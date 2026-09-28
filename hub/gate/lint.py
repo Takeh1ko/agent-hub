@@ -82,6 +82,8 @@ def _bold_header_names(s: str) -> set[str]:
                 )
                 and "`" not in gap
                 and len(gap) <= 60
+                # «см. **Приёмка.**» — ссылка в прозе, а не заголовок раздела.
+                and not gap.rstrip().lower().endswith(("см.", "см", "выше", "ниже", "раздел", "разделе"))
             )
         if ok:
             found.add(name)
@@ -149,11 +151,6 @@ def strip_arbiter(text: str) -> str:
             while i < n:
                 m2 = head_re.match(lines[i])
                 if m2 and len(m2.group(1)) <= level:
-                    break
-                # Строка-заголовок известного раздела (в начале строки) кончает
-                # markdown-раздел (смешанный стиль); произвольные `**…**` и
-                # упоминания разделов внутри — часть раздела, эталон не течёт.
-                if _is_required_bold_line(lines[i]):
                     break
                 i += 1
             continue

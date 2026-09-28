@@ -490,9 +490,10 @@ def test_strip_arbiter_bold_mention_inside_markdown_no_leak():
         "**Приёмка.**\npytest -q tests/x.py\n"
     )
     got = strip_arbiter(sample)
+    # Решение арбитра H02 №3: markdown-раздел кончается только заголовком того же/высшего уровня —
+    # жирная строка после него считается частью раздела (утечка эталона опаснее).
     assert "секрет-1" not in got and "секрет-2" not in got
-    assert "**Приёмка.**" in got
-    assert "pytest -q tests/x.py" in got
+    assert got.startswith("# T")
 
 
 def test_read_missing_first_segment_is_error(tmp_path):
