@@ -112,10 +112,38 @@ class Grouper:
                 continue
 
     def flush(self) -> str:
-        """Слить буфер в одно сообщение и очистить."""
+        """Слить буфер в одно сообщение и очистить (id — из seen)."""
+        ids = self.pending_ids()
         text = format_grouped(self.buf)
         self.clear()
+        self.drop(ids)
         return text
+
+    def remove_ids(self, ids: list[int]) -> None:
+        """Убрать из буфера только события с id (частичная отправка).
+
+        Остаток ждёт следующее окно: first_ts перезапускается вызывающим,
+        seen чистится только по ушедшим id.
+        """
+        want = set()
+        for i in ids:
+            try:
+                want.add(int(i))
+            except (TypeError, ValueError):
+                continue
+        kept = []
+        for e in self.buf:
+            try:
+                key = int(e.get("id"))
+            except (TypeError, ValueError, AttributeError):
+                kept.append(e)
+                continue
+            if key not in want:
+                kept.append(e)
+        self.buf = kept
+        self.drop(list(want))
+        if not self.buf:
+            self.first_ts = None
 
 
 def esc(text: str) -> str:
@@ -378,23 +406,30 @@ def format_answered_text(row: dict, answer: str) -> str:
     return f"{base}\nОтвет: {answer}"
 
 
-def answer_question(store: Store, qid: int, answer: str,
-                    via: str = "tg", now_ms: int = 0) -> bool:
-    """Ответить на вопрос: status='answered', событие answer.
+ANSWER_OK = "ok"
+ANSWER_NOT_FOUND = "not_found"
+ANSWER_EMPTY = "empty"
+ANSWER_ALREADY = "already"
 
+
+def answer_question_reason(store: Store, qid: int, answer: str,
+                           via: str = "tg", now_ms: int = 0) -> str:
+    """Ответить на вопрос, вернув причину исхода.
+
+    ok — записан (событие answer); not_found — нет такого вопроса;
+    empty — пустой текст; already — уже отвечен (без дубля события).
     Атомарно: UPDATE с условием status<>'answered', событие только
-    при rowcount==1. Параллельные тапы дают один ответ и одно событие.
-    Повторный ответ — False, без дубля события.
+    при rowcount==1.
     """
     body = str(answer or "").strip()
     if not body:
-        return False
+        return ANSWER_EMPTY
     con = _con(store)
     try:
         row = con.execute("SELECT task_id FROM question WHERE id=?",
                           (int(qid),)).fetchone()
         if row is None:
-            return False
+            return ANSWER_NOT_FOUND
         task_id = str(row["task_id"] or "")
         cur = con.execute(
             "UPDATE question SET status='answered', answer=?, answered_via=?"
@@ -402,14 +437,25 @@ def answer_question(store: Store, qid: int, answer: str,
             (body, str(via), int(qid)),
         )
         if cur.rowcount != 1:
-            return False
+            return ANSWER_ALREADY
         con.commit()
     finally:
         con.close()
     _add_event(store, task_id, "answer",
                {"question_id": int(qid), "answer": body[:500], "via": str(via)},
                int(now_ms))
-    return True
+    return ANSWER_OK
+
+
+def answer_question(store: Store, qid: int, answer: str,
+                    via: str = "tg", now_ms: int = 0) -> bool:
+    """Ответить на вопрос: status='answered', событие answer.
+
+    Совместимая обёртка: True только при ANSWER_OK.
+    Причину неуспеха даёт answer_question_reason.
+    """
+    return answer_question_reason(store, qid, answer,
+                                  via=via, now_ms=now_ms) == ANSWER_OK
 
 
 def parse_answer_callback(data: str) -> tuple[int, int] | None:
@@ -454,11 +500,16 @@ def format_event_line(event: dict) -> str:
     """Одна строка события для сводки."""
     kind = str(event.get("kind") or "?")
     task_id = str(event.get("task_id") or "")
-    payload_raw = str(event.get("payload_json") or "{}")
-    try:
-        payload = json.loads(payload_raw)
-    except (TypeError, ValueError):
-        payload = {}
+    payload: object = {}
+    if isinstance(event.get("payload"), dict):
+        # Свежие строки продюсера (record_events) несут payload-дикт.
+        payload = event.get("payload")
+    else:
+        payload_raw = str(event.get("payload_json") or "{}")
+        try:
+            payload = json.loads(payload_raw)
+        except (TypeError, ValueError):
+            payload = {}
     extra = ""
     if isinstance(payload, dict):
         for key in ("stage", "text", "answer", "action"):
@@ -482,6 +533,42 @@ def format_grouped(events: list[dict]) -> str:
     head = f"Сводка ({len(lines)}):"
     text = head + "\n" + "\n".join(lines)
     return clip(text, MSG_LIMIT)
+
+
+def select_summary_batch(events: list[dict],
+                         limit: int = MSG_LIMIT) -> tuple[str, list[int]]:
+    """Текст сводки из целых строк + id вошедших событий.
+
+    Строки добавляются, пока следующая влезает в limit (заголовок
+    «Сводка (N):» считается). Первое событие входит всегда (режется
+    clip'ом), чтобы очередь не встала. Остаток — следующим сообщением.
+    """
+    items = [e for e in events if e]
+    if not items:
+        return "", []
+    lines = [format_event_line(e) for e in items]
+    ids: list[int] = []
+    for e in items:
+        try:
+            ids.append(int(e.get("id")))
+        except (TypeError, ValueError, AttributeError):
+            ids.append(-1)
+    # Заголовок зависит от N — подбираем максимальное N целых строк.
+    chosen = 0
+    for n in range(1, len(lines) + 1):
+        head = f"Сводка ({n}):"
+        text = head + "\n" + "\n".join(lines[:n])
+        if len(text) <= limit:
+            chosen = n
+        else:
+            break
+    if chosen == 0:
+        # Даже одна строка не влезает — шлём её одну, обрезанную.
+        text = clip(f"Сводка (1):\n{lines[0]}", limit)
+        return text, [ids[0]] if ids[0] >= 0 else []
+    head = f"Сводка ({chosen}):"
+    return head + "\n" + "\n".join(lines[:chosen]), \
+        [i for i in ids[:chosen] if i >= 0]
 
 
 def fetch_unsent_notifiable(store: Store) -> list[dict]:
@@ -517,26 +604,40 @@ def mark_events_sent(store: Store, ids: list[int]) -> None:
 
 
 def record_events(store: Store, events: list[dict], now_ms: int) -> list[dict]:
-    """Записать события продюсера (snapshot-дифф) в store, вернуть строки с id."""
+    """Записать события продюсера (snapshot-дифф) в store, вернуть строки с id.
+
+    Возвращаемая строка несёт и payload_json (как таблица event), чтобы
+    format_event_line давал те же детали, что и для строк из БД.
+    """
     out: list[dict] = []
     for e in events:
+        payload = dict(e.get("payload") or {})
         eid = _add_event(store, str(e.get("task_id") or ""),
-                         str(e.get("kind") or ""), dict(e.get("payload") or {}),
+                         str(e.get("kind") or ""), payload,
                          int(now_ms))
         row = dict(e)
         row["id"] = eid
+        row["payload"] = payload
+        row["payload_json"] = json.dumps(payload, ensure_ascii=False)
         out.append(row)
     return out
 
 
 _FINAL_STAGES = ("merged", "dropped")
 
+# Этапы, где пульс ⚫/🔴 без процесса — норма, а не падение:
+# задача уже не работает (ждёт merge, в арбитраже, остановлена...).
+# Отдельно от _FINAL_STAGES: та используется в apply_confirm для /stop.
+_QUIET_STAGES = ("ready", "arbiter", "failed", "stopped", "merged", "dropped")
+
 
 def snapshot_events(prev, cur) -> list[dict]:
     """Разница снимков → события (чисто, без БД).
 
     prev None — baseline, событий нет (не спамим при старте).
-    Этап → ready/arbiter/failed; пульс → stuck (🔴) / crashed (⚫).
+    Этап → ready/arbiter/failed; пульс → stuck (🔴) / crashed (⚫),
+    но для задач в _QUIET_STAGES пульс-события не порождаются
+    (⚫/🔴 без процесса там — норма завершения, а не падение).
     """
     if prev is None or cur is None:
         return []
@@ -556,12 +657,12 @@ def snapshot_events(prev, cur) -> list[dict]:
             elif t.stage == "failed":
                 out.append({"task_id": t.id, "kind": "failed",
                             "payload": {"stage": t.stage}})
-        if str(t.pulse) != str(p.pulse):
+        if (str(t.pulse) != str(p.pulse)
+                and str(t.stage) not in _QUIET_STAGES):
             if t.pulse == "🔴" and str(p.pulse) != "🔴":
                 out.append({"task_id": t.id, "kind": "stuck",
                             "payload": {"stage": str(t.stage)}})
-            elif (t.pulse == "⚫" and str(p.pulse) != "⚫"
-                    and str(t.stage) not in _FINAL_STAGES):
+            elif t.pulse == "⚫" and str(p.pulse) != "⚫":
                 out.append({"task_id": t.id, "kind": "crashed",
                             "payload": {"stage": str(t.stage)}})
     return out

@@ -445,6 +445,102 @@ def test_parse_question_ref():
     assert bc.parse_question_ref("реплай без номера") is None
 
 
+def _snap_stage(stage: str, pulse: str) -> Snapshot:
+    return Snapshot(
+        tasks=[TaskSnap("H01", "P", stage, 1, pulse, 0.0, 0.0, 0, "-", [])],
+        total_go=0.0, total_usd=0.0, now_ms=NOW)
+
+
+def test_snapshot_no_pulse_events_on_quiet_stages():
+    """HIGH: exec🟢→ready⚫ — ровно ready; тихие этапы пульс-сигналов не дают."""
+    kinds = [e["kind"] for e in bc.snapshot_events(
+        _snap_stage("exec r1", "🟢"), _snap_stage("ready", "⚫"))]
+    assert kinds == ["ready"]
+    assert bc.snapshot_events(
+        _snap_stage("ready", "🟡"), _snap_stage("ready", "🔴")) == []
+    assert bc.snapshot_events(
+        _snap_stage("ready", "🟢"), _snap_stage("ready", "⚫")) == []
+    assert bc.snapshot_events(
+        _snap_stage("stopped", "🟢"), _snap_stage("stopped", "⚫")) == []
+    assert bc.snapshot_events(
+        _snap_stage("failed", "🟢"), _snap_stage("failed", "⚫")) == []
+    assert bc.snapshot_events(
+        _snap_stage("arbiter", "🟡"), _snap_stage("arbiter", "🔴")) == []
+    # Живая задача по-прежнему сигналит о падении/зависании.
+    kinds = [e["kind"] for e in bc.snapshot_events(
+        _snap_stage("exec r1", "🟢"), _snap_stage("exec r1", "⚫"))]
+    assert kinds == ["crashed"]
+    kinds = [e["kind"] for e in bc.snapshot_events(
+        _snap_stage("exec r1", "🟢"), _snap_stage("exec r1", "🔴"))]
+    assert kinds == ["stuck"]
+    # _FINAL_STAGES не расширена: /stop у ready разрешён.
+    assert bc._FINAL_STAGES == ("merged", "dropped")
+    s = Store()
+    s.upsert_task(id="HR", stage="ready")
+    assert "передано Claude" in bc.apply_confirm(s, "stop", "HR", True, NOW)
+
+
+def test_record_events_payload_json_matches_db():
+    """MEDIUM: строка из record_events форматируется как строка из БД."""
+    s = Store()
+    added = bc.record_events(
+        s, [{"task_id": "H01", "kind": "ready",
+             "payload": {"stage": "ready"}}], NOW)
+    assert len(added) == 1
+    from_db = bc.fetch_unsent_notifiable(s)
+    assert len(from_db) == 1
+    assert bc.format_event_line(added[0]) == "ready H01: ready"
+    assert bc.format_event_line(added[0]) == bc.format_event_line(from_db[0])
+    # budget: суммы видны сразу, а не только после перечитывания из БД.
+    added2 = bc.record_events(
+        s, [{"task_id": "H02", "kind": "budget_soft",
+             "payload": {"text": "go $0.45/$0.50 usd $0.00/$0.00"}}], NOW)
+    line = bc.format_event_line(added2[0])
+    assert "0.45" in line and "0.50" in line
+
+
+def test_select_summary_batch_cuts_by_events():
+    """MEDIUM: длинная сводка режется по событиям, суммарно без потерь."""
+    evs = [{"id": i + 1, "kind": "ready", "task_id": f"H{i:03d}",
+            "payload_json": '{"stage": "ready"}'} for i in range(120)]
+    rest = list(evs)
+    total = 0
+    rounds = 0
+    while rest:
+        text, batch = bc.select_summary_batch(rest)
+        assert text and batch
+        assert len(text) <= bc.MSG_LIMIT
+        total += len(batch)
+        rest = rest[len(batch):]
+        rounds += 1
+        assert rounds < 10, "очередь встала"
+    assert total == 120
+
+
+def test_answer_reason_not_found_empty_already():
+    """LOW: answer различает отсутствие/пустоту/повтор вопроса."""
+    s = Store()
+    assert bc.answer_question_reason(
+        s, 999999, "да", now_ms=NOW) == bc.ANSWER_NOT_FOUND
+    assert bc.answer_question(s, 999999, "да", now_ms=NOW) is False
+    qid = _add_question(s, "ещё?", ["да", "нет"])
+    assert bc.answer_question_reason(
+        s, qid, "   ", now_ms=NOW) == bc.ANSWER_EMPTY
+    assert bc.answer_question_reason(
+        s, qid, "да", now_ms=NOW) == bc.ANSWER_OK
+    assert bc.answer_question_reason(
+        s, qid, "нет", now_ms=NOW) == bc.ANSWER_ALREADY
+
+
+def test_flush_drops_seen():
+    """LOW: после flush id не застревают в seen — событие можно добрать."""
+    g = bc.Grouper()
+    ev = {"id": 7, "kind": "ready", "task_id": "H01", "payload_json": "{}"}
+    assert g.add(ev, NOW)
+    g.flush()
+    assert g.add(dict(ev), NOW), "flush не должен вечно блокировать id"
+
+
 def test_dry_run_builds_dispatcher(capsys):
     assert main(["bot", "--dry-run"]) == 0
     assert "dry-run ok" in capsys.readouterr().out

@@ -26,6 +26,8 @@ ROSTER_S = 60 * 60
 
 # bot_msg_id → question_id для ответов реплаем (только event loop трогает).
 _QMSG: dict[tuple[int, int], int] = {}
+# question_id → все копии вопроса по чатам (для правки веером).
+_QSENT: dict[int, list[tuple[int, int]]] = {}
 _QMSG_MAX = 1000
 
 # path → настроен ли хендлер (изоляция тестов с разным HOME).
@@ -74,12 +76,21 @@ def _remember_qmsg(chat_id: int, bot_msg_id: int, qid: int) -> None:
     """Запомнить соответствие, с капой от утечки."""
     key = (int(chat_id), int(bot_msg_id))
     _QMSG[key] = int(qid)
+    sent = _QSENT.setdefault(int(qid), [])
+    if key not in sent:
+        sent.append(key)
     while len(_QMSG) > _QMSG_MAX:
         _QMSG.pop(next(iter(_QMSG)))
+    while len(_QSENT) > _QMSG_MAX:
+        _QSENT.pop(next(iter(_QSENT)))
 
 
 def _forget_qid(qid: int) -> None:
-    """Убрать отвеченный вопрос из mapping."""
+    """Убрать отвеченный вопрос из mapping реплаев.
+
+    _QSENT оставляем: опоздавший тап «Уже отвечен» тоже должен
+    гасить клавиатуру в копиях других чатов.
+    """
     for key in [k for k, v in _QMSG.items() if v == int(qid)]:
         _QMSG.pop(key, None)
 
@@ -93,6 +104,11 @@ def _resolve_qid(chat_id: int, replied_msg_id: int,
     return bc.parse_question_ref(replied_text or "")
 
 
+def _qmsg_keys(qid: int) -> list[tuple[int, int]]:
+    """Все (chat_id, message_id), куда ушёл вопрос (все чаты рассылки)."""
+    return list(_QSENT.get(int(qid), []))
+
+
 @dataclass
 class BotState:
     """Память циклов: дедуп, diff-база, per-chat доставки."""
@@ -103,6 +119,7 @@ class BotState:
     last_roster_ts: int = 0
     outbox_done: set[tuple[int, int]] = field(default_factory=set)
     q_done: set[tuple[int, int]] = field(default_factory=set)
+    summary_done: set[tuple[int, int]] = field(default_factory=set)
 
 
 # --- sync-хелперы: вызываются только через asyncio.to_thread ---
@@ -143,12 +160,14 @@ def _opencode_db() -> str | None:
 
 
 def _sync_status(now_ms: int) -> str:
+    """Статус как `hub status` без --all: без merged/dropped."""
     from hub.read import snapshot as snap
-    from hub.store import Store
+    from hub.store import FINAL_STAGES, Store
 
     store = Store()
     s = snap.build(store, int(now_ms),
                    opencode_db=_opencode_db(), proc_root="/proc")
+    s.tasks = [t for t in s.tasks if t.stage not in FINAL_STAGES]
     return bc.format_status(s)
 
 
@@ -196,9 +215,13 @@ def _sync_answer(qid: int, text: str, now_ms: int) -> tuple[bool, str, str]:
     from hub.store import Store
 
     store = Store()
-    ok = bc.answer_question(store, int(qid), str(text),
-                            via="tg", now_ms=int(now_ms))
-    if not ok:
+    reason = bc.answer_question_reason(store, int(qid), str(text),
+                                       via="tg", now_ms=int(now_ms))
+    if reason == bc.ANSWER_NOT_FOUND:
+        return False, "Вопрос не найден.", ""
+    if reason == bc.ANSWER_EMPTY:
+        return False, "Пустой ответ — нечего записывать.", ""
+    if reason != bc.ANSWER_OK:
         return False, "Уже отвечен.", ""
     row = bc.get_question(store, int(qid))
     full = bc.format_answered_text(row, str(text)) if row else "✅ Ответ записан"
@@ -253,6 +276,86 @@ def _sync_tick(prev_snap, now_ms: int):
     return cur, added
 
 
+async def _edit_question_everywhere(bot, qid: int, text: str) -> int:
+    """Править копии вопроса во всех чатах рассылки. Возвращает число правок."""
+    log = logging.getLogger("hub.bot")
+    n = 0
+    for c, m in _qmsg_keys(int(qid)):
+        try:
+            await bot.edit_message_text(
+                text=bc.clip(text), chat_id=int(c), message_id=int(m))
+            n += 1
+        except Exception as e:  # noqa: BLE001 — best-effort правка
+            log.debug("правка вопроса %s в %s: %s", qid, c, e)
+            continue
+    return n
+
+
+async def _drop_question_keyboards(bot, qid: int) -> int:
+    """Убрать клавиатуру у копий вопроса во всех чатах (уже отвечен)."""
+    n = 0
+    for c, m in _qmsg_keys(int(qid)):
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=int(c), message_id=int(m), reply_markup=None)
+            n += 1
+        except Exception:  # noqa: BLE001 — best-effort
+            continue
+    return n
+
+
+async def handle_qans(bot, chat_id: int, data: str, now_ms: int) -> tuple[bool, str]:
+    """Тап по варианту ответа: remember чата, запись, правка всех копий.
+
+    Тестируется с фейковым ботом (без сети).
+    """
+    await asyncio.to_thread(_sync_remember, int(chat_id), int(now_ms))
+    ok, text = await asyncio.to_thread(
+        _sync_answer_cb, str(data), int(now_ms))
+    parsed = bc.parse_answer_callback(str(data or ""))
+    if parsed is not None:
+        if ok:
+            await _edit_question_everywhere(bot, parsed[0], text)
+            _forget_qid(parsed[0])
+        elif text == "Уже отвечен.":
+            await _drop_question_keyboards(bot, parsed[0])
+    return ok, text
+
+
+async def handle_confirm(chat_id: int, data: str, now_ms: int) -> str | None:
+    """Подтверждение stop/merge: remember чата, применение.
+
+    None — кнопку не понял. Тестируется без сети.
+    """
+    await asyncio.to_thread(_sync_remember, int(chat_id), int(now_ms))
+    parsed = bc.parse_confirm(str(data or ""))
+    if parsed is None:
+        return None
+    action, tid, ok = parsed
+    return await asyncio.to_thread(
+        _sync_confirm, action, tid, ok, int(now_ms))
+
+
+async def handle_reply(bot, chat_id: int, qid: int, body: str,
+                       replied_id: int, now_ms: int) -> tuple[bool, str]:
+    """Ответ реплаем: запись + правка копий вопроса во всех чатах."""
+    ok, short, full = await asyncio.to_thread(
+        _sync_answer, int(qid), str(body), int(now_ms))
+    if not ok:
+        return False, short
+    targets = set(_qmsg_keys(int(qid)))
+    if replied_id:
+        targets.add((int(chat_id), int(replied_id)))
+    for c, m in targets:
+        try:
+            await bot.edit_message_text(
+                text=bc.clip(full), chat_id=int(c), message_id=int(m))
+        except Exception:  # noqa: BLE001 — best-effort правка
+            continue
+    _forget_qid(int(qid))
+    return True, short
+
+
 # --- шаги циклов без sleep (тестируются с фейковым ботом) ---
 
 async def outbox_once(bot, state: BotState, now_ms: int) -> int:
@@ -292,8 +395,6 @@ async def outbox_once(bot, state: BotState, now_ms: int) -> int:
 
 async def poll_once(bot, state: BotState, now_ms: int) -> dict:
     """Одна итерация 15 с: вопросы, продюсер, группировка, авторостер."""
-    from hub import time as ht  # noqa: F401 — время идёт параметром now_ms
-
     log = logging.getLogger("hub.bot")
     res = {"questions": 0, "added": 0, "sent": 0, "roster": False}
     # 1. Продюсер: снимок → разница → события.
@@ -328,23 +429,33 @@ async def poll_once(bot, state: BotState, now_ms: int) -> dict:
     for ev in await asyncio.to_thread(_sync_events_take):
         state.grouper.add(ev, now_ms)
     if state.grouper.buf and state.grouper.ready(now_ms):
-        text = state.grouper.peek()
-        ids = state.grouper.pending_ids()
-        if text.strip():
-            chats = await asyncio.to_thread(_sync_all_chats)
-            ok_any = False
+        chats = await asyncio.to_thread(_sync_all_chats)
+        # Текст — из целых строк (остаток — следующим сообщением),
+        # доставка — per-chat: sent_tg и буфер — только когда ушло всем.
+        text, batch = bc.select_summary_batch(state.grouper.buf)
+        if chats and text.strip() and batch:
             for chat in chats:
+                if all((eid, int(chat)) in state.summary_done
+                       for eid in batch):
+                    continue
                 try:
                     await bot.send_message(int(chat), bc.clip(text))
-                    ok_any = True
-                except Exception as e:  # noqa: BLE001 — best-effort сводка
+                except Exception as e:  # noqa: BLE001 — ретрай этому чату
                     log.warning("сводка → %s: %s", chat, e)
                     continue
-            if ok_any:
-                await asyncio.to_thread(_sync_events_mark, ids)
-                state.grouper.clear()
-                state.grouper.drop(ids)
-                res["sent"] = len(ids)
+                for eid in batch:
+                    state.summary_done.add((int(eid), int(chat)))
+            if all((eid, int(c)) in state.summary_done
+                   for eid in batch for c in chats):
+                await asyncio.to_thread(_sync_events_mark, batch)
+                state.grouper.remove_ids(batch)
+                if state.grouper.buf:
+                    # Остаток — на следующее окно.
+                    state.grouper.first_ts = int(now_ms)
+                done = set(int(e) for e in batch)
+                state.summary_done = {(e, c) for e, c in state.summary_done
+                                      if e not in done}
+                res["sent"] = len(batch)
     # 4. Авторостер раз в час, если нормализованный снимок менялся.
     norm = bc.snapshot_key(cur)
     if state.last_roster_norm is None:
@@ -478,11 +589,12 @@ def build_dispatcher() -> Dispatcher:
     async def _qans(call: CallbackQuery) -> None:
         from hub import time as ht
 
-        ok, text = await asyncio.to_thread(
-            _sync_answer_cb, str(call.data or ""), ht.now_ms())
-        parsed = bc.parse_answer_callback(str(call.data or ""))
-        if ok and parsed is not None:
-            _forget_qid(parsed[0])
+        try:
+            chat = int(call.message.chat.id)
+        except (AttributeError, TypeError, ValueError):
+            chat = int(call.from_user.id)
+        ok, text = await handle_qans(
+            call.bot, chat, str(call.data or ""), ht.now_ms())
         try:
             if ok:
                 await call.message.edit_text(bc.clip(text))
@@ -494,13 +606,14 @@ def build_dispatcher() -> Dispatcher:
     async def _confirm(call: CallbackQuery) -> None:
         from hub import time as ht
 
-        parsed = bc.parse_confirm(str(call.data or ""))
-        if parsed is None:
+        try:
+            chat = int(call.message.chat.id)
+        except (AttributeError, TypeError, ValueError):
+            chat = int(call.from_user.id)
+        text = await handle_confirm(chat, str(call.data or ""), ht.now_ms())
+        if text is None:
             await call.answer("Не понял кнопку.")
             return
-        action, tid, ok = parsed
-        text = await asyncio.to_thread(
-            _sync_confirm, action, tid, ok, ht.now_ms())
         try:
             await call.message.edit_text(bc.clip(text))
         except Exception:  # noqa: BLE001 — сообщение могли удалить
@@ -527,18 +640,9 @@ def build_dispatcher() -> Dispatcher:
             qid = _resolve_qid(chat, replied_id,
                                str(getattr(replied, "text", "") or ""))
         if qid is not None:
-            ok, short, full = await asyncio.to_thread(
-                _sync_answer, qid, body, now)
-            if ok:
-                _forget_qid(qid)
-                if replied is not None:
-                    try:
-                        await msg.bot.edit_message_text(
-                            text=bc.clip(full), chat_id=chat,
-                            message_id=replied_id)
-                    except Exception:  # noqa: BLE001 — best-effort правка
-                        pass
-            await msg.answer(bc.clip(short if ok else full or short))
+            ok, short = await handle_reply(
+                msg.bot, chat, qid, body, replied_id, now)
+            await msg.answer(bc.clip(short))
             return
         text = await asyncio.to_thread(_sync_owner_text, chat, body, now)
         await msg.answer(bc.clip(text))

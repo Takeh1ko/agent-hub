@@ -21,6 +21,8 @@ class FakeBot:
     def __init__(self, fail: set[int] | None = None) -> None:
         self.fail = set(fail or ())
         self.sent: list[tuple[int, str]] = []
+        self.edited: list[tuple[int, int, str]] = []
+        self.markup_dropped: list[tuple[int, int]] = []
         self._mid = 0
 
     async def send_message(self, chat, text, **kwargs):
@@ -29,6 +31,14 @@ class FakeBot:
         self._mid += 1
         self.sent.append((int(chat), str(text)))
         return SimpleNamespace(message_id=self._mid)
+
+    async def edit_message_text(self, text, chat_id=None,
+                                message_id=None, **kwargs):
+        self.edited.append((int(chat_id), int(message_id), str(text)))
+
+    async def edit_message_reply_markup(self, chat_id=None,
+                                        message_id=None, **kwargs):
+        self.markup_dropped.append((int(chat_id), int(message_id)))
 
     def texts(self, chat: int | None = None) -> list[str]:
         if chat is None:
@@ -222,6 +232,7 @@ def test_qmsg_fallback_after_restart():
     from hub.bot import run as br
 
     br._QMSG.clear()
+    br._QSENT.clear()
     assert br._resolve_qid(1, 999, "❓ Вопрос #7 [T1]:\nидём?") == 7
     br._remember_qmsg(1, 10, 5)
     assert br._resolve_qid(1, 10, "что-то") == 5
@@ -231,7 +242,211 @@ def test_qmsg_fallback_after_restart():
     for i in range(1200):
         br._remember_qmsg(1, 100 + i, i)
     assert len(br._QMSG) <= 1000
+    assert len(br._QSENT) <= 1000
     br._QMSG.clear()
+    br._QSENT.clear()
+
+
+def _add_question(s: Store, text="идём?", opts=None) -> int:
+    con = _con(s)
+    try:
+        cur = con.execute(
+            "INSERT INTO question(task_id, asked_by, text, options_json,"
+            " status, answer, answered_via, ts)"
+            " VALUES ('T1','claude',?,?, 'open','','',?)",
+            (text, json.dumps(opts if opts is not None else ["да", "нет"],
+                              ensure_ascii=False), NOW),
+        )
+        con.commit()
+        return int(cur.lastrowid)
+    finally:
+        con.close()
+
+
+def test_poll_summary_partial_per_chat_retry():
+    """MEDIUM: сводка per-chat — упавший чат добирает ретраем, без дублей."""
+    async def _go():
+        s = Store()
+        bc.remember_chat(s, 555, NOW)
+        s.add_event("H01", "ready", {"stage": "ready"})
+        bot, state = FakeBot(), BotState()
+        r1 = await poll_once(bot, state, NOW)
+        assert r1["sent"] == 0 and len(state.grouper.buf) == 1
+        bot.fail = {_owner()}
+        r2 = await poll_once(bot, state, NOW + 5 * 60_000 + 1)
+        assert r2["sent"] == 0, "дошло не всем — не помечаем"
+        assert bot.count(555) == 1 and bot.count(_owner()) == 0
+        # sent_tg=0, буфер цел — событие не потеряно.
+        con = _con(s)
+        try:
+            left = con.execute(
+                "SELECT COUNT(*) FROM event WHERE sent_tg=0").fetchone()[0]
+        finally:
+            con.close()
+        assert left == 1
+        assert len(state.grouper.buf) == 1
+        bot.fail.clear()
+        r3 = await poll_once(bot, state, NOW + 5 * 60_000 + 2)
+        assert r3["sent"] == 1
+        assert bot.count(555) == 1, "получившему — без дубля"
+        assert bot.count(_owner()) == 1, "владелец добрал ровно один раз"
+        assert state.grouper.buf == []
+        con = _con(s)
+        try:
+            left = con.execute(
+                "SELECT COUNT(*) FROM event WHERE sent_tg=0").fetchone()[0]
+        finally:
+            con.close()
+        assert left == 0
+
+    asyncio.run(_go())
+
+
+def test_poll_summary_long_backlog_lossless():
+    """MEDIUM: бэклог > 4000 симв. — остаток следующим сообщением, без потерь."""
+    async def _go():
+        from hub.bot import run as br  # noqa: F401 — _QMSG не трогаем
+
+        s = Store()
+        bc.remember_chat(s, 555, NOW)
+        n = 120
+        for i in range(n):
+            s.add_event(f"H{i:03d}", "ready",
+                        {"stage": "ready", "text": "x" * 90})
+        bot, state = FakeBot(), BotState()
+        r1 = await poll_once(bot, state, NOW)
+        assert r1["sent"] == 0 and len(state.grouper.buf) == n
+        now = NOW + 5 * 60_000 + 1
+        total = 0
+        rounds = 0
+        while True:
+            r = await poll_once(bot, state, now)
+            total += r["sent"]
+            now += 5 * 60_000 + 1
+            rounds += 1
+            con = _con(s)
+            try:
+                left = con.execute(
+                    "SELECT COUNT(*) FROM event WHERE sent_tg=0"
+                    ).fetchone()[0]
+            finally:
+                con.close()
+            if left == 0 and not state.grouper.buf:
+                break
+            assert rounds < 10, "очередь встала"
+        assert total == n, f"помечено {total} из {n}"
+        got: set[str] = set()
+        for t in bot.texts(_owner()):
+            for line in t.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 2:
+                    got.add(parts[1].rstrip(":"))
+        assert got == {f"H{i:03d}" for i in range(n)}
+        for t in bot.texts():
+            assert len(t) <= bc.MSG_LIMIT
+
+    asyncio.run(_go())
+
+
+def test_status_hides_final():
+    """LOW: /status как hub status без --all — без merged/dropped."""
+    async def _go():
+        from hub.bot import run as br
+
+        s = Store()
+        s.upsert_task(id="H8", stage="exec r1", worktree="")
+        s.upsert_task(id="H9", stage="merged", worktree="")
+        text = await asyncio.to_thread(br._sync_status, NOW)
+        assert "H8" in text and "H9" not in text
+
+    asyncio.run(_go())
+
+
+def test_sync_answer_reasons():
+    """LOW: несуществующий вопрос — «Вопрос не найден», отвеченный — «Уже отвечен»."""
+    async def _go():
+        from hub.bot import run as br
+
+        s = Store()
+        ok, short, _ = await asyncio.to_thread(br._sync_answer, 987654, "да", NOW)
+        assert not ok and short == "Вопрос не найден."
+        qid = _add_question(s)
+        ok, short, full = await asyncio.to_thread(br._sync_answer, qid, "да", NOW)
+        assert ok and short == "✅ Ответ записан" and "Ответ: да" in full
+        ok, short, _ = await asyncio.to_thread(br._sync_answer, qid, "нет", NOW)
+        assert not ok and short == "Уже отвечен."
+
+    asyncio.run(_go())
+
+
+def test_qans_edits_all_chats_and_remembers():
+    """LOW: ответ кнопкой правит копии во всех чатах; тап запоминает чат."""
+    async def _go():
+        from hub.bot import run as br
+
+        br._QMSG.clear()
+        br._QSENT.clear()
+        s = Store()
+        qid = _add_question(s)
+        bot = FakeBot()
+        br._remember_qmsg(555, 11, qid)
+        br._remember_qmsg(_owner(), 22, qid)
+        ok, text = await br.handle_qans(bot, 555, f"qans:{qid}:0", NOW)
+        assert ok and "Ответ: да" in text
+        assert 555 in bc.list_chats(s), "тап — тоже первый контакт"
+        edited = {(c, m) for c, m, _ in bot.edited}
+        assert (555, 11) in edited and (_owner(), 22) in edited
+        assert all("Ответ: да" in t for _, _, t in bot.edited)
+        # Опоздавший тап из второго чата — «Уже отвечен» + снять клавиатуру.
+        ok2, text2 = await br.handle_qans(bot, _owner(), f"qans:{qid}:1", NOW + 1)
+        assert not ok2 and text2 == "Уже отвечен."
+        dropped = set(bot.markup_dropped)
+        assert (555, 11) in dropped and (_owner(), 22) in dropped
+        br._QMSG.clear()
+        br._QSENT.clear()
+
+    asyncio.run(_go())
+
+
+def test_confirm_remembers_chat():
+    """LOW: подтверждение кнопкой запоминает чат для рассылки."""
+    async def _go():
+        from hub.bot import run as br
+
+        s = Store()
+        s.upsert_task(id="HC", stage="ready")
+        text = await br.handle_confirm(777, "confirm:merge:HC:yes", NOW)
+        assert text is not None and "передано Claude" in text
+        assert 777 in bc.list_chats(s)
+        assert await br.handle_confirm(778, "confirm:nope", NOW) is None
+        assert 778 in bc.list_chats(s)
+
+    asyncio.run(_go())
+
+
+def test_handle_reply_edits_all_copies():
+    """LOW: ответ реплаем правит копии вопроса во всех чатах."""
+    async def _go():
+        from hub.bot import run as br
+
+        br._QMSG.clear()
+        br._QSENT.clear()
+        s = Store()
+        qid = _add_question(s, "продлить?", [])
+        bot = FakeBot()
+        br._remember_qmsg(555, 31, qid)
+        br._remember_qmsg(_owner(), 32, qid)
+        # Реплай без mapping (перезапуск бота): резолв через fallback-id.
+        ok, short = await br.handle_reply(bot, 555, qid, "продлить", 99, NOW)
+        assert ok and short == "✅ Ответ записан"
+        edited = {(c, m) for c, m, _ in bot.edited}
+        assert (555, 31) in edited
+        assert (_owner(), 32) in edited
+        assert (555, 99) in edited, "реплайнутое сообщение правится тоже"
+        br._QMSG.clear()
+        br._QSENT.clear()
+
+    asyncio.run(_go())
 
 
 def test_reply_edits_question_no_dup():
