@@ -608,3 +608,107 @@ def test_gate_warns_without_hub_toml(tmp_path, capsys):
     _write_done(repo, head, ["sub/a.txt", "sub/test_ok.py"])
     assert main(["gate", "T12"]) == 0
     assert "warn:" in capsys.readouterr().err
+
+
+def test_harness_prev_dir_ignored_in_dirty(tmp_path):
+    """Незакоммиченный .agent.prev_<ts>/ создаёт харнесс — не грязь исполнителя."""
+    repo, base = _repo(tmp_path)
+    _commit(repo, "a.txt", "1\n2\n")
+    prev = repo / ".agent.prev_123"
+    prev.mkdir()
+    (prev / "review.json").write_text("{}", encoding="utf-8")
+    res = check_gate(repo, base, "HEAD", ["**"], PASS)
+    assert res.ok, res.errors
+    assert not any(e.startswith("dirty:") for e in res.errors)
+
+
+def test_rename_old_path_forbidden(tmp_path):
+    """Перенос файла вне allowed: виден и старый путь (--no-renames) → forbidden."""
+    repo, _ = _repo(tmp_path)
+    _commit(repo, "other/x.txt", "x\n")
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "hub").mkdir()
+    _git(repo, "mv", "other/x.txt", "hub/x.txt")
+    _git(repo, "commit", "-m", "mv")
+    res = check_gate(repo, base, "HEAD", ["hub/**"], PASS)
+    assert not res.ok
+    assert "forbidden: other/x.txt" in res.errors
+
+
+def test_gate_rename_no_unknown_file(tmp_path, capsys):
+    """Перенос: честный done.json с исходным путём — без ложного unknown-file."""
+    repo, _ = _repo(tmp_path)
+    _commit(repo, "other/x.txt", "x\n")
+    base = _git(repo, "rev-parse", "HEAD")
+    _task(tmp_path, "T13", repo, base, ["hub/**", "sub/**"])
+    _with_test(repo)
+    (repo / "hub").mkdir()
+    _git(repo, "mv", "other/x.txt", "hub/x.txt")
+    _git(repo, "commit", "-m", "mv")
+    head = _git(repo, "rev-parse", "HEAD")
+    _write_done(repo, head, ["other/x.txt", "hub/x.txt", "sub/test_ok.py"])
+    assert main(["gate", "T13"]) == 1
+    out = capsys.readouterr().out
+    assert "forbidden: other/x.txt" in out
+    assert "unknown-file" not in out
+
+
+def test_gate_done_errors_skip_acceptance(tmp_path, capsys):
+    """mismatch при красной приёмке: exit 1 по mismatch, pytest не гонялся (нет tests-fail)."""
+    repo, base = _repo(tmp_path)
+    _commit(repo, "sub/a.txt", "1\n2\n")
+    _commit(repo, "sub/test_red.py", "def test_red():\n    assert False\n")
+    _task(tmp_path, "T14", repo, base, ["sub/**"])
+    _write_done(repo, "0" * 40, ["sub/a.txt", "sub/test_red.py"])
+    assert main(["gate", "T14"]) == 1
+    out = capsys.readouterr().out
+    assert "mismatch:" in out
+    assert "tests-fail:" not in out
+
+
+def test_unicode_names_not_mangled(tmp_path):
+    """Не-ASCII имена без кавычек: легальный файл не forbidden, грязь читаема."""
+    repo, base = _repo(tmp_path)
+    _commit(repo, "hub/юникод.txt", "x\n")
+    res = check_gate(repo, base, "HEAD", ["hub/**"], PASS)
+    assert res.ok, res.errors
+    (repo / "hub" / "юникод2.txt").write_text("y\n", encoding="utf-8")
+    res2 = check_gate(repo, base, "HEAD", ["hub/**"], PASS)
+    assert not res2.ok
+    assert "dirty: hub/юникод2.txt" in res2.errors
+
+
+def test_gate_empty_diff_cmd(tmp_path, capsys):
+    """Командный уровень: пустой base..HEAD → exit 1 + empty-diff."""
+    repo, base = _repo(tmp_path)
+    _task(tmp_path, "T15", repo, base, ["sub/**"])
+    _write_done(repo, base, [])
+    assert main(["gate", "T15"]) == 1
+    assert "empty-diff" in capsys.readouterr().out
+
+
+def test_gate_forbidden_cmd(tmp_path, capsys):
+    """Командный уровень: дифф вне allowed → exit 1 + forbidden:."""
+    repo, base = _repo(tmp_path)
+    _commit(repo, "other/x.txt", "x\n")
+    _task(tmp_path, "T16", repo, base, ["hub/**"])
+    _write_done(repo, _git(repo, "rev-parse", "HEAD"), ["other/x.txt"])
+    assert main(["gate", "T16"]) == 1
+    assert "forbidden:" in capsys.readouterr().out
+
+
+def test_gate_no_task(capsys):
+    """Командный уровень: нет задачи → exit 1 + no-task:."""
+    assert main(["gate", "НЕТ-ТАКОЙ-ЗАДАЧИ"]) == 1
+    assert "no-task:" in capsys.readouterr().out
+
+
+def test_gate_no_card(tmp_path, capsys):
+    """Командный уровень: нет карточки → exit 1 + no-card:."""
+    repo, base = _repo(tmp_path)
+    _commit(repo, "sub/a.txt", "1\n2\n")
+    Store().upsert_task(id="T17", worktree=str(repo), base_sha=base,
+                        branch="agent/T17", card_path=str(tmp_path / "нет-карточки.md"))
+    _write_done(repo, _git(repo, "rev-parse", "HEAD"), ["sub/a.txt"])
+    assert main(["gate", "T17"]) == 1
+    assert "no-card:" in capsys.readouterr().out

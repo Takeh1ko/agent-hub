@@ -28,9 +28,11 @@ def _head_sha(worktree: str) -> str | None:
 
 
 def _diff_files(worktree: str, base: str, head: str) -> tuple[set[str] | None, str]:
-    """Файлы base..head; при ошибке git — (None, stderr), не пустой set."""
+    """Файлы base..head (--no-renames: перенос показывает и старый путь);
+    при ошибке git — (None, stderr), не пустой set."""
     try:
-        r = subprocess.run(["git", "diff", "--name-only", f"{base}..{head}", "--"],
+        r = subprocess.run(["git", "-c", "core.quotepath=false", "diff", "--no-renames",
+                            "--name-only", f"{base}..{head}", "--"],
                            cwd=worktree, capture_output=True, text=True, timeout=60)
     except OSError as e:
         return None, str(e)
@@ -164,6 +166,11 @@ def cmd_gate(args) -> int:
                     errors.append(f"cmd-mismatch: done={done.cmd!r} мимо Приёмки {nodes}")
 
     # Приёмка — всегда каноническая, done.cmd — только заявление для сверки.
+    # Итог уже не-ok (done.json/дифф/карточка): замок не захватываем, приёмку не гоняем.
+    if errors:
+        for e in errors:
+            print(e)
+        return 1
     py = project.python.strip() if project and project.python.strip() else sys.executable
     res = check_gate(Path(worktree), base_sha, head_sha, allowed,
                      [py, "-m", "pytest", "-q"], lock_path)

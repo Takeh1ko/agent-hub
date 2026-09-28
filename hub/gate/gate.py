@@ -51,8 +51,13 @@ def _rev_count(repo: str, base: str, head: str) -> tuple[int | None, str]:
 
 
 def _diff_names(repo: str, base: str, head: str) -> tuple[list[str] | None, str]:
-    """Файлы base..head; при ошибке git — (None, последняя строка stderr)."""
-    r = _git(repo, "diff", "--name-only", f"{base}..{head}", "--")
+    """Файлы base..head; при ошибке git — (None, последняя строка stderr).
+
+    --no-renames: перенос показывает и старый путь (иначе удаление вне
+    allowed проходит ворота), -c core.quotepath=false: не-ASCII без кавычек.
+    """
+    r = _git(repo, "-c", "core.quotepath=false", "diff", "--no-renames",
+             "--name-only", f"{base}..{head}", "--")
     if r.returncode != 0:
         return None, _git_err(r)
     return [l for l in (s.strip() for s in r.stdout.splitlines()) if l], ""
@@ -64,26 +69,40 @@ def _git_err(r: subprocess.CompletedProcess[str]) -> str:
 
 
 def _dirty_paths(repo: str) -> list[str] | None:
-    """Незакоммиченное/неотслеженное вне .agent/; None — git не ответил."""
-    r = _git(repo, "status", "--porcelain")
+    """Незакоммиченное/неотслеженное вне .agent/ и .agent.prev_*/; None — git не ответил.
+
+    .agent.prev_<ts>/ создаёт сам харнесс (continue/repair-логи) — не грязь исполнителя.
+    Формат -z: токены по \\0 без кавычек, у переименований второй путь следующим токеном.
+    """
+    r = _git(repo, "-c", "core.quotepath=false", "status", "--porcelain", "-z")
     if r.returncode != 0:
         return None
+    raw: list[str] = []
+    toks = [t for t in r.stdout.split("\0") if t]
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        i += 1
+        if len(tok) > 3 and tok[2] == " ":
+            raw.append(tok[3:])
+            if tok[0] in "RC" and i < len(toks):
+                # Переименование/копия в -z: второй путь следующим токеном.
+                raw.append(toks[i])
+                i += 1
+        else:
+            raw.append(tok)
     out: list[str] = []
-    for line in r.stdout.splitlines():
-        if not line.strip():
+    for p in raw:
+        p = p.strip()
+        if not p or p == ".agent" or p.startswith((".agent/", ".agent.prev_")):
             continue
-        rest = line[3:] if len(line) > 3 else ""
-        if " -> " in rest:  # переименование: берём новое имя
-            rest = rest.rsplit(" -> ", 1)[1]
-        p = rest.strip().strip('"')
-        if not p or p == ".agent" or p.startswith(".agent/"):
-            continue
-        out.append(p)
+        if p not in out:
+            out.append(p)
     return out
 
 
 def _diff_stat(repo: str, base: str, head: str) -> str:
-    r = _git(repo, "diff", "--stat", f"{base}..{head}", "--")
+    r = _git(repo, "-c", "core.quotepath=false", "diff", "--stat", f"{base}..{head}", "--")
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
@@ -103,8 +122,8 @@ def check_gate(
 ) -> GateResult:
     """Проверить ворота по порядку: чистота, дифф, allowed, приёмка под замком.
 
-    Незакоммиченное/неотслеженное вне .agent/ → dirty (приёмку не запускаем):
-    иначе conftest.py/pytest.ini меняют саму приёмку мимо диффа.
+    Незакоммиченное/неотслеженное вне .agent/ и .agent.prev_*/ → dirty
+    (приёмку не запускаем): иначе conftest.py/pytest.ini меняют саму приёмку мимо диффа.
     """
     repo_s = str(repo)
     allowed_list = list(allowed) if allowed else []
