@@ -31,6 +31,9 @@ MAX_CARD_BYTES = 12 * 1024
 
 _CYR = re.compile(r"[а-яА-ЯёЁ]")
 
+# Для поиска `**Имя` — от длинных к коротким (имён-префиксов среди разделов нет).
+_SECTIONS_BY_LEN = sorted(REQUIRED_SECTIONS, key=len, reverse=True)
+
 
 @dataclass
 class LintResult:
@@ -38,13 +41,52 @@ class LintResult:
     errors: list[str] = field(default_factory=list)
 
 
+def _bold_header_names(s: str) -> set[str]:
+    """Имена обязательных разделов, найденных жирными заголовками в строке.
+
+    Первый сегмент — только в начале строки; дальше — только как продолжение
+    комбинированной строки карточки (`**Сеть.** нет. **Уровень.** …` — формат
+    `docs/tasks/*.md`), т.е. только после уже найденного заголовка. Упоминание
+    раздела в прозе (`Об этом сказано: см. **Приёмка.** ниже`) заголовком не
+    считается: строка в этом месте не «начинается» с `**Имя` (арбитр №1).
+    """
+    found: set[str] = set()
+    chain = False
+    pos = 0
+    while True:
+        idx = s.find("**", pos)
+        if idx == -1:
+            return found
+        rest = s[idx + 2:]
+        name = next((n for n in _SECTIONS_BY_LEN if rest.startswith(n)), None)
+        if name is None:
+            pos = idx + 2
+            continue
+        after = rest[len(name):]
+        if idx == 0:
+            ok = (
+                after == ""
+                or after.startswith("**")
+                or after.startswith(" (")
+                or after[:1] in (".", "(", ":")
+            )
+        else:
+            ok = chain and (
+                after.startswith(".") or after.startswith("(") or after.startswith(" (")
+            )
+        if ok:
+            found.add(name)
+            chain = True
+        pos = idx + 2
+
+
 def _is_header_line(line: str, name: str) -> bool:
     """Строгий заголовок раздела.
 
-    Markdown `#{1,6} Имя` — только в начале строки. Жирный `**Имя`:
-    в начале строки — суффикс `**`/`.`/`(`/`:`/` (`; в середине строки
-    (комбинированная `**Сеть.** … **Уровень.** …`) — только с точкой
-    `**Имя.` или `**Имя (` (упоминание `**Имя**` без точки — проза).
+    Markdown `#{1,6} Имя` — только в начале строки. Жирный `**Имя` — только
+    начало строки (сразу `**`/`.`/`(`/`:`/` (`) либо продолжение
+    комбинированной строки, начинающейся с жирного заголовка. Никаких
+    «имя где-то в строке» (арбитр №1).
     """
     s = line.strip()
     if not s or name not in s:
@@ -59,33 +101,19 @@ def _is_header_line(line: str, name: str) -> bool:
         after = rest[len(name):]
         if after == "":
             return True
-        if after[0] in " \t.:()*—-–":
-            return True
-        return False
-    needle = "**" + name
-    idx = s.find(needle)
-    while idx != -1:
-        after = s[idx + len(needle):]
-        if idx == 0:
-            if after == "" or after.startswith("**"):
-                return True
-            if after and after[0] in ".(:":
-                return True
-            if after.startswith(" ("):
-                return True
-        else:
-            # Середина строки: только proper `**Имя.` или `**Имя (`.
-            if after.startswith("."):
-                return True
-            if after.startswith(" (") or after.startswith("("):
-                return True
-        idx = s.find(needle, idx + 1)
-    return False
+        return after[0] in " \t.:()*—-–"
+    return name in _bold_header_names(s)
 
 
 def _is_required_bold_header(line: str) -> bool:
     """Жирный заголовок известного обязательного раздела (строгий)."""
     return any(_is_header_line(line, n) for n in REQUIRED_SECTIONS)
+
+
+def _is_required_bold_line(line: str) -> bool:
+    """Строка-заголовок обязательного раздела: начинается с `**Имя` (арбитр №3)."""
+    t = line.strip()
+    return t.startswith("**") and _is_required_bold_header(line)
 
 
 def strip_arbiter(text: str) -> str:
@@ -106,9 +134,10 @@ def strip_arbiter(text: str) -> str:
                 m2 = head_re.match(lines[i])
                 if m2 and len(m2.group(1)) <= level:
                     break
-                # Жирный заголовок известного раздела заканчивает markdown-раздел
-                # (смешанный стиль), произвольные `**…**` внутри — часть раздела.
-                if _is_required_bold_header(lines[i]):
+                # Строка-заголовок известного раздела (в начале строки) кончает
+                # markdown-раздел (смешанный стиль); произвольные `**…**` и
+                # упоминания разделов внутри — часть раздела, эталон не течёт.
+                if _is_required_bold_line(lines[i]):
                     break
                 i += 1
             continue
@@ -118,7 +147,7 @@ def strip_arbiter(text: str) -> str:
             while i < n:
                 if head_re.match(lines[i]):
                     break
-                if _is_required_bold_header(lines[i]):
+                if _is_required_bold_line(lines[i]):
                     break
                 i += 1
             continue
@@ -290,7 +319,7 @@ def _looks_like_concrete_path(cand: str) -> bool:
     return False
 
 
-def _read_paths(section: str, project_root: Path | None) -> list[str]:
+def _read_paths(section: str) -> list[str]:
     """Пути из «Прочитать»: `...` + голые `docs/...`, `hub/...`, `/abs/...`."""
     found: list[str] = []
     seen: set[str] = set()
@@ -462,13 +491,10 @@ def lint_card(path: Path, project: ProjectConfig) -> LintResult:
                 ln = _line_of(lines, g, card)
                 msg = f"glob «{g}» вне allowed_paths"
                 errors.append(f"{card}:{ln}: {msg}" if ln is not None else f"{card}: {msg}")
-    # 3. Пути из «Прочитать» существуют.
+    # 3. Пути из «Прочитать» существуют (относительно root проекта или абсолютные).
     if "Прочитать" not in missing:
         section = _section_text(lines, "Прочитать")
-        root = Path(project.root) if (project.root or "").strip() else None
-        if root is not None and not root.is_dir():
-            root = None
-        for p in _read_paths(section, root):
+        for p in _read_paths(section):
             rp = _resolve(p, project, card.parent)
             if not rp.exists():
                 ln = _line_of(lines, p, card)
@@ -491,8 +517,6 @@ def lint_card(path: Path, project: ProjectConfig) -> LintResult:
                 else ""
             )
             can_globs = _can_change_globs(can_section) if can_section else []
-            pats = [p.removeprefix("./") for p in (project.allowed_paths or [])]
-            _ = pats
             existing: list[str] = []
             for nd in nodes:
                 filepart = nd.split("::")[0].strip() or nd

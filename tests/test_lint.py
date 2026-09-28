@@ -404,6 +404,57 @@ def test_header_mention_level_not_section(tmp_path):
     assert any("нет раздела «Уровень»" in e for e in r.errors)
 
 
+def test_header_prose_mention_with_dot_not_section(tmp_path):
+    # arbiter №1: строка не начинается с `**Уровень` — упоминание в прозе
+    # с точкой (`см. **Уровень.** medium`) разделом не считается.
+    base = GOOD.read_text(encoding="utf-8")
+    lines = [l for l in base.splitlines() if not l.strip().startswith("**Уровень.")]
+    text = "\n".join(lines) + "\n\nОб этом сказано: см. **Уровень.** medium.\n"
+    card = tmp_path / "no-level2.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("нет раздела «Уровень»" in e for e in r.errors)
+
+
+def test_combined_sections_line_is_section(tmp_path):
+    # Формат карточек docs/tasks/*.md: `**Сеть.** нет. **Уровень.** …` в одну
+    # строку — разделы находятся (иначе линт не пропускает живые карточки).
+    base = GOOD.read_text(encoding="utf-8")
+    drop = ("**Сеть.", "**Уровень.", "**Исполнитель.")
+    out: list[str] = []
+    inserted = False
+    for line in base.splitlines():
+        if line.strip().startswith(drop):
+            if not inserted:
+                out.append(
+                    "**Сеть.** нет. **Уровень.** medium. **Исполнитель.** musefree."
+                )
+                inserted = True
+            continue
+        out.append(line)
+    assert inserted
+    card = tmp_path / "combined.md"
+    card.write_text("\n".join(out) + "\n", encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert r.ok, r.errors
+
+
+def test_strip_arbiter_bold_mention_inside_markdown_no_leak():
+    # Утечка эталона: жирное упоминание раздела в середине строки внутри
+    # markdown-раздела арбитра не кончает раздел — секреты вырезаются целиком,
+    # следующий настоящий заголовок раздела остаётся.
+    sample = (
+        "# T\n\n## Решения арбитра\n\nсекрет-1\n\n"
+        "Об этом сказано: см. **Приёмка.** ниже\n\nсекрет-2\n\n"
+        "**Приёмка.**\npytest -q tests/x.py\n"
+    )
+    got = strip_arbiter(sample)
+    assert "секрет-1" not in got and "секрет-2" not in got
+    assert "**Приёмка.**" in got
+    assert "pytest -q tests/x.py" in got
+
+
 def test_read_missing_first_segment_is_error(tmp_path):
     # HIGH: `core/secret.py` (нет каталога core) — «нет пути», не молча ok.
     text = GOOD.read_text(encoding="utf-8").replace("docs/spec.md", "core/secret.py")
