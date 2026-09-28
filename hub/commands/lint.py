@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 from hub.config import load_project
@@ -13,7 +14,7 @@ def cmd_lint(args) -> int:
     proj_src = getattr(args, "project", None) or str(card.parent if card.parent != Path("") else ".")
     try:
         project = load_project(proj_src)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, OSError, tomllib.TOMLDecodeError) as e:
         print(f"{card}: нет проекта: {e}")
         return 1
     res = lint_card(card, project)

@@ -185,6 +185,16 @@ def test_cli_blind_hides_etalon(tmp_path, capsys):
     assert "Цель" in blind_part
 
 
+def test_cli_broken_toml_no_traceback(tmp_path, capsys):
+    # LOW (ревью): битый .hub.toml — аккуратная ошибка, а не traceback.
+    d = tmp_path / "bad-proj"
+    d.mkdir()
+    (d / ".hub.toml").write_text("это не toml [[[\n", encoding="utf-8")
+    assert main(["lint", str(GOOD), "--project", str(d)]) == 1
+    out = capsys.readouterr().out
+    assert "нет проекта" in out
+
+
 def test_unbackticked_can_change(tmp_path):
     # Голый core/secret.py без бэктиков — всё равно вне allowed_paths.
     text = GOOD.read_text(encoding="utf-8").replace(
@@ -300,6 +310,19 @@ def test_strip_bold_arbiter():
     assert "секрет" not in strip_arbiter(sample2)
 
 
+def test_strip_bold_arbiter_swallows_deep_headers():
+    # LOW (ревью): `###` внутри жирного раздела арбитра — часть раздела,
+    # иначе `секрет2` течёт в blind-промпт.
+    sample = (
+        "**Решения арбитра.**\n\nсекрет\n\n### детали\n\nсекрет2\n\n"
+        "**Приёмка.**\nтест\n"
+    )
+    got = strip_arbiter(sample)
+    assert "секрет" not in got and "секрет2" not in got
+    assert "детали" not in got
+    assert "**Приёмка.**" in got
+
+
 def test_collect_cwd_git_root(tmp_path):
     # Карточка во временном git-worktree, project.root указывает в другое место.
     import subprocess as _sp
@@ -385,6 +408,23 @@ def test_header_mention_acceptance_not_section(tmp_path):
     )
     card = tmp_path / "no-acc2.md"
     card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("нет раздела «Приёмка»" in e for e in r.errors)
+
+
+def test_header_mention_with_dot_in_interface_not_section(tmp_path):
+    # HIGH (ревью): упоминание с точкой в чужой строке — `см. **Приёмка.**`
+    # внутри `**Интерфейс.**` — разделом не считается, карточка битая.
+    base = GOOD.read_text(encoding="utf-8")
+    lines = [l for l in base.splitlines() if "Приёмка" not in l]
+    out = []
+    for l in lines:
+        if l.strip().startswith("**Интерфейс."):
+            l = l + " см. **Приёмка.** `pytest -q tests/test_time.py`"
+        out.append(l)
+    card = tmp_path / "no-acc-dot.md"
+    card.write_text("\n".join(out) + "\n", encoding="utf-8")
     r = lint_card(card, _proj())
     assert not r.ok
     assert any("нет раздела «Приёмка»" in e for e in r.errors)
@@ -480,6 +520,19 @@ def test_read_prose_with_slash_ok(tmp_path):
     card.write_text(text, encoding="utf-8")
     r = lint_card(card, _proj())
     assert r.ok, r.errors
+
+
+def test_read_two_paths_in_one_backtick(tmp_path):
+    # LOW (ревью): второй путь в том же бэктике тоже проверяется.
+    base = GOOD.read_text(encoding="utf-8")
+    text = base.replace(
+        "`hub/config.py`", "`docs/spec.md hub/нет-такого.py`", 1
+    )
+    card = tmp_path / "two-in-tick.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("нет пути" in e and "нет-такого" in e for e in r.errors)
 
 
 def test_strip_arbiter_bold_inside_markdown():

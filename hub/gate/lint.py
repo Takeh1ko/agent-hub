@@ -46,12 +46,13 @@ def _bold_header_names(s: str) -> set[str]:
 
     Первый сегмент — только в начале строки; дальше — только как продолжение
     комбинированной строки карточки (`**Сеть.** нет. **Уровень.** …` — формат
-    `docs/tasks/*.md`), т.е. только после уже найденного заголовка. Упоминание
-    раздела в прозе (`Об этом сказано: см. **Приёмка.** ниже`) заголовком не
-    считается: строка в этом месте не «начинается» с `**Имя` (арбитр №1).
+    `docs/tasks/*.md`): между заголовками лишь короткое plain-значение без
+    кода. Упоминание раздела в прозе (`см. **Приёмка.** `pytest…``) заголовком
+    не считается: строка в этом месте не «начинается» с `**Имя` (арбитр №1).
     """
     found: set[str] = set()
     chain = False
+    last_end = 0
     pos = 0
     while True:
         idx = s.find("**", pos)
@@ -71,12 +72,21 @@ def _bold_header_names(s: str) -> set[str]:
                 or after[:1] in (".", "(", ":")
             )
         else:
-            ok = chain and (
-                after.startswith(".") or after.startswith("(") or after.startswith(" (")
+            gap = s[last_end:idx]
+            ok = (
+                chain
+                and (
+                    after.startswith(".")
+                    or after.startswith("(")
+                    or after.startswith(" (")
+                )
+                and "`" not in gap
+                and len(gap) <= 60
             )
         if ok:
             found.add(name)
             chain = True
+            last_end = idx + 2 + len(name)
         pos = idx + 2
 
 
@@ -117,7 +127,13 @@ def _is_required_bold_line(line: str) -> bool:
 
 
 def strip_arbiter(text: str) -> str:
-    """Вырезать раздел «Решения арбитра» до следующего заголовка того же/высшего уровня."""
+    """Вырезать раздел «Решения арбитра» до следующего заголовка того же/высшего уровня.
+
+    Жирный заголовок (`**Решения арбитра.**`) считаем уровнем 2: более глубокие
+    markdown-подзаголовки (`###+`) внутри — часть раздела и тоже вырезаются,
+    иначе эталон течёт в blind-промпт; кончают раздел только `#`/`##` и
+    строка-заголовок обязательного раздела.
+    """
     lines = text.splitlines()
     head_re = re.compile(r"^(#{1,6})\s*\S.*$")
     out: list[str] = []
@@ -142,10 +158,12 @@ def strip_arbiter(text: str) -> str:
                 i += 1
             continue
         # Жирный заголовок `**Решения арбитра...` — стиль остальных разделов карточки.
+        # Считаем его уровнем 2: `###+` внутри — часть раздела (см. docstring).
         if s.startswith("**") and "Решения арбитра" in s:
             i += 1
             while i < n:
-                if head_re.match(lines[i]):
+                m2 = head_re.match(lines[i])
+                if m2 and len(m2.group(1)) <= 2:
                     break
                 if _is_required_bold_line(lines[i]):
                     break
@@ -328,19 +346,23 @@ def _read_paths(section: str) -> list[str]:
         cand = cand.strip()
         if not cand:
             return
-        # Взять первый токен (отрезать `docs/spec.md (§7` → `docs/spec.md`).
-        cand = re.split(r"\s", cand)[0] if cand else ""
-        # Резать только кавычки/скобки и хвостовую пунктуацию; ведущую `.` беречь.
-        cand = cand.lstrip("\"'([")
-        cand = cand.rstrip("\"')].,;:!?")
-        if not _looks_like_concrete_path(cand):
-            return
-        # Фильтр «первый сегмент есть в root» убран (арбитр №2):
-        # всё похожее на путь проверяется на существование, проза отсекается
-        # уже по форме в `_looks_like_concrete_path` (расширение или `/` в конце).
-        if cand not in seen:
-            seen.add(cand)
-            found.append(cand)
+        # Содержимое бэктика дробится по `[,;\s]+` (как в «Можно менять»):
+        # каждый токен проверяется отдельно (`docs/spec.md (§7` → `docs/spec.md`).
+        for tok in re.split(r"[,;\s]+", cand):
+            tok = tok.strip()
+            if not tok:
+                continue
+            # Резать только кавычки/скобки и хвостовую пунктуацию; ведущую `.` беречь.
+            tok = tok.lstrip("\"'([")
+            tok = tok.rstrip("\"')].,;:!?")
+            if not _looks_like_concrete_path(tok):
+                continue
+            # Фильтр «первый сегмент есть в root» убран (арбитр №2):
+            # всё похожее на путь проверяется на существование, проза отсекается
+            # уже по форме в `_looks_like_concrete_path` (расширение или `/` в конце).
+            if tok not in seen:
+                seen.add(tok)
+                found.append(tok)
 
     for m in re.finditer(r"`([^`]+)`", section):
         _add(m.group(1).strip())

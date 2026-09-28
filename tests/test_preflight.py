@@ -260,6 +260,32 @@ def test_cli_preflight_ok_fail(tmp_path, capsys, monkeypatch):
     assert "FAIL нет-такой no-task" in capsys.readouterr().out
 
 
+def test_cli_broken_db_no_traceback(tmp_path, capsys):
+    # LOW (ревью): битая hub.db — `FAIL <id> store-fail: …`, а не traceback.
+    proj_root = tmp_path / "proj"
+    proj_root.mkdir()
+    (proj_root / ".hub.toml").write_text(
+        "schema_version = 1\n"
+        f'name = "P"\nroot = "{proj_root}"\n'
+        'rules = "docs/agents/rules.md"\n'
+        f'python = "{sys.executable}"\ntest_lock = ""\n'
+        'allowed_paths = ["hub/**"]\n',
+        encoding="utf-8")
+    db = Path(Store().path)
+    db.write_bytes(b"not-sqlite-garbage")
+    assert main(["preflight", "T-x", "--project", str(proj_root)]) == 1
+    assert "FAIL T-x store-fail" in capsys.readouterr().out
+
+
+def test_cli_broken_toml_no_traceback(tmp_path, capsys):
+    # LOW (ревью): битый .hub.toml — `FAIL <id> no-project`, а не traceback.
+    proj_root = tmp_path / "proj"
+    proj_root.mkdir()
+    (proj_root / ".hub.toml").write_text("это не toml [[[\n", encoding="utf-8")
+    assert main(["preflight", "T-x", "--project", str(proj_root)]) == 1
+    assert "FAIL T-x no-project" in capsys.readouterr().out
+
+
 def test_setup_env_forwarded(tmp_path):
     # preflight передаёт HUB_TASK_ID/WORKTREE/PROJECT_ROOT в хук.
     repo, sha = _mk_repo(tmp_path)

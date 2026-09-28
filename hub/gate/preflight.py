@@ -28,7 +28,11 @@ def run_hook(
     cwd: Path,
     timeout_s: int = 120,
 ) -> tuple[int, str, str]:
-    """Запустить shell-хук; вернуть (код, stdout-хвост ≤2000, stderr-хвост ≤2000)."""
+    """Запустить shell-хук; вернуть (код, stdout-хвост ≤2000, stderr-хвост ≤2000).
+
+    На таймауте код 124; stderr-хвост — честный, при пустом stderr в нём
+    комбинированный хвост (stdout или `timeout`), чтобы причина не терялась.
+    """
     full_env = dict(os.environ)
     full_env.update(env)
     try:
@@ -45,7 +49,7 @@ def run_hook(
         out = (e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or ""))[-2000:]
         err = (e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or ""))[-2000:]
         tail = (err or out or "timeout").strip()[-2000:]
-        return (124, out[-2000:], (tail or "timeout")[-2000:])
+        return (124, out[-2000:], (err[-2000:] or tail or "timeout")[-2000:])
     except OSError as e:
         return (127, "", str(e)[-2000:])
     out = r.stdout if isinstance(r.stdout, str) else ""

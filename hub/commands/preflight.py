@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
+import tomllib
+
 from hub.config import load_project
 from hub.gate.preflight import preflight
 from hub.store import Store
@@ -12,10 +15,15 @@ def cmd_preflight(args) -> int:
     proj_src = getattr(args, "project", None) or "."
     try:
         project = load_project(proj_src)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
         print(f"FAIL {task_id} no-project")
         return 1
-    res = preflight(Store(), task_id, project)
+    try:
+        store = Store()
+    except (OSError, sqlite3.Error) as e:
+        print(f"FAIL {task_id} store-fail: {e}")
+        return 1
+    res = preflight(store, task_id, project)
     if res.ok:
         print(f"OK {task_id}")
         return 0
