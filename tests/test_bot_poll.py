@@ -21,8 +21,12 @@ class FakeBot:
     def __init__(self, fail: set[int] | None = None) -> None:
         self.fail = set(fail or ())
         self.sent: list[tuple[int, str]] = []
+        # reply_markup каждого send/edit (None — поле не передавали).
+        self.sent_kb: list[object] = []
         self.edited: list[tuple[int, int, str]] = []
+        self.edited_kb: list[object] = []
         self.markup_dropped: list[tuple[int, int]] = []
+        self.markup_dropped_kb: list[object] = []
         self._mid = 0
 
     async def send_message(self, chat, text, **kwargs):
@@ -30,15 +34,18 @@ class FakeBot:
             raise RuntimeError(f"сеть упала → {chat}")
         self._mid += 1
         self.sent.append((int(chat), str(text)))
+        self.sent_kb.append(kwargs.get("reply_markup"))
         return SimpleNamespace(message_id=self._mid)
 
     async def edit_message_text(self, text, chat_id=None,
                                 message_id=None, **kwargs):
         self.edited.append((int(chat_id), int(message_id), str(text)))
+        self.edited_kb.append(kwargs.get("reply_markup"))
 
     async def edit_message_reply_markup(self, chat_id=None,
                                         message_id=None, **kwargs):
         self.markup_dropped.append((int(chat_id), int(message_id)))
+        self.markup_dropped_kb.append(kwargs.get("reply_markup"))
 
     def texts(self, chat: int | None = None) -> list[str]:
         if chat is None:
@@ -660,3 +667,105 @@ def test_reply_edits_question_no_dup():
     assert ok and short == "✅ Ответ записан" and "Ответ: да" in full
     row = bc.get_question(s, qid)
     assert row["status"] == "answered" and row["answer"] == "да"
+
+
+def _kb_rows(markup) -> list:
+    """Строки инлайн-клавиатуры из reply_markup (None → [])."""
+    return list(getattr(markup, "inline_keyboard", None) or [])
+
+
+def _has_buttons(markup) -> bool:
+    return bool(_kb_rows(markup))
+
+
+def _is_empty_kb(markup) -> bool:
+    """Явно переданная пустая клавиатура (поле reply_markup в запросе)."""
+    return markup is not None and _kb_rows(markup) == []
+
+
+def test_question_keeps_buttons_answer_removes_them():
+    """Карточка п.4: вопрос уходит с кнопками, ответ — правка без кнопок.
+
+    aiogram не отправляет reply_markup=None, поэтому снятие кнопок —
+    только через явно пустую клавиатуру.
+    """
+    async def _go():
+        from hub.bot import run as br
+
+        br._QMSG.clear()
+        br._QSENT.clear()
+        s = Store()
+        bc.remember_chat(s, 555, NOW)
+        qid = _add_question(s)
+        bot, state = FakeBot(), BotState()
+        r = await poll_once(bot, state, NOW)
+        assert r["questions"] == 1
+        # Рассылка: каждая копия с кнопками.
+        assert len(bot.sent_kb) == 2 and all(_has_buttons(kb) for kb in bot.sent_kb)
+        assert len(br._qmsg_keys(qid)) == 2
+        ok, text = await br.handle_qans(bot, 555, f"qans:{qid}:0", NOW + 1)
+        assert ok and "Ответ: да" in text
+        # Обе копии отредактированы и обе — с явно пустой клавиатурой.
+        assert len(bot.edited) == 2
+        assert all(_is_empty_kb(kb) for kb in bot.edited_kb), bot.edited_kb
+        # Опоздавший тап: снятие клавиатуры тоже явное.
+        ok2, _ = await br.handle_qans(bot, _owner(), f"qans:{qid}:1", NOW + 2)
+        assert not ok2
+        assert bot.markup_dropped and len(bot.markup_dropped) == 2
+        assert all(_is_empty_kb(kb) for kb in bot.markup_dropped_kb)
+        br._QMSG.clear()
+        br._QSENT.clear()
+
+    asyncio.run(_go())
+
+
+def test_handle_reply_removes_buttons_in_all_copies():
+    """Ответ реплаем: кнопки сняты во всех копиях и в реплайнутом сообщении."""
+    async def _go():
+        from hub.bot import run as br
+
+        br._QMSG.clear()
+        br._QSENT.clear()
+        s = Store()
+        qid = _add_question(s, "продлить?", ["да", "нет"])
+        bot = FakeBot()
+        br._remember_qmsg(555, 41, qid)
+        br._remember_qmsg(_owner(), 42, qid)
+        ok, short = await br.handle_reply(bot, 556, qid, "продлить", 41, NOW)
+        assert ok and short == "✅ Ответ записан"
+        # Две копии вопроса + реплайнутое сообщение.
+        assert len(bot.edited) == 3
+        assert all(_is_empty_kb(kb) for kb in bot.edited_kb), bot.edited_kb
+        br._QMSG.clear()
+        br._QSENT.clear()
+
+    asyncio.run(_go())
+
+
+def test_show_confirm_result_drops_confirm_buttons():
+    """Подтверждение: после тапа Да/Нет уходят, иначе тап можно повторить."""
+    from hub.bot import run as br
+
+    class _Msg:
+        def __init__(self, fail_edit: bool = False) -> None:
+            self.fail_edit = fail_edit
+            self.edits: list[tuple[str, object]] = []
+            self.answers: list[str] = []
+
+        async def edit_text(self, text, **kw):
+            if self.fail_edit:
+                raise RuntimeError("сообщение недоступно")
+            self.edits.append((str(text), kw.get("reply_markup")))
+
+        async def answer(self, text, **kw):
+            self.answers.append(str(text))
+
+    m = _Msg()
+    asyncio.run(br.show_confirm_result(m, "✅ stop H01 — передано Claude"))
+    assert m.edits and m.edits[0][0].startswith("✅ stop")
+    assert _is_empty_kb(m.edits[0][1]), "кнопки Да/Нет сняты явно"
+    assert not m.answers
+    # Правка упала — новое сообщение (без клавиатуры отправляется как есть).
+    m2 = _Msg(fail_edit=True)
+    asyncio.run(br.show_confirm_result(m2, "Отменено."))
+    assert m2.answers == ["Отменено."] and not m2.edits

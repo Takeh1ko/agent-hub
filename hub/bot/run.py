@@ -154,6 +154,12 @@ def _markup(buttons: list[bc.Button]):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _no_buttons():
+    """Явно снять кнопки: aiogram не кладёт reply_markup=None в запрос,
+    а без поля Telegram оставляет прежнюю клавиатуру."""
+    return InlineKeyboardMarkup(inline_keyboard=[])
+
+
 def _remember_qmsg(chat_id: int, bot_msg_id: int, qid: int) -> None:
     """Запомнить соответствие, с капой от утечки.
 
@@ -398,13 +404,18 @@ def _sync_tick(prev_snap, now_ms: int, pending: dict | None = None):
 
 
 async def _edit_question_everywhere(bot, qid: int, text: str) -> int:
-    """Править копии вопроса во всех чатах рассылки. Возвращает число правок."""
+    """Править копии вопроса во всех чатах рассылки. Возвращает число правок.
+
+    Карточка п.4: у отвеченного вопроса кнопки убираются — передаём явно
+    пустую клавиатуру (без поля Telegram оставил бы прежние кнопки).
+    """
     log = logging.getLogger("hub.bot")
     n = 0
     for c, m in _qmsg_keys(int(qid)):
         try:
             await bot.edit_message_text(
-                text=bc.clip(text), chat_id=int(c), message_id=int(m))
+                text=bc.clip(text), chat_id=int(c), message_id=int(m),
+                reply_markup=_no_buttons())
             n += 1
         except Exception as e:  # noqa: BLE001 — best-effort правка
             log.debug("правка вопроса %s в %s: %s", qid, c, e)
@@ -418,7 +429,8 @@ async def _drop_question_keyboards(bot, qid: int) -> int:
     for c, m in _qmsg_keys(int(qid)):
         try:
             await bot.edit_message_reply_markup(
-                chat_id=int(c), message_id=int(m), reply_markup=None)
+                chat_id=int(c), message_id=int(m),
+                reply_markup=_no_buttons())
             n += 1
         except Exception:  # noqa: BLE001 — best-effort
             continue
@@ -471,11 +483,24 @@ async def handle_reply(bot, chat_id: int, qid: int, body: str,
     for c, m in targets:
         try:
             await bot.edit_message_text(
-                text=bc.clip(full), chat_id=int(c), message_id=int(m))
+                text=bc.clip(full), chat_id=int(c), message_id=int(m),
+                reply_markup=_no_buttons())
         except Exception:  # noqa: BLE001 — best-effort правка
             continue
     _forget_qid(int(qid))
     return True, short
+
+
+async def show_confirm_result(message, text: str) -> None:
+    """Заменить текст подтверждения и снять кнопки Да/Нет (шаг израсходован).
+
+    Правка падает (сообщение удалили) — отвечаем новым сообщением.
+    """
+    body = bc.clip(text)
+    try:
+        await message.edit_text(body, reply_markup=_no_buttons())
+    except Exception:  # noqa: BLE001 — сообщение могли удалить
+        await message.answer(body)
 
 
 # --- шаги циклов без sleep (тестируются с фейковым ботом) ---
@@ -753,10 +778,7 @@ def build_dispatcher() -> Dispatcher:
         if text is None:
             await call.answer("Не понял кнопку.")
             return
-        try:
-            await call.message.edit_text(bc.clip(text))
-        except Exception:  # noqa: BLE001 — сообщение могли удалить
-            await call.message.answer(bc.clip(text))
+        await show_confirm_result(call.message, text)
         await call.answer("Готово")
 
     @router.message(F.text)
