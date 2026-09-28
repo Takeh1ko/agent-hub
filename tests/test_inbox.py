@@ -59,6 +59,21 @@ def test_inbox_order_and_mark(capsys):
     finally:
         con.close()
     assert n == 0
+    # Второй вызов реально выполнен и пуст (не только счётчик в БД).
+    assert main(["inbox"]) == 0
+    out2 = capsys.readouterr().out
+    assert "первое" not in out2 and "второе" not in out2
+    assert "(пусто)" in out2
+
+
+def test_inbox_order_by_ts_not_id(capsys):
+    """Порядок — по ts, а не по id: ts обратен id."""
+    s = Store()
+    _add_inbox(s, "поздний_ts", 2000)  # id=1, но ts больше
+    _add_inbox(s, "ранний_ts", 1000)  # id=2, но ts меньше
+    assert main(["inbox"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("ранний_ts") < out.index("поздний_ts")
 
 
 def test_inbox_peek_keeps_unread(capsys):
@@ -131,6 +146,58 @@ def test_inbox_answered_once_then_cursor(capsys):
     assert "answer:" not in capsys.readouterr().out
 
 
+def test_inbox_answered_out_of_order(capsys):
+    """Ответ сначала на новый вопрос, потом на старый — оба видны по разу."""
+    s = Store()
+    con = _con(s)
+    try:
+        c1 = con.execute(
+            "INSERT INTO question(task_id, asked_by, text, options_json,"
+            " status, answer, answered_via, ts)"
+            " VALUES ('T9','claude','старый?','[]','open','','',1000)")
+        q_old = int(c1.lastrowid)
+        c2 = con.execute(
+            "INSERT INTO question(task_id, asked_by, text, options_json,"
+            " status, answer, answered_via, ts)"
+            " VALUES ('T9','claude','новый?','[]','open','','',2000)")
+        q_new = int(c2.lastrowid)
+        con.commit()
+        # Владелец ответил сначала на НОВЫЙ вопрос.
+        con.execute(
+            "UPDATE question SET status='answered', answer='да2' WHERE id=?",
+            (q_new,))
+        con.commit()
+    finally:
+        con.close()
+    assert main(["inbox"]) == 0
+    out1 = capsys.readouterr().out
+    assert f"answer:{q_new}" in out1 and "да2" in out1
+    # Затем — на СТАРЫЙ: ответ не теряется (курсор max(id) его бы съел).
+    con = _con(s)
+    try:
+        con.execute(
+            "UPDATE question SET status='answered', answer='нет1' WHERE id=?",
+            (q_old,))
+        con.commit()
+    finally:
+        con.close()
+    assert main(["inbox"]) == 0
+    out2 = capsys.readouterr().out
+    assert f"answer:{q_old}" in out2 and "нет1" in out2
+    assert f"answer:{q_new}" not in out2
+    # Третий вызов: оба уже видены — повторов нет, seen — JSON-список.
+    assert main(["inbox"]) == 0
+    assert "answer:" not in capsys.readouterr().out
+    con = _con(s)
+    try:
+        val = con.execute(
+            "SELECT value FROM meta WHERE key='claude_seen_question'"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert sorted(json.loads(val)) == sorted([q_old, q_new])
+
+
 def test_inbox_peek_keeps_question_cursor(capsys):
     s = Store()
     con = _con(s)
@@ -151,6 +218,8 @@ def test_inbox_peek_keeps_question_cursor(capsys):
 
 def test_inbox_bad_limit(capsys):
     assert main(["inbox", "--limit", "-1"]) == 2
+    assert "непонятный --limit" in capsys.readouterr().err
+    assert main(["inbox", "--limit", "0"]) == 2
     assert "непонятный --limit" in capsys.readouterr().err
 
 

@@ -33,8 +33,12 @@ def test_next_events_after_and_task():
 def test_wait_immediate():
     s = _seed()
     e1 = s.add_event("T1", "stage", {})
-    got = ev.wait(s, 0, timeout_s=5, poll_s=0.05)
+    # poll_s=10: возврат обязан быть сразу (сон перед первым опросом
+    # откладывал бы его на ~10 с и ронял тест).
+    t0 = time.monotonic()
+    got = ev.wait(s, 0, timeout_s=30, poll_s=10)
     assert [e["id"] for e in got] == [e1]
+    assert time.monotonic() - t0 < 1
 
 
 def test_wait_background_event():
@@ -188,3 +192,50 @@ def test_cli_prints_delta(monkeypatch, capsys):
 def test_cli_bad_timeout(capsys):
     assert main(["wait", "--timeout", "херня"]) == 2
     assert "непонятный --timeout" in capsys.readouterr().err
+
+
+def test_timeout_s_absolute_fixed_clock():
+    """Абсолютная ветка timeout_s на фиксированных часах (без сна)."""
+    from datetime import datetime
+
+    from hub import time as ht
+    from hub.commands import wait as wait_cmd
+
+    now_dt = datetime(2026, 9, 28, 12, 0, tzinfo=ht.TZ)
+    now_ms = int(now_dt.timestamp() * 1000)
+    # Будущее абсолютное — секунды до него.
+    assert wait_cmd.timeout_s("сегодня 12:01", now_ms) == 60.0
+    assert wait_cmd.timeout_s("2026-09-28 12:05", now_ms) == 300.0
+    # Прошедшее абсолютное — 0, а не отрицательное/огромное.
+    assert wait_cmd.timeout_s("сегодня 11:59", now_ms) == 0.0
+    assert wait_cmd.timeout_s("2026-09-28 11:00", now_ms) == 0.0
+    # Относительная ветка не сломана.
+    assert wait_cmd.timeout_s("1м", now_ms) == 60.0
+
+
+def test_cli_absolute_timeout_future(monkeypatch, capsys):
+    """Абсолютное будущее через CLI: инверсия дала бы 0, а не ~180 с."""
+    from datetime import timedelta
+
+    from hub import time as ht
+
+    Store()  # пустой store
+    seen: dict = {}
+
+    def _fake(store, after_id, task_id=None, timeout_s=0, poll_s=0.5, clock=None):
+        seen["timeout_s"] = timeout_s
+        return []
+
+    monkeypatch.setattr(ev, "wait", _fake)
+    future = ht.to_local(ht.now_ms()) + timedelta(minutes=3)
+    assert main(["wait", "--timeout", future.strftime("%Y-%m-%d %H:%M")]) == 2
+    assert 60.0 < seen["timeout_s"] <= 300.0
+
+
+def test_cli_absolute_timeout_past_real(capsys):
+    """Абсолютное прошлое: настоящий wait выходит почти мгновенно."""
+    Store()  # пусто
+    t0 = time.monotonic()
+    assert main(["wait", "--timeout", "сегодня 00:00", "--poll", "0.05"]) == 2
+    assert capsys.readouterr().out == ""
+    assert time.monotonic() - t0 < 5

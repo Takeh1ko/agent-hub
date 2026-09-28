@@ -98,6 +98,14 @@ def dedup_findings(items: list[Finding]) -> list[Finding]:
         key = (f.file, f.line, _norm_issue(f.issue))
         if key not in seen:
             seen[key] = f
+        else:
+            # Сводный review_rN.json идёт раньше персонального и выигрывает
+            # дедуп с пустым author — подтянуть непустого от дубля.
+            prev = seen[key]
+            if not prev.author and f.author:
+                prev.author = f.author
+            if not prev.severity and f.severity:
+                prev.severity = f.severity
     return sorted(seen.values(), key=lambda f: (f.file, f.line))
 
 

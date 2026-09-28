@@ -25,15 +25,18 @@ def _write(path, data) -> None:
 def test_dedup_case_space():
     items = [
         Finding("a.py", 11, "нет проверки", "high", "muse"),
-        Finding("a.py", 10, "Нет  проверки", "high", "muse"),
-        Finding("a.py", 10, "нет проверки", "low", "mimo"),
+        Finding("a.py", 10, "Нет  проверки", "low", "mimo"),
+        Finding("a.py", 10, "нет проверки", "high", "x"),
         Finding("a.py", 10, "НЕТ   ПРОВЕРКИ", "high", "muse"),
     ]
     got = dedup_findings(items)
-    # Элементы 2–4 (строка 10) схлопнулись, осталось первое из них; строка 11 — отдельно.
-    # Сортировка по (file, line): 10 раньше 11, хотя на входе 11 было первым.
+    # Элементы 2–4 (строка 10) схлопнулись, осталось ПЕРВОЕ из них;
+    # строка 11 — отдельно. Сортировка по (file, line): 10 раньше 11.
     assert len(got) == 2
-    assert got[0].line == 10 and got[0].author == "muse"
+    assert got[0].line == 10
+    # Дубли различимы: первое (low/mimo) обязано выиграть, не последнее.
+    assert got[0].severity == "low" and got[0].author == "mimo"
+    assert got[0].issue == "Нет  проверки"
     assert got[1].line == 11
 
 
@@ -85,6 +88,24 @@ def test_load_reviewer_field(tmp_path):
     assert "()" not in format_findings(ded)
 
 
+def test_dedup_summary_empty_author_filled(tmp_path):
+    """Сводный без reviewer + персональный: автор подтягивается, нет ()."""
+    wt = tmp_path / "wt-empty"
+    _write(wt / ".agent" / "review_r1.json", {
+        "verdict": "changes",
+        "findings": [
+            {"file": "a.py", "line": 1, "issue": "баг", "severity": "high"},
+        ],
+    })
+    _write(wt / ".agent" / "review_r1_muse.json", {
+        "verdict": "changes",
+        "findings": [{"file": "a.py", "line": 1, "issue": "БАГ"}],
+    })
+    ded = dedup_findings(load_findings(wt))
+    assert len(ded) == 1 and ded[0].author == "muse"
+    assert "()" not in format_findings(ded)
+
+
 def test_load_skips_broken(tmp_path):
     wt = tmp_path / "wt"
     _write(wt / ".agent" / "review_r1.json", "{битый json")
@@ -129,3 +150,20 @@ def test_cli_findings(tmp_path, capsys):
     assert len(out.strip().splitlines()) == 1
     assert main(["findings", "T55", "--round", "1", "--fix"]) == 0
     assert "x.py:7" in capsys.readouterr().out
+
+
+def test_cli_fix_same_as_default(tmp_path, capsys):
+    """--fix — осознанный no-op-алиас: вывод побайтово как без флага."""
+    wt = tmp_path / "wt-T6"
+    _write(wt / ".agent" / "review_r1.json", {
+        "verdict": "changes",
+        "findings": [
+            {"file": "y.py", "line": 2, "issue": "утечка", "severity": "high"},
+        ],
+    })
+    s = Store()
+    s.upsert_task(id="T6", stage="review r1", worktree=str(wt))
+    assert main(["findings", "T6"]) == 0
+    plain = capsys.readouterr().out
+    assert main(["findings", "T6", "--fix"]) == 0
+    assert capsys.readouterr().out == plain

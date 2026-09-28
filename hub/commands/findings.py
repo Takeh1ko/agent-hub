@@ -28,5 +28,6 @@ def register(subparsers) -> None:
     p = subparsers.add_parser("findings", help="замечания ревью (дедуп)")
     p.add_argument("id", help="ID задачи")
     p.add_argument("--round", type=int, default=None, help="круг ревью")
-    p.add_argument("--fix", action="store_true", help="печать для починки")
+    p.add_argument("--fix", action="store_true",
+                   help="печать для починки (то же, что без флага: только печать)")
     p.set_defaults(func=cmd_findings)
