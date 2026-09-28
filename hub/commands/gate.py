@@ -57,13 +57,14 @@ def _resolve_card(card_rel: str, project, worktree: str) -> Path | None:
 
 
 def _cmd_covers(parts: list[str], nodes: list[str]) -> bool:
-    """done.cmd гоняет приёмку из карточки: pytest + ноды (голый pytest — всё)."""
-    blob = " ".join(parts)
-    if "pytest" not in blob:
+    """done.cmd гоняет приёмку из карточки: токен pytest + все ноды (голый pytest — всё)."""
+    if not any(t == "pytest" or t.endswith("/pytest") or t.endswith("\\pytest")
+               for t in parts):
         return False
     if not nodes:
         return True
-    if any(n in blob for n in nodes):
+    blob = " ".join(parts)
+    if all(n in blob for n in nodes):
         return True
     explicit = any("tests" in p or p.endswith(".py") or "::" in p for p in parts)
     return not explicit
@@ -95,6 +96,7 @@ def cmd_gate(args) -> int:
         project = load_project(hint)
         lock_path = project.test_lock or None
     except FileNotFoundError:
+        print("warn: нет .hub.toml — приёмка без замка", file=sys.stderr)
         project = None
     except Exception as e:
         # Битый конфиг — не повод идти без замка: стоим, не продолжаем.

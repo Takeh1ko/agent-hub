@@ -55,6 +55,14 @@ def test_changes_beats_valid_dispute():
     assert verdict(rs, round=2) == "arbiter"
 
 
-def test_empty_reviews_never_ready():
-    assert verdict([], round=1) == "next"
+def test_empty_reviews_go_to_arbiter():
+    """Никто из панели не ответил → arbiter сразу на любом круге (контракт H06)."""
+    assert verdict([], round=1) == "arbiter"
     assert verdict([], round=2) == "arbiter"
+
+
+def test_unknown_verdict_counts_as_changes():
+    """Неизвестный verdict трактуется как changes (не даёт ложного ready)."""
+    rs = [Review("bogus", file="a.py", line=1, body="x")]
+    assert verdict(rs, round=1) == "next"
+    assert verdict(rs, round=2) == "arbiter"

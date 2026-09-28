@@ -9,11 +9,13 @@ import subprocess
 import sys
 import time
 import types
+from importlib import import_module
 from pathlib import Path
 
 import pytest
 
 from hub.cli import main
+from hub.commands.gate import _cmd_covers
 from hub.gate.donefile import load_done
 from hub.gate.gate import check_gate
 from hub.gate.repair import REPAIR_PROMPT, repair_prompt
@@ -27,11 +29,22 @@ CANON_STR = sys.executable + " -m pytest -q"
 
 @pytest.fixture(autouse=True)
 def _stub_lint(monkeypatch):
-    """hub.gate.lint (H02) отсутствует в этом worktree: стаб с тем же контрактом.
+    """hub.gate.lint (H02): настоящий модуль, если слит, иначе стаб с тем же контрактом.
 
-    Реализация — построчный поиск заголовка (как H02 _section_bounds),
+    Реализация стаба — построчный поиск заголовка (как H02 _section_bounds),
     не подстрока по тексту (см. real-card.md: «Можно менять» в Цели).
     """
+    monkeypatch.delitem(sys.modules, "hub.gate.lint", raising=False)
+    try:
+        return import_module("hub.gate.lint")
+    except ImportError:
+        pass
+    mod = _make_stub_lint()
+    monkeypatch.setitem(sys.modules, "hub.gate.lint", mod)
+    return mod
+
+
+def _make_stub_lint():
     mod = types.ModuleType("hub.gate.lint")
 
     def _is_header(line, name):
@@ -81,7 +94,6 @@ def _stub_lint(monkeypatch):
     mod._section_text = _section_text
     mod._can_change_globs = _can_change_globs
     mod._pytest_nodes = _pytest_nodes
-    monkeypatch.setitem(sys.modules, "hub.gate.lint", mod)
     return mod
 
 
@@ -113,9 +125,14 @@ def _commit(repo, rel, text):
     return _git(repo, "rev-parse", "HEAD")
 
 
-def _with_test(repo):
-    """Каноническая приёмка (pytest -q) в worktree: один зелёный тест."""
-    (repo / "test_ok.py").write_text("def test_ok():\n    pass\n", encoding="utf-8")
+def _with_test(repo, rel="sub/test_ok.py"):
+    """Каноническая приёмка (pytest -q) в worktree: один зелёный тест, закоммичен
+    (ворота требуют чистое дерево — незакоммиченное вне .agent/ даёт dirty)."""
+    p = repo / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("def test_ok():\n    pass\n", encoding="utf-8")
+    _git(repo, "add", rel)
+    _git(repo, "commit", "-m", rel)
 
 
 def _write_done(repo, commit, files, cmd=CANON_STR, ok=True, tail="ok", notes=""):
@@ -312,7 +329,12 @@ def _task(tmp_path, tid, repo, base, globs):
 
 
 def test_gate_no_lint(tmp_path, capsys, monkeypatch):
-    monkeypatch.delitem(sys.modules, "hub.gate.lint", raising=False)
+    import hub.commands.gate as gate_cmd
+
+    def _boom():
+        raise ImportError("нет H02")
+
+    monkeypatch.setattr(gate_cmd, "_load_lint", _boom)
     repo, base = _repo(tmp_path)
     _commit(repo, "sub/a.txt", "1\n2\n")
     _task(tmp_path, "T00", repo, base, ["sub/**"])
@@ -333,11 +355,12 @@ def test_gate_bad_config_loud(tmp_path, capsys):
 
 def test_gate_no_diff_no_flood(tmp_path, capsys):
     repo, base = _repo(tmp_path)
-    head = _commit(repo, "sub/a.txt", "1\n2\n")
+    _commit(repo, "sub/a.txt", "1\n2\n")
     _with_test(repo)
+    head = _git(repo, "rev-parse", "HEAD")
     _task(tmp_path, "T07", repo, base, ["sub/**"])
     Store().upsert_task(id="T07", base_sha="0" * 40)
-    _write_done(repo, head, ["sub/a.txt"])
+    _write_done(repo, head, ["sub/a.txt", "sub/test_ok.py"])
     assert main(["gate", "T07"]) == 1
     out = capsys.readouterr().out
     assert "no-diff:" in out
@@ -357,7 +380,7 @@ def test_gate_mismatch(tmp_path, capsys):
     _commit(repo, "sub/a.txt", "1\n2\n")
     _with_test(repo)
     _task(tmp_path, "T01", repo, base, ["sub/**"])
-    _write_done(repo, "0" * 40, ["sub/a.txt"])
+    _write_done(repo, "0" * 40, ["sub/a.txt", "sub/test_ok.py"])
     assert main(["gate", "T01"]) == 1
     out = capsys.readouterr().out
     assert "mismatch:" in out
@@ -365,10 +388,11 @@ def test_gate_mismatch(tmp_path, capsys):
 
 def test_gate_unknown_file(tmp_path, capsys):
     repo, base = _repo(tmp_path)
-    head = _commit(repo, "sub/a.txt", "1\n2\n")
+    _commit(repo, "sub/a.txt", "1\n2\n")
     _with_test(repo)
-    _task(tmp_path, "T02", repo, base, ["sub/a.txt", "нет-в-диффе.txt"])
-    _write_done(repo, head, ["sub/a.txt", "нет-в-диффе.txt"])
+    head = _git(repo, "rev-parse", "HEAD")
+    _task(tmp_path, "T02", repo, base, ["sub/a.txt", "sub/test_ok.py", "нет-в-диффе.txt"])
+    _write_done(repo, head, ["sub/a.txt", "sub/test_ok.py", "нет-в-диффе.txt"])
     assert main(["gate", "T02", "--round", "1"]) == 1
     out = capsys.readouterr().out
     assert "unknown-file:" in out
@@ -376,10 +400,11 @@ def test_gate_unknown_file(tmp_path, capsys):
 
 def test_gate_ok_false(tmp_path, capsys):
     repo, base = _repo(tmp_path)
-    head = _commit(repo, "sub/a.txt", "1\n2\n")
+    _commit(repo, "sub/a.txt", "1\n2\n")
     _with_test(repo)
+    head = _git(repo, "rev-parse", "HEAD")
     _task(tmp_path, "T04", repo, base, ["sub/**"])
-    _write_done(repo, head, ["sub/a.txt"], ok=False)
+    _write_done(repo, head, ["sub/a.txt", "sub/test_ok.py"], ok=False)
     assert main(["gate", "T04"]) == 1
     out = capsys.readouterr().out
     assert "tests-fail: done.json ok=false" in out
@@ -388,10 +413,11 @@ def test_gate_ok_false(tmp_path, capsys):
 def test_gate_cmd_mismatch(tmp_path, capsys):
     """done.cmd=/bin/true при падающей приёмке: OK запрещён, приёмка каноническая."""
     repo, base = _repo(tmp_path)
-    head = _commit(repo, "sub/a.txt", "1\n2\n")
+    _commit(repo, "sub/a.txt", "1\n2\n")
     _with_test(repo)
+    head = _git(repo, "rev-parse", "HEAD")
     _task(tmp_path, "T05", repo, base, ["sub/**"])
-    _write_done(repo, head, ["sub/a.txt"], cmd="/bin/true")
+    _write_done(repo, head, ["sub/a.txt", "sub/test_ok.py"], cmd="/bin/true")
     assert main(["gate", "T05"]) == 1
     out = capsys.readouterr().out
     assert "cmd-mismatch:" in out
@@ -400,10 +426,11 @@ def test_gate_cmd_mismatch(tmp_path, capsys):
 
 def test_gate_ok(tmp_path, capsys):
     repo, base = _repo(tmp_path)
-    head = _commit(repo, "sub/a.txt", "1\n2\n")
+    _commit(repo, "sub/a.txt", "1\n2\n")
     _with_test(repo)
+    head = _git(repo, "rev-parse", "HEAD")
     _task(tmp_path, "T03", repo, base, ["sub/**"])
-    _write_done(repo, head, ["sub/a.txt"])
+    _write_done(repo, head, ["sub/a.txt", "sub/test_ok.py"])
     assert main(["gate", "T03"]) == 0
     assert "OK T03" in capsys.readouterr().out
 
@@ -411,12 +438,173 @@ def test_gate_ok(tmp_path, capsys):
 def test_gate_real_card(tmp_path, capsys):
     """Реальная карточка (упоминание «Можно менять» в Цели): OK на легальном диффе."""
     repo, base = _repo(tmp_path)
-    head = _commit(repo, "hub/gate/gate.py", "x\n")
-    _with_test(repo)
+    _commit(repo, "hub/gate/gate.py", "x\n")
+    _with_test(repo, "tests/fixtures/gate/test_ok.py")
+    head = _git(repo, "rev-parse", "HEAD")
     card = Path(__file__).parent / "fixtures" / "gate" / "real-card.md"
     assert card.is_file()
     Store().upsert_task(id="TR", worktree=str(repo), base_sha=base,
                         branch="agent/TR", card_path=str(card))
-    _write_done(repo, head, ["hub/gate/gate.py"])
+    _write_done(repo, head, ["hub/gate/gate.py", "tests/fixtures/gate/test_ok.py"])
     assert main(["gate", "TR"]) == 0
     assert "OK TR" in capsys.readouterr().out
+
+
+def test_stub_matches_real_lint(monkeypatch, _stub_lint):
+    """Семантика стаба == настоящему hub.gate.lint на реальной карточке.
+
+    Пока H02 не слит — skipped; после мержа станет активной и поймает расхождение.
+    """
+    monkeypatch.delitem(sys.modules, "hub.gate.lint", raising=False)
+    real = pytest.importorskip("hub.gate.lint", reason="H02 ещё не слит")
+    stub = _make_stub_lint()
+    lines = (Path(__file__).parent / "fixtures" / "gate" / "real-card.md"
+             ).read_text(encoding="utf-8").splitlines()
+    for section in ("Можно менять", "Приёмка"):
+        assert real._section_text(lines, section) == stub._section_text(lines, section)
+    sec = stub._section_text(lines, "Можно менять")
+    assert real._can_change_globs(sec) == stub._can_change_globs(sec)
+    acc = stub._section_text(lines, "Приёмка")
+    assert real._pytest_nodes(acc) == stub._pytest_nodes(acc)
+
+
+def test_dirty_blocks_acceptance(tmp_path):
+    """Незакоммиченный conftest.py (меняет исход приёмки мимо диффа) → dirty, без запуска."""
+    repo, base = _repo(tmp_path)
+    _commit(repo, "a.txt", "1\n2\n")
+    (repo / "conftest.py").write_text(
+        "def pytest_collection_modifyitems(items):\n    items[:] = []\n", encoding="utf-8")
+    marker = tmp_path / "marker"
+    cmd = [sys.executable, "-c", "open(%r,'w').write('x')" % str(marker)]
+    res = check_gate(repo, base, "HEAD", ["**"], cmd)
+    assert not res.ok
+    assert any(e.startswith("dirty:") for e in res.errors)
+    assert any("conftest.py" in e for e in res.errors)
+    assert not marker.exists()  # приёмка не запускалась
+
+
+def test_agent_dir_ignored_in_dirty(tmp_path):
+    """Неотслеженный .agent/done.json — не грязь (в живом репо .agent/ игнорируется)."""
+    repo, base = _repo(tmp_path)
+    _commit(repo, "a.txt", "1\n2\n")
+    _write_done(repo, _git(repo, "rev-parse", "HEAD"), ["a.txt"])
+    res = check_gate(repo, base, "HEAD", ["**"], PASS)
+    assert res.ok, res.errors
+
+
+def test_forbidden_skips_acceptance(tmp_path):
+    """forbidden-дифф: итог не-ok без захвата замка и запуска приёмки."""
+    repo, base = _repo(tmp_path)
+    _commit(repo, "other/x.txt", "x\n")
+    marker = tmp_path / "marker"
+    cmd = [sys.executable, "-c", "open(%r,'w').write('x')" % str(marker)]
+    res = check_gate(repo, base, "HEAD", ["hub/**"], cmd)
+    assert not res.ok
+    assert any(e.startswith("forbidden:") for e in res.errors)
+    assert not marker.exists()  # приёмка не запускалась
+
+
+def test_git_error_not_empty_diff(tmp_path):
+    """Битый base — это git-error, а не empty-diff (причину не маскируем)."""
+    repo, base = _repo(tmp_path)
+    _commit(repo, "a.txt", "1\n2\n")
+    res = check_gate(repo, base, "0" * 40, ["**"], PASS)
+    assert not res.ok
+    assert any(e.startswith("git-error:") for e in res.errors)
+    assert not any(e == "empty-diff" for e in res.errors)
+
+
+def test_cmd_covers_tokens_and_all_nodes():
+    """_cmd_covers: токен pytest (не подстрока) + все ноды приёмки."""
+    assert _cmd_covers(shlex.split("python -m pytest -q"), [])
+    both = ["tests/test_gate.py", "tests/test_verdict.py"]
+    full = shlex.split("python -m pytest -q tests/test_gate.py tests/test_verdict.py")
+    assert _cmd_covers(full, both)
+    part = shlex.split("python -m pytest -q tests/test_gate.py")
+    assert not _cmd_covers(part, both)  # частичное покрытие — не покрытие
+    assert not _cmd_covers(["mypytest", "-q"], [])  # подстрока в имени — не pytest
+    assert not _cmd_covers(["/bin/true"], [])
+    assert _cmd_covers(["/x/.venv/bin/pytest", "-q"], [])  # путь к бинарнику — pytest
+
+
+def test_load_done_empty_cmd(tmp_path):
+    """Пустой tests.cmd отклоняется: ok=true без команды заявить нельзя."""
+    repo, base = _repo(tmp_path)
+    _write_done(repo, base, [], cmd="")
+    with pytest.raises(ValueError, match=r"done\.json:.*tests\.cmd"):
+        load_done(repo)
+
+
+def test_load_done_unreadable(tmp_path):
+    """done.json-каталог (EISDIR): ValueError «не читается», а не «нет файла»."""
+    repo, _ = _repo(tmp_path)
+    d = repo / ".agent"
+    d.mkdir(exist_ok=True)
+    (d / "done.json").mkdir()
+    with pytest.raises(ValueError, match=r"done\.json:"):
+        load_done(repo)
+
+
+def test_gate_runs_acceptance(tmp_path, capsys):
+    """Проводка hub gate → check_gate: красная приёмка даёт exit 1 + tests-fail:."""
+    repo, base = _repo(tmp_path)
+    _commit(repo, "sub/a.txt", "1\n2\n")
+    _commit(repo, "sub/test_red.py", "def test_red():\n    assert False\n")
+    _task(tmp_path, "T10", repo, base, ["sub/**"])
+    _write_done(repo, _git(repo, "rev-parse", "HEAD"), ["sub/a.txt", "sub/test_red.py"])
+    assert main(["gate", "T10"]) == 1
+    assert "tests-fail:" in capsys.readouterr().out
+
+
+def test_gate_uses_project_lock(tmp_path, capsys):
+    """Проводка lock_path: занятый замок проекта → exit 1 + locked:, приёмка не гонялась."""
+    from hub.read.procs import lock_holder
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    lock = proj / "t.lock"
+    lock.touch()
+    (proj / ".hub.toml").write_text(
+        'schema_version = 1\nname = "T"\npython = "%s"\ntest_lock = "%s"\n'
+        % (sys.executable, lock), encoding="utf-8")
+    repo, base = _repo(tmp_path, name="wtrepo")
+    _commit(repo, "sub/a.txt", "1\n2\n")
+    _with_test(repo)
+    _task(tmp_path, "T11", repo, base, ["sub/**"])
+    _write_done(repo, _git(repo, "rev-parse", "HEAD"), ["sub/a.txt", "sub/test_ok.py"])
+    ready = tmp_path / "ready"
+    script = ("import fcntl, sys, time; fd = open(sys.argv[1], 'w'); "
+              "fcntl.flock(fd, fcntl.LOCK_EX); "
+              "open(sys.argv[2], 'w').write('ready'); time.sleep(20)")
+    holder = subprocess.Popen(
+        [sys.executable, "-c", script, str(lock), str(ready)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + 10
+        while True:
+            if ready.exists() and lock_holder(str(lock)) is not None:
+                break
+            if holder.poll() is not None:
+                pytest.fail("держатель замка упал")
+            if time.time() > deadline:
+                pytest.fail("держатель не взял замок")
+            time.sleep(0.05)
+        assert main(["gate", "T11", "--project", str(proj)]) == 1
+        out = capsys.readouterr().out
+        assert "locked:" in out
+        assert "pid" in out
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_gate_warns_without_hub_toml(tmp_path, capsys):
+    """Нет .hub.toml — предупреждение в stderr, ворота идут без замка, но честно."""
+    repo, base = _repo(tmp_path)
+    _commit(repo, "sub/a.txt", "1\n2\n")
+    _with_test(repo)
+    head = _git(repo, "rev-parse", "HEAD")
+    _task(tmp_path, "T12", repo, base, ["sub/**"])
+    _write_done(repo, head, ["sub/a.txt", "sub/test_ok.py"])
+    assert main(["gate", "T12"]) == 0
+    assert "warn:" in capsys.readouterr().err

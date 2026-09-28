@@ -39,21 +39,47 @@ def _git(repo: str, *args: str) -> subprocess.CompletedProcess[str]:
             args=["git", *args], returncode=124, stdout="", stderr=f"timeout: {err}")
 
 
-def _rev_count(repo: str, base: str, head: str) -> int | None:
+def _rev_count(repo: str, base: str, head: str) -> tuple[int | None, str]:
+    """Число коммитов base..head; при ошибке git — (None, последняя строка stderr)."""
     r = _git(repo, "rev-list", "--count", f"{base}..{head}", "--")
     if r.returncode != 0:
-        return None
+        return None, _git_err(r)
     try:
-        return int(r.stdout.strip())
+        return int(r.stdout.strip()), ""
     except ValueError:
-        return None
+        return None, "rev-list вернул не число"
 
 
-def _diff_names(repo: str, base: str, head: str) -> list[str] | None:
+def _diff_names(repo: str, base: str, head: str) -> tuple[list[str] | None, str]:
+    """Файлы base..head; при ошибке git — (None, последняя строка stderr)."""
     r = _git(repo, "diff", "--name-only", f"{base}..{head}", "--")
     if r.returncode != 0:
+        return None, _git_err(r)
+    return [l for l in (s.strip() for s in r.stdout.splitlines()) if l], ""
+
+
+def _git_err(r: subprocess.CompletedProcess[str]) -> str:
+    err = (r.stderr or "").strip().splitlines()
+    return err[-1] if err else f"код {r.returncode}"
+
+
+def _dirty_paths(repo: str) -> list[str] | None:
+    """Незакоммиченное/неотслеженное вне .agent/; None — git не ответил."""
+    r = _git(repo, "status", "--porcelain")
+    if r.returncode != 0:
         return None
-    return [l for l in (s.strip() for s in r.stdout.splitlines()) if l]
+    out: list[str] = []
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        rest = line[3:] if len(line) > 3 else ""
+        if " -> " in rest:  # переименование: берём новое имя
+            rest = rest.rsplit(" -> ", 1)[1]
+        p = rest.strip().strip('"')
+        if not p or p == ".agent" or p.startswith(".agent/"):
+            continue
+        out.append(p)
+    return out
 
 
 def _diff_stat(repo: str, base: str, head: str) -> str:
@@ -75,7 +101,11 @@ def check_gate(
     lock_path: str | None = None,
     timeout_s: int = 600,
 ) -> GateResult:
-    """Проверить ворота по порядку: дифф, allowed, приёмка под замком."""
+    """Проверить ворота по порядку: чистота, дифф, allowed, приёмка под замком.
+
+    Незакоммиченное/неотслеженное вне .agent/ → dirty (приёмку не запускаем):
+    иначе conftest.py/pytest.ini меняют саму приёмку мимо диффа.
+    """
     repo_s = str(repo)
     allowed_list = list(allowed) if allowed else []
     if test_cmd is None:
@@ -84,16 +114,28 @@ def check_gate(
         cmd = list(test_cmd)
     errors: list[str] = []
 
-    count = _rev_count(repo_s, base_sha, head)
-    if count is None or count <= 0:
+    dirty = _dirty_paths(repo_s)
+    if dirty is None:
+        return GateResult(ok=False, errors=["git-error: git status не сработал"],
+                          diff_stat="", tests_tail="")
+    for p in dirty:
+        errors.append(f"dirty: {p}")
+    if errors:
+        return GateResult(ok=False, errors=errors,
+                          diff_stat=_diff_stat(repo_s, base_sha, head), tests_tail="")
+
+    count, count_err = _rev_count(repo_s, base_sha, head)
+    if count is None:
+        return GateResult(ok=False, errors=[f"git-error: {count_err}"],
+                          diff_stat="", tests_tail="")
+    if count <= 0:
         errors.append("empty-diff")
         return GateResult(ok=False, errors=errors,
                           diff_stat=_diff_stat(repo_s, base_sha, head), tests_tail="")
 
-    names = _diff_names(repo_s, base_sha, head)
+    names, names_err = _diff_names(repo_s, base_sha, head)
     if names is None:
-        errors.append("empty-diff")
-        return GateResult(ok=False, errors=errors,
+        return GateResult(ok=False, errors=[f"git-error: {names_err}"],
                           diff_stat=_diff_stat(repo_s, base_sha, head), tests_tail="")
     if not names:
         # Коммиты есть, но файлов нет (allow-empty): работы нет.
@@ -104,6 +146,9 @@ def check_gate(
         if not any(fnmatch.fnmatch(path, pat) for pat in allowed_list):
             errors.append(f"forbidden: {path}")
     stat = _diff_stat(repo_s, base_sha, head)
+    if errors:
+        # Итог уже не-ok: замок не захватываем, приёмку не гоняем.
+        return GateResult(ok=False, errors=errors, diff_stat=stat, tests_tail="")
 
     if not cmd:
         errors.append("tests-fail: пустая команда приёмки")

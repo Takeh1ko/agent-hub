@@ -21,9 +21,10 @@ def load_done(worktree: Path) -> DoneFile:
     """Прочитать <worktree>/.agent/done.json и проверить схему.
 
     Схема: {"commit": sha, "files": [..], "tests": {"cmd": "..",
-    "ok": true, "tail": ".."}, "notes": ".."}.
-    Нет файла → FileNotFoundError, битый JSON/схема → ValueError,
-    текст всегда начинается с "done.json: " и называет поле.
+    "ok": true, "tail": ".."}, "notes": ".."} (tests.cmd — непустая строка:
+    пустой cmd отклоняется, «не заявляю» без команды нельзя).
+    Нет файла → FileNotFoundError, битый JSON/схема или нечитаемый файл →
+    ValueError, текст всегда начинается с "done.json: " и называет поле.
     """
     path = Path(worktree) / ".agent" / "done.json"
     try:
@@ -31,7 +32,7 @@ def load_done(worktree: Path) -> DoneFile:
     except FileNotFoundError:
         raise FileNotFoundError(f"done.json: нет файла {path}") from None
     except OSError as e:
-        raise FileNotFoundError(f"done.json: нет файла {path}: {e}") from None
+        raise ValueError(f"done.json: не читается: {e}") from None
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
@@ -52,8 +53,8 @@ def load_done(worktree: Path) -> DoneFile:
     if not isinstance(tests, dict):
         raise ValueError('done.json: поле tests должно быть объектом {"cmd", "ok", "tail"}')
     cmd = tests.get("cmd")
-    if not isinstance(cmd, str):
-        raise ValueError("done.json: поле tests.cmd должно быть строкой")
+    if not isinstance(cmd, str) or not cmd.strip():
+        raise ValueError("done.json: поле tests.cmd должно быть непустой строкой")
     cmd = cmd.strip()
     ok = tests.get("ok")
     if type(ok) is not bool:

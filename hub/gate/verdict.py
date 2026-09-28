@@ -24,6 +24,7 @@ def _effective(v: Review) -> str:
         if v.file and v.line and len(v.body or "") >= VALID_DISPUTE_BODY:
             return "dispute"
         return "changes"
+    # Неизвестный verdict — безопасно считаем changes (не даёт ложного ready).
     return "changes"
 
 
@@ -31,13 +32,13 @@ def verdict(reviews: list[Review], round: int, max_rounds: int = 2) -> str:
     """Свести отзывы панели к ready/next/arbiter.
 
     dispute без file:line или с телом короче 50 символов = changes.
-    Пустой список отзывов — не ready: next/arbiter по кругу.
+    Пустой список (никто из панели не ответил) → "arbiter" сразу: контракт H06.
     """
     eff = [_effective(r) for r in reviews]
-    if eff and all(v == "approve" for v in eff):
+    if not eff:
+        return "arbiter"
+    if all(v == "approve" for v in eff):
         return "ready"
     if any(v == "changes" for v in eff):
-        return "next" if round < max_rounds else "arbiter"
-    if not eff:
         return "next" if round < max_rounds else "arbiter"
     return "arbiter"
