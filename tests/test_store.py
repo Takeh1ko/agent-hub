@@ -131,16 +131,20 @@ def test_import_legacy_verdicts_without_review_file(tmp_path):
 
 
 def test_import_legacy_personal_review_file(tmp_path):
-    """Только review_r1_<имя>.json (без сводного) → этап review r1."""
+    """Только review_r1_<имя>.json (без сводного) → этап review r1.
+
+    verdicts в state.json заведомо без 'changes', чтобы тест ловил
+    именно чтение персонального файла, а не фолбэк по verdicts.
+    """
     _legacy_wt(tmp_path, "T18", {
         "task": "T18", "base": "b", "worktree": "x",
         "executor_session": "s", "reviewer_sessions": [],
-        "round": 1, "verdicts": ["changes"], "status": "failed",
+        "round": 1, "verdicts": [], "status": "failed",
     }, reviews={"review_r1_muse.json": "changes"})
     _legacy_wt(tmp_path, "T19", {
         "task": "T19", "base": "b", "worktree": "x",
         "executor_session": "s", "reviewer_sessions": [],
-        "round": 1, "verdicts": ["approve", "changes"], "status": "failed",
+        "round": 1, "verdicts": ["approve"], "status": "failed",
     }, reviews={"review_r1_a.json": "approve", "review_r1_b.json": "changes"})
     s = Store(tmp_path / "hub.db")
     assert s.import_legacy(tmp_path / "worktrees") == ["T18", "T19"]
