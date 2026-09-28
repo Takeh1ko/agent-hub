@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from rich.text import Text
+import logging
+
+from rich.text import Text  # транзитивная зависимость textual, новых записей в pyproject нет
 from textual.widgets import DataTable, RichLog
 
 from hub.read.snapshot import Snapshot
+
+log = logging.getLogger(__name__)
 
 BLOCKS = "▁▂▃▄▅▆▇█"
 
@@ -82,8 +86,13 @@ class TaskTable(DataTable):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        # Enter по строке даёт RowSelected (при cell-курсоре — CellSelected,
+        # который тоже обрабатываем) — иначе детали по Enter не открываются.
+        self.cursor_type = "row"
         self._cols_ready = False
         self._keys: set[str] = set()
+        # Прокси до H02: в Snapshot H01 нет дельт session.tokens_* (spec §5),
+        # поэтому динамика колонки 'токены/10мин' строится по task.context.
         self._hist: dict[str, list[float]] = {}
 
     def _ensure_columns(self) -> None:
@@ -102,6 +111,7 @@ class TaskTable(DataTable):
             str(task.pulse or ""),
             _role_model(task),
             str(task.round),
+            # Полей времени/кэша нет в Snapshot H01 — честный прочерк.
             "—",
             spark,
             str(task.context or 0),
@@ -119,7 +129,7 @@ class TaskTable(DataTable):
                 try:
                     self.remove_row(key)
                 except Exception:
-                    pass
+                    log.exception("не удалась строка %s", key)
                 self._keys.discard(key)
                 self._hist.pop(key, None)
         for tid, task in wanted.items():
@@ -134,19 +144,26 @@ class TaskTable(DataTable):
             if tid in self._keys:
                 for col_key, val in zip(COL_KEYS, cells):
                     try:
-                        self.update_cell(tid, col_key, val)
+                        # Ширину пересчитываем, иначе длинные значения
+                        # обрезаются по первому кадру.
+                        self.update_cell(tid, col_key, val, update_width=True)
                     except Exception:
-                        pass
+                        log.exception("не обновилась ячейка %s/%s", tid, col_key)
             else:
                 try:
                     self.add_row(*cells, key=tid)
                 except Exception:
+                    log.exception("не добавилась строка %s", tid)
                     continue
                 self._keys.add(tid)
 
 
 class EventFeed(RichLog):
     """Лента событий снизу."""
+
+    def __init__(self, *args, max_lines: int | None = 200, **kwargs) -> None:
+        # Без лимита лента растёт бесконечно за долгую сессию top.
+        super().__init__(*args, max_lines=max_lines, **kwargs)
 
     def push(self, events: list[dict]) -> None:
         """Добавить строки событий (последние N решает вызывающий)."""
@@ -161,8 +178,9 @@ class EventFeed(RichLog):
                     text = text[:80]
                 line = f"#{eid} {tid} {kind} {text}".rstrip()
             except Exception:
+                log.exception("битое событие")
                 continue
             try:
                 self.write(line)
             except Exception:
-                continue
+                log.exception("не записалась строка ленты")

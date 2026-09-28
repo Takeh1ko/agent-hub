@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+DEFAULT_OPENCODB = Path.home() / ".local/share/opencode/opencode.db"
 
 
 def cmd_top(args) -> int:
@@ -11,7 +14,10 @@ def cmd_top(args) -> int:
         return 3
     from hub.tui.app import HubApp
 
-    app = HubApp()
+    # Как в hub status: живой top обязан видеть сессии/деньги,
+    # иначе snapshot.build при opencode_db=None даёт нули.
+    db = Path.home() / ".local/share/opencode/opencode.db"
+    app = HubApp(opencode_db=str(db) if db.exists() else None)
     proj = getattr(args, "project", None)
     if proj:
         app.project_filter = proj
