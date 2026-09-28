@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-import shutil
+import re
+import shlex
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,68 @@ from hub.store import Store
 
 PASS = [sys.executable, "-c", "pass"]
 FAIL = [sys.executable, "-c", "import sys; print('БАХ-хвост'); sys.exit(1)"]
-PASS_STR = sys.executable + " -c pass"
+# Заявление исполнителя: голый pytest (покрывает все ноды карточки).
+CANON_STR = sys.executable + " -m pytest -q"
+
+
+@pytest.fixture(autouse=True)
+def _stub_lint(monkeypatch):
+    """hub.gate.lint (H02) отсутствует в этом worktree: стаб с тем же контрактом.
+
+    Реализация — построчный поиск заголовка (как H02 _section_bounds),
+    не подстрока по тексту (см. real-card.md: «Можно менять» в Цели).
+    """
+    mod = types.ModuleType("hub.gate.lint")
+
+    def _is_header(line, name):
+        s = line.strip()
+        m = re.match(r"^(#{1,6}\s+|\*\*)(.+)$", s)
+        return bool(m) and m.group(2).lstrip().startswith(name)
+
+    def _section_text(lines, name):
+        start = next((i for i, line in enumerate(lines) if _is_header(line, name)), None)
+        if start is None:
+            return ""
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            t = lines[j].strip()
+            if re.match(r"^(#{1,6}\s+|\*\*)", t):
+                end = j
+                break
+        return "\n".join(lines[start:end])
+
+    def _can_change_globs(section):
+        out = []
+        for m in re.finditer(r"`([^`]+)`", section):
+            c = m.group(1).strip()
+            if not c or any(ch.isspace() for ch in c):
+                continue
+            if "/" not in c and c not in (".hub.toml", "pyproject.toml"):
+                continue
+            out.append(c)
+        return out
+
+    def _pytest_nodes(section):
+        nodes = []
+        for m in re.finditer(r"`([^`]*pytest[^`]*)`", section):
+            frag = m.group(1)
+            tail = frag[frag.find("pytest") + len("pytest"):]
+            try:
+                toks = shlex.split(tail)
+            except ValueError:
+                toks = tail.split()
+            for t in toks:
+                t = t.strip()
+                if not t or t.startswith("-") or t == "pytest":
+                    continue
+                nodes.append(t)
+        return nodes
+
+    mod._section_text = _section_text
+    mod._can_change_globs = _can_change_globs
+    mod._pytest_nodes = _pytest_nodes
+    monkeypatch.setitem(sys.modules, "hub.gate.lint", mod)
+    return mod
 
 
 def _git(cwd, *args):
@@ -50,7 +113,12 @@ def _commit(repo, rel, text):
     return _git(repo, "rev-parse", "HEAD")
 
 
-def _write_done(repo, commit, files, cmd=PASS_STR, ok=True, tail="ok", notes=""):
+def _with_test(repo):
+    """Каноническая приёмка (pytest -q) в worktree: один зелёный тест."""
+    (repo / "test_ok.py").write_text("def test_ok():\n    pass\n", encoding="utf-8")
+
+
+def _write_done(repo, commit, files, cmd=CANON_STR, ok=True, tail="ok", notes=""):
     d = repo / ".agent"
     d.mkdir(exist_ok=True)
     payload = {"commit": commit, "files": files,
@@ -59,10 +127,12 @@ def _write_done(repo, commit, files, cmd=PASS_STR, ok=True, tail="ok", notes="")
 
 
 def _card(tmp_path, globs, name="CARD.md"):
+    """Карточка с упоминанием «Можно менять» в Цели — ловит поиск подстрокой."""
     card = tmp_path / name
-    card.write_text("# Тест\n\n**Можно менять.** "
-                    + ", ".join(f"`{g}`" for g in globs)
-                    + "\n\n**Нельзя.** ничего\n", encoding="utf-8")
+    card.write_text(
+        "# Тест\n\n**Цель.** Сделать X диффом внутри «Можно менять» без путей.\n\n"
+        "**Можно менять.** " + ", ".join(f"`{g}`" for g in globs) + "\n\n"
+        "**Приёмка.** `pytest -q`\n\n**Нельзя.** ничего\n", encoding="utf-8")
     return card
 
 
@@ -73,6 +143,22 @@ def test_empty_diff(tmp_path):
     res = check_gate(repo, base, "HEAD", ["**"], PASS)
     assert not res.ok
     assert res.errors == ["empty-diff"]  # приёмка не запускалась — нет tests-fail
+
+
+def test_allow_empty_commit_is_empty_diff(tmp_path):
+    repo, base = _repo(tmp_path)
+    _git(repo, "commit", "--allow-empty", "-m", "пусто")
+    res = check_gate(repo, base, "HEAD", ["**"], PASS)
+    assert not res.ok
+    assert res.errors == ["empty-diff"]
+
+
+def test_empty_test_cmd_fails(tmp_path):
+    repo, base = _repo(tmp_path)
+    _commit(repo, "a.txt", "1\n2\n")
+    res = check_gate(repo, base, "HEAD", ["**"], [])
+    assert not res.ok
+    assert any(e.startswith("tests-fail:") for e in res.errors)
 
 
 def test_forbidden(tmp_path):
@@ -107,18 +193,32 @@ def test_tests_fail_tail_capped(tmp_path):
 
 
 def test_locked_skips_command(tmp_path):
-    flock_bin = shutil.which("flock")
-    if flock_bin is None:
-        pytest.skip("нет flock")
+    from hub.read.procs import lock_holder
+
     repo, base = _repo(tmp_path)
     _commit(repo, "a.txt", "1\n2\n")
     lock = tmp_path / "t.lock"
     lock.touch()
+    ready = tmp_path / "ready"
     marker = tmp_path / "marker"
-    cmd = [sys.executable, "-c", "open(%r,'w').write('x')" % str(marker)]
-    holder = subprocess.Popen([flock_bin, str(lock), "sleep", "15"])
+    script = ("import fcntl, sys, time; fd = open(sys.argv[1], 'w'); "
+              "fcntl.flock(fd, fcntl.LOCK_EX); "
+              "open(sys.argv[2], 'w').write('ready'); time.sleep(20)")
+    holder = subprocess.Popen(
+        [sys.executable, "-c", script, str(lock), str(ready)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        time.sleep(1.0)
+        # Ждём готовности, а не время: держатель виден в /proc.
+        deadline = time.time() + 10
+        while True:
+            if ready.exists() and lock_holder(str(lock)) is not None:
+                break
+            if holder.poll() is not None:
+                pytest.fail("держатель замка упал")
+            if time.time() > deadline:
+                pytest.fail("держатель не взял замок")
+            time.sleep(0.05)
+        cmd = [sys.executable, "-c", "open(%r,'w').write('x')" % str(marker)]
         res = check_gate(repo, base, "HEAD", ["**"], cmd,
                          lock_path=str(lock), timeout_s=30)
     finally:
@@ -172,21 +272,33 @@ def test_load_done_bad_json_and_fields(tmp_path):
 
 def test_load_done_ok(tmp_path):
     repo, base = _repo(tmp_path)
-    _write_done(repo, base, ["a.txt"], cmd=PASS_STR, ok=True, tail="хвост", notes="н")
+    _write_done(repo, base, ["a.txt"], cmd=CANON_STR, ok=True, tail="хвост", notes="н")
     got = load_done(repo)
     assert got.commit == base and got.files == ["a.txt"]
-    assert got.cmd == PASS_STR and got.ok is True
+    assert got.cmd == CANON_STR and got.ok is True
     assert got.tail == "хвост" and got.notes == "н"
+
+
+def test_load_done_strips(tmp_path):
+    repo, base = _repo(tmp_path)
+    _write_done(repo, f"  {base} ", ["  a.txt "])
+    got = load_done(repo)
+    assert got.commit == base and got.files == ["a.txt"]
+    _write_done(repo, base, ["   "])
+    with pytest.raises(ValueError, match=r"done\.json:.*files"):
+        load_done(repo)
 
 
 # --- repair ---
 
 def test_repair_prompt():
-    assert "git status" in REPAIR_PROMPT
-    assert "-A" in REPAIR_PROMPT
-    assert "done.json" in REPAIR_PROMPT
+    assert "git status --short" in REPAIR_PROMPT
+    assert "никогда -A" in REPAIR_PROMPT
+    assert ".agent/done.json" in REPAIR_PROMPT
     text = repair_prompt("нет коммита")
-    assert "git status" in text and "-A" in text and "done.json" in text
+    assert "git status --short" in text
+    assert "никогда -A" in text
+    assert ".agent/done.json" in text
     assert "Причина: нет коммита" in text
 
 
@@ -199,11 +311,53 @@ def _task(tmp_path, tid, repo, base, globs):
     return card
 
 
+def test_gate_no_lint(tmp_path, capsys, monkeypatch):
+    monkeypatch.delitem(sys.modules, "hub.gate.lint", raising=False)
+    repo, base = _repo(tmp_path)
+    _commit(repo, "sub/a.txt", "1\n2\n")
+    _task(tmp_path, "T00", repo, base, ["sub/**"])
+    _write_done(repo, _git(repo, "rev-parse", "HEAD"), ["sub/a.txt"])
+    assert main(["gate", "T00"]) == 1
+    assert "no-lint:" in capsys.readouterr().out
+
+
+def test_gate_bad_config_loud(tmp_path, capsys):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".hub.toml").write_text("{битый toml", encoding="utf-8")
+    repo, base = _repo(tmp_path, name="wtrepo")
+    _task(tmp_path, "T06", repo, base, ["sub/**"])
+    assert main(["gate", "T06", "--project", str(proj)]) == 1
+    assert "config:" in capsys.readouterr().out
+
+
+def test_gate_no_diff_no_flood(tmp_path, capsys):
+    repo, base = _repo(tmp_path)
+    head = _commit(repo, "sub/a.txt", "1\n2\n")
+    _with_test(repo)
+    _task(tmp_path, "T07", repo, base, ["sub/**"])
+    Store().upsert_task(id="T07", base_sha="0" * 40)
+    _write_done(repo, head, ["sub/a.txt"])
+    assert main(["gate", "T07"]) == 1
+    out = capsys.readouterr().out
+    assert "no-diff:" in out
+    assert "unknown-file" not in out
+
+
+def test_lock_open_error(tmp_path):
+    repo, base = _repo(tmp_path)
+    _commit(repo, "sub/a.txt", "1\n2\n")
+    res = check_gate(repo, base, "HEAD", ["**"], PASS, lock_path=str(tmp_path))
+    assert not res.ok
+    assert any(e.startswith("lock-error:") for e in res.errors)
+
+
 def test_gate_mismatch(tmp_path, capsys):
     repo, base = _repo(tmp_path)
-    _commit(repo, "a.txt", "1\n2\n")
-    _task(tmp_path, "T01", repo, base, ["a.txt"])
-    _write_done(repo, "0" * 40, ["a.txt"])
+    _commit(repo, "sub/a.txt", "1\n2\n")
+    _with_test(repo)
+    _task(tmp_path, "T01", repo, base, ["sub/**"])
+    _write_done(repo, "0" * 40, ["sub/a.txt"])
     assert main(["gate", "T01"]) == 1
     out = capsys.readouterr().out
     assert "mismatch:" in out
@@ -211,18 +365,58 @@ def test_gate_mismatch(tmp_path, capsys):
 
 def test_gate_unknown_file(tmp_path, capsys):
     repo, base = _repo(tmp_path)
-    head = _commit(repo, "a.txt", "1\n2\n")
-    _task(tmp_path, "T02", repo, base, ["a.txt", "нет-в-диффе.txt"])
-    _write_done(repo, head, ["a.txt", "нет-в-диффе.txt"])
+    head = _commit(repo, "sub/a.txt", "1\n2\n")
+    _with_test(repo)
+    _task(tmp_path, "T02", repo, base, ["sub/a.txt", "нет-в-диффе.txt"])
+    _write_done(repo, head, ["sub/a.txt", "нет-в-диффе.txt"])
     assert main(["gate", "T02", "--round", "1"]) == 1
     out = capsys.readouterr().out
     assert "unknown-file:" in out
 
 
+def test_gate_ok_false(tmp_path, capsys):
+    repo, base = _repo(tmp_path)
+    head = _commit(repo, "sub/a.txt", "1\n2\n")
+    _with_test(repo)
+    _task(tmp_path, "T04", repo, base, ["sub/**"])
+    _write_done(repo, head, ["sub/a.txt"], ok=False)
+    assert main(["gate", "T04"]) == 1
+    out = capsys.readouterr().out
+    assert "tests-fail: done.json ok=false" in out
+
+
+def test_gate_cmd_mismatch(tmp_path, capsys):
+    """done.cmd=/bin/true при падающей приёмке: OK запрещён, приёмка каноническая."""
+    repo, base = _repo(tmp_path)
+    head = _commit(repo, "sub/a.txt", "1\n2\n")
+    _with_test(repo)
+    _task(tmp_path, "T05", repo, base, ["sub/**"])
+    _write_done(repo, head, ["sub/a.txt"], cmd="/bin/true")
+    assert main(["gate", "T05"]) == 1
+    out = capsys.readouterr().out
+    assert "cmd-mismatch:" in out
+    assert "OK T05" not in out
+
+
 def test_gate_ok(tmp_path, capsys):
     repo, base = _repo(tmp_path)
-    head = _commit(repo, "a.txt", "1\n2\n")
-    _task(tmp_path, "T03", repo, base, ["a.txt"])
-    _write_done(repo, head, ["a.txt"])
+    head = _commit(repo, "sub/a.txt", "1\n2\n")
+    _with_test(repo)
+    _task(tmp_path, "T03", repo, base, ["sub/**"])
+    _write_done(repo, head, ["sub/a.txt"])
     assert main(["gate", "T03"]) == 0
     assert "OK T03" in capsys.readouterr().out
+
+
+def test_gate_real_card(tmp_path, capsys):
+    """Реальная карточка (упоминание «Можно менять» в Цели): OK на легальном диффе."""
+    repo, base = _repo(tmp_path)
+    head = _commit(repo, "hub/gate/gate.py", "x\n")
+    _with_test(repo)
+    card = Path(__file__).parent / "fixtures" / "gate" / "real-card.md"
+    assert card.is_file()
+    Store().upsert_task(id="TR", worktree=str(repo), base_sha=base,
+                        branch="agent/TR", card_path=str(card))
+    _write_done(repo, head, ["hub/gate/gate.py"])
+    assert main(["gate", "TR"]) == 0
+    assert "OK TR" in capsys.readouterr().out

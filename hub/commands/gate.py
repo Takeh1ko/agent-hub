@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 from hub.gate.donefile import load_done
 from hub.gate.gate import check_gate
+
+
+def _load_lint():
+    """Импорт hub.gate.lint (H02) — единственный путь к разбору карточки."""
+    import importlib
+
+    return importlib.import_module("hub.gate.lint")
 
 
 def _head_sha(worktree: str) -> str | None:
@@ -20,70 +27,17 @@ def _head_sha(worktree: str) -> str | None:
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
 
 
-def _diff_files(worktree: str, base: str, head: str) -> set[str]:
+def _diff_files(worktree: str, base: str, head: str) -> tuple[set[str] | None, str]:
+    """Файлы base..head; при ошибке git — (None, stderr), не пустой set."""
     try:
         r = subprocess.run(["git", "diff", "--name-only", f"{base}..{head}", "--"],
                            cwd=worktree, capture_output=True, text=True, timeout=60)
-    except OSError:
-        return set()
+    except OSError as e:
+        return None, str(e)
     if r.returncode != 0:
-        return set()
-    return {l for l in (s.strip() for s in r.stdout.splitlines()) if l}
-
-
-def _parse_can_change_local(card_text: str) -> list[str]:
-    """Запасной путь, если hub.gate.lint (H02) ещё нет: glob'ы из «Можно менять»."""
-    idx = card_text.find("Можно менять")
-    if idx < 0:
-        return []
-    tail = card_text[idx:]
-    m = re.search(r"\n(?:#{1,6}\s|\*\*)", tail[20:])
-    section = tail[:20 + m.start()] if m else tail
-    return [g for g in (s.strip() for s in re.findall(r"`([^`]+)`", section))
-            if g and " " not in g]
-
-
-def _card_allowed(card: Path | None, project) -> list[str]:
-    """Glob'ы «Можно менять»: через hub.gate.lint (H02), иначе локально."""
-    if card is not None and card.is_file():
-        try:
-            import importlib
-
-            lint_mod = importlib.import_module("hub.gate.lint")
-        except ImportError:
-            lint_mod = None
-        if lint_mod is not None:
-            for name in ("allowed_globs", "parse_allowed", "allowed_from_card",
-                         "card_allowed", "get_allowed", "extract_allowed",
-                         "parse_can_change", "can_change_globs"):
-                fn = getattr(lint_mod, name, None)
-                if not callable(fn):
-                    continue
-                for argv in ([card] if project is None else ([card], [card, project])):
-                    try:
-                        got = fn(*argv)
-                    except Exception:
-                        continue
-                    if got:
-                        return [str(x) for x in got]
-            if project is not None and hasattr(lint_mod, "lint_card"):
-                try:
-                    res = lint_mod.lint_card(card, project)
-                except Exception:
-                    res = None
-                if res is not None:
-                    for attr in ("allowed", "globs", "can_change",
-                                 "allowed_paths", "allowed_globs"):
-                        got = getattr(res, attr, None)
-                        if got:
-                            return [str(x) for x in got]
-        try:
-            return _parse_can_change_local(card.read_text(encoding="utf-8"))
-        except OSError:
-            return []
-    if project is not None and getattr(project, "allowed_paths", None):
-        return list(project.allowed_paths)
-    return []
+        err = (r.stderr or "").strip().splitlines()
+        return None, err[-1] if err else f"код {r.returncode}"
+    return {l for l in (s.strip() for s in r.stdout.splitlines()) if l}, ""
 
 
 def _resolve_card(card_rel: str, project, worktree: str) -> Path | None:
@@ -102,9 +56,20 @@ def _resolve_card(card_rel: str, project, worktree: str) -> Path | None:
     return None
 
 
-def cmd_gate(args) -> int:
-    import sys
+def _cmd_covers(parts: list[str], nodes: list[str]) -> bool:
+    """done.cmd гоняет приёмку из карточки: pytest + ноды (голый pytest — всё)."""
+    blob = " ".join(parts)
+    if "pytest" not in blob:
+        return False
+    if not nodes:
+        return True
+    if any(n in blob for n in nodes):
+        return True
+    explicit = any("tests" in p or p.endswith(".py") or "::" in p for p in parts)
+    return not explicit
 
+
+def cmd_gate(args) -> int:
     from hub.store import Store
 
     task_id = args.task_id
@@ -129,22 +94,48 @@ def cmd_gate(args) -> int:
         hint = Path(getattr(args, "project", None) or worktree)
         project = load_project(hint)
         lock_path = project.test_lock or None
-    except Exception:
+    except FileNotFoundError:
         project = None
+    except Exception as e:
+        # Битый конфиг — не повод идти без замка: стоим, не продолжаем.
+        print(f"config: {type(e).__name__}: {e}")
+        return 1
     head_sha = _head_sha(worktree)
     if not head_sha:
         print("no-head: git rev-parse HEAD не сработал")
+        return 1
+
+    try:
+        lint_mod = _load_lint()
+    except ImportError:
+        print("no-lint: hub.gate.lint недоступен")
         return 1
 
     errors: list[str] = []
     card_path = _resolve_card(card_rel, project, worktree)
     if card_path is None:
         errors.append(f"no-card: {card_rel or '?'}")
-        allowed = list(project.allowed_paths) if project else []
+        allowed: list[str] = []
+        nodes: list[str] = []
     else:
-        allowed = _card_allowed(card_path, project)
+        try:
+            card_text = card_path.read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"no-card: {card_path}: {e}")
+            return 1
+        lines = card_text.splitlines()
+        try:
+            allowed = [str(g) for g in
+                       lint_mod._can_change_globs(lint_mod._section_text(lines, "Можно менять"))]
+            nodes = [str(n) for n in
+                     lint_mod._pytest_nodes(lint_mod._section_text(lines, "Приёмка"))]
+        except AttributeError as e:
+            print(f"no-lint: hub.gate.lint без нужной функции: {e}")
+            return 1
 
-    diff_files = _diff_files(worktree, base_sha, head_sha)
+    diff_files, diff_err = _diff_files(worktree, base_sha, head_sha)
+    if diff_files is None:
+        errors.append(f"no-diff: {diff_err}" if diff_err else "no-diff")
     done = None
     try:
         done = load_done(Path(worktree))
@@ -153,22 +144,27 @@ def cmd_gate(args) -> int:
     except ValueError as e:
         errors.append(str(e))
     if done is not None:
+        if not done.ok:
+            errors.append("tests-fail: done.json ok=false")
         if done.commit != head_sha:
             errors.append(f"mismatch: done={done.commit} head={head_sha}")
-        for f in done.files:
-            if f not in diff_files:
-                errors.append(f"unknown-file: {f}")
+        if diff_files is not None:
+            for f in done.files:
+                if f not in diff_files:
+                    errors.append(f"unknown-file: {f}")
+        if done.cmd:
+            try:
+                parts = shlex.split(done.cmd)
+            except ValueError as e:
+                errors.append(f"cmd-mismatch: done.cmd не разбирается: {e}")
+            else:
+                if not _cmd_covers(parts, nodes):
+                    errors.append(f"cmd-mismatch: done={done.cmd!r} мимо Приёмки {nodes}")
 
-    if done is not None and done.cmd.strip():
-        try:
-            test_cmd = shlex.split(done.cmd)
-        except ValueError:
-            py = project.python if project and project.python else sys.executable
-            test_cmd = [py, "-m", "pytest", "-q"]
-    else:
-        py = project.python if project and project.python else sys.executable
-        test_cmd = [py, "-m", "pytest", "-q"]
-    res = check_gate(Path(worktree), base_sha, head_sha, allowed, test_cmd, lock_path)
+    # Приёмка — всегда каноническая, done.cmd — только заявление для сверки.
+    py = project.python.strip() if project and project.python.strip() else sys.executable
+    res = check_gate(Path(worktree), base_sha, head_sha, allowed,
+                     [py, "-m", "pytest", "-q"], lock_path)
     errors.extend(res.errors)
     if not errors and res.ok:
         print(f"OK {task_id}")

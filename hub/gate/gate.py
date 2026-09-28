@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import fnmatch
 import os
 import subprocess
@@ -94,13 +95,19 @@ def check_gate(
         errors.append("empty-diff")
         return GateResult(ok=False, errors=errors,
                           diff_stat=_diff_stat(repo_s, base_sha, head), tests_tail="")
+    if not names:
+        # Коммиты есть, но файлов нет (allow-empty): работы нет.
+        errors.append("empty-diff")
+        return GateResult(ok=False, errors=errors,
+                          diff_stat=_diff_stat(repo_s, base_sha, head), tests_tail="")
     for path in names:
         if not any(fnmatch.fnmatch(path, pat) for pat in allowed_list):
             errors.append(f"forbidden: {path}")
     stat = _diff_stat(repo_s, base_sha, head)
 
     if not cmd:
-        return GateResult(ok=not errors, errors=errors, diff_stat=stat, tests_tail="")
+        errors.append("tests-fail: пустая команда приёмки")
+        return GateResult(ok=False, errors=errors, diff_stat=stat, tests_tail="")
 
     lock_fd: int | None = None
     if lock_path:
@@ -111,11 +118,9 @@ def check_gate(
         try:
             lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
         except OSError as e:
-            errors.append(f"locked: {e}")
+            errors.append(f"lock-error: {e}")
             return GateResult(ok=False, errors=errors, diff_stat=stat, tests_tail="")
         try:
-            import fcntl
-
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError):
             holder = lock_holder(str(lock_path))
@@ -152,8 +157,6 @@ def check_gate(
     finally:
         if lock_fd is not None:
             try:
-                import fcntl
-
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
             except OSError:
                 pass

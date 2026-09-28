@@ -31,6 +31,7 @@ def verdict(reviews: list[Review], round: int, max_rounds: int = 2) -> str:
     """Свести отзывы панели к ready/next/arbiter.
 
     dispute без file:line или с телом короче 50 символов = changes.
+    Пустой список отзывов — не ready: next/arbiter по кругу.
     """
     eff = [_effective(r) for r in reviews]
     if eff and all(v == "approve" for v in eff):

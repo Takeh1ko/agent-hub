@@ -41,15 +41,20 @@ def load_done(worktree: Path) -> DoneFile:
     commit = data.get("commit")
     if not isinstance(commit, str) or not commit.strip():
         raise ValueError("done.json: поле commit должно быть строкой sha")
+    commit = commit.strip()
     files = data.get("files")
     if not isinstance(files, list) or any(not isinstance(f, str) for f in files):
         raise ValueError("done.json: поле files должно быть списком строк [..]")
+    files = [f.strip() for f in files]
+    if any(not f for f in files):
+        raise ValueError("done.json: поле files не должно содержать пустых строк")
     tests = data.get("tests")
     if not isinstance(tests, dict):
         raise ValueError('done.json: поле tests должно быть объектом {"cmd", "ok", "tail"}')
     cmd = tests.get("cmd")
     if not isinstance(cmd, str):
         raise ValueError("done.json: поле tests.cmd должно быть строкой")
+    cmd = cmd.strip()
     ok = tests.get("ok")
     if type(ok) is not bool:
         raise ValueError("done.json: поле tests.ok должно быть true/false")
@@ -59,4 +64,5 @@ def load_done(worktree: Path) -> DoneFile:
     notes = data.get("notes")
     if not isinstance(notes, str):
         raise ValueError("done.json: поле notes должно быть строкой")
+    notes = notes.strip()
     return DoneFile(commit=commit, files=list(files), cmd=cmd, ok=ok, tail=tail, notes=notes)

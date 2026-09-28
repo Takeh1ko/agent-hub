@@ -53,3 +53,8 @@ def test_changes_beats_valid_dispute():
           Review("dispute", file="b.py", line=2, body=LONG)]
     assert verdict(rs, round=1) == "next"
     assert verdict(rs, round=2) == "arbiter"
+
+
+def test_empty_reviews_never_ready():
+    assert verdict([], round=1) == "next"
+    assert verdict([], round=2) == "arbiter"
