@@ -92,30 +92,37 @@ def _lock_time_text(started_ms: int) -> str:
         return str(started_ms)
 
 
-def _ensure_rules_sha_column(store: Store) -> None:
-    """Добавить колонку rules_sha при её отсутствии (без файлов миграций)."""
+def _write_rules_sha(store: Store, task_id: str, digest: str) -> tuple[bool, str]:
+    """Записать sha256 правил прямым SQL (без мутации hub.store).
+
+    Возвращает (успех, причина). Без файлов миграций: колонка добавляется
+    при отсутствии; контракт «через upsert» невыполним без правки
+    hub/store.py + миграции (см. отчёт) — пишем явным UPDATE.
+    """
     try:
         con = sqlite3.connect(str(store.path))
-    except OSError:
-        return
+    except (OSError, sqlite3.Error) as e:
+        return False, f"store-fail: {e}"[-2000:]
     try:
         try:
             con.execute("ALTER TABLE task ADD COLUMN rules_sha TEXT NOT NULL DEFAULT ''")
             con.commit()
         except sqlite3.OperationalError as e:
-            # Колонка уже есть — не ошибка.
             if "duplicate column" not in str(e).lower():
-                pass
+                return False, f"store-fail: {e}"[-2000:]
+        try:
+            cur = con.execute("UPDATE task SET rules_sha=? WHERE id=?", (digest, task_id))
+            con.commit()
+            if cur.rowcount == 0:
+                return False, "store-fail: нет задачи"[-2000:]
+        except (OSError, sqlite3.Error) as e:
+            return False, f"store-fail: {e}"[-2000:]
     finally:
-        con.close()
-    # Разрешить upsert_task писать rules_sha (контракт H02).
-    try:
-        import hub.store as store_mod
-
-        if "rules_sha" not in store_mod.TASK_COLUMNS:
-            store_mod.TASK_COLUMNS = (*store_mod.TASK_COLUMNS, "rules_sha")
-    except Exception:
-        pass
+        try:
+            con.close()
+        except (OSError, sqlite3.Error):
+            pass
+    return True, ""
 
 
 def preflight(
@@ -151,11 +158,16 @@ def preflight(
             raw = err_tail.strip() or out_tail.strip()
             one = " ".join(raw.split())
             tail = one[-2000:] if len(one) > 2000 else one
-            reason = f"setup-fail: {tail}" if tail else "setup-fail"
-            return PreflightResult(ok=False, reason=reason)
+            return PreflightResult(ok=False, reason=f"setup-fail: {tail}")
     # `pytest --collect-only` питоном проекта в worktree.
+    # Заданный, но отсутствующий питон — collect-fail (не молчаливый fallback).
     python = (project.python or "").strip()
-    py = python if python and Path(python).exists() else sys.executable
+    if python:
+        if not Path(python).exists():
+            return PreflightResult(ok=False, reason="collect-fail")
+        py = python
+    else:
+        py = sys.executable
     try:
         r = subprocess.run(
             [py, "-m", "pytest", "--collect-only", "-q"],
@@ -164,9 +176,7 @@ def preflight(
             text=True,
             timeout=120,
         )
-    except OSError as e:
-        return PreflightResult(ok=False, reason="collect-fail")
-    except subprocess.TimeoutExpired:
+    except (OSError, subprocess.TimeoutExpired):
         return PreflightResult(ok=False, reason="collect-fail")
     if r.returncode != 0:
         return PreflightResult(ok=False, reason="collect-fail")
@@ -176,23 +186,12 @@ def preflight(
         if holder is not None:
             when = _lock_time_text(holder.started_ms)
             return PreflightResult(ok=False, reason=f"locked: pid {holder.pid} since {when}")
-    # Всё чисто — записать sha256 правил.
+    # Всё чисто — записать sha256 правил (только при успехе всех проверок).
     try:
         digest = hashlib.sha256(rp.read_bytes()).hexdigest()
     except OSError:
         return PreflightResult(ok=False, reason="no-rules")
-    _ensure_rules_sha_column(store)
-    try:
-        store.upsert_task(id=task_id, rules_sha=digest)
-    except Exception:
-        # Прямая запись как запасной путь (upsert фильтрует по TASK_COLUMNS).
-        try:
-            con = sqlite3.connect(str(store.path))
-            try:
-                con.execute("UPDATE task SET rules_sha=? WHERE id=?", (digest, task_id))
-                con.commit()
-            finally:
-                con.close()
-        except OSError:
-            pass
+    ok_write, write_reason = _write_rules_sha(store, task_id, digest)
+    if not ok_write:
+        return PreflightResult(ok=False, reason=write_reason or "store-fail")
     return PreflightResult(ok=True, reason="")

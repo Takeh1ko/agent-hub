@@ -183,3 +183,173 @@ def test_cli_blind_hides_etalon(tmp_path, capsys):
     blind_part = out.split("--- blind ---", 1)[1]
     assert SECRET not in blind_part
     assert "Цель" in blind_part
+
+
+def test_unbackticked_can_change(tmp_path):
+    # Голый core/secret.py без бэктиков — всё равно вне allowed_paths.
+    text = GOOD.read_text(encoding="utf-8").replace(
+        "`hub/gate/lint.py`", "core/secret.py"
+    )
+    card = tmp_path / "unback.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("core/secret.py" in e for e in r.errors)
+
+
+def test_star_glob_rejected(tmp_path):
+    text = GOOD.read_text(encoding="utf-8").replace(
+        "`hub/gate/lint.py`", "`*.py`"
+    )
+    card = tmp_path / "star.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("*.py" in e for e in r.errors)
+
+
+def test_dotdot_glob_rejected(tmp_path):
+    text = GOOD.read_text(encoding="utf-8").replace(
+        "hub/gate/lint.py", "../hub/gate/lint.py"
+    )
+    card = tmp_path / "dotdot.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("allowed_paths" in e for e in r.errors)
+
+
+def test_read_dot_hub_toml_and_prose_ok(tmp_path):
+    # `.hub.toml` существует, проза со слэшами — не пути.
+    import subprocess as _sp
+
+    proj_root = tmp_path / "proj"
+    (proj_root / "docs").mkdir(parents=True)
+    (proj_root / "docs" / "spec.md").write_text("с\n", encoding="utf-8")
+    (proj_root / ".hub.toml").write_text("x\n", encoding="utf-8")
+    (proj_root / "tests").mkdir()
+    (proj_root / "tests" / "test_a.py").write_text(
+        "def test_a():\n    assert True\n", encoding="utf-8")
+    _sp.run(["git", "init", "-b", "main"], cwd=str(proj_root),
+            capture_output=True, timeout=60)
+    card = proj_root / "card.md"
+    card.write_text(
+        "# H\n\n**Цель.** ц\n\n"
+        "**Прочитать.** `.hub.toml`, docs/spec.md, событие/вопрос/inbox, "
+        "подпроцессы/кнопки\n\n"
+        "**Можно менять.** `docs/spec.md`\n\n"
+        "**Интерфейс.** `f()`\n\n"
+        "**Приёмка.** `pytest -q tests/test_a.py`\n\n"
+        "**Нельзя.** сеть\n\n**Сеть.** нет\n\n"
+        "**Исполнитель.** m\n\n**Уровень.** medium\n\n**Коммит.** `feat: x`\n",
+        encoding="utf-8",
+    )
+    proj = ProjectConfig(
+        root=str(proj_root),
+        rules="docs/spec.md",
+        python=sys.executable,
+        allowed_paths=["docs/**", "tests/**", ".hub.toml"],
+    )
+    r = lint_card(card, proj)
+    assert r.ok, r.errors
+    # А отсутствующий docs/нет.md — не ok.
+    card2 = proj_root / "card2.md"
+    card2.write_text(
+        card.read_text(encoding="utf-8").replace("docs/spec.md", "docs/нет.md"),
+        encoding="utf-8",
+    )
+    # docs/нет.md нет, но docs/ есть → кандидат остаётся, проверка падает.
+    r2 = lint_card(card2, proj)
+    assert not r2.ok
+    assert any("нет.md" in e for e in r2.errors)
+
+
+def test_pytest_nodes_ignore_prose(tmp_path):
+    # Проза «(подмена PATH/worktree фейком)» не должна стать нодой.
+    from hub.gate.lint import _pytest_nodes
+
+    sec = ("`pytest -q tests/test_lint.py tests/test_preflight.py` "
+           "(подмена PATH/worktree фейком, сеть не нужна)")
+    nodes = _pytest_nodes(sec)
+    assert "PATH/worktree" not in nodes
+    assert "tests/test_lint.py" in nodes and "tests/test_preflight.py" in nodes
+    sec2 = "`pytest -q tests/` пример `/flock` замок"
+    nodes2 = _pytest_nodes(sec2)
+    assert "/flock" not in nodes2
+    assert nodes2 == ["tests/"]
+
+
+def test_bare_tests_without_pytest_is_error(tmp_path):
+    text = GOOD.read_text(encoding="utf-8").replace(
+        "`pytest -q tests/test_time.py`", "tests/test_time.py руками"
+    )
+    card = tmp_path / "bare.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("pytest" in e for e in r.errors)
+
+
+def test_strip_bold_arbiter():
+    sample = ("# T\n\n**Цель.** ц\n\n**Решения арбитра.**\n\nЭТАЛОН-БОЛД\n\n"
+              "**Приёмка.** тест\n")
+    got = strip_arbiter(sample)
+    assert "ЭТАЛОН-БОЛД" not in got
+    assert "**Приёмка.**" in got
+    sample2 = "#T\n\n#Решения арбитра\n\nсекрет\n\n## Дальше\n\nок\n"
+    assert "секрет" not in strip_arbiter(sample2)
+
+
+def test_collect_cwd_git_root(tmp_path):
+    # Карточка во временном git-worktree, project.root указывает в другое место.
+    import subprocess as _sp
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _sp.run(["git", "init", "-b", "main"], cwd=str(wt),
+            capture_output=True, timeout=60, check=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(wt),
+            capture_output=True, timeout=60, check=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(wt),
+            capture_output=True, timeout=60, check=True)
+    (wt / "docs").mkdir()
+    (wt / "docs" / "spec.md").write_text("с\n", encoding="utf-8")
+    (wt / "tests").mkdir()
+    (wt / "tests" / "test_a.py").write_text(
+        "def test_a():\n    assert True\n", encoding="utf-8")
+    _sp.run(["git", "add", "."], cwd=str(wt), capture_output=True, timeout=60)
+    _sp.run(["git", "commit", "-m", "init"], cwd=str(wt),
+            capture_output=True, timeout=60, check=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    card = wt / "card.md"
+    card.write_text(
+        "# H\n\n**Цель.** ц\n\n**Прочитать.** docs/spec.md\n\n"
+        "**Можно менять.** `tests/test_a.py`\n\n**Интерфейс.** `f()`\n\n"
+        "**Приёмка.** `pytest -q tests/test_a.py`\n\n"
+        "**Нельзя.** сеть\n\n**Сеть.** нет\n\n"
+        "**Исполнитель.** m\n\n**Уровень.** medium\n\n**Коммит.** `feat: x`\n",
+        encoding="utf-8",
+    )
+    proj = ProjectConfig(
+        root=str(other),
+        rules="docs/spec.md",
+        python=sys.executable,
+        allowed_paths=["tests/**", "docs/**"],
+    )
+    r = lint_card(card, proj)
+    assert r.ok, r.errors
+
+
+def test_collect_python_missing(tmp_path):
+    card = tmp_path / "card.md"
+    card.write_text(GOOD.read_text(encoding="utf-8"), encoding="utf-8")
+    proj = ProjectConfig(
+        root=str(REPO),
+        rules="docs/agents/rules.md",
+        python="/nonexistent/bin/python",
+        allowed_paths=["hub/**", "tests/**", "docs/**"],
+    )
+    r = lint_card(card, proj)
+    assert not r.ok
+    assert any("питон" in e for e in r.errors)
