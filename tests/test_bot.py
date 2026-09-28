@@ -112,6 +112,18 @@ def test_owner_text_never_listened():
     assert "не слушает" in reply and "очереди" in reply
 
 
+def test_owner_empty_text_no_write():
+    s = Store()
+    before_inbox = len(_inbox_rows(s))
+    before_ev = len(_events(s))
+    reply = bc.handle_owner_text(s, 999, "   ", NOW)
+    assert "Пустое" in reply or "пустое" in reply
+    assert len(_inbox_rows(s)) == before_inbox
+    assert len(_events(s)) == before_ev
+    # Чат запомнился даже для пустого.
+    assert 999 in bc.list_chats(s)
+
+
 def test_all_chats_includes_owner():
     from hub.tg_send import OWNER_CHAT_ID
 
@@ -141,6 +153,37 @@ def test_outbox_once():
     finally:
         con.close()
     assert left == 0
+
+
+def test_outbox_marks_only_after_success():
+    """Падающий send: первая строка помечена, вторая осталась; порядок строгий."""
+    s = Store()
+    _add_outbox(s, "раз")
+    _add_outbox(s, "два")
+    calls: list[str] = []
+
+    def _flaky(row):
+        calls.append(row["text"])
+        if row["text"] == "два":
+            raise RuntimeError("сеть упала")
+
+    try:
+        bc.drain_outbox(s, _flaky, NOW)
+        assert False, "исключение отправителя обязано проброситься"
+    except RuntimeError:
+        pass
+    assert calls == ["раз", "два"]  # порядок — по id, маркировка после успеха
+    con = _con(s)
+    try:
+        rows = {r["text"]: r["sent_ts"] for r in
+                con.execute("SELECT text, sent_ts FROM outbox")}
+    finally:
+        con.close()
+    assert rows["раз"] is not None and rows["два"] is None
+    # Повтор шлёт только непомеченную.
+    calls2: list[str] = []
+    assert bc.drain_outbox(s, lambda r: calls2.append(r["text"]), NOW) == 1
+    assert calls2 == ["два"]
 
 
 def test_question_buttons_and_answer():
@@ -190,9 +233,15 @@ def test_grouping_three_events_one_message():
     # Окно 5 мин: раньше не готово, после — готово.
     g = bc.Grouper()
     for e in evs:
-        g.add(e, NOW)
+        assert g.add({**e, "id": 100 + len(g.buf)}, NOW)
     assert not g.ready(NOW + 60_000)
     assert g.ready(NOW + 5 * 60_000)
+    # Дедуп: повторный забор тех же id не дублирует буфер.
+    assert not g.add({"id": 100, "kind": "ready",
+                      "task_id": "H01", "payload_json": "{}"}, NOW)
+    assert len(g.buf) == 3
+    # peek не очищает (отправка может упасть), clear — после успеха.
+    assert "H01" in g.peek() and len(g.buf) == 3
     one = g.flush()
     assert "H01" in one and "H03" in one and g.buf == []
 
@@ -223,8 +272,15 @@ def test_merge_confirm_two_steps():
     s.upsert_task(id="H01", stage="ready")
     # Без подтверждения ничего не пишет.
     before = len(_events(s))
-    text, buttons = bc.confirm_text("merge", "H01"), bc.confirm_buttons("H01", "H01")
+    text, buttons = bc.confirm_text("merge", "H01"), bc.confirm_buttons("merge", "H01")
     assert "H01" in text and len(buttons) == 2
+    assert [b.data for b in buttons] == [
+        "confirm:merge:H01:yes", "confirm:merge:H01:no"]
+    for act in ("stop", "merge"):
+        btns = bc.confirm_buttons(act, "H09")
+        for b in btns:
+            parsed = bc.parse_confirm(b.data)
+            assert parsed is not None and parsed[0] == act and parsed[1] == "H09"
     parsed = bc.parse_confirm("confirm:merge:H01:no")
     assert parsed == ("merge", "H01", False)
     assert bc.apply_confirm(s, "merge", "H01", False, NOW) == "Отменено."
@@ -237,6 +293,17 @@ def test_merge_confirm_two_steps():
     got = [e for e in _events(s) if e["kind"] == "owner_command"]
     assert len(got) == 1
     assert json.loads(got[0]["payload_json"])["action"] == "merge"
+
+
+def test_merge_only_ready_stop_not_final():
+    s = Store()
+    s.upsert_task(id="HX", stage="exec r1")
+    before = len(_events(s))
+    assert "только для ready" in bc.apply_confirm(s, "merge", "HX", True, NOW)
+    assert len(_events(s)) == before  # ничего не записало
+    s.upsert_task(id="HF", stage="merged")
+    assert "финаль" in bc.apply_confirm(s, "stop", "HF", True, NOW)
+    assert "передано Claude" in bc.apply_confirm(s, "stop", "HX", True, NOW)
 
 
 def test_stop_confirm_and_unknown_task():
@@ -255,13 +322,30 @@ def test_task_format_limit(tmp_path):
         {"findings": [{"file": "a.py", "line": 1, "issue": "баг",
                        "severity": "high", "author": "muse"}]}),
         encoding="utf-8")
-    s.upsert_task(id="H09", stage="exec r1", round=1, worktree=str(wt))
+    s.upsert_task(id="H09", stage="exec r1", round=1, worktree=str(wt),
+                  budget_go=0.5, budget_usd=1.0)
     s.link_session("sx", "opencode", "H09", "executor", 1, "muse")
-    text = bc.format_task(s, "H09")
+    text = bc.format_task(s, "H09", snapshot=_fake_snapshot_for("H09"))
     assert "H09" in text and "exec r1" in text and "executor" in text
     assert "a.py" in text
-    assert len(text) <= 4000
+    assert "$" in text  # карточка п.6: этап, сессии, $, замечания
+    assert len(text) <= 3500 and text.endswith("</pre>")
     assert bc.format_task(s, "НЕТ") == "нет задачи НЕТ"
+
+
+def _fake_snapshot_for(tid: str) -> Snapshot:
+    ss = [SessionSnap("sx", "executor", "muse", "opencode-go",
+                      NOW, "🟢", 0.11, True, 5000, "bash: pytest")]
+    tasks = [TaskSnap(tid, "PlayerUP", "exec r1", 1, "🟢",
+                      0.11, 0.02, 5000, "bash: pytest", ss)]
+    return Snapshot(tasks=tasks, total_go=0.11, total_usd=0.02, now_ms=NOW)
+
+
+def test_task_wrap_esc_limit():
+    """Раздув esc не ломает лимит 3500 и </pre>."""
+    text = bc._wrap_pre("<" * 3400, 3500)
+    assert len(text) <= 3500 and text.endswith("</pre>")
+    assert "&lt;" in text
 
 
 def test_budget_pause_resume():
@@ -288,6 +372,77 @@ def test_new_questions_dedup():
     assert [q["id"] for q in bc.new_questions_to_send(s)] == [qid]
     bc.mark_question_sent(s, qid)
     assert bc.new_questions_to_send(s) == []
+
+
+def test_answer_race_single_event():
+    """Параллельные ответы — один True и одно событие answer."""
+    import threading
+
+    s = Store()
+    qid = _add_question(s, "гонка?", ["да", "нет"])
+    results = []
+    lock = threading.Lock()
+
+    def _try(i):
+        ok = bc.answer_question(s, qid, f"вариант{i}", now_ms=NOW)
+        with lock:
+            results.append(ok)
+
+    threads = [threading.Thread(target=_try, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sum(1 for r in results if r) == 1
+    assert len([e for e in _events(s) if e["kind"] == "answer"]) == 1
+
+
+def test_fetch_sql_filters_kinds():
+    """Ненотифицируемые висят в БД, но забор отдаёт только NOTIFY_KINDS."""
+    s = Store()
+    s.add_event("T1", "owner_message", {"text": "x"})
+    s.add_event("T1", "answer", {})
+    s.add_event("T1", "owner_command", {"action": "stop"})
+    eid = s.add_event("T9", "ready", {})
+    got = bc.fetch_unsent_notifiable(s)
+    assert [e["id"] for e in got] == [eid]
+
+
+def test_snapshot_events_and_budget():
+    """Дифф этапов/пульса + эскалация бюджета только вверх."""
+    prev = _fake_snapshot()
+    cur = _fake_snapshot()
+    assert bc.snapshot_events(None, cur) == []  # baseline молчит
+    assert bc.snapshot_events(prev, cur) == []
+    cur.tasks[0].stage = "ready"
+    kinds = [e["kind"] for e in bc.snapshot_events(prev, cur)]
+    assert kinds == ["ready"]
+    cur.tasks[0].stage = "exec r1"
+    cur.tasks[0].pulse = "🔴"
+    kinds = [e["kind"] for e in bc.snapshot_events(prev, cur)]
+    assert kinds == ["stuck"]
+    # Бюджет: hard один раз, повтор и soft после hard — тишина.
+    s = Store()
+    s.upsert_task(id="H01", stage="exec r1", budget_go=0.5, budget_usd=0.0)
+    snap = _fake_snapshot()
+    snap.tasks[0].cost_go = 0.45
+    assert [e["kind"] for e in bc.pop_budget_events(s, snap)] == ["budget_soft"]
+    assert bc.pop_budget_events(s, snap) == []
+    snap.tasks[0].cost_go = 0.6
+    assert [e["kind"] for e in bc.pop_budget_events(s, snap)] == ["budget_hard"]
+    assert bc.pop_budget_events(s, snap) == []
+
+
+def test_snapshot_key_ignores_now():
+    a = _fake_snapshot()
+    b = _fake_snapshot()
+    b.now_ms = a.now_ms + 3600_000
+    assert bc.snapshot_key(a) == bc.snapshot_key(b)
+
+
+def test_parse_question_ref():
+    assert bc.parse_question_ref("❓ Вопрос #12 [T1]:\nтекст") == 12
+    assert bc.parse_question_ref("реплай без номера") is None
 
 
 def test_dry_run_builds_dispatcher(capsys):

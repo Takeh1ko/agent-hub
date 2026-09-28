@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
@@ -50,17 +51,32 @@ class Button:
 
 @dataclass
 class Grouper:
-    """Группировка событий за окно в одно сообщение."""
+    """Группировка событий за окно в одно сообщение.
+
+    seen — id уже взятых событий: повторный забор тех же строк
+    (sent_tg ставится только после отправки) не дублирует буфер.
+    """
 
     window_ms: int = GROUP_MS
     buf: list[dict] = field(default_factory=list)
     first_ts: int | None = None
+    seen: set[int] = field(default_factory=set)
 
-    def add(self, event: dict, now_ms: int) -> None:
-        """Положить событие в буфер."""
+    def add(self, event: dict, now_ms: int) -> bool:
+        """Положить событие в буфер. Дубль по id — пропустить (False)."""
+        eid = event.get("id") if isinstance(event, dict) else None
+        try:
+            key = int(eid) if eid is not None else None
+        except (TypeError, ValueError):
+            key = None
+        if key is not None:
+            if key in self.seen:
+                return False
+            self.seen.add(key)
         if self.first_ts is None:
             self.first_ts = int(now_ms)
         self.buf.append(dict(event))
+        return True
 
     def ready(self, now_ms: int) -> bool:
         """Окно вышло и есть что слать."""
@@ -68,11 +84,37 @@ class Grouper:
             return False
         return int(now_ms) - int(self.first_ts) >= self.window_ms
 
+    def peek(self) -> str:
+        """Слить буфер в сообщение без очистки (отправка может упасть)."""
+        return format_grouped(self.buf)
+
+    def pending_ids(self) -> list[int]:
+        """Id событий в буфере."""
+        out: list[int] = []
+        for e in self.buf:
+            try:
+                out.append(int(e.get("id")))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return out
+
+    def clear(self) -> None:
+        """Очистить буфер (только после успешной отправки)."""
+        self.buf.clear()
+        self.first_ts = None
+
+    def drop(self, ids: list[int]) -> None:
+        """Убрать из seen (после mark_events_sent — рост не бесконечный)."""
+        for i in ids:
+            try:
+                self.seen.discard(int(i))
+            except (TypeError, ValueError):
+                continue
+
     def flush(self) -> str:
         """Слить буфер в одно сообщение и очистить."""
         text = format_grouped(self.buf)
-        self.buf.clear()
-        self.first_ts = None
+        self.clear()
         return text
 
 
@@ -87,6 +129,29 @@ def clip(text: str, limit: int = MSG_LIMIT) -> str:
     if len(s) <= limit:
         return s
     return s[:limit]
+
+
+def _wrap_pre(body: str, limit: int) -> str:
+    """Обернуть в <pre>, длина считается после esc, </pre> цел."""
+    inner = esc(clip(str(body), max(0, limit - 11)))
+    if len(inner) > limit - 11:
+        inner = inner[:limit - 11]
+        inner = re.sub(r"&[A-Za-z#0-9]*$", "", inner)
+    return f"<pre>{inner}</pre>"
+
+
+_QREF = re.compile(r"Вопрос\s*#(\d+)")
+
+
+def parse_question_ref(text: str) -> int | None:
+    """Достать id вопроса из текста («❓ Вопрос #12 …») — fallback реплая."""
+    m = _QREF.search(str(text or ""))
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except (TypeError, ValueError):
+        return None
 
 
 def _con(store: Store) -> sqlite3.Connection:
@@ -189,6 +254,8 @@ def handle_owner_text(store: Store, chat_id: int, text: str, now_ms: int) -> str
     """
     body = str(text or "").strip()
     remember_chat(store, int(chat_id), int(now_ms))
+    if not body:
+        return "Пустое сообщение — нечего передавать."
     con = _con(store)
     try:
         con.execute(
@@ -315,25 +382,27 @@ def answer_question(store: Store, qid: int, answer: str,
                     via: str = "tg", now_ms: int = 0) -> bool:
     """Ответить на вопрос: status='answered', событие answer.
 
-    Повторный ответ на отвеченный — False, без дубля события.
+    Атомарно: UPDATE с условием status<>'answered', событие только
+    при rowcount==1. Параллельные тапы дают один ответ и одно событие.
+    Повторный ответ — False, без дубля события.
     """
     body = str(answer or "").strip()
     if not body:
         return False
     con = _con(store)
     try:
-        row = con.execute("SELECT * FROM question WHERE id=?",
+        row = con.execute("SELECT task_id FROM question WHERE id=?",
                           (int(qid),)).fetchone()
         if row is None:
             return False
-        if str(row["status"]) == "answered":
-            return False
         task_id = str(row["task_id"] or "")
-        con.execute(
+        cur = con.execute(
             "UPDATE question SET status='answered', answer=?, answered_via=?"
-            " WHERE id=?",
+            " WHERE id=? AND status<>'answered'",
             (body, str(via), int(qid)),
         )
+        if cur.rowcount != 1:
+            return False
         con.commit()
     finally:
         con.close()
@@ -416,13 +485,16 @@ def format_grouped(events: list[dict]) -> str:
 
 
 def fetch_unsent_notifiable(store: Store) -> list[dict]:
-    """События для сводки: sent_tg=0 и kind из NOTIFY_KINDS."""
+    """События для сводки: sent_tg=0 и kind из NOTIFY_KINDS (фильтр в SQL)."""
+    kinds = sorted(NOTIFY_KINDS)
     con = _con(store)
     try:
         rows = con.execute(
-            "SELECT * FROM event WHERE sent_tg=0 ORDER BY id").fetchall()
-        out = [dict(r) for r in rows if is_notifiable(dict(r))]
-        return out
+            "SELECT * FROM event WHERE sent_tg=0 AND kind IN "
+            f"({','.join('?' for _ in kinds)}) ORDER BY id",
+            kinds,
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         con.close()
 
@@ -442,6 +514,128 @@ def mark_events_sent(store: Store, ids: list[int]) -> None:
         con.commit()
     finally:
         con.close()
+
+
+def record_events(store: Store, events: list[dict], now_ms: int) -> list[dict]:
+    """Записать события продюсера (snapshot-дифф) в store, вернуть строки с id."""
+    out: list[dict] = []
+    for e in events:
+        eid = _add_event(store, str(e.get("task_id") or ""),
+                         str(e.get("kind") or ""), dict(e.get("payload") or {}),
+                         int(now_ms))
+        row = dict(e)
+        row["id"] = eid
+        out.append(row)
+    return out
+
+
+_FINAL_STAGES = ("merged", "dropped")
+
+
+def snapshot_events(prev, cur) -> list[dict]:
+    """Разница снимков → события (чисто, без БД).
+
+    prev None — baseline, событий нет (не спамим при старте).
+    Этап → ready/arbiter/failed; пульс → stuck (🔴) / crashed (⚫).
+    """
+    if prev is None or cur is None:
+        return []
+    old = {t.id: t for t in (getattr(prev, "tasks", None) or [])}
+    out: list[dict] = []
+    for t in (getattr(cur, "tasks", None) or []):
+        p = old.get(t.id)
+        if p is None:
+            continue
+        if str(t.stage) != str(p.stage):
+            if t.stage == "ready":
+                out.append({"task_id": t.id, "kind": "ready",
+                            "payload": {"stage": t.stage}})
+            elif t.stage == "arbiter":
+                out.append({"task_id": t.id, "kind": "arbiter",
+                            "payload": {"stage": t.stage}})
+            elif t.stage == "failed":
+                out.append({"task_id": t.id, "kind": "failed",
+                            "payload": {"stage": t.stage}})
+        if str(t.pulse) != str(p.pulse):
+            if t.pulse == "🔴" and str(p.pulse) != "🔴":
+                out.append({"task_id": t.id, "kind": "stuck",
+                            "payload": {"stage": str(t.stage)}})
+            elif (t.pulse == "⚫" and str(p.pulse) != "⚫"
+                    and str(t.stage) not in _FINAL_STAGES):
+                out.append({"task_id": t.id, "kind": "crashed",
+                            "payload": {"stage": str(t.stage)}})
+    return out
+
+
+_BUDGET_KEY = "tg_budget_fired"
+
+
+def _budget_levels(store: Store) -> dict:
+    raw = meta_get(store, _BUDGET_KEY)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def pop_budget_events(store: Store, snapshot) -> list[dict]:
+    """Превышения бюджетов задач → budget_soft (80%) / budget_hard (100%).
+
+    Уровень хранится в meta (escalation только вверх), повторного
+    события при каждом poll нет. Пороги — из task.budget_go/budget_usd.
+    """
+    fired = _budget_levels(store)
+    dirty = False
+    out: list[dict] = []
+    for t in (getattr(snapshot, "tasks", None) or []):
+        row = store.get_task(str(t.id))
+        if row is None:
+            continue
+        try:
+            lim_go = float(row.get("budget_go") or 0)
+        except (TypeError, ValueError):
+            lim_go = 0.0
+        try:
+            lim_usd = float(row.get("budget_usd") or 0)
+        except (TypeError, ValueError):
+            lim_usd = 0.0
+        spent_go = float(getattr(t, "cost_go", 0) or 0)
+        spent_usd = float(getattr(t, "cost_usd", 0) or 0)
+        level = None
+        if (lim_go > 0 and spent_go >= lim_go) or (lim_usd > 0 and spent_usd >= lim_usd):
+            level = "hard"
+        elif ((lim_go > 0 and spent_go >= 0.8 * lim_go)
+                or (lim_usd > 0 and spent_usd >= 0.8 * lim_usd)):
+            level = "soft"
+        if level is None:
+            continue
+        prev_level = fired.get(str(t.id))
+        rank = {"soft": 1, "hard": 2}
+        if prev_level is not None and rank.get(str(prev_level), 0) >= rank[level]:
+            continue
+        fired[str(t.id)] = level
+        dirty = True
+        kind = "budget_hard" if level == "hard" else "budget_soft"
+        out.append({"task_id": str(t.id), "kind": kind,
+                    "payload": {"text": f"go ${spent_go:.2f}/${lim_go:.2f}"
+                                f" usd ${spent_usd:.2f}/${lim_usd:.2f}"}})
+    if dirty:
+        meta_set(store, _BUDGET_KEY, json.dumps(fired, ensure_ascii=False))
+    return out
+
+
+def snapshot_key(snapshot) -> str:
+    """Нормализованный JSON снимка без now_ms — для «если что-то менялось»."""
+    try:
+        data = json.loads(snapshot.to_json())
+    except (TypeError, ValueError, AttributeError):
+        return str(snapshot)
+    if isinstance(data, dict):
+        data.pop("now_ms", None)
+    return json.dumps(data, ensure_ascii=False, sort_keys=True)
 
 
 def sent_question_ids(store: Store) -> set[int]:
@@ -484,17 +678,21 @@ def format_roster(snapshot) -> str:
         f" + usd ${float(snapshot.total_usd):.3f}"
         f" (лимит Go ${GO_LIMIT:.0f})"
     )
-    body = clip(f"{base}\n{footer}".strip(), MSG_LIMIT - 20)
-    return clip(f"<pre>{esc(body)}</pre>", MSG_LIMIT)
+    return _wrap_pre(f"{base}\n{footer}".strip(), MSG_LIMIT)
 
 
 def format_status(snapshot) -> str:
     """Компактная картина (= hub status) в <pre>."""
-    return clip(f"<pre>{esc(str(snapshot.to_text()))}</pre>", MSG_LIMIT)
+    return _wrap_pre(str(snapshot.to_text()), MSG_LIMIT)
 
 
-def format_task(store: Store, task_id: str, limit: int = TASK_LIMIT) -> str:
-    """Этап, сессии, $, замечания (findings H04), ≤ limit символов."""
+def format_task(store: Store, task_id: str, limit: int = TASK_LIMIT,
+                snapshot=None) -> str:
+    """Этап, сессии, $, замечания (findings H04), ≤ limit символов.
+
+    $ — потрачено из snapshot (TaskSnap.cost_go/cost_usd + по сессиям),
+    без snapshot — бюджет задачи. Итоговая длина ≤ limit, </pre> цел.
+    """
     tid = str(task_id or "").strip()
     if not tid:
         return "Нужен ID: /task ID"
@@ -504,23 +702,51 @@ def format_task(store: Store, task_id: str, limit: int = TASK_LIMIT) -> str:
     sessions = store.list_sessions(tid)
     stage = str(task.get("stage") or "")
     rnd = str(task.get("round") or 0)
+    try:
+        lim_go = float(task.get("budget_go") or 0)
+    except (TypeError, ValueError):
+        lim_go = 0.0
+    try:
+        lim_usd = float(task.get("budget_usd") or 0)
+    except (TypeError, ValueError):
+        lim_usd = 0.0
+    tsnap = None
+    if snapshot is not None:
+        for t in (getattr(snapshot, "tasks", None) or []):
+            if str(getattr(t, "id", "")) == tid:
+                tsnap = t
+                break
     lines = [f"{tid} {stage} r{rnd}"]
+    if tsnap is not None:
+        lines.append(f"$ go ${float(tsnap.cost_go):.3f}"
+                     f" + usd ${float(tsnap.cost_usd):.3f}"
+                     f" (бюджет go ${lim_go:.2f} usd ${lim_usd:.2f})")
+    else:
+        lines.append(f"$ бюджет go ${lim_go:.2f} usd ${lim_usd:.2f}")
     if sessions:
+        cost_by_ext: dict[str, float] = {}
+        if tsnap is not None:
+            for s in (getattr(tsnap, "sessions", None) or []):
+                try:
+                    cost_by_ext[str(s.external_id)] = float(s.cost)
+                except (TypeError, ValueError, AttributeError):
+                    continue
         lines.append("Сессии:")
         for s in sessions[:6]:
             role = str(s.get("role") or "?")
             model = str(s.get("model") or "?")
             ext = str(s.get("external_id") or "")
-            lines.append(f"- {role} {model} ({ext})")
+            if ext in cost_by_ext:
+                lines.append(f"- {role} {model} ({ext}) ${cost_by_ext[ext]:.3f}")
+            else:
+                lines.append(f"- {role} {model} ({ext})")
     else:
         lines.append("Сессии: —")
     notes = _task_findings_text(task)
     if notes:
         lines.append("Замечания:")
         lines.append(notes)
-    body = "\n".join(lines)
-    body = clip(body, int(limit) - 20)
-    return clip(f"<pre>{esc(body)}</pre>", MSG_LIMIT)
+    return _wrap_pre("\n".join(lines), int(limit))
 
 
 def _task_findings_text(task: dict) -> str:
@@ -582,6 +808,7 @@ def apply_confirm(store: Store, action: str, task_id: str,
                   ok: bool, now_ms: int) -> str:
     """Применить подтверждение: без Да ничего не пишет.
 
+    spec §9: /merge только для ready; /stop — для нефинальной задачи.
     До pipeline H06 действие — событие owner_command в store.
     """
     if not ok:
@@ -590,8 +817,14 @@ def apply_confirm(store: Store, action: str, task_id: str,
     act = str(action or "").strip()
     if act not in ("stop", "merge"):
         return "Не знаю действия."
-    if store.get_task(tid) is None:
+    task = store.get_task(tid)
+    if task is None:
         return f"нет задачи {tid}"
+    stage = str(task.get("stage") or "")
+    if act == "merge" and stage != "ready":
+        return f"/merge только для ready (сейчас: {stage})."
+    if act == "stop" and stage in _FINAL_STAGES:
+        return f"Задача уже финальная: {stage}."
     _add_event(store, tid, "owner_command", {"action": act}, int(now_ms))
     return f"✅ {act} {tid} — передано Claude"
 
@@ -617,7 +850,7 @@ def format_budget(store: Store) -> str:
             f" usd {float(b.get('usd_limit') or 0):.2f} {hard}")
     lines.append(f"Очередь: {'пауза' if is_paused(store) else 'идёт'}")
     lines.append(f"Лимит Go: ${GO_LIMIT:.0f}/мес")
-    return clip(f"<pre>{esc(chr(10).join(lines))}</pre>", MSG_LIMIT)
+    return _wrap_pre(chr(10).join(lines), MSG_LIMIT)
 
 
 def is_paused(store: Store) -> bool:
