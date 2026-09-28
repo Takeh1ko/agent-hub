@@ -38,6 +38,56 @@ class LintResult:
     errors: list[str] = field(default_factory=list)
 
 
+def _is_header_line(line: str, name: str) -> bool:
+    """Строгий заголовок раздела.
+
+    Markdown `#{1,6} Имя` — только в начале строки. Жирный `**Имя`:
+    в начале строки — суффикс `**`/`.`/`(`/`:`/` (`; в середине строки
+    (комбинированная `**Сеть.** … **Уровень.** …`) — только с точкой
+    `**Имя.` или `**Имя (` (упоминание `**Имя**` без точки — проза).
+    """
+    s = line.strip()
+    if not s or name not in s:
+        return False
+    if s.startswith("#"):
+        m = re.match(r"^(#{1,6})\s*", s)
+        if not m:
+            return False
+        rest = s[m.end():]
+        if not rest.startswith(name):
+            return False
+        after = rest[len(name):]
+        if after == "":
+            return True
+        if after[0] in " \t.:()*—-–":
+            return True
+        return False
+    needle = "**" + name
+    idx = s.find(needle)
+    while idx != -1:
+        after = s[idx + len(needle):]
+        if idx == 0:
+            if after == "" or after.startswith("**"):
+                return True
+            if after and after[0] in ".(:":
+                return True
+            if after.startswith(" ("):
+                return True
+        else:
+            # Середина строки: только proper `**Имя.` или `**Имя (`.
+            if after.startswith("."):
+                return True
+            if after.startswith(" (") or after.startswith("("):
+                return True
+        idx = s.find(needle, idx + 1)
+    return False
+
+
+def _is_required_bold_header(line: str) -> bool:
+    """Жирный заголовок известного обязательного раздела (строгий)."""
+    return any(_is_header_line(line, n) for n in REQUIRED_SECTIONS)
+
+
 def strip_arbiter(text: str) -> str:
     """Вырезать раздел «Решения арбитра» до следующего заголовка того же/высшего уровня."""
     lines = text.splitlines()
@@ -56,8 +106,9 @@ def strip_arbiter(text: str) -> str:
                 m2 = head_re.match(lines[i])
                 if m2 and len(m2.group(1)) <= level:
                     break
-                # Жирный заголовок тоже заканчивает markdown-раздел.
-                if lines[i].strip().startswith("**"):
+                # Жирный заголовок известного раздела заканчивает markdown-раздел
+                # (смешанный стиль), произвольные `**…**` внутри — часть раздела.
+                if _is_required_bold_header(lines[i]):
                     break
                 i += 1
             continue
@@ -65,10 +116,9 @@ def strip_arbiter(text: str) -> str:
         if s.startswith("**") and "Решения арбитра" in s:
             i += 1
             while i < n:
-                t = lines[i].strip()
                 if head_re.match(lines[i]):
                     break
-                if t.startswith("**"):
+                if _is_required_bold_header(lines[i]):
                     break
                 i += 1
             continue
@@ -81,15 +131,9 @@ def strip_arbiter(text: str) -> str:
 
 
 def _header_line_no(lines: list[str], name: str) -> int | None:
-    """Номер строки (1..) заголовка раздела или None."""
+    """Номер строки (1..) строгого заголовка раздела или None."""
     for idx, line in enumerate(lines, 1):
-        s = line.strip()
-        if name not in s:
-            continue
-        # Заголовок: markdown `#` или жирное `**Имя`.
-        if s.startswith("#") or s.startswith("**") or f"**{name}" in s:
-            return idx
-        if name in s[:60] and "**" in s:
+        if _is_header_line(line, name):
             return idx
     return None
 
@@ -151,16 +195,22 @@ def _line_of_in_section(
 
 
 def _can_change_globs(section: str) -> list[str]:
-    """Паттерны из «Можно менять»: бэктики + голые токены + glob-символы."""
+    """Паттерны из «Можно менять»: бэктики (дробление по [,;\\s]+) + голые токены."""
     out: list[str] = []
     seen: set[str] = set()
 
-    def _add(cand: str) -> None:
-        cand = cand.strip().strip("\"'(),;")
-        if not cand or any(c.isspace() for c in cand):
+    def _add_single(cand: str) -> None:
+        cand = cand.strip().lstrip("\"'([“”").rstrip("\"')].,;:!?“”")
+        if not cand:
             return
         if _CYR.search(cand):
             return  # проза, не путь
+        if any(c.isspace() for c in cand):
+            return
+        if cand.startswith("~") or cand.startswith("$"):
+            return
+        if any(ch in cand for ch in ("<", ">", "|")):
+            return
         has_glob = any(c in cand for c in ("*", "?", "["))
         if has_glob:
             # Glob без `/` — только файловый (`*.py`); `[project.scripts]` — не путь.
@@ -169,22 +219,41 @@ def _can_change_globs(section: str) -> list[str]:
                     return
                 if not re.match(r"^[A-Za-z0-9_.\-/*?\[\]]+$", cand):
                     return
-        elif "/" not in cand and cand not in (".hub.toml", "pyproject.toml"):
-            return  # код (`register`, `ProjectConfig`), не путь
+        else:
+            if "/" in cand:
+                pass  # путь/каталог с `/` — всегда кандидат
+            elif cand in (".hub.toml", "pyproject.toml", "Makefile", "Dockerfile"):
+                pass
+            elif re.match(
+                r"^[\w.\-]+\.(md|py|toml|sql|json|sh|cfg|ini|txt|yaml|yml)$", cand
+            ):
+                # Голое имя файла с известным расширением — тоже путь.
+                pass
+            else:
+                return  # код (`register`, `project.scripts`, `state.status`), не путь
         if cand not in seen:
             seen.add(cand)
             out.append(cand)
+
+    def _add(cand: str) -> None:
+        # Содержимое бэктика дробится по `[,;\\s]+`, каждый токен — отдельно.
+        for part in re.split(r"[,;\s]+", cand.strip()):
+            if part:
+                _add_single(part)
 
     for m in re.finditer(r"`([^`]+)`", section):
         _add(m.group(1).strip())
     no_tick = re.sub(r"`[^`]*`", " ", section)
     # Голые пути с `/` (вне бэктиков).
     for m in re.finditer(r"(?<![\w/`~])(/?(?:[\w.\-]+/)+[\w.\-]+(?:\.[\w]+)?)", no_tick):
-        _add(m.group(1))
+        _add_single(m.group(1))
     # Голые glob-токены без `/` (например `*.py`).
     for m in re.finditer(r"[^\s`'\",;:!?()]+[*?\[\]][^\s`'\",;:!?()]*", no_tick):
-        _add(m.group(0))
-    # Одиночные файлы без `/`.
+        _add_single(m.group(0))
+    # Голые имена файлов без `/` (`Makefile`, `conftest.py`).
+    for m in re.finditer(r"(?<![\w/`.\-])(Makefile|Dockerfile|[\w.\-]+\.[\w]+)(?![\w.\-])", no_tick):
+        _add_single(m.group(0))
+    # Одиночные известные файлы без `/`.
     for name in (".hub.toml", "pyproject.toml"):
         if name in no_tick and name not in seen:
             seen.add(name)
@@ -210,7 +279,10 @@ def _looks_like_concrete_path(cand: str) -> bool:
         if not re.search(r"\.(md|py|toml|sql|json|sh)$", cand):
             return False
     if "/" in cand:
-        return True
+        # Похоже на путь — только с известным расширением или каталог с `/`.
+        if cand.endswith("/"):
+            return True
+        return bool(re.search(r"\.(md|py|toml|sql|json|sh)$", cand))
     if cand in (".hub.toml", "pyproject.toml"):
         return True
     if re.match(r"^[\w.\-]+\.(md|py|toml|sql|json|sh)$", cand):
@@ -234,12 +306,9 @@ def _read_paths(section: str, project_root: Path | None) -> list[str]:
         cand = cand.rstrip("\"')].,;:!?")
         if not _looks_like_concrete_path(cand):
             return
-        # Для путей с `/`: первый сегмент должен существовать в project.root,
-        # иначе это проза (`Store.add/a`, `Snapshot.to/a`) или чужое (`agent/...`).
-        if "/" in cand and not Path(cand).is_absolute() and project_root is not None:
-            first = Path(cand).parts[0] if Path(cand).parts else ""
-            if first and not (project_root / first).exists():
-                return
+        # Фильтр «первый сегмент есть в root» убран (арбитр №2):
+        # всё похожее на путь проверяется на существование, проза отсекается
+        # уже по форме в `_looks_like_concrete_path` (расширение или `/` в конце).
         if cand not in seen:
             seen.add(cand)
             found.append(cand)
@@ -406,6 +475,8 @@ def lint_card(path: Path, project: ProjectConfig) -> LintResult:
                 msg = f"нет пути «{p}»"
                 errors.append(f"{card}:{ln}: {msg}" if ln is not None else f"{card}: {msg}")
     # 4. Приёмка: есть ноды из команд pytest и они собираются.
+    # Нода на ещё не созданный файл из «Можно менять» — допустима (новый файл
+    # задачи); `--collect-only` гоняем только для существующих.
     if "Приёмка" not in missing:
         section = _section_text(lines, "Приёмка")
         bounds = _section_bounds(lines, "Приёмка")
@@ -414,29 +485,64 @@ def lint_card(path: Path, project: ProjectConfig) -> LintResult:
             errors.append(f"{card}: «Приёмка» без pytest-нод")
         else:
             cwd = _collect_cwd(card, project)
-            py, py_err = _collect_python(project)
-            if py_err is not None:
-                errors.append(f"{card}: {py_err}")
-            else:
-                assert py is not None
-                try:
-                    r = subprocess.run(
-                        [py, "-m", "pytest", "--collect-only", "-q", *nodes],
-                        cwd=str(cwd),
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
+            can_section = (
+                _section_text(lines, "Можно менять")
+                if "Можно менять" not in missing
+                else ""
+            )
+            can_globs = _can_change_globs(can_section) if can_section else []
+            pats = [p.removeprefix("./") for p in (project.allowed_paths or [])]
+            _ = pats
+            existing: list[str] = []
+            for nd in nodes:
+                filepart = nd.split("::")[0].strip() or nd
+                fp = Path(filepart)
+                cand = fp if fp.is_absolute() else (Path(cwd) / filepart)
+                if cand.exists():
+                    existing.append(nd)
+                    continue
+                norm = filepart.removeprefix("./")
+                covered = any(
+                    fnmatch.fnmatch(norm, g.removeprefix("./")) for g in can_globs
+                )
+                if not covered:
+                    ln = _line_of_in_section(lines, bounds, nd)
+                    msg = f"нет файла «{nd}»"
+                    errors.append(
+                        f"{card}:{ln}: {msg}" if ln is not None else f"{card}: {msg}"
                     )
-                except OSError as e:
-                    errors.append(f"{card}: pytest не запустился: {e}")
-                except subprocess.TimeoutExpired:
-                    errors.append(f"{card}: pytest --collect-only: таймаут")
+            if existing:
+                py, py_err = _collect_python(project)
+                if py_err is not None:
+                    errors.append(f"{card}: {py_err}")
                 else:
-                    if r.returncode != 0:
-                        tail = (r.stdout + "\n" + r.stderr).strip()
-                        tail = tail[-2000:] if len(tail) > 2000 else tail
-                        one = tail.splitlines()[-1] if tail else f"код {r.returncode}"
-                        ln = _line_of_in_section(lines, bounds, nodes[0]) if nodes else None
-                        msg = f"pytest --collect-only не собрал {nodes}: {one}"
-                        errors.append(f"{card}:{ln}: {msg}" if ln is not None else f"{card}: {msg}")
+                    assert py is not None
+                    try:
+                        r = subprocess.run(
+                            [py, "-m", "pytest", "--collect-only", "-q", *existing],
+                            cwd=str(cwd),
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                        )
+                    except OSError as e:
+                        errors.append(f"{card}: pytest не запустился: {e}")
+                    except subprocess.TimeoutExpired:
+                        errors.append(f"{card}: pytest --collect-only: таймаут")
+                    else:
+                        if r.returncode != 0:
+                            tail = (r.stdout + "\n" + r.stderr).strip()
+                            tail = tail[-2000:] if len(tail) > 2000 else tail
+                            one = tail.splitlines()[-1] if tail else f"код {r.returncode}"
+                            ln = (
+                                _line_of_in_section(lines, bounds, existing[0])
+                                if existing
+                                else None
+                            )
+                            msg = f"pytest --collect-only не собрал {existing}: {one}"
+                            errors.append(
+                                f"{card}:{ln}: {msg}"
+                                if ln is not None
+                                else f"{card}: {msg}"
+                            )
     return LintResult(ok=not errors, errors=errors)

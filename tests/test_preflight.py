@@ -129,7 +129,23 @@ def test_setup_fail(tmp_path):
     got = preflight(store, "T-setup", proj, proc_root=str(tmp_path / "proc-пусто"))
     assert got.reason.startswith("setup-fail") and not got.ok
     assert ":" in got.reason
+    # LOW: хвост не пустой — молчаливый хук даёт `код 1`.
+    assert got.reason.split(":", 1)[1].strip() != ""
     assert not (store.get_task("T-setup") or {}).get("rules_sha")
+
+
+def test_setup_fail_empty_tail_has_code(tmp_path):
+    # LOW: `exit 1` без вывода → `setup-fail: код 1`.
+    repo, sha = _mk_repo(tmp_path)
+    proj_root = tmp_path / "proj"
+    proj_root.mkdir()
+    lock = tmp_path / "t.lock"
+    proj = _mk_project(proj_root, lock, setup="exit 1")
+    store = Store()
+    store.upsert_task(id="T-setup-code", worktree=str(repo), base_sha=sha)
+    got = preflight(store, "T-setup-code", proj, proc_root=str(tmp_path / "proc-пусто"))
+    assert not got.ok
+    assert got.reason == "setup-fail: код 1"
 
 
 def test_setup_fail_tail_has_stderr(tmp_path):
@@ -307,7 +323,9 @@ def test_order_base_moved_beats_no_rules(tmp_path):
 
 
 def test_store_fail_no_exception(tmp_path):
-    # БД только на чтение → объект PreflightResult, не исключение.
+    # Сильный тест: битая БД → store-fail, не исключение; ok → rules_sha совпал.
+    import os
+
     repo, sha = _mk_repo(tmp_path)
     proj_root = tmp_path / "proj"
     proj_root.mkdir()
@@ -315,11 +333,97 @@ def test_store_fail_no_exception(tmp_path):
     proj = _mk_project(proj_root, lock)
     store = Store()
     store.upsert_task(id="T-ro", worktree=str(repo), base_sha=sha)
+    if os.geteuid() == 0:
+        # root игнорирует chmod 444 — ветку read-only проверить нельзя.
+        import pytest as _pt
+
+        _pt.skip("root игнорирует права 444")
     db = Path(store.path)
     db.chmod(0o444)
     try:
         got = preflight(store, "T-ro", proj, proc_root=str(tmp_path / "proc-пусто"))
     finally:
         db.chmod(0o644)
-    # Либо ok (root игнорирует 444), либо store-fail — но не исключение.
-    assert hasattr(got, "reason") and isinstance(got.reason, str)
+    assert not got.ok
+    assert got.reason.startswith("store-fail")
+
+
+def test_store_corrupted_no_exception(tmp_path):
+    # MEDIUM: мусор вместо hub.db → PreflightResult(store-fail), не traceback.
+    repo, sha = _mk_repo(tmp_path)
+    proj_root = tmp_path / "proj"
+    proj_root.mkdir()
+    lock = tmp_path / "t.lock"
+    proj = _mk_project(proj_root, lock)
+    store = Store()
+    store.upsert_task(id="T-bad", worktree=str(repo), base_sha=sha)
+    Path(store.path).write_bytes(b"not-sqlite-garbage")
+    got = preflight(store, "T-bad", proj, proc_root=str(tmp_path / "proc-пусто"))
+    assert not got.ok
+    assert got.reason.startswith("store-fail")
+
+
+def test_head_timeout_returns_base_moved(tmp_path, monkeypatch):
+    # MEDIUM: зависший git rev-parse → base-moved, а не исключение.
+    repo, sha = _mk_repo(tmp_path)
+    proj_root = tmp_path / "proj"
+    proj_root.mkdir()
+    lock = tmp_path / "t.lock"
+    proj = _mk_project(proj_root, lock)
+    store = Store()
+    store.upsert_task(id="T-to", worktree=str(repo), base_sha=sha)
+    orig = subprocess.run
+
+    def _fake(*a, **kw):
+        args = a[0] if a else kw.get("args", [])
+        if isinstance(args, list) and args[:3] == ["git", "rev-parse", "HEAD"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=60)
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    got = preflight(store, "T-to", proj, proc_root=str(tmp_path / "proc-пусто"))
+    assert not got.ok
+    assert got.reason == "base-moved"
+
+
+def test_dirty_on_git_timeout(tmp_path, monkeypatch):
+    # MEDIUM: таймаут `git status` → dirty (fail-safe), а не исключение.
+    repo, sha = _mk_repo(tmp_path)
+    proj_root = tmp_path / "proj"
+    proj_root.mkdir()
+    lock = tmp_path / "t.lock"
+    proj = _mk_project(proj_root, lock)
+    store = Store()
+    store.upsert_task(id="T-dto", worktree=str(repo), base_sha=sha)
+    orig = subprocess.run
+
+    def _fake(*a, **kw):
+        args = a[0] if a else kw.get("args", [])
+        if isinstance(args, list) and args[:2] == ["git", "status"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=60)
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    got = preflight(store, "T-dto", proj, proc_root=str(tmp_path / "proc-пусто"))
+    assert not got.ok
+    assert got.reason == "dirty"
+
+
+def test_short_sha_ok(tmp_path):
+    # LOW: короткий sha того же HEAD — ok, а не base-moved.
+    repo, sha = _mk_repo(tmp_path)
+    proj_root = tmp_path / "proj"
+    proj_root.mkdir()
+    lock = tmp_path / "t.lock"
+    proj = _mk_project(proj_root, lock)
+    short = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=str(repo), capture_output=True, text=True, timeout=60,
+    ).stdout.strip()
+    assert len(short) >= 7
+    store = Store()
+    store.upsert_task(id="T-short", worktree=str(repo), base_sha=short)
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    got = preflight(store, "T-short", proj, proc_root=str(proc_root))
+    assert got.ok, got.reason

@@ -322,6 +322,10 @@ def test_collect_cwd_git_root(tmp_path):
             capture_output=True, timeout=60, check=True)
     other = tmp_path / "other"
     other.mkdir()
+    # «Прочитать» резолвится относительно project.root — создать там же,
+    # чтобы проверка читала git-корень только для collect.
+    (other / "docs").mkdir(parents=True, exist_ok=True)
+    (other / "docs" / "spec.md").write_text("с\n", encoding="utf-8")
     card = wt / "card.md"
     card.write_text(
         "# H\n\n**Цель.** ц\n\n**Прочитать.** docs/spec.md\n\n"
@@ -353,3 +357,166 @@ def test_collect_python_missing(tmp_path):
     r = lint_card(card, proj)
     assert not r.ok
     assert any("питон" in e for e in r.errors)
+
+
+def test_header_mention_is_not_section(tmp_path):
+    # HIGH: упоминание `см. **Цель** выше` в другом разделе — не заголовок.
+    base = GOOD.read_text(encoding="utf-8")
+    # Убрать настоящий `**Цель.**`, добавить прозу в «Прочитать».
+    lines = [l for l in base.splitlines() if not l.strip().startswith("**Цель.")]
+    assert any("**Цель" in l for l in base.splitlines())
+    text = "\n".join(lines).replace(
+        "**Прочитать.**", "**Прочитать.** см. **Цель** выше,"
+    )
+    card = tmp_path / "no-goal.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("нет раздела «Цель»" in e for e in r.errors)
+
+
+def test_header_mention_acceptance_not_section(tmp_path):
+    # HIGH (mimoflash): `см. **Приёмка** ...` в «Интерфейс» — не раздел.
+    base = GOOD.read_text(encoding="utf-8")
+    lines = [l for l in base.splitlines() if "Приёмка" not in l]
+    text = "\n".join(lines).replace(
+        "**Интерфейс.**",
+        "**Интерфейс.** см. **Приёмка** `pytest -q tests/test_time.py`,",
+    )
+    card = tmp_path / "no-acc2.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("нет раздела «Приёмка»" in e for e in r.errors)
+
+
+def test_header_mention_level_not_section(tmp_path):
+    # HIGH: `**Сеть.** нет; **Уровень** см. в карточке` — не раздел «Уровень».
+    base = GOOD.read_text(encoding="utf-8")
+    lines = [l for l in base.splitlines() if not l.strip().startswith("**Уровень.")]
+    text = "\n".join(lines).replace(
+        "**Сеть.** нет.", "**Сеть.** нет; **Уровень** см. в карточке."
+    )
+    card = tmp_path / "no-level.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("нет раздела «Уровень»" in e for e in r.errors)
+
+
+def test_read_missing_first_segment_is_error(tmp_path):
+    # HIGH: `core/secret.py` (нет каталога core) — «нет пути», не молча ok.
+    text = GOOD.read_text(encoding="utf-8").replace("docs/spec.md", "core/secret.py")
+    card = tmp_path / "bad-first.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("нет пути" in e and "core/secret.py" in e for e in r.errors)
+    # Тот же класс: `docs2/nope.md` при живом docs/.
+    text2 = GOOD.read_text(encoding="utf-8").replace("docs/spec.md", "docs2/nope.md")
+    card2 = tmp_path / "bad-first2.md"
+    card2.write_text(text2, encoding="utf-8")
+    r2 = lint_card(card2, _proj())
+    assert not r2.ok
+    assert any("нет пути" in e and "docs2/nope.md" in e for e in r2.errors)
+
+
+def test_read_prose_with_slash_ok(tmp_path):
+    # HIGH: проза `событие/вопрос/inbox` без расширения — не путь, ok.
+    base = GOOD.read_text(encoding="utf-8")
+    text = base.replace("**Прочитать.**", "**Прочитать.** событие/вопрос/inbox,")
+    card = tmp_path / "prose.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert r.ok, r.errors
+
+
+def test_strip_arbiter_bold_inside_markdown():
+    # MEDIUM: `**`-строка внутри markdown-арбитра — часть раздела (утечка эталона).
+    sample = "## Решения арбитра\n\nсекрет1\n\n**жирный** текст\n\nсекрет2\n\n## Дальше\n\nок\n"
+    got = strip_arbiter(sample)
+    assert "секрет1" not in got and "секрет2" not in got
+    assert "жирный" not in got
+    assert "## Дальше" in got
+    sample2 = (
+        "# T\n\n## Решения арбитра (круг 1)\n\nсекрет-1\n\n"
+        "**Вывод:** эталон-2\n\nещё-секрет-3\n\n## Приёмка\n\nтест\n"
+    )
+    got2 = strip_arbiter(sample2)
+    assert "секрет-1" not in got2
+    assert "эталон-2" not in got2
+    assert "секрет-3" not in got2
+    assert "## Приёмка" in got2
+
+
+def test_can_change_split_backtick(tmp_path):
+    # MEDIUM: два пути в одном бэктике, второй вне allowed_paths → не ok.
+    text = GOOD.read_text(encoding="utf-8").replace(
+        "`hub/gate/lint.py`, `tests/test_lint.py`",
+        "`hub/gate/lint.py`, `core/secret.py tests/test_lint.py`",
+    )
+    card = tmp_path / "split.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("allowed_paths" in e and "core/secret.py" in e for e in r.errors)
+
+
+def test_can_change_bare_filenames(tmp_path):
+    # MEDIUM: голые `Makefile`, `conftest.py`, `setup.cfg` — тоже пути.
+    text = GOOD.read_text(encoding="utf-8").replace(
+        "`hub/gate/lint.py`, `tests/test_lint.py`",
+        "`Makefile`, `conftest.py`, `setup.cfg`",
+    )
+    card = tmp_path / "bare-names.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("Makefile" in e for e in r.errors)
+
+
+def test_acceptance_new_file_allowed_and_missing_rejected(tmp_path):
+    # MEDIUM (арбитр №5): нода на новый файл из «Можно менять» — допустима.
+    import subprocess as _sp
+
+    proj_root = tmp_path / "proj"
+    (proj_root / "docs").mkdir(parents=True)
+    (proj_root / "docs" / "spec.md").write_text("с\n", encoding="utf-8")
+    (proj_root / "tests").mkdir(parents=True)
+    (proj_root / "tests" / "test_a.py").write_text(
+        "def test_a():\n    assert True\n", encoding="utf-8"
+    )
+    _sp.run(["git", "init", "-b", "main"], cwd=str(proj_root),
+            capture_output=True, timeout=60)
+    proj = ProjectConfig(
+        root=str(proj_root),
+        rules="docs/spec.md",
+        python=sys.executable,
+        allowed_paths=["tests/**", "docs/**"],
+    )
+    card_ok = proj_root / "card-ok.md"
+    card_ok.write_text(
+        "# H\n\n**Цель.** ц\n\n**Прочитать.** docs/spec.md\n\n"
+        "**Можно менять.** `tests/test_a.py`, `tests/test_new.py`\n\n"
+        "**Интерфейс.** `f()`\n\n"
+        "**Приёмка.** `pytest -q tests/test_a.py tests/test_new.py`\n\n"
+        "**Нельзя.** сеть\n\n**Сеть.** нет\n\n"
+        "**Исполнитель.** m\n\n**Уровень.** medium\n\n**Коммит.** `feat: x`\n",
+        encoding="utf-8",
+    )
+    r = lint_card(card_ok, proj)
+    assert r.ok, r.errors
+    # Нет файла и не в «Можно менять» — ошибка.
+    card_bad = proj_root / "card-bad.md"
+    card_bad.write_text(
+        "# H\n\n**Цель.** ц\n\n**Прочитать.** docs/spec.md\n\n"
+        "**Можно менять.** `tests/test_a.py`\n\n"
+        "**Интерфейс.** `f()`\n\n"
+        "**Приёмка.** `pytest -q tests/test_missing2.py`\n\n"
+        "**Нельзя.** сеть\n\n**Сеть.** нет\n\n"
+        "**Исполнитель.** m\n\n**Уровень.** medium\n\n**Коммит.** `feat: x`\n",
+        encoding="utf-8",
+    )
+    r2 = lint_card(card_bad, proj)
+    assert not r2.ok
+    assert any("нет файла" in e and "test_missing2" in e for e in r2.errors)

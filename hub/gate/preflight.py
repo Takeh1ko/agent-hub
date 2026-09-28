@@ -65,7 +65,7 @@ def _rules_path(project: ProjectConfig) -> Path:
 
 
 def _head_sha(worktree: str) -> str | None:
-    """HEAD worktree через `git rev-parse HEAD`. None при ошибке."""
+    """HEAD worktree через `git rev-parse HEAD`. None при ошибке/таймауте."""
     try:
         r = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -74,12 +74,25 @@ def _head_sha(worktree: str) -> str | None:
             text=True,
             timeout=60,
         )
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode != 0:
         return None
     sha = r.stdout.strip()
     return sha or None
+
+
+def _shas_equal(head: str, base: str) -> bool:
+    """Равенство sha с учётом короткого (prefix при длине ≥ 7)."""
+    h = (head or "").strip()
+    b = (base or "").strip()
+    if not h or not b:
+        return False
+    if h == b:
+        return True
+    if len(h) >= 7 and len(b) >= 7 and (h.startswith(b) or b.startswith(h)):
+        return True
+    return False
 
 
 def _lock_time_text(started_ms: int) -> str:
@@ -93,35 +106,15 @@ def _lock_time_text(started_ms: int) -> str:
 
 
 def _write_rules_sha(store: Store, task_id: str, digest: str) -> tuple[bool, str]:
-    """Записать sha256 правил прямым SQL (без мутации hub.store).
+    """Записать sha256 правил только через `store.upsert_task` (арбитр №6).
 
-    Возвращает (успех, причина). Без файлов миграций: колонка добавляется
-    при отсутствии; контракт «через upsert» невыполним без правки
-    hub/store.py + миграции (см. отчёт) — пишем явным UPDATE.
+    Схема — миграция `005_rules_sha.sql`, колонка в `TASK_COLUMNS`.
+    Никаких ALTER из кода.
     """
     try:
-        con = sqlite3.connect(str(store.path))
-    except (OSError, sqlite3.Error) as e:
+        store.upsert_task(id=task_id, rules_sha=digest)
+    except (OSError, sqlite3.Error, subprocess.SubprocessError) as e:
         return False, f"store-fail: {e}"[-2000:]
-    try:
-        try:
-            con.execute("ALTER TABLE task ADD COLUMN rules_sha TEXT NOT NULL DEFAULT ''")
-            con.commit()
-        except sqlite3.OperationalError as e:
-            if "duplicate column" not in str(e).lower():
-                return False, f"store-fail: {e}"[-2000:]
-        try:
-            cur = con.execute("UPDATE task SET rules_sha=? WHERE id=?", (digest, task_id))
-            con.commit()
-            if cur.rowcount == 0:
-                return False, "store-fail: нет задачи"[-2000:]
-        except (OSError, sqlite3.Error) as e:
-            return False, f"store-fail: {e}"[-2000:]
-    finally:
-        try:
-            con.close()
-        except (OSError, sqlite3.Error):
-            pass
     return True, ""
 
 
@@ -131,17 +124,27 @@ def preflight(
     project: ProjectConfig,
     proc_root: str = "/proc",
 ) -> PreflightResult:
-    """Проверки по порядку карточки; первая неуспешная — итог."""
-    task = store.get_task(task_id)
+    """Проверки по порядку карточки; первая неуспешная — итог; никогда не бросает."""
+    try:
+        task = store.get_task(task_id)
+    except (OSError, sqlite3.Error, subprocess.SubprocessError) as e:
+        return PreflightResult(ok=False, reason=f"store-fail: {e}"[-2000:])
     if task is None:
         return PreflightResult(ok=False, reason="no-task")
     worktree = str(task.get("worktree") or "")
     wt = Path(worktree) if worktree else None
-    if wt is None or not wt.is_dir() or is_dirty(worktree):
+    if wt is None or not wt.is_dir():
+        return PreflightResult(ok=False, reason="dirty")
+    try:
+        dirty = is_dirty(worktree)
+    except (OSError, subprocess.SubprocessError):
+        # Fail-safe из hub/read/git.py: ошибка git — считаем грязным.
+        return PreflightResult(ok=False, reason="dirty")
+    if dirty:
         return PreflightResult(ok=False, reason="dirty")
     base_sha = str(task.get("base_sha") or "")
     head = _head_sha(worktree)
-    if not base_sha or head is None or head != base_sha:
+    if not base_sha or head is None or not _shas_equal(head, base_sha):
         return PreflightResult(ok=False, reason="base-moved")
     rp = _rules_path(project)
     if not str(rp) or not rp.is_file():
@@ -153,11 +156,16 @@ def preflight(
             "HUB_WORKTREE": worktree,
             "HUB_PROJECT_ROOT": project.root or "",
         }
-        code, out_tail, err_tail = run_hook(hook, env, Path(worktree))
+        try:
+            code, out_tail, err_tail = run_hook(hook, env, Path(worktree))
+        except (OSError, subprocess.SubprocessError) as e:
+            return PreflightResult(ok=False, reason=f"setup-fail: {e}"[-2000:])
         if code != 0:
             raw = err_tail.strip() or out_tail.strip()
             one = " ".join(raw.split())
             tail = one[-2000:] if len(one) > 2000 else one
+            if not tail:
+                tail = f"код {code}"
             return PreflightResult(ok=False, reason=f"setup-fail: {tail}")
     # `pytest --collect-only` питоном проекта в worktree.
     # Заданный, но отсутствующий питон — collect-fail (не молчаливый fallback).
@@ -176,13 +184,16 @@ def preflight(
             text=True,
             timeout=120,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.SubprocessError):
         return PreflightResult(ok=False, reason="collect-fail")
     if r.returncode != 0:
         return PreflightResult(ok=False, reason="collect-fail")
     lock_path = (project.test_lock or "").strip()
     if lock_path:
-        holder = lock_holder(lock_path, proc_root)
+        try:
+            holder = lock_holder(lock_path, proc_root)
+        except (OSError, subprocess.SubprocessError) as e:
+            return PreflightResult(ok=False, reason=f"lock-fail: {e}"[-2000:])
         if holder is not None:
             when = _lock_time_text(holder.started_ms)
             return PreflightResult(ok=False, reason=f"locked: pid {holder.pid} since {when}")
