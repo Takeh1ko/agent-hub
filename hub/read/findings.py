@@ -36,7 +36,8 @@ def _parse_one(data: dict, author: str) -> Finding | None:
         lineno = 0
     issue = str(data.get("issue") or data.get("text") or data.get("message") or "")
     severity = str(data.get("severity") or data.get("level") or "info")
-    who = str(data.get("author") or author or "")
+    # Живые сводные файлы пишут имя в поле reviewer (run_task.py), author — фолбэк.
+    who = str(data.get("author") or data.get("reviewer") or author or "")
     return Finding(file=str(fname), line=lineno, issue=issue,
                    severity=severity, author=who)
 

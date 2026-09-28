@@ -104,6 +104,56 @@ def test_inbox_shows_answered(capsys):
     assert "привет" in out and "да" in out
 
 
+def test_inbox_shows_open(capsys):
+    Store()
+    assert main(["ask", "ждём ответа владельца", "--task", "T7"]) == 0
+    capsys.readouterr()
+    assert main(["inbox", "--peek"]) == 0
+    out = capsys.readouterr().out
+    assert "question:" in out and "ждём ответа владельца" in out
+
+
+def test_inbox_answered_once_then_cursor(capsys):
+    s = Store()
+    con = _con(s)
+    try:
+        con.execute(
+            "INSERT INTO question(task_id, asked_by, text, options_json,"
+            " status, answer, answered_via, ts)"
+            " VALUES ('T9','claude','закрытый?','[]','answered','да','tg',2000)")
+        con.commit()
+    finally:
+        con.close()
+    assert main(["inbox"]) == 0
+    assert "answer:" in capsys.readouterr().out
+    # Второй вызов не повторяет уже показанный ответ.
+    assert main(["inbox"]) == 0
+    assert "answer:" not in capsys.readouterr().out
+
+
+def test_inbox_peek_keeps_question_cursor(capsys):
+    s = Store()
+    con = _con(s)
+    try:
+        con.execute(
+            "INSERT INTO question(task_id, asked_by, text, options_json,"
+            " status, answer, answered_via, ts)"
+            " VALUES ('T9','claude','закрытый?','[]','answered','да','tg',2000)")
+        con.commit()
+    finally:
+        con.close()
+    assert main(["inbox", "--peek"]) == 0
+    assert "answer:" in capsys.readouterr().out
+    # --peek не двигает курсор: повторный --peek снова показывает.
+    assert main(["inbox", "--peek"]) == 0
+    assert "answer:" in capsys.readouterr().out
+
+
+def test_inbox_bad_limit(capsys):
+    assert main(["inbox", "--limit", "-1"]) == 2
+    assert "непонятный --limit" in capsys.readouterr().err
+
+
 def test_say_insert_ok(capsys):
     s = Store()
     assert main(["say", "готово, жду", "--task", "T3"]) == 0

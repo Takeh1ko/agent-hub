@@ -30,7 +30,8 @@ def test_dedup_case_space():
         Finding("a.py", 10, "НЕТ   ПРОВЕРКИ", "high", "muse"),
     ]
     got = dedup_findings(items)
-    # Первые три схлопнулись (осталось первое), строка 11 — нет; сортировка по (file, line).
+    # Элементы 2–4 (строка 10) схлопнулись, осталось первое из них; строка 11 — отдельно.
+    # Сортировка по (file, line): 10 раньше 11, хотя на входе 11 было первым.
     assert len(got) == 2
     assert got[0].line == 10 and got[0].author == "muse"
     assert got[1].line == 11
@@ -49,6 +50,39 @@ def test_output_1500_bytes_50():
     out = format_findings(dedup_findings(items))
     assert len(out.encode("utf-8")) <= 1500
     assert len(out.strip().splitlines()) >= 1
+
+
+def test_format_all_short_present():
+    """Контракт «по одному на строку»: 3 коротких → ровно 3 строки."""
+    items = [Finding(f"f{i}.py", i, f"короткое {i}", "low", "m")
+             for i in range(3)]
+    out = format_findings(items)
+    lines = out.strip().splitlines()
+    assert len(lines) == 3
+    for i in range(3):
+        assert f"f{i}.py:{i}" in out
+
+
+def test_load_reviewer_field(tmp_path):
+    """Живые сводные файлы пишут имя в поле reviewer, не author."""
+    wt = tmp_path / "wt"
+    _write(wt / ".agent" / "review_r1.json", {
+        "verdict": "changes",
+        "findings": [
+            {"file": "b.py", "line": 5, "issue": "гонка",
+             "severity": "high", "reviewer": "mimoflash"},
+        ],
+    })
+    got = load_findings(wt)
+    assert len(got) == 1 and got[0].author == "mimoflash"
+    # После дедупа со сводным первым автор не теряется (не пустые скобки).
+    _write(wt / ".agent" / "review_r1_mimoflash.json", {
+        "verdict": "changes",
+        "findings": [{"file": "b.py", "line": 5, "issue": "Гонка"}],
+    })
+    ded = dedup_findings(load_findings(wt))
+    assert len(ded) == 1 and ded[0].author == "mimoflash"
+    assert "()" not in format_findings(ded)
 
 
 def test_load_skips_broken(tmp_path):
