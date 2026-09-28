@@ -10,7 +10,7 @@ from pathlib import Path
 @dataclass
 class Proc:
     pid: int
-    kind: str  # opencode|agy|run_task|pytest|flock
+    kind: str  # opencode|agy|run_task|pytest|flock|hub_bot
     cwd: str
     args: list[str]
     started_ms: int
@@ -25,6 +25,17 @@ def _kind_of(args: list[str]) -> str | None:
         return "flock"
     if "run_task" in blob:
         return "run_task"
+    # hub_bot (H07): живой `hub bot` — консольный скрипт hub с подкомандой bot
+    # либо `python -m hub.bot…` / `python -m hub.cli bot`. Другие подкоманды hub
+    # (status, stop…) — короткие CLI-вызовы, не агенты: kind None, в список не идут.
+    stem = Path(args[0]).stem if args else ""
+    if stem == "hub":
+        if "bot" in args[1:]:
+            return "hub_bot"
+        return None
+    if "-m" in args and any(a == "hub.cli" or a.startswith("hub.") for a in args):
+        if "bot" in blob:
+            return "hub_bot"
     if base == "opencode" or base.startswith("opencode"):
         return "opencode"
     if base == "agy" or base.startswith("agy"):
