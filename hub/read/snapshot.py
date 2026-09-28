@@ -26,6 +26,9 @@ def stage_threshold(stage: str) -> int:
     s = stage.lower()
     if s.startswith("review"):
         return REVIEW_MS
+    if s.startswith("gate") or s.startswith("preflight"):
+        # Там идут тесты приёмки — как pytest.
+        return PYTEST_MS
     if "pytest" in s:
         return PYTEST_MS
     return EXEC_MS
@@ -111,7 +114,7 @@ class Snapshot:
             if len(text.encode("utf-8")) <= limit:
                 return text
             tasks.pop()
-        return head[:limit]
+        return head.encode("utf-8")[:limit].decode("utf-8", "ignore")
 
     def roster_text(self) -> str:
         """Модель → роль → задача → этап → пульс → $."""
@@ -164,7 +167,8 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
             pulse_ms = int(t.get("updated_at") or 0)
             active = None
         explained = bool(active) or pytest_kid
-        pulse = _pulse_mark(str(t.get("stage") or ""), now_ms - pulse_ms, explained, alive)
+        pulse = _pulse_mark(str(t.get("stage") or ""), now_ms - pulse_ms,
+                            explained, alive, pytest_kid)
         ss: list[SessionSnap] = []
         for e, s in zip(links, [oc_by_id.get(e["external_id"]) for e in links]):
             if s is None:
@@ -173,7 +177,7 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
                 continue
             go = s.provider == "opencode-go"
             smark = _pulse_mark(str(t.get("stage") or ""), now_ms - s.pulse_ms,
-                                bool(s.active_tool) or pytest_kid, alive)
+                                bool(s.active_tool) or pytest_kid, alive, pytest_kid)
             ss.append(SessionSnap(s.id, e["role"], s.model, s.provider, s.pulse_ms,
                                   smark, s.cost, go, s.context_tokens, s.last_activity))
         cost_go = sum(s.cost for s in ss if s.go)
@@ -189,20 +193,23 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
     return Snapshot(tasks=snaps, total_go=totals_go, total_usd=totals_usd, now_ms=now_ms)
 
 
-def _pulse_mark(stage: str, age_ms: int, explained: bool, alive: list) -> str:
+def _pulse_mark(stage: str, age_ms: int, explained: bool, alive: list,
+                pytest_kid: bool = False) -> str:
     if stage in DONE_STAGES:
         return DONE_MARK
+    # Порог — по факту pytest/flock-ребёнка, не по имени этапа.
+    threshold = PYTEST_MS if pytest_kid else stage_threshold(stage)
     if not alive:
         # Процесса нет и этап не финальный → упал, но свежий пульс
         # без процесса считаем зависшим, а не упавшим (процесс мог
         # завершиться штатно между опросами).
-        if age_ms >= stage_threshold(stage) and not explained:
+        if age_ms >= threshold and not explained:
             return "🔴"
         return "⚫"
     if age_ms < GREEN_MS:
         return "🟢"
     if explained:
         return "🟡"
-    if age_ms >= stage_threshold(stage):
+    if age_ms >= threshold:
         return "🔴"
     return "🟡"

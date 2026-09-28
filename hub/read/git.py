@@ -6,9 +6,13 @@ import subprocess
 
 
 def _run(*args: str, cwd: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        list(args), cwd=cwd, capture_output=True, text=True, timeout=60,
-    )
+    try:
+        return subprocess.run(
+            list(args), cwd=cwd, capture_output=True, text=True, timeout=60,
+        )
+    except OSError as e:
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=127, stdout="", stderr=str(e))
 
 
 def branch_commits(repo: str, base: str, branch: str) -> int:
@@ -29,9 +33,15 @@ def diff_stat(repo: str, base: str, head: str) -> str:
 
 
 def is_dirty(worktree: str) -> bool:
-    """Есть ли незакоммиченные изменения."""
+    """Есть ли незакоммиченные изменения.
+
+    Каталог без .git или ошибка git — считаем «грязным»,
+    чтобы ворота падали, а не пропускали ложно-зелёным.
+    """
     r = _run("git", "status", "--porcelain", cwd=worktree)
-    return bool(r.returncode == 0 and r.stdout.strip())
+    if r.returncode != 0:
+        return True
+    return bool(r.stdout.strip())
 
 
 def worktrees(repo: str) -> list[dict]:

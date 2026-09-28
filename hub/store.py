@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -73,7 +74,8 @@ class Store:
         fields["updated_at"] = fields.get("updated_at", now)
         cols = [c for c in TASK_COLUMNS if c in fields]
         placeholders = ", ".join("?" for _ in cols)
-        updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+        # created_at пишется только при INSERT, обновление его не трогает.
+        updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c not in ("id", "created_at"))
         con = self._connect()
         try:
             con.execute(
@@ -206,11 +208,12 @@ class Store:
                 stage_reason=",".join(str(v) for v in verdicts),
             )
             exec_sid = state.get("executor_session")
-            if exec_sid and exec_sid != "noop":
+            if exec_sid and str(exec_sid) not in ("noop", "panel"):
                 self.link_session(str(exec_sid), "opencode", task_id, "executor", round_no, "")
             for rsid in reviewers:
-                if rsid and rsid != "noop":
-                    self.link_session(str(rsid), "opencode", task_id, "reviewer", round_no, "")
+                if not rsid or str(rsid) in ("noop", "panel"):
+                    continue
+                self.link_session(str(rsid), "opencode", task_id, "reviewer", round_no, "")
             done.append(task_id)
         return done
 
@@ -224,6 +227,13 @@ def _legacy_stage(status: str, round_no: int, verdicts: list, worktree: Path) ->
                 return f"review r{round_no}"
             if rev == "dispute":
                 return "arbiter"
+            # Review-файла может не быть (панель не дописала агрегат) —
+            # тогда этап восстанавливаем по verdicts из state.json.
+            vals = [str(v) for v in (verdicts or [])]
+            if any(v == "changes" for v in vals):
+                return f"review r{round_no}"
+            if any(v == "dispute" for v in vals) or "invalid" in vals:
+                return "arbiter"
         return status
     if status == "ready":
         return "ready"
@@ -231,14 +241,23 @@ def _legacy_stage(status: str, round_no: int, verdicts: list, worktree: Path) ->
 
 
 def _last_review_verdict(worktree: Path, round_no: int) -> str | None:
-    for name in (f"review_r{round_no}.json", f"review_r{round_no}_panel.json"):
-        path = worktree / ".agent" / name
-        if not path.is_file():
+    """Первый verdict из review_rN*.json (приоритет dispute > changes > approve)."""
+    try:
+        cands = sorted((worktree / ".agent").glob(f"review_r{round_no}*.json"))
+    except OSError:
+        return None
+    pats = re.compile(rf"^review_r{round_no}(?:_.*)?\.json$")
+    found: set[str] = set()
+    for path in cands:
+        if not pats.match(path.name) or not path.is_file():
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(data, dict) and data.get("verdict") in ("approve", "changes", "dispute"):
-            return str(data["verdict"])
+            found.add(str(data["verdict"]))
+    for v in ("dispute", "changes", "approve"):
+        if v in found:
+            return v
     return None

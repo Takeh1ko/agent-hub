@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +16,11 @@ DEFAULT_OPENCODB = Path.home() / ".local/share/opencode/opencode.db"
 
 def cmd_cost(args) -> int:
     now = ht.now_ms()
-    since = ht.parse_since(args.since, now) if args.since else 0
+    try:
+        since = ht.parse_since(args.since, now) if args.since else 0
+    except ValueError as e:
+        print(f"непонятный --since: {e}", file=sys.stderr)
+        return 2
     db = Path(args.opencode_db) if getattr(args, "opencode_db", None) else DEFAULT_OPENCODB
     sessions = oc.sessions(str(db), since) if db.exists() else []
     by = args.by

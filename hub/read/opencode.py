@@ -12,6 +12,8 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 REQUIRED_TABLES = ("session", "message", "part", "todo")
+# Минимум колонок session: живая БД меняется быстрее тестов.
+REQUIRED_SESSION_COLS = ("time_updated", "time_created", "directory", "cost", "model")
 
 
 @dataclass
@@ -79,17 +81,30 @@ def sessions(
         if any(t not in tables for t in REQUIRED_TABLES):
             log.warning("opencode.db %s: незнакомая схема (нет %s)", path, REQUIRED_TABLES)
             return []
-        if directory_prefix:
-            rows = con.execute(
-                "SELECT * FROM session WHERE time_updated >= ? AND directory LIKE ?"
-                " ORDER BY time_updated",
-                (since_ms, directory_prefix + "%"),
-            ).fetchall()
-        else:
-            rows = con.execute(
-                "SELECT * FROM session WHERE time_updated >= ? ORDER BY time_updated",
-                (since_ms,),
-            ).fetchall()
+        try:
+            cols = {r[1] for r in con.execute("PRAGMA table_info('session')").fetchall()}
+        except sqlite3.Error as e:
+            log.warning("opencode.db %s: схема не читается: %s", path, e)
+            return []
+        if any(c not in cols for c in REQUIRED_SESSION_COLS):
+            log.warning("opencode.db %s: незнакомая схема (нет колонок %s)",
+                        path, REQUIRED_SESSION_COLS)
+            return []
+        try:
+            if directory_prefix:
+                rows = con.execute(
+                    "SELECT * FROM session WHERE time_updated >= ? AND directory LIKE ?"
+                    " ORDER BY time_updated",
+                    (since_ms, directory_prefix + "%"),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT * FROM session WHERE time_updated >= ? ORDER BY time_updated",
+                    (since_ms,),
+                ).fetchall()
+        except sqlite3.Error as e:
+            log.warning("opencode.db %s: незнакомая схема: %s", path, e)
+            return []
         now_ms = int(time.time() * 1000)
         out: list[OcSession] = []
         for row in rows:
@@ -122,7 +137,8 @@ def _one(con: sqlite3.Connection, s: dict, now_ms: int) -> OcSession:
         ).fetchone()[0])
     except sqlite3.Error:
         steps = 0
-    # Контекст: input + cache.read последнего assistant-сообщения.
+    # Контекст: input + cache.read последнего «живого» assistant-сообщения
+    # (без error и с ненулевым вкладом — оборванные повторы дают нули).
     context = 0
     try:
         msgs = con.execute(
@@ -136,9 +152,17 @@ def _one(con: sqlite3.Connection, s: dict, now_ms: int) -> OcSession:
                 continue
             if m.get("role") != "assistant":
                 continue
+            if m.get("error"):
+                continue
             toks = m.get("tokens") or {}
             cache = toks.get("cache") or {}
-            context = int(toks.get("input") or 0) + int(cache.get("read") or 0)
+            try:
+                contrib = int(toks.get("input") or 0) + int(cache.get("read") or 0)
+            except (TypeError, ValueError):
+                continue
+            if contrib <= 0:
+                continue
+            context = contrib
             break
     except sqlite3.Error:
         context = 0
