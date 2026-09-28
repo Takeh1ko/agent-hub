@@ -11,7 +11,7 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hub.store import Store
@@ -329,22 +329,6 @@ def mark_outbox_sent(store: Store, outbox_id: int, now_ms: int) -> None:
         con.close()
 
 
-def drain_outbox(store: Store, send: Callable[[dict], None], now_ms: int) -> int:
-    """Отправить всё неотправленное через send(row) ровно по разу.
-
-    send — фейковый/настоящий отправитель; sent_ts ставится только
-    после успешного вызова, при исключении строка остаётся в очереди.
-    Возвращает число отправленных.
-    """
-    rows = fetch_outbox(store)
-    n = 0
-    for row in rows:
-        send(dict(row))
-        mark_outbox_sent(store, int(row["id"]), int(now_ms))
-        n += 1
-    return n
-
-
 def parse_options(row: dict) -> list[str]:
     """Варианты вопроса из options_json, битый JSON → []."""
     raw = row.get("options_json") if isinstance(row, dict) else None
@@ -383,8 +367,16 @@ def list_open_questions(store: Store) -> list[dict]:
         con.close()
 
 
+# Лимит Telegram на текст инлайн-кнопки.
+BUTTON_LABEL_LIMIT = 64
+
+
 def format_question(row: dict) -> tuple[str, list[Button]]:
-    """Текст вопроса + кнопки по options_json."""
+    """Текст вопроса + кнопки по options_json.
+
+    Подпись кнопки режется до BUTTON_LABEL_LIMIT: длинный вариант иначе
+    роняет send_message (400) во все чаты и вопрос ретраится бесконечно.
+    """
     qid = int(row.get("id") or 0)
     task_id = str(row.get("task_id") or "")
     text = str(row.get("text") or "")
@@ -396,7 +388,8 @@ def format_question(row: dict) -> tuple[str, list[Button]]:
     if not opts:
         body += "\nОтветить текстом (реплаем)."
         return body, []
-    buttons = [Button(label=o, data=f"qans:{qid}:{i}") for i, o in enumerate(opts)]
+    buttons = [Button(label=o[:BUTTON_LABEL_LIMIT], data=f"qans:{qid}:{i}")
+               for i, o in enumerate(opts)]
     return body, buttons
 
 
@@ -626,24 +619,51 @@ def record_events(store: Store, events: list[dict], now_ms: int) -> list[dict]:
 _FINAL_STAGES = ("merged", "dropped")
 
 # Этапы, где пульс ⚫/🔴 без процесса — норма, а не падение:
-# задача уже не работает (ждёт merge, в арбитраже, остановлена...).
+# задача уже не работает (ждёт merge, в арбитраже, остановлена...)
+# либо процесса не должно быть в принципе (очередь, предполёт).
 # Отдельно от _FINAL_STAGES: та используется в apply_confirm для /stop.
-_QUIET_STAGES = ("ready", "arbiter", "failed", "stopped", "merged", "dropped")
+_QUIET_STAGES = ("queued", "preflight", "ready", "arbiter", "failed",
+                 "stopped", "merged", "dropped")
 
 
-def snapshot_events(prev, cur) -> list[dict]:
+def _pulse_state(t) -> dict | None:
+    """Текущее плохое пульс-состояние задачи, None — всё хорошо.
+
+    Тихо для _QUIET_STAGES и для задач без сессий (там пульс считается
+    из updated_at и ни о чём не говорит).
+    """
+    if str(t.stage) in _QUIET_STAGES:
+        return None
+    if not getattr(t, "sessions", None):
+        return None
+    if t.pulse == "🔴":
+        return {"task_id": t.id, "kind": "stuck",
+                "payload": {"stage": str(t.stage)}}
+    if t.pulse == "⚫":
+        return {"task_id": t.id, "kind": "crashed",
+                "payload": {"stage": str(t.stage)}}
+    return None
+
+
+def snapshot_events(prev, cur, pending: dict | None = None) -> list[dict]:
     """Разница снимков → события (чисто, без БД).
 
     prev None — baseline, событий нет (не спамим при старте).
-    Этап → ready/arbiter/failed; пульс → stuck (🔴) / crashed (⚫),
-    но для задач в _QUIET_STAGES пульс-события не порождаются
-    (⚫/🔴 без процесса там — норма завершения, а не падение).
+    Этап → ready/arbiter/failed сразу; пульс → stuck (🔴) / crashed (⚫).
+    Для задач в _QUIET_STAGES и без сессий пульс-события не порождаются
+    (⚫/🔴 без процесса там — норма, а не падение).
+
+    pending — отложенные пульс-сигналы между тиками (гистерезис):
+    None — прежнее поведение (сигнал сразу); dict — сигнал публикуется,
+    только если подтверждён следующим снимком, иначе сбрасывается
+    (этап стал тихим, пульс вернулся). Живёт в BotState, переживает тики.
     """
     if prev is None or cur is None:
         return []
     old = {t.id: t for t in (getattr(prev, "tasks", None) or [])}
     out: list[dict] = []
-    for t in (getattr(cur, "tasks", None) or []):
+    cur_tasks = list(getattr(cur, "tasks", None) or [])
+    for t in cur_tasks:
         p = old.get(t.id)
         if p is None:
             continue
@@ -657,14 +677,27 @@ def snapshot_events(prev, cur) -> list[dict]:
             elif t.stage == "failed":
                 out.append({"task_id": t.id, "kind": "failed",
                             "payload": {"stage": t.stage}})
-        if (str(t.pulse) != str(p.pulse)
-                and str(t.stage) not in _QUIET_STAGES):
-            if t.pulse == "🔴" and str(p.pulse) != "🔴":
-                out.append({"task_id": t.id, "kind": "stuck",
-                            "payload": {"stage": str(t.stage)}})
-            elif t.pulse == "⚫" and str(p.pulse) != "⚫":
-                out.append({"task_id": t.id, "kind": "crashed",
-                            "payload": {"stage": str(t.stage)}})
+        state = _pulse_state(t)
+        if pending is None:
+            # Прежнее поведение: сигнал только при переходе пульса.
+            if state is not None and str(p.pulse) != str(t.pulse):
+                out.append(state)
+            continue
+        if state is None:
+            # Сигнал не подтверждён: пульс вернулся или этап стал тихим.
+            pending.pop(t.id, None)
+            continue
+        prev_state = pending.get(t.id)
+        if prev_state is not None and prev_state.get("kind") == state["kind"]:
+            # Плохое состояние держится второй снимок подряд — публикуем.
+            out.append(state)
+            pending.pop(t.id, None)
+        else:
+            pending[t.id] = state
+    if pending is not None:
+        alive = {t.id for t in cur_tasks}
+        for tid in [k for k in pending if k not in alive]:
+            pending.pop(tid, None)
     return out
 
 
@@ -799,7 +832,8 @@ def format_task(store: Store, task_id: str, limit: int = TASK_LIMIT,
         return "Нужен ID: /task ID"
     task = store.get_task(tid)
     if task is None:
-        return f"нет задачи {tid}"
+        # Plain-text, но уходит с parse_mode=HTML — экранируем id.
+        return esc(f"нет задачи {tid}")
     sessions = store.list_sessions(tid)
     stage = str(task.get("stage") or "")
     rnd = str(task.get("round") or 0)

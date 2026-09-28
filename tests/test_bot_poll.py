@@ -302,6 +302,17 @@ def test_poll_summary_partial_per_chat_retry():
     asyncio.run(_go())
 
 
+def _backlog_ids(texts: list[str]) -> list[str]:
+    """Id задач из строк сводок (без заголовка)."""
+    out: list[str] = []
+    for t in texts:
+        for line in t.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 2:
+                out.append(parts[1].rstrip(":"))
+    return out
+
+
 def test_poll_summary_long_backlog_lossless():
     """MEDIUM: бэклог > 4000 симв. — остаток следующим сообщением, без потерь."""
     async def _go():
@@ -310,9 +321,9 @@ def test_poll_summary_long_backlog_lossless():
         s = Store()
         bc.remember_chat(s, 555, NOW)
         n = 120
+        # Без stage в payload: строка ~90 симв., бэклог > 4000 — разрез обязан.
         for i in range(n):
-            s.add_event(f"H{i:03d}", "ready",
-                        {"stage": "ready", "text": "x" * 90})
+            s.add_event(f"H{i:03d}", "ready", {"text": "x" * 90})
         bot, state = FakeBot(), BotState()
         r1 = await poll_once(bot, state, NOW)
         assert r1["sent"] == 0 and len(state.grouper.buf) == n
@@ -334,16 +345,129 @@ def test_poll_summary_long_backlog_lossless():
             if left == 0 and not state.grouper.buf:
                 break
             assert rounds < 10, "очередь встала"
+        assert rounds > 1, "бэклог ушёл больше чем одним сообщением"
         assert total == n, f"помечено {total} из {n}"
-        got: set[str] = set()
-        for t in bot.texts(_owner()):
-            for line in t.splitlines()[1:]:
-                parts = line.split()
-                if len(parts) >= 2:
-                    got.add(parts[1].rstrip(":"))
-        assert got == {f"H{i:03d}" for i in range(n)}
+        # Каждая строка — ровно один раз каждому чату, без дублей и потерь.
+        for chat in (555, _owner()):
+            got = _backlog_ids(bot.texts(chat))
+            assert sorted(got) == [f"H{i:03d}" for i in range(n)]
         for t in bot.texts():
             assert len(t) <= bc.MSG_LIMIT
+
+    asyncio.run(_go())
+
+
+def test_poll_summary_frozen_batch_no_dup_on_new_event():
+    """MEDIUM: частичный отказ + новое событие — получивший без дублей."""
+    async def _go():
+        s = Store()
+        bc.remember_chat(s, 555, NOW)
+        s.add_event("H01", "ready", {"stage": "ready"})
+        bot, state = FakeBot(fail={555}), BotState()
+        r1 = await poll_once(bot, state, NOW)
+        assert r1["sent"] == 0 and len(state.grouper.buf) == 1
+        r2 = await poll_once(bot, state, NOW + 5 * 60_000 + 1)
+        assert r2["sent"] == 0  # 555 упал, владелец получил H01
+        assert bot.count(555) == 0 and bot.count(_owner()) == 1
+        # Новое событие в буфере — батч заморожен, владелец не дублируется.
+        s.add_event("H02", "ready", {"stage": "ready"})
+        r3 = await poll_once(bot, state, NOW + 5 * 60_000 + 2)
+        assert r3["sent"] == 0
+        assert bot.count(_owner()) == 1, "H01 повторно не шлётся"
+        bot.fail.clear()
+        r4 = await poll_once(bot, state, NOW + 5 * 60_000 + 3)
+        assert r4["sent"] == 1  # H01 доставлен всем, батч разморожен
+        r5 = await poll_once(bot, state, NOW + 10 * 60_000 + 4)
+        assert r5["sent"] == 1  # H02 следующим окном
+        for chat in (555, _owner()):
+            got = _backlog_ids(bot.texts(chat))
+            assert sorted(got) == ["H01", "H02"], f"чат {chat}: {got}"
+
+    asyncio.run(_go())
+
+
+def test_proxy_session_without_socks():
+    """HIGH: сессия с HTTPS_PROXY строится без aiohttp-socks и шлёт через него."""
+    import os
+    from unittest import mock
+
+    from hub.bot import run as br
+
+    with mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:8080"}):
+        assert br.get_proxy() == "http://127.0.0.1:8080"
+        sess = br.build_session()
+    assert isinstance(sess, br.HttpProxySession)
+    assert sess.proxy_url == "http://127.0.0.1:8080"
+    # Без прокси — напрямую (None), исключений нигде нет.
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("HTTPS_PROXY", None)
+        os.environ.pop("https_proxy", None)
+        assert br.build_session() is None
+
+    posted: dict = {}
+
+    class _FakeCM:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def text(self):
+            return ('{"ok": true, "result": {"id": 1, "is_bot": true,'
+                    ' "first_name": "t", "username": "t"}}')
+
+    class _FakeSession:
+        closed = False
+
+        def post(self, url, **kwargs):
+            posted.update(kwargs)
+            posted["url"] = url
+            return _FakeCM()
+
+        async def close(self):
+            self.closed = True
+
+    async def _go():
+        from aiogram import Bot
+        from aiogram.methods import GetMe
+        from aiogram.types import User
+
+        bot = Bot(token="123:abc", session=sess)
+        sess._session = _FakeSession()
+        sess._should_reset_connector = False  # сессия уже установлена
+        try:
+            user = await sess.make_request(bot, GetMe())
+        finally:
+            sess._session = None
+        assert isinstance(user, User)
+        assert posted.get("proxy") == "http://127.0.0.1:8080"
+        await sess.close()
+
+    asyncio.run(_go())
+
+
+def test_poll_pulse_hysteresis_prod():
+    """LOW: продюсер с гистерезисом — crashed только со второго тика."""
+    async def _go():
+        s = Store()
+        bc.remember_chat(s, 555, NOW)
+        s.upsert_task(id="HZ", stage="exec r1", worktree="")
+        s.link_session("sz", "opencode", "HZ", "executor", 1, "muse")
+        bot, state = FakeBot(), BotState()
+        t = NOW
+        r1 = await poll_once(bot, state, t)
+        t += 15_000
+        assert r1["added"] == 0  # baseline молчит
+        r2 = await poll_once(bot, state, t)
+        t += 15_000
+        assert r2["added"] == 0, "первый плохой тик — только отложен"
+        assert set(state.pulse_pending) == {"HZ"}
+        r3 = await poll_once(bot, state, t)
+        assert r3["added"] == 1, "подтверждено вторым тиком"
+        assert [e["kind"] for e in state.grouper.buf] == ["crashed"]
 
     asyncio.run(_go())
 
@@ -447,6 +571,73 @@ def test_handle_reply_edits_all_copies():
         br._QSENT.clear()
 
     asyncio.run(_go())
+
+
+def test_handle_reply_remembers_chat():
+    """LOW: первое действие чата — реплай: чат попадает в рассылку."""
+    async def _go():
+        from hub.bot import run as br
+
+        br._QMSG.clear()
+        br._QSENT.clear()
+        s = Store()
+        assert 556 not in bc.list_chats(s)
+        qid = _add_question(s, "продлить?", [])
+        bot = FakeBot()
+        ok, _ = await br.handle_reply(bot, 556, qid, "продлить", 41, NOW)
+        assert ok
+        assert 556 in bc.list_chats(s), "реплай — тоже первый контакт"
+        br._QMSG.clear()
+        br._QSENT.clear()
+
+    asyncio.run(_go())
+
+
+def test_poll_roster_partial_per_chat_retry():
+    """LOW: ростер per-chat — упавший чат добирает после починки ровно раз."""
+    async def _go():
+        s = Store()
+        bc.remember_chat(s, 555, NOW)
+        bot, state = FakeBot(fail={555}), BotState()
+        r1 = await poll_once(bot, state, NOW)
+        assert r1["roster"] is False  # baseline
+        s.upsert_task(id="HN", stage="exec r1", worktree="")
+        r2 = await poll_once(bot, state, NOW + 3600_000 + 1)
+        assert r2["roster"] is False, "дошло не всем — метка не движется"
+        assert bot.count(_owner()) == 1 and bot.count(555) == 0
+        assert any("Итого сегодня" in t for t in bot.texts(_owner()))
+        bot.fail.clear()
+        r3 = await poll_once(bot, state, NOW + 3600_000 + 2)
+        assert r3["roster"] is True
+        assert bot.count(555) == 1, "недостававший добрал ровно один раз"
+        assert bot.count(_owner()) == 1, "получившему — без дубля"
+        r4 = await poll_once(bot, state, NOW + 2 * 3600_000 + 3)
+        assert r4["roster"] is False and bot.count() == 2
+
+    asyncio.run(_go())
+
+
+def test_qmsg_qsent_eviction_consistent():
+    """LOW: вытеснение _QMSG/_QSENT синхронно — ссылок на мёртвые нет."""
+    from hub.bot import run as br
+
+    br._QMSG.clear()
+    br._QSENT.clear()
+    for i in range(1200):
+        br._remember_qmsg(1, 100 + i, i)
+    assert len(br._QMSG) <= 1000
+    assert len(br._QSENT) <= 1000
+    for key, qid in br._QMSG.items():
+        assert qid in br._QSENT, f"qid {qid} вытеснен из _QSENT"
+        assert key in br._QSENT[qid], f"ключ {key} потерян в _QSENT"
+    seen_keys = set()
+    for qid, keys in br._QSENT.items():
+        for key in keys:
+            assert br._QMSG.get(key) == qid, f"мёртвая ссылка {key}"
+            seen_keys.add(key)
+    assert set(br._QMSG) == seen_keys
+    br._QMSG.clear()
+    br._QSENT.clear()
 
 
 def test_reply_edits_question_no_dup():

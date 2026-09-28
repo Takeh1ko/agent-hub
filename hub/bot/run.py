@@ -15,6 +15,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from aiogram import Dispatcher, F, Router
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
@@ -61,6 +62,87 @@ def get_proxy() -> str | None:
     return os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or None
 
 
+class HttpProxySession(AiohttpSession):
+    """Aiohttp-сессия с HTTP-прокси без пакета aiohttp-socks.
+
+    aiogram 3.31 при любом proxy= в конструкторе строит ProxyConnector,
+    которому нужен aiohttp-socks (нет в зависимостях — старт падал
+    с RuntimeError до цикла с повтором). Нативный aiohttp умеет
+    HTTP-прокси через параметр proxy= самого запроса — для HTTPS_PROXY
+    вида http://host:port этого достаточно.
+    """
+
+    def __init__(self, proxy_url: str, **kwargs) -> None:
+        super().__init__(proxy=None, **kwargs)
+        self._proxy_url = str(proxy_url)
+
+    @property
+    def proxy_url(self) -> str:
+        """Куда идут запросы."""
+        return self._proxy_url
+
+    async def make_request(self, bot, method, timeout=None):
+        """Как базовая, но proxy= уходит в session.post."""
+        from aiogram.exceptions import TelegramNetworkError
+
+        session = await self.create_session()
+        url = self.api.api_url(token=bot.token, method=method.__api_method__)
+        form = self.build_form_data(bot=bot, method=method)
+        try:
+            async with session.post(
+                url,
+                data=form,
+                proxy=self._proxy_url,
+                timeout=self.timeout if timeout is None else timeout,
+            ) as resp:
+                raw_result = await resp.text()
+        except asyncio.TimeoutError as e:
+            raise TelegramNetworkError(
+                method=method, message="Request timeout error") from e
+        except Exception as e:  # noqa: BLE001 — как базовая ClientError-ветка
+            from aiohttp import ClientError
+
+            if not isinstance(e, ClientError):
+                raise
+            raise TelegramNetworkError(
+                method=method, message=f"{type(e).__name__}: {e}") from e
+        response = self.check_response(
+            bot=bot,
+            method=method,
+            status_code=resp.status,
+            content=raw_result,
+        )
+        return response.result
+
+    async def stream_content(self, url, headers=None, timeout=30,
+                             chunk_size=65536, raise_for_status=True):
+        """Как базовая, но proxy= уходит в session.get."""
+        if headers is None:
+            headers = {}
+        session = await self.create_session()
+        async with session.get(
+            url,
+            proxy=self._proxy_url,
+            timeout=timeout,
+            headers=headers,
+            raise_for_status=raise_for_status,
+        ) as resp:
+            async for chunk in resp.content.iter_chunked(chunk_size):
+                yield chunk
+
+
+def build_session():
+    """Сессия aiogram: с прокси из HTTPS_PROXY либо None (напрямую).
+
+    Не бросает исключений отсутствия aiohttp-socks: HTTP-прокси идёт
+    через нативный параметр запроса aiohttp.
+    """
+    proxy = get_proxy()
+    if not proxy:
+        return None
+    return HttpProxySession(proxy)
+
+
 def _markup(buttons: list[bc.Button]):
     """Кнопки core → InlineKeyboardMarkup (чисто, без сети/БД)."""
     if not buttons:
@@ -73,16 +155,45 @@ def _markup(buttons: list[bc.Button]):
 
 
 def _remember_qmsg(chat_id: int, bot_msg_id: int, qid: int) -> None:
-    """Запомнить соответствие, с капой от утечки."""
+    """Запомнить соответствие, с капой от утечки.
+
+    _QMSG (резолв реплаев) и _QSENT (веерная правка) чистятся синхронно:
+    вытеснение из одной структуры убирает ключ и из другой.
+    """
     key = (int(chat_id), int(bot_msg_id))
-    _QMSG[key] = int(qid)
-    sent = _QSENT.setdefault(int(qid), [])
+    qid = int(qid)
+    old = _QMSG.get(key)
+    if old is not None and old != qid:
+        _drop_qmsg_key(old, key)
+    _QMSG[key] = qid
+    sent = _QSENT.setdefault(qid, [])
     if key not in sent:
         sent.append(key)
     while len(_QMSG) > _QMSG_MAX:
-        _QMSG.pop(next(iter(_QMSG)))
+        oldest = next(iter(_QMSG))
+        _drop_qmsg_key(_QMSG.pop(oldest), oldest)
     while len(_QSENT) > _QMSG_MAX:
-        _QSENT.pop(next(iter(_QSENT)))
+        _drop_qsent_qid(next(iter(_QSENT)))
+
+
+def _drop_qmsg_key(qid: int, key: tuple[int, int]) -> None:
+    """Убрать (chat, msg) из веерного списка вопроса."""
+    sent = _QSENT.get(int(qid))
+    if sent is None:
+        return
+    try:
+        sent.remove(key)
+    except ValueError:
+        pass
+    if not sent:
+        _QSENT.pop(int(qid), None)
+
+
+def _drop_qsent_qid(qid: int) -> None:
+    """Вытеснить вопрос из _QSENT вместе с ключами _QMSG."""
+    for key in _QSENT.pop(int(qid), []):
+        if _QMSG.get(key) == int(qid):
+            _QMSG.pop(key, None)
 
 
 def _forget_qid(qid: int) -> None:
@@ -120,6 +231,14 @@ class BotState:
     outbox_done: set[tuple[int, int]] = field(default_factory=set)
     q_done: set[tuple[int, int]] = field(default_factory=set)
     summary_done: set[tuple[int, int]] = field(default_factory=set)
+    # Замороженный батч сводки (текст + id) до полной доставки всем чатам:
+    # пересчёт из всего буфера давал бы дубли получившим при новом событии.
+    sum_text: str | None = None
+    sum_batch: list[int] = field(default_factory=list)
+    # Отложенные пульс-сигналы snapshot_events (гистерезис, см. core).
+    pulse_pending: dict = field(default_factory=dict)
+    # Per-chat доставка авторостера: (norm, chat).
+    roster_done: set[tuple[str, int]] = field(default_factory=set)
 
 
 # --- sync-хелперы: вызываются только через asyncio.to_thread ---
@@ -259,10 +378,12 @@ def _sync_q_mark(qid: int) -> None:
     bc.mark_question_sent(Store(), int(qid))
 
 
-def _sync_tick(prev_snap, now_ms: int):
+def _sync_tick(prev_snap, now_ms: int, pending: dict | None = None):
     """Продюсер сводок: snapshot.build → дифф → события в store.
 
     Возвращает (cur_snap, добавленные_строки_с_id). Вызывается в потоке.
+    pending — отложенные пульс-сигналы (гистерезис, живёт в BotState);
+    None — немедленные пульс-события (старое поведение).
     """
     from hub.read import snapshot as snap
     from hub.store import Store
@@ -270,7 +391,7 @@ def _sync_tick(prev_snap, now_ms: int):
     store = Store()
     cur = snap.build(store, int(now_ms),
                      opencode_db=_opencode_db(), proc_root="/proc")
-    produced = bc.snapshot_events(prev_snap, cur)
+    produced = bc.snapshot_events(prev_snap, cur, pending)
     produced += bc.pop_budget_events(store, cur)
     added = bc.record_events(store, produced, int(now_ms)) if produced else []
     return cur, added
@@ -338,7 +459,8 @@ async def handle_confirm(chat_id: int, data: str, now_ms: int) -> str | None:
 
 async def handle_reply(bot, chat_id: int, qid: int, body: str,
                        replied_id: int, now_ms: int) -> tuple[bool, str]:
-    """Ответ реплаем: запись + правка копий вопроса во всех чатах."""
+    """Ответ реплаем: remember чата, запись + правка копий во всех чатах."""
+    await asyncio.to_thread(_sync_remember, int(chat_id), int(now_ms))
     ok, short, full = await asyncio.to_thread(
         _sync_answer, int(qid), str(body), int(now_ms))
     if not ok:
@@ -397,8 +519,9 @@ async def poll_once(bot, state: BotState, now_ms: int) -> dict:
     """Одна итерация 15 с: вопросы, продюсер, группировка, авторостер."""
     log = logging.getLogger("hub.bot")
     res = {"questions": 0, "added": 0, "sent": 0, "roster": False}
-    # 1. Продюсер: снимок → разница → события.
-    cur, added = await asyncio.to_thread(_sync_tick, state.prev_snap, now_ms)
+    # 1. Продюсер: снимок → разница → события (пульс — с гистерезисом).
+    cur, added = await asyncio.to_thread(
+        _sync_tick, state.prev_snap, now_ms, state.pulse_pending)
     state.prev_snap = cur
     res["added"] = len(added)
     # 2. Вопросы новым чатам — per-chat, без дублей получившим.
@@ -432,7 +555,12 @@ async def poll_once(bot, state: BotState, now_ms: int) -> dict:
         chats = await asyncio.to_thread(_sync_all_chats)
         # Текст — из целых строк (остаток — следующим сообщением),
         # доставка — per-chat: sent_tg и буфер — только когда ушло всем.
-        text, batch = bc.select_summary_batch(state.grouper.buf)
+        # Батч заморожен до полной доставки: пересчёт из всего буфера
+        # при новом событии давал бы дубли уже получившим чатам.
+        if not state.sum_batch:
+            state.sum_text, state.sum_batch = \
+                bc.select_summary_batch(state.grouper.buf)
+        text, batch = state.sum_text or "", list(state.sum_batch)
         if chats and text.strip() and batch:
             for chat in chats:
                 if all((eid, int(chat)) in state.summary_done
@@ -449,6 +577,7 @@ async def poll_once(bot, state: BotState, now_ms: int) -> dict:
                    for eid in batch for c in chats):
                 await asyncio.to_thread(_sync_events_mark, batch)
                 state.grouper.remove_ids(batch)
+                state.sum_text, state.sum_batch = None, []
                 if state.grouper.buf:
                     # Остаток — на следующее окно.
                     state.grouper.first_ts = int(now_ms)
@@ -457,22 +586,35 @@ async def poll_once(bot, state: BotState, now_ms: int) -> dict:
                                       if e not in done}
                 res["sent"] = len(batch)
     # 4. Авторостер раз в час, если нормализованный снимок менялся.
+    # Доставка per-chat (как сводка): метка — только когда ушло всем.
     norm = bc.snapshot_key(cur)
     if state.last_roster_norm is None:
         state.last_roster_norm = norm
         state.last_roster_ts = now_ms
-    elif (now_ms - state.last_roster_ts >= ROSTER_S * 1000
+    elif norm != state.last_roster_norm:
+        # Новая картина вытесняет недодоставленную старую.
+        state.roster_done = {(n, c) for n, c in state.roster_done
+                             if n == norm}
+    if (state.last_roster_norm is not None
+            and now_ms - state.last_roster_ts >= ROSTER_S * 1000
             and norm != state.last_roster_norm):
         roster = bc.format_roster(cur)
-        for chat in await asyncio.to_thread(_sync_all_chats):
+        chats = await asyncio.to_thread(_sync_all_chats)
+        for chat in chats:
+            if (norm, int(chat)) in state.roster_done:
+                continue
             try:
                 await bot.send_message(int(chat), roster, parse_mode="HTML")
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 — ретрай этому чату
                 log.warning("авторостер → %s: %s", chat, e)
                 continue
-        state.last_roster_norm = norm
-        state.last_roster_ts = now_ms
-        res["roster"] = True
+            state.roster_done.add((norm, int(chat)))
+        if chats and all((norm, int(c)) in state.roster_done for c in chats):
+            state.roster_done = {(n, c) for n, c in state.roster_done
+                                 if n != norm}
+            state.last_roster_norm = norm
+            state.last_roster_ts = now_ms
+            res["roster"] = True
     return res
 
 
@@ -593,14 +735,11 @@ def build_dispatcher() -> Dispatcher:
             chat = int(call.message.chat.id)
         except (AttributeError, TypeError, ValueError):
             chat = int(call.from_user.id)
+        # Правку копий делает handle_qans веером (включая тапнутую):
+        # повторный edit_text давал бы вечный «message is not modified».
         ok, text = await handle_qans(
             call.bot, chat, str(call.data or ""), ht.now_ms())
-        try:
-            if ok:
-                await call.message.edit_text(bc.clip(text))
-            await call.answer("✅ Записано" if ok else text)
-        except Exception:  # noqa: BLE001 — правка может устареть
-            await call.answer("✅ Записано" if ok else text)
+        await call.answer("✅ Записано" if ok else text)
 
     @router.callback_query(F.data.startswith("confirm:"))
     async def _confirm(call: CallbackQuery) -> None:
@@ -689,16 +828,15 @@ async def _amain() -> None:
     from hub.secrets import TELEGRAM_BOT_TOKEN
 
     log = setup_logging()
-    proxy = get_proxy()
-    if proxy:
-        from aiogram.client.session.aiohttp import AiohttpSession
+    try:
+        session = build_session()
+        from aiogram import Bot
 
-        session = AiohttpSession(proxy=proxy)
-    else:
-        session = None
-    from aiogram import Bot
-
-    bot = Bot(token=TELEGRAM_BOT_TOKEN, session=session)
+        bot = Bot(token=TELEGRAM_BOT_TOKEN, session=session)
+    except Exception:
+        # Стартовый отказ — в bot.log с трейсом, а не молча.
+        log.exception("старт бота невозможен")
+        raise
     dp = build_dispatcher()
     tasks = [asyncio.create_task(_outbox_loop(bot)),
              asyncio.create_task(_poll_loop(bot))]

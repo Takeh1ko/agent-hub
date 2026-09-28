@@ -135,55 +135,20 @@ def test_all_chats_includes_owner():
     assert chats.count(555) == 1
 
 
-def test_outbox_once():
+def test_outbox_primitives_order_and_mark():
+    """Примитивы outbox: забор по id, пометка; доставка — через outbox_once.
+
+    Прод шлёт рассылкой по чатам через run.outbox_once (per-chat ретрай,
+    тесты в test_bot_poll.py); здесь — порядок и пометки без сети.
+    """
     s = Store()
     _add_outbox(s, "раз")
     _add_outbox(s, "два")
-    sent: list[str] = []
-    n = bc.drain_outbox(s, lambda row: sent.append(row["text"]), NOW)
-    assert n == 2 and sent == ["раз", "два"]
-    # Второй проход — тишина, ровно один раз.
-    sent2: list[str] = []
-    assert bc.drain_outbox(s, lambda row: sent2.append(row["text"]), NOW) == 0
-    assert sent2 == []
-    con = _con(s)
-    try:
-        left = con.execute(
-            "SELECT COUNT(*) FROM outbox WHERE sent_ts IS NULL").fetchone()[0]
-    finally:
-        con.close()
-    assert left == 0
-
-
-def test_outbox_marks_only_after_success():
-    """Падающий send: первая строка помечена, вторая осталась; порядок строгий."""
-    s = Store()
-    _add_outbox(s, "раз")
-    _add_outbox(s, "два")
-    calls: list[str] = []
-
-    def _flaky(row):
-        calls.append(row["text"])
-        if row["text"] == "два":
-            raise RuntimeError("сеть упала")
-
-    try:
-        bc.drain_outbox(s, _flaky, NOW)
-        assert False, "исключение отправителя обязано проброситься"
-    except RuntimeError:
-        pass
-    assert calls == ["раз", "два"]  # порядок — по id, маркировка после успеха
-    con = _con(s)
-    try:
-        rows = {r["text"]: r["sent_ts"] for r in
-                con.execute("SELECT text, sent_ts FROM outbox")}
-    finally:
-        con.close()
-    assert rows["раз"] is not None and rows["два"] is None
-    # Повтор шлёт только непомеченную.
-    calls2: list[str] = []
-    assert bc.drain_outbox(s, lambda r: calls2.append(r["text"]), NOW) == 1
-    assert calls2 == ["два"]
+    rows = bc.fetch_outbox(s)
+    assert [r["text"] for r in rows] == ["раз", "два"]  # порядок — по id
+    bc.mark_outbox_sent(s, int(rows[0]["id"]), NOW)
+    left = [r["text"] for r in bc.fetch_outbox(s)]
+    assert left == ["два"], "повтор забирает только непомеченную"
 
 
 def test_question_buttons_and_answer():
@@ -445,9 +410,12 @@ def test_parse_question_ref():
     assert bc.parse_question_ref("реплай без номера") is None
 
 
-def _snap_stage(stage: str, pulse: str) -> Snapshot:
+def _snap_stage(stage: str, pulse: str, sessions: object = "one") -> Snapshot:
+    ss = [] if sessions is None else [SessionSnap(
+        "s1", "executor", "muse", "opencode-go",
+        NOW, pulse, 0.11, True, 5000, "bash: pytest")]
     return Snapshot(
-        tasks=[TaskSnap("H01", "P", stage, 1, pulse, 0.0, 0.0, 0, "-", [])],
+        tasks=[TaskSnap("H01", "P", stage, 1, pulse, 0.0, 0.0, 0, "-", ss)],
         total_go=0.0, total_usd=0.0, now_ms=NOW)
 
 
@@ -480,6 +448,54 @@ def test_snapshot_no_pulse_events_on_quiet_stages():
     assert "передано Claude" in bc.apply_confirm(s, "stop", "HR", True, NOW)
 
 
+def test_snapshot_quiet_queued_and_sessionless():
+    """LOW: queued/preflight и задачи без сессий пульс-сигналов не дают."""
+    assert bc.snapshot_events(
+        _snap_stage("queued", "⚫"), _snap_stage("queued", "🔴")) == []
+    assert bc.snapshot_events(
+        _snap_stage("queued", "🔴"), _snap_stage("queued", "⚫")) == []
+    assert bc.snapshot_events(
+        _snap_stage("preflight", "🟢"), _snap_stage("preflight", "⚫")) == []
+    # Без сессий пульс считается из updated_at — сигнала нет и в exec.
+    assert bc.snapshot_events(
+        _snap_stage("exec r1", "🟢", sessions=None),
+        _snap_stage("exec r1", "⚫", sessions=None)) == []
+    assert bc.snapshot_events(
+        _snap_stage("exec r1", "🟢", sessions=None),
+        _snap_stage("exec r1", "🔴", sessions=None)) == []
+
+
+def test_snapshot_pulse_hysteresis():
+    """LOW: crashed/stuck — только со второго подряд снимка; сброс при ready."""
+    pending: dict = {}
+    # Тик 1: процесс ушёл раньше смены этапа — молчим, сигнал отложен.
+    assert bc.snapshot_events(
+        _snap_stage("exec r1", "🟢"), _snap_stage("exec r1", "⚫"),
+        pending) == []
+    assert set(pending) == {"H01"}
+    # Тик 2: этап стал ready — только ready, отложенное сброшено.
+    kinds = [e["kind"] for e in bc.snapshot_events(
+        _snap_stage("exec r1", "⚫"), _snap_stage("ready", "⚫"), pending)]
+    assert kinds == ["ready"]
+    assert pending == {}
+    # Подтверждённыйстой: два тика exec⚫ подряд — crashed на втором.
+    assert bc.snapshot_events(
+        _snap_stage("exec r1", "🟢"), _snap_stage("exec r1", "⚫"),
+        pending) == []
+    kinds = [e["kind"] for e in bc.snapshot_events(
+        _snap_stage("exec r1", "⚫"), _snap_stage("exec r1", "⚫"), pending)]
+    assert kinds == ["crashed"]
+    assert pending == {}
+    # Пульс вернулся — отложенное сброшено без события.
+    assert bc.snapshot_events(
+        _snap_stage("exec r1", "🟢"), _snap_stage("exec r1", "🔴"),
+        pending) == []
+    assert bc.snapshot_events(
+        _snap_stage("exec r1", "🔴"), _snap_stage("exec r1", "🟢"),
+        pending) == []
+    assert pending == {}
+
+
 def test_record_events_payload_json_matches_db():
     """MEDIUM: строка из record_events форматируется как строка из БД."""
     s = Store()
@@ -501,8 +517,13 @@ def test_record_events_payload_json_matches_db():
 
 def test_select_summary_batch_cuts_by_events():
     """MEDIUM: длинная сводка режется по событиям, суммарно без потерь."""
+    # Без stage в payload: строка ~90 симв., 120 строк > 4000 — разрез обязан.
     evs = [{"id": i + 1, "kind": "ready", "task_id": f"H{i:03d}",
-            "payload_json": '{"stage": "ready"}'} for i in range(120)]
+            "payload_json": '{"text": "' + "x" * 90 + '"}'}
+           for i in range(120)]
+    text0, batch0 = bc.select_summary_batch(evs)
+    assert 0 < len(batch0) < 120, "первый проход — частичный батч"
+    assert len(text0) <= bc.MSG_LIMIT
     rest = list(evs)
     total = 0
     rounds = 0
@@ -514,6 +535,7 @@ def test_select_summary_batch_cuts_by_events():
         rest = rest[len(batch):]
         rounds += 1
         assert rounds < 10, "очередь встала"
+    assert rounds > 1, "бэклог ушёл больше чем одним сообщением"
     assert total == 120
 
 
@@ -530,6 +552,26 @@ def test_answer_reason_not_found_empty_already():
         s, qid, "да", now_ms=NOW) == bc.ANSWER_OK
     assert bc.answer_question_reason(
         s, qid, "нет", now_ms=NOW) == bc.ANSWER_ALREADY
+
+
+def test_question_button_label_limit():
+    """LOW: вариант длиннее 64 симв. — подпись кнопки режется, вопрос уходит."""
+    s = Store()
+    qid = _add_question(s, "выбирай?", ["y" * 100], task_id="T9")
+    row = bc.get_question(s, qid)
+    assert row is not None
+    text, buttons = bc.format_question(row)
+    assert len(buttons) == 1
+    assert len(buttons[0].label) == bc.BUTTON_LABEL_LIMIT == 64
+    assert buttons[0].data == f"qans:{qid}:0", "callback — по индексу, цел"
+    assert "выбирай?" in text
+
+
+def test_task_unknown_id_html_safe():
+    """LOW: /task на несуществующий id с '<' безопасен при parse_mode=HTML."""
+    s = Store()
+    out = bc.format_task(s, "a<b")
+    assert "<" not in out and "&lt;" in out
 
 
 def test_flush_drops_seen():
