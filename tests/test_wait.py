@@ -234,6 +234,12 @@ def test_cli_absolute_timeout_future(monkeypatch, capsys):
 
 def test_cli_absolute_timeout_past_real(capsys):
     """Абсолютное прошлое: настоящий wait выходит почти мгновенно."""
+    from hub import time as ht
+    from hub.commands import wait as wait_cmd
+
+    # Сторож: инверсия ветки дала бы «часы до полуночи» и повесила бы
+    # настоящий wait — тест обязан упасть сразу, а не висеть до таймаута.
+    assert wait_cmd.timeout_s("сегодня 00:00", ht.now_ms()) == 0.0
     Store()  # пусто
     t0 = time.monotonic()
     assert main(["wait", "--timeout", "сегодня 00:00", "--poll", "0.05"]) == 2
