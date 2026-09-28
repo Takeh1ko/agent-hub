@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,6 +49,16 @@ def _snap(task_id="T01", pulse="🔴", stage="exec r1", last="bash: pytest -q",
         sessions=[sess],
     )
     return Snapshot(tasks=[task], total_go=0.1, total_usd=0.0, now_ms=NOW)
+
+
+def _snap_two_sessions(task_id="T01", pulse="🔴") -> Snapshot:
+    """Детали длиннее панели: две сессии и две активности (~12 строк)."""
+    base = _snap(task_id=task_id, pulse=pulse)
+    t = base.tasks[0]
+    s2 = replace(t.sessions[0], last_activity="второй запуск: gate r1")
+    t2 = replace(t, sessions=[t.sessions[0], s2])
+    return Snapshot(tasks=[t2], total_go=base.total_go,
+                    total_usd=base.total_usd, now_ms=NOW)
 
 
 def _app(tmp_path) -> HubApp:
@@ -104,7 +116,7 @@ async def test_table_shows_red_pulse(tmp_path):
         await pilot.pause()
         assert table.row_count == 1
         row = table.get_row("T01")
-        assert any("🔴" in str(c) for c in row)
+        assert str(row[COL_KEYS.index("pulse")]) == "🔴"
 
 
 # --- q завершает ---
@@ -132,8 +144,24 @@ async def test_wide_shows_details_and_feed(tmp_path):
     app = _app(tmp_path)
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
-        assert app.query_one("#details").display is not False
-        assert app.query_one("#events").display is not False
+        assert app.query_one("#details").display is True
+        assert app.query_one("#events").display is True
+
+
+async def test_resize_updates_narrow_mode(tmp_path):
+    """MEDIUM: узкий режим — по новому размеру из события, без отставания."""
+    app = _app(tmp_path)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        assert app.query_one("#details").display is True
+        await pilot.resize_terminal(80, 24)
+        await pilot.pause()
+        assert app.query_one("#details").display is False
+        assert app.query_one("#events").display is False
+        await pilot.resize_terminal(120, 30)
+        await pilot.pause()
+        assert app.query_one("#details").display is True
+        assert app.query_one("#events").display is True
 
 
 # --- обновление без роста строк ---
@@ -170,20 +198,42 @@ async def test_update_keeps_row_identity(tmp_path):
         assert table.ordered_rows[0].key is key_before
 
 
-async def test_spark_cell_follows_context(tmp_path):
-    """Источник спарклайна таблицы: два update с разным context меняют символ."""
+async def test_update_reorders_rows_like_snapshot(tmp_path):
+    """Порядок строк — как в снимке: свежая задача поднимается вверх."""
     app = _app(tmp_path)
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
         table = app.query_one("#tasks", TaskTable)
-        table.update(_snap(ctx=100))
+
+        def snap_of(*ids: str) -> Snapshot:
+            return Snapshot(tasks=[_snap(task_id=i).tasks[0] for i in ids],
+                            total_go=0.2, total_usd=0.0, now_ms=NOW)
+
+        table.update(snap_of("TA", "TB"))
         await pilot.pause()
+        assert [r.key.value for r in table.ordered_rows] == ["TA", "TB"]
+        table.update(snap_of("TB", "TA"))
+        await pilot.pause()
+        assert table.row_count == 2
+        assert [r.key.value for r in table.ordered_rows] == ["TB", "TA"]
+
+
+async def test_spark_cell_follows_context(tmp_path):
+    """Источник спарклайна таблицы: растущий context даёт лесенку вверх."""
+    app = _app(tmp_path)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#tasks", TaskTable)
         spark_col = COL_KEYS.index("tokens")
-        first = str(table.get_row("T01")[spark_col])
-        table.update(_snap(ctx=5000))
-        await pilot.pause()
-        second = str(table.get_row("T01")[spark_col])
-        assert first != second
+        for ctx in (100, 300, 900, 2000, 5000):
+            table.update(_snap(ctx=ctx))
+            await pilot.pause()
+        spark = str(table.get_row("T01")[spark_col])
+        assert len(spark) == 5
+        idx = [BLOCKS.index(c) for c in spark]
+        # Лесенка от нижнего блока до верхнего, а не плоский ряд/неравенство.
+        assert idx == sorted(idx)
+        assert idx[0] == 0 and idx[-1] == len(BLOCKS) - 1
 
 
 # --- Enter открывает детали ---
@@ -204,8 +254,43 @@ async def test_enter_opens_details(tmp_path):
             if app._details_task == "T01":
                 break
         assert app._details_task == "T01"
-        text = str(app.query_one("#details").render())
+        from textual.widgets import Static
+
+        text = str(app.query_one("#details-text", Static).render())
         assert "Задача T01" in text
+
+
+async def test_details_panel_scrolls_to_findings(tmp_path):
+    """HIGH: хвост деталей (todo, замечания) достижим прокруткой и виден."""
+    from textual.containers import VerticalScroll
+    from textual.widgets import Static
+
+    app = _app(tmp_path)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        app._apply_snapshot(_snap_two_sessions(), bot_alive=False, events=[])
+        await pilot.pause()
+        table = app.query_one("#tasks", TaskTable)
+        table.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(100):
+            await pilot.pause()
+            if app._details_task == "T01":
+                break
+        assert app._details_task == "T01"
+        await pilot.pause()
+        inner = app.query_one("#details-text", Static)
+        nlines = len(str(inner.render()).splitlines())
+        assert nlines > 7  # в старом Static(7 строк контента) хвост терялся
+        assert "Замечания:" in str(inner.render())
+        vs = app.query_one("#details", VerticalScroll)
+        assert vs.max_scroll_y > 0 or vs.size.height >= nlines
+        assert "Замечания" not in app.export_screenshot()  # хвост обрезан
+        vs.scroll_end(animate=False)
+        await pilot.pause()
+        await pilot.pause()
+        assert "Замечания" in app.export_screenshot()  # хвост на экране
 
 
 async def test_enter_keeps_details_hidden_when_narrow(tmp_path):
@@ -262,7 +347,7 @@ def test_filtered_drops_merged_and_other_project(tmp_path):
     assert got.total_go == 0.3 and got.now_ms == NOW
 
 
-def test_header_counts_and_bot_unknown(tmp_path, monkeypatch):
+def test_header_counts_and_bot_unknown(tmp_path):
     app = _app(tmp_path)
     snap = Snapshot(tasks=[
         _snap(task_id="T1", stage="exec r1").tasks[0],
@@ -273,10 +358,48 @@ def test_header_counts_and_bot_unknown(tmp_path, monkeypatch):
     # Очередь не входит в 'активно'; бота без данных не хороним.
     assert "активно 1 · в очереди 1" in text
     assert "бот ?" in text and "бот нет" not in text
-    monkeypatch.setattr("hub.tui.app.procs.agent_procs",
-                        lambda root: [SimpleNamespace(args=["hub", "bot"])])
-    assert app._check_bot() is True
+    # total_go — расход за сегодня, лимит 60 — месячный котёл: подпись честная.
+    assert "мес" in text
     assert "бот жив" in app._header_text(snap, bot_alive=True)
+
+
+def _fake_proc(root: Path, pid: str, cmdline: bytes) -> None:
+    """Один процесс в фейковом /proc: cmdline + stat + cwd."""
+    d = root / pid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "cmdline").write_bytes(cmdline)
+    (d / "stat").write_text(
+        f"{pid} (hub) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0\n",
+        encoding="utf-8")
+    try:
+        os.symlink(str(root), d / "cwd")
+    except OSError:
+        pass
+
+
+def test_bot_seen_via_real_agent_procs(tmp_path):
+    """MEDIUM: настоящий agent_procs видит hub bot на фейковом /proc."""
+    from hub.read import procs as hub_procs
+
+    root = tmp_path / "proc-bot"
+    _fake_proc(root, "424242", b"hub\x00bot\x00")
+    live = hub_procs.agent_procs(str(root))
+    assert [(p.pid, p.kind) for p in live] == [(424242, "hub_bot")]
+    app = HubApp(store=Store(), opencode_db=None, proc_root=str(root))
+    assert app._check_bot() is True
+
+
+def test_bot_absent_and_no_false_positive(tmp_path):
+    """Другой hub-вызов — не бот; pytest с hub/bot в пути — не бот."""
+    from hub.read import procs as hub_procs
+
+    root = tmp_path / "proc-nobot"
+    _fake_proc(root, "111", b"hub\x00status\x00")
+    _fake_proc(root, "222", b"pytest\x00tests/test_hub_bot.py\x00")
+    live = hub_procs.agent_procs(str(root))
+    assert [p.kind for p in live] == ["pytest"]
+    app = HubApp(store=Store(), opencode_db=None, proc_root=str(root))
+    assert app._check_bot() is False
 
 
 # --- живой путь _fetch_snapshot: БД по умолчанию ---
@@ -309,13 +432,17 @@ def test_top_passes_existing_db(monkeypatch, tmp_path, capsys):
     db.parent.mkdir(parents=True, exist_ok=True)
     db.write_bytes(b"")
     captured: dict = {}
+    made: list = []
 
     class FakeApp:
         def __init__(self, *args, **kwargs):
             captured.update(kwargs)
             self.project_filter = None
+            self.ran = False
+            made.append(self)
 
         def run(self):
+            self.ran = True
             return 0
 
     monkeypatch.setattr("hub.tui.app.HubApp", FakeApp)
@@ -324,10 +451,15 @@ def test_top_passes_existing_db(monkeypatch, tmp_path, capsys):
 
     assert main(["top"]) == 0
     assert captured.get("opencode_db") == str(db)
+    assert made and made[-1].ran is True
+    assert made[-1].project_filter is None
     db.unlink()
     captured.clear()
+    made.clear()
     assert main(["top", "--project", "/x"]) == 0
     assert captured.get("opencode_db") is None
+    assert made and made[-1].ran is True
+    assert made[-1].project_filter == "/x"
 
 
 # --- живой опрос заполняет таблицу ---
@@ -369,6 +501,96 @@ def test_eventfeed_bounded():
     from hub.tui.widgets import EventFeed as EF
 
     assert EF().max_lines == 200
+
+
+async def test_snapshot_events_reach_feed_and_interval(tmp_path, monkeypatch):
+    """Связка 'события снапшота → лента' и опрос каждые 2 с."""
+    calls: list = []
+    orig = HubApp.set_interval
+
+    def fake_interval(self, interval, *args, **kwargs):
+        calls.append(interval)
+        return orig(self, interval, *args, **kwargs)
+
+    monkeypatch.setattr(HubApp, "set_interval", fake_interval)
+    app = _app(tmp_path)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        feed = app.query_one("#events", EventFeed)
+        before = len(feed.lines)
+        app._apply_snapshot(_snap(), bot_alive=False, events=[
+            {"id": 1, "task_id": "T01", "kind": "stage", "payload_json": "{}"},
+        ])
+        await pilot.pause()
+        assert len(feed.lines) > before
+        assert app._last_event_id == 1
+    assert calls and calls[0] == 2.0
+
+
+def test_first_fetch_primes_feed_without_history(tmp_path):
+    """Первый тик ленту историей не заливает, только запоминает id."""
+    store = Store()
+    old = store.add_event("T01", "stage", {"s": 1})
+    proc = tmp_path / "proc-пусто"
+    proc.mkdir(exist_ok=True)
+    app = HubApp(store=store, opencode_db=None, proc_root=str(proc))
+    assert app._fetch_events() == []
+    assert app._last_event_id == old
+    new = store.add_event("T01", "stage", {"s": 2})
+    got = app._fetch_events()
+    assert [e["id"] for e in got] == [new]
+
+
+async def test_run_hub_cmd_reports_error(tmp_path, monkeypatch):
+    """Ненулевой код — notify с severity='error', запуск через свой python."""
+    app = _app(tmp_path)
+    seen: dict = {}
+    notes: list = []
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["timeout"] = kwargs.get("timeout")
+        return SimpleNamespace(returncode=2, stdout="",
+                               stderr="usage: нет такой команды")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(app, "notify",
+                        lambda msg, *a, **k: notes.append((msg, k)))
+    monkeypatch.setattr(app, "_schedule_refresh",
+                        lambda: seen.setdefault("refresh", True))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await app._run_hub_cmd(["stop", "T01"])
+        await pilot.pause()
+    assert seen["cmd"][:3] == [sys.executable, "-m", "hub.cli"]
+    assert seen["cmd"][3:] == ["stop", "T01"]
+    assert seen["timeout"] == 60
+    assert seen["refresh"] is True
+    assert notes and notes[-1][1].get("severity") == "error"
+
+
+async def test_run_hub_cmd_merge_timeout_and_ok(tmp_path, monkeypatch):
+    """merge ждёт дольше минуты; успех — без severity='error'."""
+    app = _app(tmp_path)
+    seen: dict = {}
+    notes: list = []
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["timeout"] = kwargs.get("timeout")
+        return SimpleNamespace(returncode=0, stdout="смержено T01", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(app, "notify",
+                        lambda msg, *a, **k: notes.append((msg, k)))
+    monkeypatch.setattr(app, "_schedule_refresh", lambda: None)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await app._run_hub_cmd(["merge", "T01"])
+        await pilot.pause()
+    assert seen["cmd"][3:] == ["merge", "T01"]
+    assert seen["timeout"] == 600
+    assert notes and notes[-1][1].get("severity") is None
 
 
 # --- hub top в не-TTY ---

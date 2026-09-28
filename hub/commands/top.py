@@ -5,8 +5,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-DEFAULT_OPENCODB = Path.home() / ".local/share/opencode/opencode.db"
-
 
 def cmd_top(args) -> int:
     if not sys.stdout.isatty():

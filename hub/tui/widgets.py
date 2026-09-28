@@ -156,6 +156,13 @@ class TaskTable(DataTable):
                     log.exception("не добавилась строка %s", tid)
                     continue
                 self._keys.add(tid)
+        # Порядок — как в снимке (hub status: updated_at DESC): свежие вверх.
+        # Ключи строк те же, только перестановка — обновление остаётся по ключу.
+        try:
+            pos = {tid: i for i, tid in enumerate(wanted)}
+            self.sort("id", key=lambda cell: pos.get(str(cell), len(pos)))
+        except Exception:
+            log.exception("не пересортилась таблица")
 
 
 class EventFeed(RichLog):

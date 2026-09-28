@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from textual.app import App, ComposeResult
+from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Static
 
@@ -59,7 +61,7 @@ class HubApp(App):
     CSS = """
     #top-header { height: 3; }
     #tasks { height: 1fr; }
-    #details { height: 9; border: solid #666; }
+    #details { height: 12; border: solid #666; }
     #events { height: 8; }
     """
 
@@ -84,11 +86,15 @@ class HubApp(App):
         self._details_task: str | None = None
         self._narrow: bool = False
         self._bot_alive_flag: bool = False
+        self._events_primed: bool = False
 
     def compose(self) -> ComposeResult:
         yield Static("hub top — загрузка…", id="top-header")
         yield TaskTable(id="tasks")
-        yield Static("Детали: Enter по строке таблицы", id="details")
+        # Детали — в прокрутке: текст длиннее фиксированной высоты
+        # (сессии, tool-строки, todo, замечания), Static обрезал бы хвост.
+        yield VerticalScroll(Static("Детали: Enter по строке таблицы",
+                                    id="details-text"), id="details")
         yield EventFeed(id="events")
         yield Footer()
 
@@ -98,7 +104,9 @@ class HubApp(App):
         self._schedule_refresh()
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        self._apply_narrow_mode()
+        # self.size в этот момент ещё старый (App._on_resize бежит позже
+        # по MRO) — берём новый размер из события.
+        self._apply_narrow_mode(getattr(event, "size", None))
 
     # --- опрос: весь блокирующий I/O — в потоке воркера ---
 
@@ -155,40 +163,45 @@ class HubApp(App):
             return None
 
     def _check_bot(self) -> bool:
-        """Жив ли hub bot. agent_procs не знает процесс hub (H01),
-        поэтому отсутствие в списке = 'неизвестно', а не 'нет'."""
+        """Жив ли hub bot: процесс вида hub_bot в agent_procs (см. _kind_of)."""
         try:
             live = procs.agent_procs(self._proc_root)
         except Exception:
             log.exception("не читаются процессы")
             return False
-        for p in live:
-            try:
-                blob = " ".join(p.args or [])
-            except Exception:
-                log.exception("битые аргументы процесса")
-                continue
-            if "hub" in blob and "bot" in blob:
-                return True
-        return False
+        return any(p.kind == "hub_bot" for p in live)
 
     def _fetch_events(self) -> list[dict]:
         store = self._store()
         if store is None:
             return []
         try:
-            return store.events_since(self._last_event_id)
+            evs = store.events_since(self._last_event_id)
         except Exception:
             log.exception("не читаются события")
             return []
+        if not self._events_primed:
+            # Первый тик: лента начинается с пустого — всю историю
+            # не вываливаем, только запоминаем последний id.
+            self._events_primed = True
+            if evs:
+                try:
+                    self._last_event_id = max(int(e.get("id", 0) or 0) for e in evs)
+                except Exception:
+                    log.exception("битый id события")
+            return []
+        return evs
 
     def _fetch_all(self) -> tuple[Snapshot | None, bool, list[dict]]:
         """Всё блокирующее чтение тика — одним куском в потоке воркера."""
         return (self._fetch_snapshot(), self._check_bot(), self._fetch_events())
 
     def _apply_snapshot(self, snap: Snapshot | None, bot_alive: bool = False,
-                        events: list[dict] | None = None) -> None:
+                         events: list[dict] | None = None) -> None:
         """Только рисование готовых данных — без I/O."""
+        # Узкий режим — всегда, даже при пустом тике: иначе при snap None
+        # неверный режим после ресайза остался бы навсегда.
+        self._apply_narrow_mode()
         if snap is None:
             return
         self._snap = snap
@@ -233,24 +246,25 @@ class HubApp(App):
         frac = min(1.0, go / GO_LIMIT) if GO_LIMIT > 0 else 0.0
         filled = int(frac * 10)
         bar = "█" * filled + "░" * (10 - filled)
-        # Проверки worker'ом нет в списке agent_procs (H01) — не врём: 'бот ?'.
+        # Нет процесса hub_bot в agent_procs — честное 'бот ?', не 'бот нет'.
         bot = "бот жив" if bot_alive else "бот ?"
         return (
             f"активно {active} · в очереди {queued} · "
             f"$ сегодня go {go:.2f} usd {usd:.2f} · "
-            f"Go [{bar}] {go:.2f}/60 · agy n/a · {bot}"
+            # total_go — расход за сегодня, лимит 60 — месячный котёл (spec §5).
+            f"Go-день [{bar}] {go:.2f}/60мес · agy n/a · {bot}"
         )
 
     # --- узкий режим ---
 
-    def _apply_narrow_mode(self) -> None:
+    def _apply_narrow_mode(self, size=None) -> None:  # type: ignore[no-untyped-def]
         try:
-            w = self.size.width
-            h = self.size.height
+            sz = size if size is not None else self.size
+            narrow = sz.width <= 80 or sz.height <= 24
         except Exception:
             log.exception("нет размера экрана")
             return
-        self._narrow = w <= 80 or h <= 24
+        self._narrow = narrow
         for wid_id in ("#details", "#events"):
             try:
                 self.query_one(wid_id).display = not self._narrow
@@ -316,21 +330,13 @@ class HubApp(App):
         lines.extend(self._finding_lines(task_id))
         return "\n".join(lines)
 
-    def _render_details(self, task_id: str) -> None:
-        """Синхронная отрисовка (тесты, тёплый путь); в проде — через воркер."""
-        self._details_task = task_id
-        try:
-            self.query_one("#details", Static).update(self._build_detail_text(task_id))
-        except Exception:
-            log.exception("не отрисовались детали")
-
     async def _do_show_details(self, task_id: str) -> None:
         text = await asyncio.to_thread(self._build_detail_text, task_id)
         self._details_task = task_id
         try:
-            self.query_one("#details", Static).update(text)
+            self.query_one("#details-text", Static).update(text)
             # В узком режиме детали скрыты — не выпячиваем их из-под шторки.
-            self.query_one("#details", Static).display = not self._narrow
+            self.query_one("#details").display = not self._narrow
         except Exception:
             log.exception("не отрисовались детали")
 
@@ -382,17 +388,6 @@ class HubApp(App):
             self.run_worker(self._do_show_details(tid), group="cmd", exclusive=True,
                             exit_on_error=False)
 
-    def on_data_table_cell_selected(self, event) -> None:  # type: ignore[no-untyped-def]
-        # При cursor_type='cell' Enter даёт CellSelected — обрабатываем так же.
-        try:
-            tid = str(event.row_key.value or "")
-        except Exception:
-            log.exception("битое событие выбора ячейки")
-            return
-        if tid:
-            self.run_worker(self._do_show_details(tid), group="cmd", exclusive=True,
-                            exit_on_error=False)
-
     def action_quit_app(self) -> None:
         self.exit()
 
@@ -430,16 +425,25 @@ class HubApp(App):
                         exclusive=True, exit_on_error=False)
 
     async def _run_hub_cmd(self, argv: list[str]) -> None:
-        cmd = ["hub", *argv]
+        # Тот же интерпретатор, что крутит TUI: 'hub' из PATH может не найтись.
+        cmd = [sys.executable, "-m", "hub.cli", *argv]
+        # merge гоняет приёмку под замком дольше минуты — таймаут с запасом.
+        timeout = 600 if argv[:1] == ["merge"] else 60
         try:
             proc = await asyncio.to_thread(
-                subprocess.run, cmd, capture_output=True, text=True, timeout=60,
+                subprocess.run, cmd, capture_output=True, text=True, timeout=timeout,
             )
-            tail = (proc.stdout or proc.stderr or "").strip().splitlines()
-            self.notify(tail[-1][:80] if tail else "готово")
         except Exception as e:
             log.exception("команда hub не вышла")
             self.notify(f"не вышло: {e}"[:80], severity="error")
+            self._schedule_refresh()
+            return
+        tail = (proc.stdout or proc.stderr or "").strip().splitlines()
+        if proc.returncode != 0:
+            self.notify((tail[-1][:80] if tail else f"код {proc.returncode}"),
+                        severity="error")
+        else:
+            self.notify(tail[-1][:80] if tail else "готово")
         self._schedule_refresh()
 
 
