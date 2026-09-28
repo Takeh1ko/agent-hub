@@ -106,6 +106,57 @@ def test_unknown_schema_returns_empty(tmp_path, caplog):
     assert caplog.text.strip() != ""
 
 
+def test_unknown_columns_returns_empty(tmp_path, caplog):
+    """Таблицы свои, а колонки чужие (нет time_updated) → [] + warning."""
+    db = tmp_path / "полусвой.db"
+    con = sqlite3.connect(str(db))
+    con.execute("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL,"
+                " title TEXT NOT NULL, model TEXT, cost REAL, time_created INTEGER NOT NULL)")
+    con.execute("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,"
+                " time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)")
+    con.execute("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL,"
+                " session_id TEXT NOT NULL, time_created INTEGER NOT NULL,"
+                " time_updated INTEGER NOT NULL, data TEXT NOT NULL)")
+    con.execute("CREATE TABLE todo (session_id TEXT NOT NULL, content TEXT NOT NULL,"
+                " status TEXT NOT NULL, priority TEXT NOT NULL, position INTEGER NOT NULL,"
+                " time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)")
+    con.execute("INSERT INTO session VALUES (?,?,?,?,?,?)",
+                ("s", "/wt/T", "t", "{}", 0.0, NOW))
+    con.commit()
+    con.close()
+    with caplog.at_level(logging.WARNING):
+        assert sessions(db, 0) == []
+    assert caplog.text.strip() != ""
+
+
+def test_context_skips_error_and_zero_tokens(tmp_path):
+    """Последний assistant оборван (error, нули) → контекст из предыдущего живого."""
+    con = sqlite3.connect(str(tmp_path / "opencode.db"))
+    con.executescript(SCHEMA)
+    con.execute(
+        "INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("s", "p", "/wt/T", "t", json.dumps({"id": "x", "providerID": "openrouter"}),
+         0.0, 0, 0, 0, 0, NOW - 100_000, NOW))
+    con.execute(
+        "INSERT INTO message VALUES (?,?,?,?,?)",
+        ("m_old", "s", NOW - 90_000, NOW - 90_000, json.dumps({
+            "role": "assistant", "tokens": {"input": 2000, "cache": {"read": 8000}}})))
+    con.execute(
+        "INSERT INTO message VALUES (?,?,?,?,?)",
+        ("m_zero", "s", NOW - 50_000, NOW - 50_000, json.dumps({
+            "role": "assistant", "tokens": {"input": 0, "cache": {"read": 0}}})))
+    con.execute(
+        "INSERT INTO message VALUES (?,?,?,?,?)",
+        ("m_new", "s", NOW - 10_000, NOW - 10_000, json.dumps({
+            "role": "assistant",
+            "error": {"name": "MessageAbortedError"},
+            "tokens": {"input": 0, "cache": {"read": 0}}})))
+    con.commit()
+    con.close()
+    (got,) = sessions(tmp_path / "opencode.db", 0)
+    assert got.context_tokens == 2000 + 8000
+
+
 def test_last_activity_edit_format(tmp_path):
     con = sqlite3.connect(str(tmp_path / "opencode.db"))
     con.executescript(SCHEMA)

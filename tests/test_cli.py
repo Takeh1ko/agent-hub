@@ -101,6 +101,42 @@ def test_roster_and_cost(tmp_path, capsys, monkeypatch):
     assert main(["cost", "--since", "1д", "--by", "task"]) == 0
 
 
+def test_cost_exact_groups(tmp_path, capsys, monkeypatch):
+    """go/usd раздельно, группировка — точными строками, не словом «go»."""
+    from datetime import datetime, timezone
+
+    import hub.time as ht
+
+    _seed(Store())  # ses0 go, ses1 usd, ses2 go; все executor/muse, цена 0.1
+    db = tmp_path / "oc.db"
+    _oc(db)
+    monkeypatch.setattr(cost_cmd, "DEFAULT_OPENCODB", db)
+    assert main(["cost", "--by", "model"]) == 0
+    out = capsys.readouterr().out
+    assert "muse: go $0.200 + usd $0.100" in out
+    assert "Итого: go $0.200 + usd $0.100" in out
+    assert main(["cost", "--by", "role"]) == 0
+    out = capsys.readouterr().out
+    assert "executor: go $0.200 + usd $0.100" in out
+    assert main(["cost", "--by", "task"]) == 0
+    out = capsys.readouterr().out
+    assert "T00: go $0.100 + usd $0.000" in out
+    assert "T01: go $0.000 + usd $0.100" in out
+    assert main(["cost", "--by", "day"]) == 0
+    out = capsys.readouterr().out
+    day = datetime.fromtimestamp((NOW - 30_000) / 1000,
+                                 tz=timezone.utc).astimezone(ht.TZ).strftime("%Y-%m-%d")
+    assert f"{day}: go $0.200 + usd $0.100" in out
+
+
+def test_cost_bad_since_returns_2(tmp_path, capsys, monkeypatch):
+    db = tmp_path / "oc.db"
+    _oc(db, 0)
+    monkeypatch.setattr(cost_cmd, "DEFAULT_OPENCODB", db)
+    assert main(["cost", "--since", "херня"]) == 2
+    assert "непонятный --since" in capsys.readouterr().err
+
+
 def test_import_legacy_cmd(tmp_path, capsys):
     wt = tmp_path / "wt"
     t = wt / "T09-x"

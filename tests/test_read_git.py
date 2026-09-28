@@ -46,6 +46,18 @@ def test_is_dirty(tmp_path):
     assert is_dirty(str(repo))
 
 
+def test_missing_and_nongit_dirs(tmp_path):
+    """Нет каталога / не git: без исключений; is_dirty — «грязно», ворота падают."""
+    missing = str(tmp_path / "нет-такого")
+    assert branch_commits(missing, "main", "agent/T01") == 0
+    assert diff_stat(missing, "main", "agent/T01") == ""
+    assert is_dirty(missing) is True
+    plain = tmp_path / "просто-каталог"
+    plain.mkdir()
+    assert is_dirty(str(plain)) is True
+    assert branch_commits(str(plain), "main", "b") == 0
+
+
 def test_worktrees(tmp_path):
     repo = _repo(tmp_path)
     wt = tmp_path / "wt"

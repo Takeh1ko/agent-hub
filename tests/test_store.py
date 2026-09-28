@@ -99,3 +99,74 @@ def test_import_legacy_skips_broken(tmp_path):
     s = Store(tmp_path / "hub.db")
     assert s.import_legacy(wt) == []
     assert s.import_legacy(tmp_path / "нет-каталога") == []
+
+
+def _legacy_wt(tmp_path, name, state, reviews=None):
+    t = tmp_path / "worktrees" / name
+    (t / ".agent").mkdir(parents=True)
+    (t / ".agent" / "state.json").write_text(
+        json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    for fname, verdict in (reviews or {}).items():
+        (t / ".agent" / fname).write_text(
+            json.dumps({"verdict": verdict, "findings": []}), encoding="utf-8")
+    return t
+
+
+def test_import_legacy_verdicts_without_review_file(tmp_path):
+    """failed + changes в state.json без review-файла → всё равно review r1."""
+    _legacy_wt(tmp_path, "T10", {
+        "task": "T10", "base": "b", "worktree": "x",
+        "executor_session": "s", "reviewer_sessions": [],
+        "round": 1, "verdicts": ["changes"], "status": "failed",
+    })
+    _legacy_wt(tmp_path, "T11", {
+        "task": "T11", "base": "b", "worktree": "x",
+        "executor_session": "s", "reviewer_sessions": [],
+        "round": 2, "verdicts": ["dispute"], "status": "failed",
+    })
+    s = Store(tmp_path / "hub.db")
+    assert s.import_legacy(tmp_path / "worktrees") == ["T10", "T11"]
+    assert s.get_task("T10")["stage"] == "review r1"
+    assert s.get_task("T11")["stage"] == "arbiter"
+
+
+def test_import_legacy_personal_review_file(tmp_path):
+    """Только review_r1_<имя>.json (без сводного) → этап review r1."""
+    _legacy_wt(tmp_path, "T18", {
+        "task": "T18", "base": "b", "worktree": "x",
+        "executor_session": "s", "reviewer_sessions": [],
+        "round": 1, "verdicts": ["changes"], "status": "failed",
+    }, reviews={"review_r1_muse.json": "changes"})
+    _legacy_wt(tmp_path, "T19", {
+        "task": "T19", "base": "b", "worktree": "x",
+        "executor_session": "s", "reviewer_sessions": [],
+        "round": 1, "verdicts": ["approve", "changes"], "status": "failed",
+    }, reviews={"review_r1_a.json": "approve", "review_r1_b.json": "changes"})
+    s = Store(tmp_path / "hub.db")
+    assert s.import_legacy(tmp_path / "worktrees") == ["T18", "T19"]
+    assert s.get_task("T18")["stage"] == "review r1"
+    assert s.get_task("T19")["stage"] == "review r1"
+
+
+def test_import_legacy_skips_panel_sentinel(tmp_path):
+    """reviewer_sessions=['panel'] — не сессия, в БД её быть не должно."""
+    _legacy_wt(tmp_path, "T20", {
+        "task": "T20", "base": "b", "worktree": "x",
+        "executor_session": "s", "reviewer_sessions": ["panel", "noop", ""],
+        "round": 1, "verdicts": [], "status": "failed",
+    })
+    s = Store(tmp_path / "hub.db")
+    assert s.import_legacy(tmp_path / "worktrees") == ["T20"]
+    ext = [r["external_id"] for r in s.list_sessions("T20")]
+    assert "panel" not in ext and "noop" not in ext
+    assert ext == ["s"]
+
+
+def test_upsert_task_keeps_created_at(tmp_path):
+    s = Store(tmp_path / "hub.db")
+    s.upsert_task(id="T", stage="exec r1", created_at=1000)
+    assert s.get_task("T")["created_at"] == 1000
+    s.upsert_task(id="T", stage="exec r2")
+    got = s.get_task("T")
+    assert got["stage"] == "exec r2"
+    assert got["created_at"] == 1000

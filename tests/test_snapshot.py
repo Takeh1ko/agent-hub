@@ -90,14 +90,50 @@ def test_yellow_pytest_child(tmp_path):
     s = Store()
     wt = tmp_path / "wt-y"
     wt.mkdir()
-    s.upsert_task(id="T02", stage="exec r1", round=1, worktree=str(wt), updated_at=NOW - 600_000)
+    # Пульс старше порога exec (20 мин): без pytest-ребёнка будет 🔴, с ним — 🟡.
+    s.upsert_task(id="T02", stage="exec r1", round=1, worktree=str(wt), updated_at=NOW - 21 * 60_000)
     s.link_session("ses2", "opencode", "T02", "executor", 1, "muse")
-    db = _mkdb(tmp_path / "oc.db", [{"id": "ses2", "pulse": NOW - 600_000}])
+    db = _mkdb(tmp_path / "oc.db", [{"id": "ses2", "pulse": NOW - 21 * 60_000}])
     root = tmp_path / "proc"
     _proc(root, 10, ["opencode", "run"], str(wt))
     _proc(root, 11, ["flock", "/tmp/x.lock", "pytest"], str(wt), ppid=10)
-    got = snap.build(s, NOW, opencode_db=db, proc_root=root)
-    assert got.tasks[0].pulse == "🟡"
+    assert snap.build(s, NOW, opencode_db=db, proc_root=root).tasks[0].pulse == "🟡"
+    # Тот же пульс без ребёнка — завис.
+    assert snap.build(s, NOW, opencode_db=db,
+                      proc_root=tmp_path / "пустой").tasks[0].pulse == "🔴"
+
+
+def test_red_alive_no_explanation(tmp_path):
+    """Живой процесс, пульс 21 мин, без active_tool и pytest → 🔴."""
+    s = Store()
+    wt = tmp_path / "wt-r"
+    wt.mkdir()
+    s.upsert_task(id="T03", stage="exec r1", round=1, worktree=str(wt),
+                  updated_at=NOW - 21 * 60_000)
+    s.link_session("ses3", "opencode", "T03", "executor", 1, "muse")
+    db = _mkdb(tmp_path / "oc.db", [{"id": "ses3", "pulse": NOW - 21 * 60_000}])
+    root = tmp_path / "proc"
+    _proc(root, 10, ["opencode", "run"], str(wt))
+    assert snap.build(s, NOW, opencode_db=db, proc_root=root).tasks[0].pulse == "🔴"
+
+
+def test_pytest_threshold_by_fact(tmp_path):
+    """Порог 30 мин — по факту pytest-ребёнка, а не по имени этапа."""
+    assert snap.stage_threshold("gate r1") == 30 * 60_000
+    assert snap.stage_threshold("preflight") == 30 * 60_000
+    assert snap.stage_threshold("exec r1") == 20 * 60_000
+    assert snap._pulse_mark("exec r1", 25 * 60_000, False, ["жив"], True) == "🟡"
+    assert snap._pulse_mark("exec r1", 25 * 60_000, False, ["жив"], False) == "🔴"
+
+
+def test_to_text_byte_limit(tmp_path):
+    s = Store()
+    s.upsert_task(id="TК-кириллица", stage="exec r1", worktree=str(tmp_path / "w"),
+                  updated_at=NOW)
+    snap_ = snap.build(s, NOW, proc_root=tmp_path / "пустой")
+    for limit in (40, 20):
+        got = snap_.to_text(limit=limit)
+        assert len(got.encode("utf-8")) <= limit
 
 
 def test_green_and_black(tmp_path):
