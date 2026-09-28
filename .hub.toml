@@ -1,0 +1,24 @@
+schema_version = 1
+name = "agent-hub"
+root = "$HOME/Projects/Python/agent-hub"
+worktrees = "$HOME/Projects/Python/agent-hub-wt"
+rules = "docs/agents/rules.md"
+python = "$HOME/Projects/Python/agent-hub/.venv/bin/python"
+test_lock = "/tmp/hub-selftest.lock"
+work_branch = "main"
+push = ""
+allowed_paths = ["hub/**", "tests/**", "docs/**", "pyproject.toml", ".hub.toml"]
+
+[hooks]
+task_setup = ""
+task_cleanup = ""
+
+[defaults]
+executor = "muse"
+reviewers = ["muse", "mimoflash"]
+budget_go = 0.5
+
+[levels]
+easy = "gemini"
+medium = "musefree"
+hard = "muse"
