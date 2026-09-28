@@ -41,7 +41,9 @@ def is_dirty(worktree: str) -> bool:
     r = _run("git", "status", "--porcelain", cwd=worktree)
     if r.returncode != 0:
         return True
-    return bool(r.stdout.strip())
+    # Служебные каталоги конвейера (.agent, .agent.prev_<ts> после --continue-work) — не грязь.
+    paths = [ln[3:].strip().strip('"') for ln in r.stdout.splitlines() if ln.strip()]
+    return any(not (p == ".agent" or p.startswith((".agent/", ".agent.prev_"))) for p in paths)
 
 
 def worktrees(repo: str) -> list[dict]:

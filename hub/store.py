@@ -22,7 +22,7 @@ TASK_COLUMNS = (
     "id", "project", "card_path", "card_hash", "level", "branch",
     "worktree", "base_sha", "stage", "round", "executor",
     "reviewers_json", "stage_reason", "budget_go", "budget_usd",
-    "created_at", "updated_at", "merged_sha",
+    "created_at", "updated_at", "merged_sha", "rules_sha",
 )
 
 
