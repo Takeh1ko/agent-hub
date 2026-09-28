@@ -14,11 +14,15 @@ from hub.pipeline.cycle import (
     _allowed_intersection,
     _card_globs,
     _collect_reviews,
+    _diff_files,
     _diff_text,
     _read_rules,
     _resolve_card,
+    _review_file_valid,
     _runner_tool_model,
     _set_stage,
+    _unlink_round_reviews,
+    REVIEW_FIX_TEXT,
 )
 from hub.store import Store
 
@@ -77,9 +81,23 @@ def cmd_review(args) -> int:
         print(f"no-head: {e}")
         return 1
     head = r.stdout.strip() if r.returncode == 0 else ""
+    if not head:
+        print("no-head: git rev-parse HEAD не сработал")
+        return 1
     if done.commit != head:
         print(f"mismatch: done={done.commit} head={head}")
         return 1
+    diff_set = _diff_files(worktree, base_sha, head)
+    if diff_set is None:
+        print("no-diff: ворота не проверены")
+        return 1
+    if not diff_set:
+        print("empty-diff")
+        return 1
+    for f in done.files:
+        if f not in diff_set:
+            print(f"unknown-file: {f}")
+            return 1
     py = (getattr(project, "python", "") or "").strip() or _sys.executable
     lock = (getattr(project, "test_lock", "") or "").strip() or None
     gate = check_gate(Path(worktree), base_sha, head, allowed,
@@ -106,6 +124,7 @@ def cmd_review(args) -> int:
         return 1
     round_no = int(task.get("round") or 1) or 1
     _set_stage(store, task_id, f"review r{round_no}", round_no, "ручное ревью")
+    _unlink_round_reviews(worktree, round_no)
     diff_text = _diff_text(worktree, base_sha)
 
     def _one(item) -> None:
@@ -115,11 +134,19 @@ def cmd_review(args) -> int:
         log = str(Path(worktree) / ".agent" / f"reviewer_r{round_no}_{name}.log")
         try:
             rsid = runner.start(prompt, worktree, log)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, _sp.SubprocessError):
             return
+        own = Path(worktree) / ".agent" / f"review_r{round_no}_{name}.json"
+        if not _review_file_valid(own):
+            try:
+                runner.resume(rsid, REVIEW_FIX_TEXT.replace(
+                    "review_rN.json", f"review_r{round_no}_{name}.json"),
+                    worktree, log)
+            except (OSError, RuntimeError, _sp.SubprocessError):
+                pass
         try:
-            _, _m = _runner_tool_model(runner, {"executor": name})
-            store.link_session(rsid, "opencode", task_id, "reviewer", round_no,
+            rtool, _m = _runner_tool_model(runner, {"executor": name})
+            store.link_session(rsid, rtool, task_id, "reviewer", round_no,
                                str(getattr(runner, "model", name) or name).split("/")[-1])
         except (OSError, ValueError):
             pass

@@ -59,6 +59,15 @@ def cmd_continue(args) -> int:
     except (OSError, ValueError) as e:
         print(f"store-fail: {e}")
         return 1
+    # Флаг продолжения: HEAD ветки уже впереди базы (работа прошлого
+    # исполнителя), штатный preflight (HEAD == base) к ней неприменим —
+    # конвейер проверит merge-base вместо HEAD.
+    try:
+        from hub.pipeline.common import meta_set
+
+        meta_set(store, f"continued:{task_id}", "1")
+    except (OSError, ValueError):
+        pass
     print(f"OK {task_id} base={base[:8]}")
     return 0
 

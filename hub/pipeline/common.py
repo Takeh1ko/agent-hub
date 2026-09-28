@@ -123,21 +123,193 @@ def card_text_of(task: dict, project) -> str | None:
     return None
 
 
+def _section_text_of(card_text: str, name: str) -> str:
+    """Текст раздела карточки через разбор H02; фолбэк — весь текст."""
+    try:
+        from hub.gate import lint as lint_mod
+
+        lines = card_text.splitlines()
+        return lint_mod._section_text(lines, name)
+    except (ImportError, AttributeError):
+        return card_text
+
+
 def card_network_is_playerok(card_text: str) -> bool:
-    """Задача с «Сеть: playerok» — не параллельно с такой же."""
-    low = card_text.lower()
-    return "playerok" in low
+    """Задача с «Сеть: playerok» — не параллельно с такой же.
+
+    Ищем только в разделе «Сеть»: упоминание в других разделах
+    серийный режим не включает.
+    """
+    return "playerok" in _section_text_of(card_text, "Сеть").lower()
 
 
 def parse_level(card_text: str) -> str:
-    for line in card_text.splitlines():
-        s = line.strip()
-        if "Уровень" in s:
-            low = s.lower()
-            for lv in ("easy", "medium", "hard"):
-                if lv in low:
-                    return lv
+    sec = _section_text_of(card_text, "Уровень")
+    low = sec.lower()
+    for lv in ("easy", "medium", "hard"):
+        if lv in low:
+            return lv
     return "medium"
+
+
+def _expand_braces_str(s: str) -> list[str]:
+    """Раскрыть первую {a,b}-группу в строке (рекурсивно)."""
+    start = s.find("{")
+    if start < 0:
+        return [s]
+    depth = 0
+    end = -1
+    for i in range(start, len(s)):
+        if s[i] == "{":
+            depth += 1
+        elif s[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end < 0:
+        return [s]
+    pre, body, post = s[:start], s[start + 1:end], s[end + 1:]
+    parts = body.split(",")
+    if len(parts) < 2:
+        return [s]
+    # Не трогаем JSON/прозу: альтернативы — только токены без пробелов и пунктуации.
+    if any(not p or any(c in p for c in (" ", '"', "'", "`", ":", "{", "}"))
+           for p in parts):
+        return [s]
+    out: list[str] = []
+    for part in parts:
+        for expanded in _expand_braces_str(pre + part + post):
+            if expanded not in out:
+                out.append(expanded)
+    return out
+
+
+def _expand_braces_token(token: str) -> list[str]:
+    """Раскрыть {a,b} в одном токене (рекурсивно): `x{a,b}y` → [xay, xby]."""
+    return _expand_braces_str(token)
+
+
+def _expand_braces_in_backticks(section: str) -> str:
+    """Раскрыть {a,b} внутри бэктиков до сплиттера H02.
+
+    Сплиттер «Можно менять» (H02) дробит содержимое бэктика по [,;\\s]+,
+    поэтому `hub/commands/{start,stop}.py` без раскрытия превращается
+    в мусорный глоб `hub/commands/{start`. Раскрываем целую строку
+    бэктика заранее (дробим только после раскрытия).
+    """
+    import re as _re
+
+    def _sub(m) -> str:
+        inner = m.group(1)
+        toks: list[str] = []
+        for variant in _expand_braces_str(inner):
+            for tok in _re.split(r"[,;\s]+", variant.strip()):
+                if tok:
+                    toks.append(tok)
+        return "`" + " ".join(toks) + "`"
+
+    return _re.sub(r"`([^`]+)`", _sub, section)
+
+
+def card_globs(card_text: str) -> list[str]:
+    """Глобы «Можно менять» с раскрытыми brace-группами (общее для cycle/merge)."""
+    try:
+        from hub.gate import lint as lint_mod
+
+        lines = card_text.splitlines()
+        sec = lint_mod._section_text(lines, "Можно менять")
+        sec = _expand_braces_in_backticks(sec)
+        return [str(g) for g in lint_mod._can_change_globs(sec)]
+    except (ImportError, AttributeError):
+        return []
+
+
+def clean_pycache(worktree: str) -> None:
+    """Убрать __pycache__/.pytest_cache: pytest их создаёт, ворота видят грязь."""
+    import shutil as _sh
+
+    root = Path(worktree)
+    try:
+        for p in root.rglob("__pycache__"):
+            try:
+                if p.is_dir() and not p.is_symlink():
+                    _sh.rmtree(p, ignore_errors=True)
+            except OSError:
+                continue
+        for p in root.rglob("*.pyc"):
+            try:
+                if p.is_file() and not p.is_symlink():
+                    p.unlink()
+            except OSError:
+                continue
+        pc = root / ".pytest_cache"
+        try:
+            if pc.is_dir() and not pc.is_symlink():
+                _sh.rmtree(pc, ignore_errors=True)
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
+def meta_get(store, key: str) -> str | None:
+    """Значение meta без долгого соединения."""
+    try:
+        con = sqlite3.connect(str(store.path))
+    except sqlite3.Error:
+        return None
+    try:
+        con.row_factory = sqlite3.Row
+        row = con.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        if row is None:
+            return None
+        return str(row["value"] if isinstance(row, sqlite3.Row) else row[0])
+    except sqlite3.Error:
+        return None
+    finally:
+        try:
+            con.close()
+        except sqlite3.Error:
+            pass
+
+
+def meta_set(store, key: str, value: str) -> None:
+    try:
+        con = sqlite3.connect(str(store.path))
+    except sqlite3.Error:
+        return
+    try:
+        con.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        con.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        try:
+            con.close()
+        except sqlite3.Error:
+            pass
+
+
+def meta_del(store, key: str) -> None:
+    try:
+        con = sqlite3.connect(str(store.path))
+    except sqlite3.Error:
+        return
+    try:
+        con.execute("DELETE FROM meta WHERE key=?", (key,))
+        con.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        try:
+            con.close()
+        except sqlite3.Error:
+            pass
 
 
 def parse_reviewers_list(raw: str | None) -> list[str] | None:

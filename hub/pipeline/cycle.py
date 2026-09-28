@@ -75,12 +75,11 @@ def _read_rules(project) -> str:
 
 
 def _card_globs(card_text: str) -> list[str]:
+    """Глобы карточки через общий разбор (brace-группы раскрыты)."""
     try:
-        from hub.gate import lint as lint_mod
+        from hub.pipeline.common import card_globs as _cg
 
-        lines = card_text.splitlines()
-        sec = lint_mod._section_text(lines, "Можно менять")
-        return [str(g) for g in lint_mod._can_change_globs(sec)]
+        return _cg(card_text)
     except (ImportError, AttributeError):
         return []
 
@@ -136,31 +135,155 @@ def _diff_text(worktree: str, base: str) -> str:
 
 def _clean_pycache(worktree: str) -> None:
     """Убрать __pycache__/.pytest_cache: pytest их создаёт, ворота видят грязь."""
-    import shutil as _sh
+    from hub.pipeline.common import clean_pycache
 
-    root = Path(worktree)
+    clean_pycache(worktree)
+
+
+REVIEW_FIX_TEXT = (
+    "Файл `.agent/review_rN.json` отсутствует или не JSON по схеме "
+    '{"verdict": "approve" | "changes" | "dispute", '
+    '"findings": [{"severity": "high|medium|low", "file": ..., '
+    '"line": ..., "issue": ..., "fix": ...}]}. '
+    "Запиши его сейчас своим инструментом записи (только JSON, без пояснений вокруг)."
+)
+
+
+def _review_file_valid(path: Path) -> bool:
+    """Per-reviewer файл — валидный вердикт для панели."""
     try:
-        for p in root.rglob("__pycache__"):
-            try:
-                # Только внутри worktree, симлинки не трогаем.
-                if p.is_dir() and not p.is_symlink():
-                    _sh.rmtree(p, ignore_errors=True)
-            except OSError:
-                continue
-        for p in root.rglob("*.pyc"):
-            try:
-                if p.is_file() and not p.is_symlink():
-                    p.unlink()
-            except OSError:
-                continue
-        pc = root / ".pytest_cache"
-        try:
-            if pc.is_dir() and not pc.is_symlink():
-                _sh.rmtree(pc, ignore_errors=True)
-        except OSError:
-            pass
+        if not path.is_file():
+            return False
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if str(data.get("verdict") or "") not in ("approve", "changes", "dispute"):
+        return False
+    findings = data.get("findings", [])
+    return isinstance(findings, list) and all(isinstance(f, dict) for f in findings)
+
+
+def _unlink_round_reviews(worktree: str, round_no: int) -> None:
+    """Убрать stale-вердикты круга перед новой панелью.
+
+    Иначе упавший ревьюер засчитает свой старый approve (ложный ready).
+    """
+    agent = Path(worktree) / ".agent"
+    try:
+        for p in sorted(agent.glob(f"review_r{round_no}*.json")):
+            import re as _re
+
+            if _re.match(rf"^review_r{round_no}(?:_.*)?\.json$", p.name):
+                try:
+                    if p.is_file() and not p.is_symlink():
+                        p.unlink()
+                except OSError:
+                    continue
     except OSError:
         pass
+
+
+def _continued_flag(store, task_id: str) -> bool:
+    from hub.pipeline.common import meta_get
+
+    return (meta_get(store, f"continued:{task_id}") or "") == "1"
+
+
+def _consume_continued_flag(store, task_id: str) -> None:
+    from hub.pipeline.common import meta_del
+
+    meta_del(store, f"continued:{task_id}")
+
+
+def _preflight_continued(store, project, task_id: str,
+                         worktree: str, base_sha: str):
+    """Предполёт для продолженной задачи (continue): HEAD уже впереди базы.
+
+    Штатный preflight требует HEAD == base_sha, что противоречит смыслу
+    continue (та же ветка, база = merge-base). Проверяем то же самое,
+    кроме равенства HEAD: точка ответвления (merge-base work_branch/ветки)
+    должна совпадать с base_sha. Файлы H02 не трогаем.
+    """
+    import hashlib as _hl
+
+    from hub.gate.preflight import PreflightResult, run_hook
+    from hub.read.git import is_dirty
+    from hub.read.procs import lock_holder
+
+    task = store.get_task(task_id)
+    if task is None:
+        return PreflightResult(ok=False, reason="no-task")
+    wt = Path(worktree)
+    if not wt.is_dir():
+        return PreflightResult(ok=False, reason="dirty")
+    try:
+        if is_dirty(worktree):
+            return PreflightResult(ok=False, reason="dirty")
+    except (OSError, subprocess.SubprocessError):
+        return PreflightResult(ok=False, reason="dirty")
+    # База продолжения — merge-base, а не HEAD.
+    branch = str((task.get("branch") or f"agent/{task_id}"))
+    root = str(getattr(project, "root", "") or "")
+    work_branch = (getattr(project, "work_branch", "") or "").strip() or "HEAD"
+    if root:
+        from hub.pipeline.common import merge_base as _mb
+
+        mb = _mb(root, work_branch, branch)
+        if not mb:
+            return PreflightResult(ok=False, reason="no-merge-base")
+        h = (base_sha or "").strip()
+        if h != mb and not (len(h) >= 7 and len(mb) >= 7
+                            and (h.startswith(mb) or mb.startswith(h))):
+            return PreflightResult(ok=False, reason="base-moved")
+    rp_raw = str(getattr(project, "rules", "") or "")
+    rp = Path(rp_raw) if Path(rp_raw).is_absolute() else (
+        Path(root) / rp_raw if root and rp_raw else Path(rp_raw))
+    if not str(rp) or not rp.is_file():
+        return PreflightResult(ok=False, reason="no-rules")
+    hook = (project.hooks.task_setup or "").strip() if getattr(project, "hooks", None) else ""
+    if hook:
+        env = {"HUB_TASK_ID": task_id, "HUB_WORKTREE": worktree,
+               "HUB_PROJECT_ROOT": root or ""}
+        try:
+            code, out_tail, err_tail = run_hook(hook, env, Path(worktree))
+        except (OSError, subprocess.SubprocessError) as e:
+            return PreflightResult(ok=False, reason=f"setup-fail: {e}"[:2000])
+        if code != 0:
+            raw = (err_tail.strip() or out_tail.strip())
+            one = " ".join(raw.split())
+            return PreflightResult(ok=False, reason=f"setup-fail: {one[-2000:] or f'код {code}'}")
+    python = (getattr(project, "python", "") or "").strip()
+    if python:
+        if not Path(python).exists():
+            return PreflightResult(ok=False, reason="collect-fail")
+        py = python
+    else:
+        py = sys.executable
+    try:
+        r = subprocess.run([py, "-m", "pytest", "--collect-only", "-q"],
+                           cwd=worktree, capture_output=True,
+                           text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return PreflightResult(ok=False, reason="collect-fail")
+    if r.returncode != 0:
+        return PreflightResult(ok=False, reason="collect-fail")
+    lock_path = (getattr(project, "test_lock", "") or "").strip()
+    if lock_path:
+        try:
+            holder = lock_holder(lock_path)
+        except (OSError, subprocess.SubprocessError) as e:
+            return PreflightResult(ok=False, reason=f"lock-fail: {e}"[:2000])
+        if holder is not None:
+            return PreflightResult(
+                ok=False, reason=f"locked: pid {holder.pid}")
+    try:
+        digest = _hl.sha256(rp.read_bytes()).hexdigest()
+        store.upsert_task(id=task_id, rules_sha=digest)
+    except (OSError, sqlite3.Error, subprocess.SubprocessError) as e:
+        return PreflightResult(ok=False, reason=f"store-fail: {e}"[:2000])
+    return PreflightResult(ok=True, reason="")
 
 
 def _runner_tool_model(runner, task: dict) -> tuple[str, str]:
@@ -344,8 +467,14 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
 
     _set_stage(store, task_id, "preflight", 0, "старт")
     _clean_pycache(worktree)
+    continued = _continued_flag(store, task_id)
+    if continued:
+        _consume_continued_flag(store, task_id)
     try:
-        pf = preflight(store, task_id, project)
+        if continued:
+            pf = _preflight_continued(store, project, task_id, worktree, base_sha)
+        else:
+            pf = preflight(store, task_id, project)
     except (OSError, sqlite3.Error, subprocess.SubprocessError) as e:
         _set_stage(store, task_id, "failed", 0, f"preflight-fail: {e}"[:500])
         return "failed"
@@ -397,34 +526,40 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                 return 0.0, 0.0
         return _task_cost(store, task_id, opencode_db)
 
-    def _over_budget() -> tuple[bool, float, float]:
+    _soft_sent: set[str] = set()
+
+    def _over_budget(round_no: int = 0) -> tuple[bool, float, float]:
         go, usd = _cost()
         if _budget_exceeded(go, budget_go) or _budget_exceeded(usd, budget_usd):
             return True, go, usd
-        # 80 % — мягкое событие.
-        try:
-            if budget_go > 0 and go >= 0.8 * budget_go:
-                store.add_event(task_id, "budget_soft", {"go": go, "budget_go": budget_go})
-            if budget_usd > 0 and usd >= 0.8 * budget_usd:
-                store.add_event(task_id, "budget_soft", {"usd": usd, "budget_usd": budget_usd})
-        except (OSError, sqlite3.Error):
-            pass
+        # 80 % — мягкое событие, один раз на круг (не спамим).
+        key = f"soft:{round_no}"
+        if key not in _soft_sent and (
+                (budget_go > 0 and go >= 0.8 * budget_go)
+                or (budget_usd > 0 and usd >= 0.8 * budget_usd)):
+            _soft_sent.add(key)
+            try:
+                store.add_event(task_id, "budget_soft",
+                                {"go": go, "budget_go": budget_go,
+                                 "usd": usd, "budget_usd": budget_usd})
+            except (OSError, sqlite3.Error):
+                pass
         return False, go, usd
 
-    def _do_budget_stop(reason: str, exec_sid: str | None) -> str:
-        over, go, usd = _cost(), 0.0, 0.0
+    def _do_budget_stop(reason: str, exec_sid: str | None, round_no: int = 0,
+                        extend_usd: float = 0.5) -> str:
         try:
             go, usd = _cost()
         except (OSError, sqlite3.Error):
-            pass
-        _set_stage(store, task_id, "stopped", 0, reason[:500])
+            go, usd = 0.0, 0.0
+        _set_stage(store, task_id, "stopped", round_no, reason[:500])
         try:
             store.add_event(task_id, "budget_hard", {"go": go, "usd": usd})
         except (OSError, sqlite3.Error):
             pass
         _ask_extend(store, task_id,
                      f"Бюджет задачи исчерпан (go ${go:.2f}/{budget_go:.2f}). "
-                     f"Продлить на $0.50?")
+                     f"Продлить на ${extend_usd:.2f}?")
         if exec_sid:
             try:
                 executor.resume(exec_sid, "Бюджет исчерпан: закоммить поимённо "
@@ -451,9 +586,9 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         if _stop_requested(worktree):
             _set_stage(store, task_id, "stopped", round_no, "stop requested")
             return "stopped"
-        over, _go, _usd = _over_budget()
+        over, _go, _usd = _over_budget(round_no)
         if over:
-            return _do_budget_stop("бюджет 100 %", exec_sid)
+            return _do_budget_stop("бюджет 100 %", exec_sid, round_no)
 
         _set_stage(store, task_id, f"exec r{round_no}", round_no, "исполнитель")
         log_exec = str(Path(worktree) / ".agent" / f"executor_r{round_no}.log")
@@ -551,9 +686,9 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         if repair_reason:
             _set_stage(store, task_id, f"gate r{round_no}", round_no,
                         f"repair: {repair_reason}"[:500])
-            over, _, _ = _over_budget()
+            over, _, _ = _over_budget(round_no)
             if over:
-                return _do_budget_stop("бюджет 100 %", exec_sid)
+                return _do_budget_stop("бюджет 100 %", exec_sid, round_no)
             try:
                 sid2 = executor.resume(exec_sid or "", repair_prompt(repair_reason),
                                        worktree,
@@ -612,9 +747,12 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                         "ворота" if not (gate and gate.errors) else "; ".join(gate.errors)[:500])
 
         # --- панель ревью параллельно ---
-        over, _, _ = _over_budget()
+        # Stale-вердикты круга убираем заранее (иначе упавший ревьюер
+        # засчитает старый approve).
+        _unlink_round_reviews(worktree, round_no)
+        over, _, _ = _over_budget(round_no)
         if over:
-            return _do_budget_stop("бюджет 100 %", exec_sid)
+            return _do_budget_stop("бюджет 100 %", exec_sid, round_no)
         if _stop_requested(worktree):
             _set_stage(store, task_id, "stopped", round_no, "stop requested")
             return "stopped"
@@ -625,7 +763,7 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
 
         def _run_one(item) -> str | None:
             name, runner = item
-            over1, _, _ = _over_budget()
+            over1, _, _ = _over_budget(round_no)
             if over1:
                 return None
             prompt = prompts.review_prompt(rules_text, card_text, diff_text,
@@ -635,6 +773,15 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                 rsid = runner.start(prompt, worktree, log)
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 return None
+            # Один повтор не записавшему валидный JSON (как PanelReviewer).
+            own = Path(worktree) / ".agent" / f"review_r{round_no}_{name}.json"
+            if not _review_file_valid(own):
+                try:
+                    runner.resume(rsid, REVIEW_FIX_TEXT.replace(
+                        "review_rN.json", f"review_r{round_no}_{name}.json"),
+                        worktree, log)
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    pass
             try:
                 rtool, rmodel = _runner_tool_model(runner, {"executor": name})
                 store.link_session(rsid, rtool, task_id, "reviewer", round_no,
@@ -646,9 +793,26 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         if reviewers:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(reviewers))) as pool:
                 list(pool.map(_run_one, list(reviewers.items())))
-        over, _, _ = _over_budget()
+        # Молчавших ревьюеров видно в findings (low), вердикт — по ответившим.
+        if reviewers:
+            valid_names = {p.stem.removeprefix(f"review_r{round_no}_")
+                           for p in (Path(worktree) / ".agent").glob(f"review_r{round_no}_*.json")
+                           if _review_file_valid(p)}
+            if valid_names and len(valid_names) < len(reviewers):
+                for name in sorted(set(reviewers) - valid_names):
+                    try:
+                        (Path(worktree) / ".agent" / f"review_r{round_no}_{name}.json"
+                         ).write_text(json.dumps({
+                             "verdict": "approve",
+                             "findings": [{"severity": "low", "file": "", "line": 0,
+                                           "issue": "ревьюер не дал валидный JSON",
+                                           "fix": ""}],
+                         }, ensure_ascii=False), encoding="utf-8")
+                    except OSError:
+                        continue
+        over, _, _ = _over_budget(round_no)
         if over:
-            return _do_budget_stop("бюджет 100 %", exec_sid)
+            return _do_budget_stop("бюджет 100 %", exec_sid, round_no)
 
         reviews = _collect_reviews(worktree, round_no)
         try:
@@ -661,7 +825,23 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         except (OSError, ValueError):
             last_findings = []
         decision = verdict(reviews, round_no, max_rounds=max(1, int(rounds)))
+        gate_green = gate is not None and not gate.errors
         if decision == "ready":
+            if not gate_green:
+                # approve при красных воротах — не ready (как run_task:
+                # approve→changes «ворота не пройдены»).
+                gate_tail = "; ".join(getattr(gate, "errors", []) or [])[:300] \
+                    if gate is not None else "нет ворот"
+                last_findings = [{"file": "", "line": 0,
+                                  "issue": f"ворота не пройдены: {gate_tail}",
+                                  "severity": "high", "author": "gate"}]
+                if round_no >= max(1, int(rounds)):
+                    _set_stage(store, task_id, "arbiter", round_no,
+                                f"approve при красных воротах: {gate_tail}"[:500])
+                    return "arbiter"
+                _set_stage(store, task_id, f"review r{round_no}", round_no,
+                            "approve→changes(ворота)")
+                continue
             _set_stage(store, task_id, "ready", round_no, "панель approve")
             return "ready"
         if decision == "arbiter":

@@ -18,6 +18,9 @@ def cmd_stop(args) -> int:
     if task is None:
         print(f"no-task: {task_id}")
         return 1
+    if str(task.get("stage") or "") in ("merged", "dropped"):
+        print(f"not-stop: {task_id} уже {task.get('stage')}")
+        return 1
     worktree = str(task.get("worktree") or "")
     if worktree:
         try:

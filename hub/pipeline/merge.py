@@ -107,7 +107,7 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
         if not work_branch:
             return False, "no-work-branch: пустой work_branch и нет текущей ветки"
 
-    # Перепроверка ворот по git: done.json + check_gate.
+    # Перепроверка ворот по git: done.json (+ mismatch, files ⊆ diff) + check_gate.
     try:
         done = load_done(Path(worktree))
     except FileNotFoundError as e:
@@ -121,24 +121,34 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
     if done.commit != head_sha:
         return False, f"mismatch: done={done.commit} head={head_sha}"
     try:
-        from hub.gate import lint as lint_mod
+        from hub.pipeline.common import card_globs as _cg
 
         card_rel = str(task.get("card_path") or "")
         card_p = Path(card_rel) if Path(card_rel).is_absolute() else Path(root) / card_rel
         card_text = card_p.read_text(encoding="utf-8") if card_p.is_file() else ""
-        lines = card_text.splitlines() if card_text else []
-        sec = lint_mod._section_text(lines, "Можно менять") if lines else ""
-        card_globs = [str(g) for g in lint_mod._can_change_globs(sec)] if sec else []
-    except (OSError, AttributeError, ImportError):
-        card_globs = []
+        globs = _cg(card_text) if card_text else []
+    except (OSError, ValueError):
+        globs = []
     import fnmatch as _fn
 
     proj_allowed = list(getattr(project, "allowed_paths", []) or [])
-    allowed = [g for g in card_globs
+    allowed = [g for g in globs
                if not (Path(g).is_absolute() or ".." in Path(g).parts)
                and any(_fn.fnmatch(g.removeprefix("./"), pat) for pat in proj_allowed)]
+    # Сверка done.files ⊆ diff (как hub gate): лживый done.json не проходит.
+    _dr = _run_git(worktree, "-c", "core.quotepath=false", "diff", "--no-renames",
+                   "--name-only", f"{base_sha}..{head_sha}", "--")
+    if _dr.returncode != 0:
+        return False, "no-diff: ворота не проверены"
+    _diff_set = {l for l in (s.strip() for s in _dr.stdout.splitlines()) if l}
+    for f in done.files:
+        if f not in _diff_set:
+            return False, f"unknown-file: {f}"
     py = (getattr(project, "python", "") or "").strip() or sys.executable
     lock = (getattr(project, "test_lock", "") or "").strip() or None
+    from hub.pipeline.common import clean_pycache as _clean
+
+    _clean(worktree)
     gate = check_gate(Path(worktree), base_sha, head_sha, allowed,
                       [py, "-m", "pytest", "-q"], lock)
     if not gate.ok:
@@ -146,6 +156,13 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
                                            "errors": gate.errors})
         return False, "; ".join(gate.errors)[:500] or "ворота красные"
 
+    # Слияние строго в work_branch: проверяем checkout, иначе работа
+    # ляжет в чужую ветку, а push уйдёт без неё.
+    cur = _run_git(root, "branch", "--show-current")
+    cur_branch = cur.stdout.strip() if cur.returncode == 0 else ""
+    if cur_branch != work_branch:
+        return False, (f"not-on-work-branch: HEAD={cur_branch or '?'} "
+                       f"({root}), нужен {work_branch}")
     # Слияние в work_branch основного репо: сразу с коммитом,
     # приёмка — уже на слитом HEAD, откат при красных.
     pre = _run_git(root, "rev-parse", "HEAD")
@@ -229,7 +246,15 @@ def list_orphans(project, store) -> tuple[list[dict], list[str]]:
     orph_wt = [w for w in wts if str(w.get("path") or "") not in known_wt
                and str(w.get("path") or "") != root]
     r = _run_git(root, "branch", "--list", "agent/*")
-    branches = [b.strip().lstrip("* ") for b in r.stdout.splitlines() if b.strip()] \
-        if r.returncode == 0 else []
+    branches = []
+    if r.returncode == 0:
+        for b in r.stdout.splitlines():
+            s = b.strip()
+            if not s:
+                continue
+            # Текущая ветка помечена '* ': срезаем префикс, не символы.
+            if s.startswith("* "):
+                s = s[2:].strip()
+            branches.append(s)
     orph_br = [b for b in branches if b not in known_br]
     return orph_wt, orph_br

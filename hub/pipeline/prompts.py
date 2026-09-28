@@ -84,7 +84,7 @@ def review_prompt(rules: str, card: str, diff: str, gate, round: int,
             from hub.gate.lint import strip_arbiter
 
             card = strip_arbiter(card)
-        except ImportError:
+        except (ImportError, AttributeError):
             pass
     if isinstance(gate, dict):
         tests = gate.get("tests", {}) if isinstance(gate.get("tests"), dict) else {}

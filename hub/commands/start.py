@@ -88,6 +88,14 @@ def cmd_start(args) -> int:
         rev_list = [r.strip() for r in str(reviewers).split(",") if r.strip()]
     else:
         rev_list = list(project.defaults.reviewers or [])
+    # Имена моделей — сразу: опечатка не должна молча исчезать в очереди.
+    from hub.pipeline.runners import MODELS
+
+    bad = [m for m in [executor, *rev_list] if m not in MODELS]
+    if bad:
+        for m in bad:
+            print(f"неизвестная модель: {m}")
+        return 1
     rounds = int(getattr(args, "rounds", 2) or 2)
     budget_go = getattr(args, "budget_go", None)
     try:
