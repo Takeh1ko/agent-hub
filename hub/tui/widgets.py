@@ -86,8 +86,8 @@ class TaskTable(DataTable):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # Enter по строке даёт RowSelected (при cell-курсоре — CellSelected,
-        # который тоже обрабатываем) — иначе детали по Enter не открываются.
+        # cursor_type='row': Enter по строке даёт RowSelected — по нему
+        # открываются детали (cell-курсор с недостижимым CellSelected не используем).
         self.cursor_type = "row"
         self._cols_ready = False
         self._keys: set[str] = set()

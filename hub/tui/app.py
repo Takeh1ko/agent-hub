@@ -438,11 +438,16 @@ class HubApp(App):
             self.notify(f"не вышло: {e}"[:80], severity="error")
             self._schedule_refresh()
             return
-        tail = (proc.stdout or proc.stderr or "").strip().splitlines()
+        # Ошибка — показываем stderr (там причина, а не полускачанный stdout);
+        # успех — последнюю строку stdout.
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
         if proc.returncode != 0:
+            tail = (err or out).splitlines()
             self.notify((tail[-1][:80] if tail else f"код {proc.returncode}"),
                         severity="error")
         else:
+            tail = out.splitlines()
             self.notify(tail[-1][:80] if tail else "готово")
         self._schedule_refresh()
 

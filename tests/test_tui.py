@@ -64,7 +64,11 @@ def _snap_two_sessions(task_id="T01", pulse="🔴") -> Snapshot:
 def _app(tmp_path) -> HubApp:
     proc = tmp_path / "proc-пусто"
     proc.mkdir(exist_ok=True)
-    return HubApp(store=Store(), opencode_db=None, proc_root=str(proc))
+    app = HubApp(store=Store(), opencode_db=None, proc_root=str(proc))
+    # Фоновый опрос выключен: тесты сами накладывают снимок, иначе тик
+    # по пустому store стирает подставленные строки таблицы.
+    app._schedule_refresh = lambda: None
+    return app
 
 
 def _make_oc_db(path: Path, now: int) -> Path:
@@ -612,3 +616,193 @@ def test_no_direct_db_read():
         text = (base / name).read_text(encoding="utf-8")
         assert "sqlite3" not in text
         assert "mode=ro" not in text
+
+
+# --- замечания ревью r2: каждый пункт закрыт тестом ---
+
+async def test_enter_spawns_single_details_worker(tmp_path, monkeypatch):
+    """Enter даёт ровно один воркер деталей — и с фокусом таблицы, и без."""
+    app = _app(tmp_path)
+    spawns: list[str] = []
+    orig = HubApp.run_worker
+
+    def spy(self, *args, **kwargs):
+        if kwargs.get("group") == "cmd":
+            spawns.append("cmd")
+        return orig(self, *args, **kwargs)
+
+    monkeypatch.setattr(HubApp, "run_worker", spy)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        app._apply_snapshot(_snap(), bot_alive=False, events=[])
+        await pilot.pause()
+        app.query_one("#tasks", TaskTable).focus()
+        await pilot.pause()
+        spawns.clear()
+        await pilot.press("enter")
+        for _ in range(50):
+            await pilot.pause()
+            if app._details_task:
+                break
+        assert len(spawns) == 1  # два пути (RowSelected + BINDINGS) не срабатывают вдвойне
+        assert app._details_task == "T01"
+        # Таблица не в фокусе: Enter идёт через BINDINGS приложения — тоже один воркер.
+        app.set_focus(None)
+        app._details_task = None
+        await pilot.pause()
+        spawns.clear()
+        await pilot.press("enter")
+        for _ in range(50):
+            await pilot.pause()
+            if app._details_task:
+                break
+        assert len(spawns) == 1
+        assert app._details_task == "T01"
+
+
+def test_no_dead_blocking_details_helpers():
+    """Мёртвых _render_details/cell_selected нет: блокирующий I/O на лупе — ловушка."""
+    assert not hasattr(HubApp, "_render_details")
+    assert not hasattr(HubApp, "on_data_table_cell_selected")
+    # Прод-путь деталей — только через воркер (to_thread), не из UI-потока.
+    import inspect
+    from hub.tui import app as app_mod
+
+    src = inspect.getsource(app_mod.HubApp._do_show_details)
+    assert "to_thread" in src
+
+
+def test_top_resolves_opencode_db_at_call_time(monkeypatch, tmp_path):
+    """Константа импорта DEFAULT_OPENCODB убрана: путь берётся в cmd_top при вызове."""
+    import hub.commands.top as top_mod
+
+    assert not hasattr(top_mod, "DEFAULT_OPENCODB")
+    home = tmp_path / "home-после-импорта"
+    db = home / ".local/share/opencode/opencode.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    db.write_bytes(b"")
+    monkeypatch.setenv("HOME", str(home))
+    captured: dict = {}
+
+    class FakeApp:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+            self.project_filter = None
+
+        def run(self):
+            return None
+
+    monkeypatch.setattr("hub.tui.app.HubApp", FakeApp)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    from hub.cli import main
+
+    assert main(["top"]) == 0
+    assert captured.get("opencode_db") == str(db)
+
+
+def test_rich_is_only_transitive_dependency():
+    """rich не объявлен в pyproject — транзитивная зависимость textual (новых нет)."""
+    text = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(
+        encoding="utf-8")
+    deps = [ln for ln in text.splitlines() if ln.strip().startswith("dependencies")]
+    assert deps and "rich" not in deps[0]
+    from rich.text import Text  # работает, пока textual тянет rich
+
+    assert Text("x").plain == "x"
+
+
+async def test_keys_stop_merge_and_findings(tmp_path, monkeypatch):
+    """Клавиши: s → hub stop, m → подтверждение → hub merge, f → findings."""
+    import hub.tui.app as app_mod
+
+    from hub.tui.app import ConfirmMerge
+
+    app = _app(tmp_path)
+    cmds: list[list[str]] = []
+
+    async def fake_cmd(self, argv):
+        cmds.append(list(argv))
+
+    monkeypatch.setattr(HubApp, "_run_hub_cmd", fake_cmd)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        app._apply_snapshot(_snap(), bot_alive=False, events=[])
+        await pilot.pause()
+        app.query_one("#tasks", TaskTable).focus()
+        await pilot.pause()
+
+        await pilot.press("s")
+        for _ in range(50):
+            await pilot.pause()
+            if cmds:
+                break
+        assert cmds == [["stop", "T01"]]
+
+        # m — модальное подтверждение, без «y» merge не уходит.
+        await pilot.press("m")
+        for _ in range(50):
+            await pilot.pause()
+            if isinstance(app.screen, ConfirmMerge):
+                break
+        assert isinstance(app.screen, ConfirmMerge)
+        assert cmds == [["stop", "T01"]]
+        await pilot.press("n")
+        for _ in range(50):
+            await pilot.pause()
+            if not isinstance(app.screen, ConfirmMerge):
+                break
+        assert cmds == [["stop", "T01"]]
+
+        await pilot.press("m")
+        for _ in range(50):
+            await pilot.pause()
+            if isinstance(app.screen, ConfirmMerge):
+                break
+        await pilot.press("y")
+        for _ in range(50):
+            await pilot.pause()
+            if cmds[-1] == ["merge", "T01"]:
+                break
+        assert cmds[-1] == ["merge", "T01"]
+
+        # f: H04 (load_findings) не применён — путь через подпроцесс hub findings.
+        monkeypatch.setattr(app_mod, "load_findings", None)
+        cmds.clear()
+        await pilot.press("f")
+        for _ in range(50):
+            await pilot.pause()
+            if cmds:
+                break
+        assert cmds == [["findings", "T01"]]
+
+        # f при наличии H04 — детали импортом load_findings, без подпроцесса.
+        monkeypatch.setattr(app_mod, "load_findings", lambda wt: [])
+        cmds.clear()
+        app._details_task = None
+        await pilot.press("f")
+        for _ in range(50):
+            await pilot.pause()
+            if app._details_task:
+                break
+        assert cmds == []
+        assert app._details_task == "T01"
+
+
+async def test_run_hub_cmd_error_shows_stderr(tmp_path, monkeypatch):
+    """При ошибке показывается stderr (причина), а не stdout."""
+    app = _app(tmp_path)
+    notes: list = []
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=2, stdout="полускачанный вывод",
+                               stderr="ошибка: нет такой задачи")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(app, "notify", lambda msg, *a, **k: notes.append((msg, k)))
+    monkeypatch.setattr(app, "_schedule_refresh", lambda: None)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await app._run_hub_cmd(["stop", "T01"])
+        await pilot.pause()
+    assert notes and notes[-1][0] == "ошибка: нет такой задачи"
+    assert notes[-1][1].get("severity") == "error"
