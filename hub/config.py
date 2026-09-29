@@ -24,6 +24,7 @@ class Defaults:
     executor: str = "muse"
     reviewers: list[str] = field(default_factory=lambda: ["muse", "mimoflash"])
     budget_go: float = 0.5
+    budget_usd: float = 0.0
 
 
 @dataclass
@@ -68,6 +69,7 @@ def _from_dict(data: dict) -> ProjectConfig:
             executor=str(defaults.get("executor", "muse")),
             reviewers=list(reviewers),
             budget_go=float(defaults.get("budget_go", 0.5)),
+            budget_usd=float(defaults.get("budget_usd", 0.0)),
         ),
         levels={str(k): str(v) for k, v in (data.get("levels", {}) or {}).items()},
     )

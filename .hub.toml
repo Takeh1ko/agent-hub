@@ -17,6 +17,7 @@ task_cleanup = ""
 executor = "muse"
 reviewers = ["muse", "mimoflash"]
 budget_go = 0.5
+budget_usd = 0.0
 
 [levels]
 easy = "gemini"
