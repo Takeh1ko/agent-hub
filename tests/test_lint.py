@@ -196,15 +196,24 @@ def test_cli_broken_toml_no_traceback(tmp_path, capsys):
 
 
 def test_unbackticked_can_change(tmp_path):
-    # Голый core/secret.py без бэктиков — всё равно вне allowed_paths.
+    # Пути в «Можно менять» — только из бэктиков: голый core/secret.py
+    # без бэктиков путём не считается, карточка ok.
     text = GOOD.read_text(encoding="utf-8").replace(
         "`hub/gate/lint.py`", "core/secret.py"
     )
     card = tmp_path / "unback.md"
     card.write_text(text, encoding="utf-8")
     r = lint_card(card, _proj())
-    assert not r.ok
-    assert any("core/secret.py" in e for e in r.errors)
+    assert r.ok, r.errors
+    # Тот же путь в бэктиках — вне allowed_paths, не ok.
+    text2 = GOOD.read_text(encoding="utf-8").replace(
+        "`hub/gate/lint.py`", "`core/secret.py`"
+    )
+    card2 = tmp_path / "back.md"
+    card2.write_text(text2, encoding="utf-8")
+    r2 = lint_card(card2, _proj())
+    assert not r2.ok
+    assert any("core/secret.py" in e for e in r2.errors)
 
 
 def test_star_glob_rejected(tmp_path):
@@ -431,7 +440,10 @@ def test_header_mention_with_dot_in_interface_not_section(tmp_path):
 
 
 def test_header_mention_level_not_section(tmp_path):
-    # HIGH: `**Сеть.** нет; **Уровень** см. в карточке` — не раздел «Уровень».
+    # «Уровень» необязателен: `**Уровень** см. в карточке` в чужой строке —
+    # не раздел, но карточка ok (уровень выводится из «Исполнитель»).
+    from hub.gate.lint import _header_line_no, card_level
+
     base = GOOD.read_text(encoding="utf-8")
     lines = [l for l in base.splitlines() if not l.strip().startswith("**Уровень.")]
     text = "\n".join(lines).replace(
@@ -440,21 +452,28 @@ def test_header_mention_level_not_section(tmp_path):
     card = tmp_path / "no-level.md"
     card.write_text(text, encoding="utf-8")
     r = lint_card(card, _proj())
-    assert not r.ok
-    assert any("нет раздела «Уровень»" in e for e in r.errors)
+    assert r.ok, r.errors
+    # Проза разделом не стала — уровень именно выведен из исполнителя.
+    assert _header_line_no(text.splitlines(), "Уровень") is None
+    assert card_level(text.splitlines()) == "medium"  # musefree из GOOD
 
 
 def test_header_prose_mention_with_dot_not_section(tmp_path):
     # arbiter №1: строка не начинается с `**Уровень` — упоминание в прозе
-    # с точкой (`см. **Уровень.** medium`) разделом не считается.
+    # с точкой (`см. **Уровень.** medium`) разделом не считается,
+    # но «Уровень» необязателен — карточка ok.
+    from hub.gate.lint import _header_line_no, card_level
+
     base = GOOD.read_text(encoding="utf-8")
     lines = [l for l in base.splitlines() if not l.strip().startswith("**Уровень.")]
     text = "\n".join(lines) + "\n\nОб этом сказано: см. **Уровень.** medium.\n"
     card = tmp_path / "no-level2.md"
     card.write_text(text, encoding="utf-8")
     r = lint_card(card, _proj())
-    assert not r.ok
-    assert any("нет раздела «Уровень»" in e for e in r.errors)
+    assert r.ok, r.errors
+    # Проза разделом не стала — уровень именно выведен из исполнителя.
+    assert _header_line_no(text.splitlines(), "Уровень") is None
+    assert card_level(text.splitlines()) == "medium"  # musefree, не проза
 
 
 def test_combined_sections_line_is_section(tmp_path):
@@ -625,3 +644,131 @@ def test_acceptance_new_file_allowed_and_missing_rejected(tmp_path):
     r2 = lint_card(card_bad, proj)
     assert not r2.ok
     assert any("нет файла" in e and "test_missing2" in e for e in r2.errors)
+
+
+def test_level_missing_ok_and_derived(tmp_path):
+    # «Уровень» необязателен; выводится из «Исполнитель».
+    from hub.gate.lint import card_level
+
+    base = GOOD.read_text(encoding="utf-8")
+    text = "\n".join(
+        l for l in base.splitlines() if not l.strip().startswith("**Уровень.")
+    ) + "\n"
+    card = tmp_path / "no-level-ok.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert r.ok, r.errors
+    assert card_level(text.splitlines()) == "medium"  # musefree
+    assert card_level(["**Исполнитель.** gemini."]) == "easy"
+    assert card_level(["**Исполнитель.** muse."]) == "hard"
+    assert card_level(["**Исполнитель.** musefree."]) == "medium"
+    # Явный «Уровень» побеждает исполнителя.
+    assert card_level(["**Уровень.** easy.", "**Исполнитель.** muse."]) == "easy"
+    # Неизвестный исполнитель — medium.
+    assert card_level(["**Исполнитель.** кто-то."]) == "medium"
+    # Ветка project.levels: отображение берётся из конфига проекта.
+    custom = ProjectConfig(
+        root=str(REPO),
+        rules="docs/agents/rules.md",
+        python=sys.executable,
+        allowed_paths=[],
+        levels={"easy": "muse", "medium": "gemini", "hard": "deepseek"},
+    )
+    assert card_level(["**Исполнитель.** gemini."], custom) == "medium"
+    assert card_level(["**Исполнитель.** muse."], custom) == "easy"
+    assert card_level(["**Исполнитель.** deepseek."], custom) == "hard"
+
+
+def test_interface_header_with_tail(tmp_path):
+    # Заголовок с произвольным хвостом после имени — раздел находится,
+    # следующий раздел не заглатывается.
+    for header in (
+        "**Интерфейс / что сделать.**",
+        "**Интерфейс (контракт для следующих задач — не переименовывать).**",
+    ):
+        text = GOOD.read_text(encoding="utf-8").replace("**Интерфейс.**", header)
+        card = tmp_path / "tail.md"
+        card.write_text(text, encoding="utf-8")
+        r = lint_card(card, _proj())
+        assert r.ok, (header, r.errors)
+    # А без «Интерфейса» вообще — отказ (настоящий дефект ловится).
+    text = "\n".join(
+        l for l in GOOD.read_text(encoding="utf-8").splitlines()
+        if not l.strip().startswith("**Интерфейс")
+    ) + "\n"
+    card = tmp_path / "no-iface.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert not r.ok
+    assert any("нет раздела «Интерфейс»" in e for e in r.errors)
+
+
+def test_can_change_ignores_markup_and_flags(tmp_path):
+    # Разметка, флаги CLI и идентификаторы в «Можно менять» — не пути.
+    text = GOOD.read_text(encoding="utf-8").replace(
+        "`hub/gate/lint.py`, `tests/test_lint.py`",
+        "`hub/gate/lint.py`, `tests/test_lint.py`, `**MEDIUM.**`, "
+        "`--proxy/--proxies`, `market.*`, `import_legacy`",
+    )
+    card = tmp_path / "junk.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert r.ok, r.errors
+    # А настоящий glob вне scope в бэктиках — ловится.
+    from hub.gate.lint import _can_change_globs
+
+    assert _can_change_globs("`*.py`") == ["*.py"]
+    assert _can_change_globs("`**MEDIUM.**`") == []
+    assert _can_change_globs("`--proxy/--proxies`") == []
+    assert _can_change_globs("`market.*`") == []
+    assert _can_change_globs("`import_legacy`") == []
+
+
+def test_bold_prose_is_not_header(tmp_path):
+    # Жирная строка-проза (`**Сеть не нужна …**`, `**Интерфейс чик**`) —
+    # не заголовок раздела.
+    from hub.gate.lint import _header_line_no
+
+    for line in (
+        "**Сеть не нужна для этой задачи**",
+        "**Сеть не нужна**",
+        "**Интерфейс чик**",
+        "**Интерфейсчик**",
+    ):
+        assert _header_line_no([line], "Сеть") is None, line
+        assert _header_line_no([line], "Интерфейс") is None, line
+    # А закрытые хвосты на `.`/`:` — заголовки.
+    for line, name in (
+        ("**Интерфейс / что сделать.**", "Интерфейс"),
+        ("**Приёмка (без сети).**", "Приёмка"),
+        ("**Сеть.** нет.", "Сеть"),
+        ("**Приёмка:**", "Приёмка"),
+    ):
+        assert _header_line_no([line], name) == 1, line
+
+
+def test_bold_prose_inside_arbiter_no_leak():
+    # Жирная проза внутри «Решений арбитра» не обрывает вырезание эталона
+    # (spec §7/Н11: эталон вырезается всегда, иначе утечка в промпт ревьюера).
+    sample = (
+        "**Решения арбитра.**\n\nсекрет-1\n\n"
+        "**Сеть не нужна для этой задачи**\n\nсекрет-2\n\n"
+        "**Приёмка.**\nтест\n"
+    )
+    got = strip_arbiter(sample)
+    assert "секрет-1" not in got and "секрет-2" not in got
+    assert "**Приёмка.**" in got
+
+
+def test_bold_prose_does_not_cut_section(tmp_path):
+    # Та же жирная строка внутри «Приёмки» не режет границы секции:
+    # pytest-ноды ниже неё по-прежнему собираются, карточка ok.
+    text = GOOD.read_text(encoding="utf-8").replace(
+        "**Приёмка.** `pytest -q tests/test_time.py`",
+        "**Приёмка.**\n\n**Сеть не нужна для этой задачи**\n\n"
+        "`pytest -q tests/test_time.py`",
+    )
+    card = tmp_path / "prose-in-acc.md"
+    card.write_text(text, encoding="utf-8")
+    r = lint_card(card, _proj())
+    assert r.ok, r.errors
