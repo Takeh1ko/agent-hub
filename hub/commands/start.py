@@ -18,6 +18,43 @@ from hub.pipeline.common import (
 from hub.store import Store
 
 
+def _executor_for_card(text: str, project) -> str:
+    """Исполнитель без --executor: Уровень → [levels], иначе Исполнитель."""
+    default = str(getattr(project.defaults, "executor", "") or "muse")
+    try:
+        from hub.gate import lint as lint_mod
+    except ImportError:
+        return default
+    try:
+        lines = text.splitlines()
+        lvl_sec = lint_mod._section_text(lines, "Уровень").lower()
+    except (AttributeError, ValueError):
+        lvl_sec = ""
+    import re as _re
+    m = _re.search(r"(?<![\w])(easy|medium|hard)(?![\w])", lvl_sec)
+    if m:
+        lvl = m.group(1)
+        levels = dict(getattr(project, "levels", None) or {})
+        if lvl in levels and str(levels[lvl]).strip():
+            return str(levels[lvl]).strip()
+        builtin = {"easy": "gemini", "medium": "musefree", "hard": "muse"}
+        return builtin.get(lvl, default)
+    try:
+        exec_sec = lint_mod._section_text(lines, "Исполнитель").lower()
+    except (AttributeError, ValueError):
+        return default
+    try:
+        from hub.pipeline.runners import MODELS
+    except ImportError:
+        return default
+    for name in sorted(MODELS, key=len, reverse=True):
+        if not name:
+            continue
+        if _re.search(r"(?<![\w])" + _re.escape(name.lower()) + r"(?![\w])", exec_sec):
+            return name
+    return default
+
+
 def _ensure_worktree(project, task_id: str, branch: str, base_sha: str,
                      worktrees_dir: str) -> tuple[str, str]:
     """Создать ветку + worktree от base_sha; существует — переиспользовать."""
@@ -97,7 +134,8 @@ def cmd_start(args) -> int:
               f"base={str(old.get('base_sha') or '')[:8]} ≠ {base[:8]}: "
               "дай hub continue или новую карточку")
         return 1
-    executor = getattr(args, "executor", None) or project.defaults.executor
+    explicit = (getattr(args, "executor", None) or "").strip()
+    executor = explicit or _executor_for_card(text, project)
     reviewers = getattr(args, "reviewers", None)
     if reviewers:
         rev_list = [r.strip() for r in str(reviewers).split(",") if r.strip()]
