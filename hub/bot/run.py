@@ -286,10 +286,15 @@ def _opencode_db() -> str | None:
 
 def _sync_status(now_ms: int) -> str:
     """Статус как `hub status` без --all: без merged/dropped."""
+    from hub.commands.status import auto_import
     from hub.read import snapshot as snap
     from hub.store import FINAL_STAGES, Store
 
     store = Store()
+    try:
+        auto_import(store)
+    except Exception:
+        pass
     s = snap.build(store, int(now_ms),
                    opencode_db=_opencode_db(), proc_root="/proc")
     s.tasks = [t for t in s.tasks if t.stage not in FINAL_STAGES]

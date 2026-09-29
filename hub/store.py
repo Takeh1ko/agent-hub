@@ -176,9 +176,10 @@ class Store:
         """Прочитать <wt>/*/.agent/state.json (+ review_rN*.json).
 
         Возвращает ids заведённых/обновлённых задач.
-        Задачи со снятым worktree (пути нет на диске) переводятся
-        в финал: ready → merged, остальные → dropped, чтобы не висели.
-        Пустой/нет каталога — только sweep, без сканирования.
+        Sweep снятых worktree — только когда каталог worktrees известен:
+        задача из него пропала → ready → merged, остальные → dropped.
+        queued/preflight не трогаем (каталог ещё может создаваться).
+        Относительные пути сверяются от cwd.
         """
         done: list[str] = []
         wt_dir = Path(worktrees_dir) if worktrees_dir else None
@@ -217,24 +218,47 @@ class Store:
                         continue
                     self.link_session(str(rsid), "opencode", task_id, "reviewer", round_no, "")
                 done.append(task_id)
-        # Sweep: снятые worktree → финал, чтобы не висели с ложным 🔴.
-        try:
-            for t in self.list_tasks(active_only=False):
-                if str(t.get("stage") or "") in FINAL_STAGES:
+        # Sweep: только когда каталог worktrees известен и задача из него
+        # пропала. queued/preflight не трогаем (каталог ещё создаётся).
+        # Без каталога (None/нет на диске) — только сканирование выше, без сноса.
+        if wt_dir is not None and wt_dir.is_dir():
+            try:
+                root = wt_dir.expanduser()
+                if not root.is_absolute():
+                    root = Path.cwd() / root
+            except OSError:
+                return done
+            try:
+                tasks = self.list_tasks(active_only=False)
+            except (OSError, ValueError, sqlite3.Error):
+                return done
+            for t in tasks:
+                stage = str(t.get("stage") or "")
+                if stage in FINAL_STAGES or stage in ("queued", "preflight"):
                     continue
                 wt = str(t.get("worktree") or "")
                 if not wt:
                     continue
                 try:
-                    exists = Path(wt).exists()
+                    p = Path(wt).expanduser()
+                    if not p.is_absolute():
+                        p = Path.cwd() / p
                 except OSError:
                     continue
-                if exists:
+                try:
+                    if p.exists():
+                        continue
+                except OSError:
                     continue
-                new_stage = "merged" if str(t.get("stage") or "") == "ready" else "dropped"
-                self.upsert_task(id=str(t.get("id") or ""), stage=new_stage)
-        except (OSError, ValueError, sqlite3.Error):
-            pass
+                try:
+                    p.relative_to(root)
+                except (ValueError, RuntimeError):
+                    continue
+                new_stage = "merged" if stage == "ready" else "dropped"
+                try:
+                    self.upsert_task(id=str(t.get("id") or ""), stage=new_stage)
+                except (OSError, ValueError, sqlite3.Error):
+                    continue
         return done
 
 

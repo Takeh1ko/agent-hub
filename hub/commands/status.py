@@ -13,36 +13,48 @@ def default_opencode_db() -> Path:
     return Path.home() / ".local/share/opencode/opencode.db"
 
 
-def _worktrees_dir() -> Path | None:
-    """Каталог worktrees из первого проекта, None если нет."""
+def _worktrees_dirs() -> list[Path]:
+    """Каталоги worktrees всех проектов + fallback на .hub.toml в cwd."""
     try:
-        from hub.config import load_projects
+        from hub.config import load_project, load_projects
 
         projs = load_projects()
-    except Exception:
-        return None
-    if not projs:
-        return None
-    wt = str(getattr(projs[0], "worktrees", "") or "")
-    return Path(wt) if wt else None
+        if not projs:
+            try:
+                one = load_project(Path.cwd())
+            except (FileNotFoundError, OSError):
+                one = None
+            if one is not None and str(getattr(one, "worktrees", "") or ""):
+                projs = [one]
+    except Exception as e:
+        import sys
+
+        print(f"авто-импорт: нет конфига ({e})", file=sys.stderr)
+        return []
+    out: list[Path] = []
+    for p in projs:
+        wt = str(getattr(p, "worktrees", "") or "")
+        if wt and Path(wt) not in out:
+            out.append(Path(wt))
+    return out
+
+
+def auto_import(store: Store) -> None:
+    """Импорт legacy для всех worktrees; ошибки — в stderr, статус не роняем."""
+    import sys
+
+    for wt in _worktrees_dirs():
+        try:
+            store.import_legacy(wt)
+        except Exception as e:
+            print(f"авто-импорт {wt}: {e}", file=sys.stderr)
+            continue
 
 
 def _snap(args) -> snap.Snapshot:
     store = Store()
     # Авто-импорт legacy при каждом status: без ручного import-legacy.
-    # Не роняет статус при битом конфиге/каталоге.
-    try:
-        wt = _worktrees_dir()
-        if wt is not None and wt.is_dir():
-            store.import_legacy(wt)
-        else:
-            # Даже без каталога — снять висящие задачи со снятым worktree.
-            try:
-                store.import_legacy(wt if wt is not None else "")
-            except Exception:
-                pass
-    except Exception:
-        pass
+    auto_import(store)
     db = Path(args.opencode_db) if getattr(args, "opencode_db", None) else default_opencode_db()
     s = snap.build(store, ht.now_ms(),
                    opencode_db=str(db) if db.exists() else None,

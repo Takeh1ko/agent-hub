@@ -38,8 +38,8 @@ QUIET_NO_RED = ("queued", "preflight")
 def clean_activity(text: str, limit: int = 60) -> str:
     """Последнее действие без markdown, ≤ limit символов.
 
-    Первая строка до смысла: markdown-знаки вычищаются,
-    пробелы жмутся, хвост режется.
+    Первая строка до смысла: парные маркеры снимаются,
+    одиночные _/* внутри слов (snake_case, пути, арифметика) целы.
     """
     s = str(text or "").splitlines()
     s = s[0] if s else ""
@@ -49,7 +49,11 @@ def clean_activity(text: str, limit: int = 60) -> str:
     # Убрать markdown: код, жирность, заголовки, ссылки, цитаты.
     s = re.sub(r"```.*?```", " ", s)
     s = re.sub(r"`+", "", s)
-    s = re.sub(r"\*\*?|__?|~~", "", s)
+    s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
+    s = re.sub(r"__(.+?)__", r"\1", s)
+    s = re.sub(r"~~(.+?)~~", r"\1", s)
+    s = re.sub(r"(?<!\w)\*(.+?)\*(?!\w)", r"\1", s)
+    s = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", s)
     s = re.sub(r"^#+\s*", "", s)
     s = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", s)
     s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)
