@@ -68,18 +68,25 @@ def _ppid(stat_text: str) -> int | None:
         return None
 
 
-def agent_procs(proc_root: str | Path = "/proc") -> list[Proc]:
-    """Все процессы агентов. Исчезнувшие/нечитаемые pid пропускаются."""
+def scan_all(proc_root: str | Path = "/proc") -> list[dict]:
+    """Один проход по /proc: cmdline/cwd/ppid/старт каждого pid.
+
+    Возврат — список словарей {pid,args,cwd,ppid,started} для всех
+    читаемых процессов (включая --run-one, которых нет в agent_procs).
+    """
     root = Path(proc_root)
     try:
         entries = list(root.iterdir())
     except OSError:
         return []
-    infos: dict[int, dict] = {}
+    out: list[dict] = []
     for entry in entries:
         if not entry.name.isdigit():
             continue
-        pid = int(entry.name)
+        try:
+            pid = int(entry.name)
+        except (TypeError, ValueError):
+            continue
         try:
             raw = (entry / "cmdline").read_bytes().decode("utf-8", "replace")
         except OSError:
@@ -100,6 +107,56 @@ def agent_procs(proc_root: str | Path = "/proc") -> list[Proc]:
             started = int((entry / "stat").stat().st_mtime * 1000)
         except OSError:
             started = 0
+        out.append({"pid": pid, "args": args, "cwd": cwd,
+                    "ppid": ppid, "started": started})
+    out.sort(key=lambda d: int(d["pid"]))
+    return out
+
+
+def run_one_map(scan: list[dict] | None) -> dict[str, list[tuple[int, int]]]:
+    """Карта --run-one id → [(pid, started)] по уже снятому списку."""
+    out: dict[str, list[tuple[int, int]]] = {}
+    for info in scan or []:
+        try:
+            args = list(info.get("args") or [])
+            pid = int(info.get("pid"))
+            started = int(info.get("started") or 0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if "--run-one" not in args:
+            continue
+        try:
+            idx = args.index("--run-one")
+        except ValueError:
+            continue
+        if idx + 1 >= len(args):
+            continue
+        tid = str(args[idx + 1]).strip()
+        if not tid:
+            continue
+        out.setdefault(tid, []).append((pid, started))
+    return out
+
+
+def agent_procs(proc_root: str | Path = "/proc",
+                _scan: list[dict] | None = None) -> list[Proc]:
+    """Все процессы агентов. Исчезнувшие/нечитаемые pid пропускаются."""
+    if _scan is None:
+        infos_list = scan_all(proc_root)
+    else:
+        infos_list = list(_scan)
+    infos: dict[int, dict] = {}
+    for info in infos_list:
+        try:
+            pid = int(info.get("pid"))
+            args = list(info.get("args") or [])
+            cwd = str(info.get("cwd") or "")
+            ppid = info.get("ppid")
+            started = int(info.get("started") or 0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if not args:
+            continue
         infos[pid] = {"args": args, "cwd": cwd, "ppid": ppid, "started": started}
     kids: dict[int, list[int]] = {pid: [] for pid in infos}
     for pid, info in infos.items():

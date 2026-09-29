@@ -164,7 +164,8 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
     from hub.gate.acceptance import acceptance_cmd
 
     gate = check_gate(Path(worktree), base_sha, head_sha, allowed,
-                      acceptance_cmd(card_text, py), lock)
+                      acceptance_cmd(card_text, py), lock,
+                      work_branch=work_branch)
     if not gate.ok:
         try:
             store.add_event(task_id, "stage", {"stage": stage, "merge": "gate-red",

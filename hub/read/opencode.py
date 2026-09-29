@@ -62,8 +62,15 @@ def _tool_activity(tool: str, state: dict) -> str:
 
 def sessions(
     db_path: str | Path, since_ms: int, directory_prefix: str | None = None,
+    session_ids: list[str] | None = None,
 ) -> list[OcSession]:
-    """Сессии opencode. Незнакомая схема → [] + warning, не исключение."""
+    """Сессии opencode. Незнакомая схема → [] + warning, не исключение.
+
+    Пакетно: детали всех сессий — фиксированным числом запросов
+    (по одному на таблицу), а не запрос на сессию. БД — только mode=ro.
+    """
+    if session_ids is not None and len(session_ids) == 0:
+        return []
     path = str(db_path)
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -91,30 +98,207 @@ def sessions(
                         path, REQUIRED_SESSION_COLS)
             return []
         try:
+            conds = ["time_updated >= ?"]
+            args: list = [since_ms]
             if directory_prefix:
-                rows = con.execute(
-                    "SELECT * FROM session WHERE time_updated >= ? AND directory LIKE ?"
-                    " ORDER BY time_updated",
-                    (since_ms, directory_prefix + "%"),
-                ).fetchall()
-            else:
-                rows = con.execute(
-                    "SELECT * FROM session WHERE time_updated >= ? ORDER BY time_updated",
-                    (since_ms,),
-                ).fetchall()
+                conds.append("directory LIKE ?")
+                args.append(directory_prefix + "%")
+            if session_ids is not None:
+                want = [str(x) for x in session_ids if str(x)]
+                if not want:
+                    return []
+                conds.append(f"id IN ({','.join('?' for _ in want)})")
+                args.extend(want)
+            where = " AND ".join(conds)
+            rows = con.execute(
+                f"SELECT * FROM session WHERE {where} ORDER BY time_updated",
+                tuple(args),
+            ).fetchall()
         except sqlite3.Error as e:
             log.warning("opencode.db %s: незнакомая схема: %s", path, e)
             return []
+        if not rows:
+            return []
         now_ms = int(time.time() * 1000)
-        out: list[OcSession] = []
-        for row in rows:
-            try:
-                out.append(_one(con, dict(row), now_ms))
-            except sqlite3.Error as e:
-                log.warning("opencode.db: сессия пропущена: %s", e)
-        return out
+        try:
+            return _batch(con, [dict(r) for r in rows], now_ms)
+        except sqlite3.Error as e:
+            log.warning("opencode.db: пакетное чтение не удалось: %s", e)
+            # Фолбэк — по одной (медленно, но тот же результат).
+            out: list[OcSession] = []
+            for row in rows:
+                try:
+                    out.append(_one(con, dict(row), now_ms))
+                except sqlite3.Error as e2:
+                    log.warning("opencode.db: сессия пропущена: %s", e2)
+            return out
     finally:
         con.close()
+
+
+def _batch(con: sqlite3.Connection, srows: list[dict], now_ms: int) -> list[OcSession]:
+    """Собрать OcSession одним запросом на таблицу (≤10 execute всего)."""
+    ids = [str(s.get("id")) for s in srows if str(s.get("id") or "")]
+    if not ids:
+        return []
+    ph = ",".join("?" for _ in ids)
+    tup = tuple(ids)
+    # Пульс: MAX(time_updated) по трём таблицам.
+    pulse: dict[str, int] = {}
+    for s in srows:
+        sid = str(s.get("id"))
+        try:
+            pulse[sid] = int(s.get("time_updated") or s.get("time_created") or 0)
+        except (TypeError, ValueError):
+            pulse[sid] = 0
+    for table in ("message", "part", "todo"):
+        for sid2, mx in con.execute(
+            f"SELECT session_id, MAX(time_updated) FROM {table}"
+            f" WHERE session_id IN ({ph}) GROUP BY session_id",
+            tup,
+        ).fetchall():
+            try:
+                mx_i = int(mx) if mx else 0
+            except (TypeError, ValueError):
+                continue
+            if mx_i > pulse.get(str(sid2), 0):
+                pulse[str(sid2)] = mx_i
+    steps: dict[str, int] = {}
+    for sid2, cnt in con.execute(
+        f"SELECT session_id, COUNT(*) FROM part WHERE session_id IN ({ph})"
+        f" AND json_extract(data, '$.type')='step-finish' GROUP BY session_id",
+        tup,
+    ).fetchall():
+        try:
+            steps[str(sid2)] = int(cnt or 0)
+        except (TypeError, ValueError):
+            steps[str(sid2)] = 0
+    # Контекст: до 20 последних сообщений на сессию.
+    msg_map: dict[str, list[tuple[str, int]]] = {sid: [] for sid in pulse}
+    for sid2, raw, t_upd in con.execute(
+        f"SELECT session_id, data, time_updated FROM (SELECT session_id, data,"
+        f" time_updated, ROW_NUMBER() OVER (PARTITION BY session_id"
+        f" ORDER BY time_updated DESC) AS rn FROM message"
+        f" WHERE session_id IN ({ph})) WHERE rn <= 20 ORDER BY time_updated DESC",
+        tup,
+    ).fetchall():
+        k = str(sid2)
+        if k in msg_map:
+            try:
+                msg_map[k].append((str(raw or ""), int(t_upd or 0)))
+            except (TypeError, ValueError):
+                msg_map[k].append((str(raw or ""), 0))
+    # Активный tool: до 20 последних tool-частей на сессию.
+    tool_map: dict[str, list[tuple[str, int]]] = {sid: [] for sid in pulse}
+    for sid2, raw, t_upd in con.execute(
+        f"SELECT session_id, data, time_updated FROM (SELECT session_id, data,"
+        f" time_updated, ROW_NUMBER() OVER (PARTITION BY session_id"
+        f" ORDER BY time_updated DESC) AS rn FROM part"
+        f" WHERE session_id IN ({ph})"
+        f" AND json_extract(data, '$.type')='tool')"
+        f" WHERE rn <= 20 ORDER BY time_updated DESC",
+        tup,
+    ).fetchall():
+        k = str(sid2)
+        if k in tool_map:
+            try:
+                tool_map[k].append((str(raw or ""), int(t_upd or 0)))
+            except (TypeError, ValueError):
+                tool_map[k].append((str(raw or ""), 0))
+    # Хвост для activity без активного tool: 5 последних частей.
+    tail_map: dict[str, list[str]] = {sid: [] for sid in pulse}
+    for sid2, raw in con.execute(
+        f"SELECT session_id, data FROM (SELECT session_id, data,"
+        f" time_updated, ROW_NUMBER() OVER (PARTITION BY session_id"
+        f" ORDER BY time_updated DESC) AS rn FROM part"
+        f" WHERE session_id IN ({ph})) WHERE rn <= 5 ORDER BY time_updated DESC",
+        tup,
+    ).fetchall():
+        k = str(sid2)
+        if k in tail_map:
+            tail_map[k].append(str(raw or ""))
+    out: list[OcSession] = []
+    for s in srows:
+        sid = str(s.get("id"))
+        context = 0
+        for raw in msg_map.get(sid, [])[:20]:
+            data_s = raw[0] if isinstance(raw, tuple) else str(raw)
+            try:
+                m = json.loads(data_s)
+            except json.JSONDecodeError:
+                continue
+            if m.get("role") != "assistant":
+                continue
+            if m.get("error"):
+                continue
+            toks = m.get("tokens") or {}
+            cache = toks.get("cache") or {}
+            try:
+                contrib = int(toks.get("input") or 0) + int(cache.get("read") or 0)
+            except (TypeError, ValueError):
+                continue
+            if contrib <= 0:
+                continue
+            context = contrib
+            break
+        active_tool = ""
+        active_age = 0
+        activity = "думает"
+        for raw, t_updated in tool_map.get(sid, [])[:20]:
+            try:
+                p = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            status = (p.get("state") or {}).get("status")
+            if status in ("pending", "running"):
+                tool = str(p.get("tool") or "")
+                active_tool = tool
+                state = p.get("state") or {}
+                start = ((state.get("time") or {}).get("start")
+                         if isinstance(state.get("time"), dict) else None) or t_updated
+                try:
+                    active_age = max(0, (now_ms - int(start or now_ms)) // 1000)
+                except (TypeError, ValueError):
+                    active_age = 0
+                activity = _tool_activity(tool, state)
+                break
+        if not active_tool:
+            for raw in tail_map.get(sid, [])[:5]:
+                try:
+                    p = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if p.get("type") == "text" and p.get("text"):
+                    activity = str(p["text"])[:60]
+                    break
+                if p.get("type") == "reasoning":
+                    activity = "думает"
+                    break
+        model, provider = _model_info(s.get("model"))
+        try:
+            cost_f = float(s.get("cost") or 0.0)
+        except (TypeError, ValueError):
+            cost_f = 0.0
+        out.append(OcSession(
+            id=sid,
+            directory=str(s.get("directory") or ""),
+            title=str(s.get("title") or ""),
+            model=model,
+            provider=provider,
+            started_ms=int(s.get("time_created") or 0),
+            pulse_ms=int(pulse.get(sid, 0)),
+            steps=int(steps.get(sid, 0)),
+            tokens_in=int(s.get("tokens_input") or 0),
+            tokens_out=int(s.get("tokens_output") or 0),
+            cache_read=int(s.get("tokens_cache_read") or 0),
+            cache_write=int(s.get("tokens_cache_write") or 0),
+            cost=cost_f,
+            context_tokens=context,
+            active_tool=active_tool,
+            active_tool_age_s=active_age,
+            last_activity=activity[:60],
+        ))
+    return out
 
 
 def _one(con: sqlite3.Connection, s: dict, now_ms: int) -> OcSession:

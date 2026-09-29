@@ -135,6 +135,55 @@ def _with_changed_tests(cmd: list[str], names: list[str], repo: str) -> list[str
     return cmd
 
 
+def _is_ancestor(repo: str, anc: str, desc: str) -> bool:
+    """anc — предок desc (git merge-base --is-ancestor)."""
+    if not anc or not desc:
+        return False
+    try:
+        r = subprocess.run(["git", "merge-base", "--is-ancestor", anc, desc],
+                           cwd=repo, capture_output=True, text=True,
+                           timeout=_GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def _merge_base(repo: str, a: str, b: str) -> str:
+    try:
+        r = subprocess.run(["git", "merge-base", a, b], cwd=repo,
+                           capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def effective_base(repo: str, base_sha: str, head: str = "HEAD",
+                   work_branch: str | None = None) -> str:
+    """База диффа с учётом ручного слияния рабочей ветки.
+
+    Если в HEAD после base_sha есть коммит-слияние с рабочей веткой —
+    база = git merge-base <work_branch> HEAD (чужие файлы ветки не
+    считаются forbidden). Иначе — base_sha, как раньше.
+    """
+    base = (base_sha or "").strip()
+    wb = (work_branch or "").strip()
+    hd = (head or "HEAD").strip() or "HEAD"
+    if not base or not wb:
+        return base
+    r = _git(repo, "log", "--merges", "--format=%H %P", f"{base}..{hd}", "--")
+    if r.returncode != 0 or not r.stdout.strip():
+        return base
+    for line in r.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 3:  # merge: коммит + ≥2 родителя
+            continue
+        for parent in parts[2:]:
+            if _is_ancestor(repo, parent, wb):
+                mb = _merge_base(repo, wb, hd)
+                return mb or base
+    return base
+
+
 def check_gate(
     repo: Path,
     base_sha: str,
@@ -145,11 +194,13 @@ def check_gate(
     timeout_s: int = 1800,  # на сам прогон приёмки
     lock_wait_s: int | None = None,  # ожидание общего замка тестов; None — как timeout_s
     lock_poll_s: float = 5.0,
+    work_branch: str | None = None,
 ) -> GateResult:
     """Проверить ворота по порядку: чистота, дифф, allowed, приёмка под замком.
 
     Незакоммиченное/неотслеженное вне .agent/ и .agent.prev_*/ → dirty
     (приёмку не запускаем): иначе conftest.py/pytest.ini меняют саму приёмку мимо диффа.
+    База диффа — effective_base (merge-base после ручного слияния рабочей ветки).
     """
     repo_s = str(repo)
     allowed_list = list(allowed) if allowed else []
@@ -158,6 +209,7 @@ def check_gate(
     else:
         cmd = list(test_cmd)
     errors: list[str] = []
+    base_eff = effective_base(repo_s, base_sha, head, work_branch)
 
     dirty = _dirty_paths(repo_s)
     if dirty is None:
@@ -167,30 +219,30 @@ def check_gate(
         errors.append(f"dirty: {p}")
     if errors:
         return GateResult(ok=False, errors=errors,
-                          diff_stat=_diff_stat(repo_s, base_sha, head), tests_tail="")
+                          diff_stat=_diff_stat(repo_s, base_eff, head), tests_tail="")
 
-    count, count_err = _rev_count(repo_s, base_sha, head)
+    count, count_err = _rev_count(repo_s, base_eff, head)
     if count is None:
         return GateResult(ok=False, errors=[f"git-error: {count_err}"],
                           diff_stat="", tests_tail="")
     if count <= 0:
         errors.append("empty-diff")
         return GateResult(ok=False, errors=errors,
-                          diff_stat=_diff_stat(repo_s, base_sha, head), tests_tail="")
+                          diff_stat=_diff_stat(repo_s, base_eff, head), tests_tail="")
 
-    names, names_err = _diff_names(repo_s, base_sha, head)
+    names, names_err = _diff_names(repo_s, base_eff, head)
     if names is None:
         return GateResult(ok=False, errors=[f"git-error: {names_err}"],
-                          diff_stat=_diff_stat(repo_s, base_sha, head), tests_tail="")
+                          diff_stat=_diff_stat(repo_s, base_eff, head), tests_tail="")
     if not names:
         # Коммиты есть, но файлов нет (allow-empty): работы нет.
         errors.append("empty-diff")
         return GateResult(ok=False, errors=errors,
-                          diff_stat=_diff_stat(repo_s, base_sha, head), tests_tail="")
+                          diff_stat=_diff_stat(repo_s, base_eff, head), tests_tail="")
     for path in names:
         if not any(fnmatch.fnmatch(path, pat) for pat in allowed_list):
             errors.append(f"forbidden: {path}")
-    stat = _diff_stat(repo_s, base_sha, head)
+    stat = _diff_stat(repo_s, base_eff, head)
     if errors:
         # Итог уже не-ok: замок не захватываем, приёмку не гоняем.
         return GateResult(ok=False, errors=errors, diff_stat=stat, tests_tail="")

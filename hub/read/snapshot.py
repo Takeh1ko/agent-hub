@@ -240,17 +240,39 @@ def _task_arg_hit(args: list | None, tid: str) -> bool:
     return False
 
 
-def _run_one_pids(proc_root: str | Path, task_id: str) -> list[tuple[int, int]]:
+def _run_one_pids(proc_root: str | Path, task_id: str,
+                  _scan: list[dict] | None = None) -> list[tuple[int, int]]:
     """Живые `--run-one <id>`: [(pid, started_ms)] прямым чтением cmdline.
 
     Дочерний слот очереди запускается как `python -m hub.commands.queue
     --run-one ID` — в agent_procs у него kind None (не opencode/agy/hub),
     поэтому через `live` он не виден. Ищем точное значение флага, а не
     подстроку: `grep T1` с чужим T10 не должен давать ложную живость.
+    При _scan — только память, без чтения /proc.
     """
     out: list[tuple[int, int]] = []
     tid = str(task_id or "").strip()
     if not tid:
+        return out
+    if _scan is not None:
+        for info in _scan:
+            try:
+                args = list(info.get("args") or [])
+                pid = int(info.get("pid"))
+                started = int(info.get("started") or 0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if "--run-one" not in args:
+                continue
+            try:
+                idx = args.index("--run-one")
+            except ValueError:
+                continue
+            if idx + 1 >= len(args):
+                continue
+            if str(args[idx + 1]).strip() != tid:
+                continue
+            out.append((pid, started))
         return out
     try:
         entries = list(Path(proc_root).iterdir())
@@ -287,11 +309,12 @@ def _run_one_pids(proc_root: str | Path, task_id: str) -> list[tuple[int, int]]:
 
 
 def _hub_task_procs(live: list, proc_root: str | Path, task_id: str,
-                     now_ms: int) -> list:
+                     now_ms: int, _scan: list[dict] | None = None) -> list:
     """Процессы, ведущие задачу: hub_task по id + прямые --run-one.
 
     Работает и без worktree (ручной запуск): id задачи в аргументах
     процесса достаточно. Дубли по pid не возвращаем.
+    При _scan --run-one ищется в памяти, без чтения /proc.
     """
     tid = str(task_id or "")
     found: list = []
@@ -307,7 +330,7 @@ def _hub_task_procs(live: list, proc_root: str | Path, task_id: str,
             if pid not in seen:
                 seen.add(pid)
                 found.append(p)
-    for pid, started in _run_one_pids(proc_root, tid):
+    for pid, started in _run_one_pids(proc_root, tid, _scan=_scan):
         if pid in seen:
             continue
         seen.add(pid)
@@ -344,11 +367,108 @@ def _agy_activity(conv) -> str:
     return clean_activity(f"{conv.steps} шагов, ошибок {conv.errors}")
 
 
+def _done_minimal(t: dict, marks: dict, now_ms: int) -> TaskSnap:
+    """Дешёвый снимок merged/dropped: без сессий и процессов."""
+    tid = str(t.get("id"))
+    wt = str(t.get("worktree") or "")
+    try:
+        info = hm.card_info(wt, str(t.get("card_path") or ""), tid)
+    except (OSError, ValueError, AttributeError):
+        from collections import namedtuple as _nt
+
+        info = _nt("I", ["title", "short", "goal"])(title="", short="", goal="")
+    mark = marks.get(tid) or (0, "", "")
+    raw_stage = str(t.get("stage") or "").strip()
+    since_ms = mark[0] if mark[2] == raw_stage else 0
+    since_reason = mark[1] if mark[2] == raw_stage else ""
+    pulse = FINAL_PULSE.get(raw_stage.lower(), DONE_MARK)
+    return TaskSnap(
+        id=tid, project=str(t.get("project") or ""),
+        stage=raw_stage, round=hm.to_int(t.get("round")),
+        pulse=pulse, cost_go=0.0, cost_usd=0.0,
+        context=0, last_activity="-", sessions=[],
+        title=info.title, short=info.short, goal=info.goal,
+        executor=str(t.get("executor") or ""),
+        reviewers=hm.parse_reviewers(t.get("reviewers_json")),
+        max_rounds=hm.to_int(t.get("rounds")) or 2,
+        reason=str(t.get("stage_reason") or "") or since_reason,
+        stage_since_ms=hm.to_int(since_ms),
+    )
+
+
+def _header_totals(opencode_db: str | Path, day0: int, month0: int,
+                   ) -> tuple[float, float, float]:
+    """Шапка без деталей сессий: (all_go, all_usd, month_go) одним запросом.
+
+    Нужна и без активных задач (пустой store всё равно показывает деньги).
+    """
+    import sqlite3 as _sq
+
+    path = str(opencode_db)
+    try:
+        con = _sq.connect(f"file:{path}?mode=ro", uri=True)
+    except _sq.Error:
+        return 0.0, 0.0, 0.0
+    try:
+        con.row_factory = _sq.Row
+        try:
+            tables = {r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        except _sq.Error:
+            return 0.0, 0.0, 0.0
+        if any(t not in tables for t in ("session",)):
+            return 0.0, 0.0, 0.0
+        try:
+            rows = con.execute(
+                "SELECT model, cost, time_created FROM session WHERE time_created >= ?",
+                (month0,),
+            ).fetchall()
+        except _sq.Error:
+            return 0.0, 0.0, 0.0
+        all_go = all_usd = month_go = 0.0
+        for model_raw, cost, started in rows:
+            try:
+                import json as _js
+
+                info = _js.loads(model_raw or "{}")
+            except (ValueError, TypeError):
+                info = {}
+            prov = str(info.get("providerID") or "")
+            try:
+                c = float(cost or 0.0)
+                st = int(started or 0)
+            except (TypeError, ValueError):
+                continue
+            if prov == "opencode-go" and st >= month0:
+                month_go += c
+            if st >= day0:
+                if prov == "opencode-go":
+                    all_go += c
+                else:
+                    all_usd += c
+        return all_go, all_usd, month_go
+    finally:
+        try:
+            con.close()
+        except _sq.Error:
+            pass
+
+
 def build(store, now_ms: int, opencode_db: str | Path | None = None,
           proc_root: str | Path = "/proc",
-          agy_root: str | Path | None = None) -> Snapshot:
-    """Собрать картину. store — hub.store.Store."""
-    tasks = store.list_tasks(active_only=False)
+          agy_root: str | Path | None = None,
+          include_done: bool = False) -> Snapshot:
+    """Собрать картину. store — hub.store.Store.
+
+    Без include_done задачи merged/dropped даются дешёво (без сессий
+    и процессов): детали сессий и /proc ради них не читаются, шапка
+    считается лёгким запросом.
+    """
+    tasks_all = store.list_tasks(active_only=False)
+    if include_done:
+        tasks = list(tasks_all)
+    else:
+        tasks = [t for t in tasks_all if str(t.get("stage") or "") not in DONE_STAGES]
     oc_by_id: dict[str, oc.OcSession] = {}
     all_go = all_usd = month_go = 0.0
     day0 = _day_start_ms(now_ms)
@@ -357,17 +477,65 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
         marks = store.stage_marks() if hasattr(store, "stage_marks") else {}
     except Exception:  # чужая/старая схема — картина без «времени в этапе»
         marks = {}
+    def _session_dirs() -> dict[str, str]:
+        """id → directory всех сессий (лёгкий запрос для поиска непривязанных)."""
+        import sqlite3 as _sq
+
+        try:
+            con = _sq.connect(f"file:{opencode_db}?mode=ro", uri=True)
+        except _sq.Error:
+            return {}
+        try:
+            try:
+                return {str(r[0]): str(r[1] or "")
+                        for r in con.execute("SELECT id, directory FROM session").fetchall()}
+            except _sq.Error:
+                return {}
+        finally:
+            try:
+                con.close()
+            except _sq.Error:
+                pass
+
     if opencode_db is not None and Path(opencode_db).exists():
-        for s in oc.sessions(opencode_db, 0):
-            oc_by_id[s.id] = s
-        for s in oc_by_id.values():
-            if s.provider == "opencode-go" and s.started_ms >= month0:
-                month_go += s.cost
-            if s.started_ms >= day0:
-                if s.provider == "opencode-go":
-                    all_go += s.cost
-                else:
-                    all_usd += s.cost
+        # Шапка — всегда лёгким запросом (деньги видны и без активных задач).
+        try:
+            all_go, all_usd, month_go = _header_totals(opencode_db, day0, month0)
+        except OSError:
+            pass
+        if tasks:
+            # Детали — только нужных сессий: линки активных + непривязанные
+            # в их worktree (старый run_task). Чужие/закрытые не тянем.
+            linked_ids: set[str] = set()
+            active_wts: list[str] = []
+            try:
+                for t in tasks:
+                    try:
+                        for e in store.list_sessions(str(t.get("id"))):
+                            linked_ids.add(str(e.get("external_id") or ""))
+                    except (OSError, ValueError, KeyError):
+                        continue
+                    wt = str(t.get("worktree") or "")
+                    if wt:
+                        active_wts.append(wt)
+            except (OSError, ValueError):
+                pass
+            try:
+                dirs = _session_dirs()
+            except OSError:
+                dirs = {}
+            need: set[str] = set(linked_ids)
+            for sid, d in dirs.items():
+                if sid in need:
+                    continue
+                if any(_in_wt(d, wt) for wt in active_wts if wt and d):
+                    need.add(sid)
+            if need:
+                try:
+                    for s in oc.sessions(opencode_db, 0, session_ids=sorted(need)):
+                        oc_by_id[s.id] = s
+                except OSError:
+                    pass
     # agy: окно 5 ч для шапки + привязка разговоров к задачам.
     # Метрика окна одна — window_usage (карточка H08 п.1), без дублей.
     agy_dir: str | Path | None = agy_root if agy_root is not None else _default_agy_root()
@@ -382,13 +550,27 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
             agy_runs, agy_steps = ag.window_usage(agy_dir, now_ms, 5)
     except OSError:
         pass
-    try:
-        live = pr.agent_procs(proc_root)
-    except OSError:
-        live = []
+    # /proc — один проход за build; дальше всё в памяти.
+    scan: list[dict] = []
+    live: list = []
+    if tasks:
+        try:
+            scan = pr.scan_all(proc_root)
+        except OSError:
+            scan = []
+        try:
+            live = pr.agent_procs(proc_root, _scan=scan)
+        except OSError:
+            live = []
     snaps: list[TaskSnap] = []
     totals_go = totals_usd = 0.0
-    for t in tasks:
+    for t in tasks_all:
+        if not include_done and str(t.get("stage") or "") in DONE_STAGES:
+            try:
+                snaps.append(_done_minimal(t, marks, now_ms))
+            except (OSError, ValueError, AttributeError):
+                continue
+            continue
         links = [dict(e) for e in store.list_sessions(t["id"])]
         wt = str(t.get("worktree") or "")
         # Сессии без линка (старый run_task, панель «panel»): opencode-сессия в каталоге worktree — этой задачи.
@@ -407,7 +589,7 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
         tid = str(t["id"])
         alive = [p for p in live if wt and (_in_wt(p.cwd, wt) or any(_in_wt(a, wt) for a in p.args)
                                              or (p.kind == "hub_task" and _task_arg_hit(p.args, tid)))]
-        hub_procs = _hub_task_procs(live, proc_root, tid, now_ms)
+        hub_procs = _hub_task_procs(live, proc_root, tid, now_ms, _scan=scan)
         _alive_pids = {int(p.pid) for p in alive
                        if isinstance(getattr(p, "pid", None), int)}
         for p in hub_procs:
