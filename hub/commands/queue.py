@@ -268,23 +268,27 @@ def _partition(todo: list[dict], lock_of) -> tuple[list[dict], list[list[dict]]]
     return free, serial
 
 
-def _mark_taken(store: Store, task_id: str) -> None:
+def _mark_taken(store: Store, task_id: str) -> bool:
     """Честный этап взятой очередью задачи: queued → exec rN до исполнителя (H13 п.4).
 
-    N — текущий круг (round+1, минимум 1). Только из queued, чужие этапы
-    не трогаем. Best effort: ошибки store глотаются.
+    Атомарно (один UPDATE ... WHERE stage='queued'): чтение и запись
+    раздельно давали TOCTOU — родитель/ребёнок мог затереть уже ушедший
+    в gate/review дочерний процесс. Только дочерний `--run-one` метит
+    (родитель в _pump не метит: умерший до старта ребёнок иначе оставил
+    бы вечный «exec r1» без процесса, а list_queued его уже не возьмёт).
+    Возвращает True, если метка поставлена.
     """
     try:
         task = store.get_task(task_id)
     except (OSError, sqlite3.Error, ValueError):
-        return
+        return False
     if task is None:
-        return
+        return False
     try:
         if str(task.get("stage") or "") != "queued":
-            return
+            return False
     except (AttributeError, TypeError):
-        return
+        return False
     try:
         cur = int(task.get("round") or 0)
     except (TypeError, ValueError):
@@ -294,15 +298,40 @@ def _mark_taken(store: Store, task_id: str) -> None:
         n = 1
     stage = f"exec r{n}"
     try:
-        store.upsert_task(id=task_id, stage=stage, round=n,
-                          stage_reason="очередь взяла задачу")
-    except (OSError, sqlite3.Error, ValueError):
-        return
+        import time as _t
+
+        con = sqlite3.connect(str(store.path))
+    except sqlite3.Error:
+        return False
+    try:
+        try:
+            cur2 = con.execute(
+                "UPDATE task SET stage=?, round=?, stage_reason=?, updated_at=?"
+                " WHERE id=? AND stage='queued'",
+                (stage, n, "очередь взяла задачу",
+                 int(_t.time() * 1000), task_id),
+            )
+            con.commit()
+            changed = cur2.rowcount
+        except sqlite3.Error:
+            try:
+                con.rollback()
+            except sqlite3.Error:
+                pass
+            return False
+    finally:
+        try:
+            con.close()
+        except sqlite3.Error:
+            pass
+    if not changed:
+        return False
     try:
         store.add_event(task_id, "stage", {"stage": stage, "round": n,
                                            "why": "queue-taken"})
     except (OSError, sqlite3.Error, ValueError):
         pass
+    return True
 
 
 def _run_one(task_id: str, project_src: str | None) -> str:
@@ -576,11 +605,9 @@ def _pump(store: Store, project, proj_src: str | None, max_par: int,
                     continue
                 running[tid] = proc
                 info[tid] = (is_pok, lock_key)
-                # Честный этап сразу, не дожидаясь старта дочернего процесса.
-                try:
-                    _mark_taken(store, tid)
-                except (OSError, ValueError):
-                    pass
+                # Этап метит только дочерний --run-one (_mark_taken в _run_one):
+                # родительская метка оставляла вечный «exec r1» без процесса,
+                # если ребёнок умирал до старта, и перетирала gate/review.
                 try:
                     pid = getattr(proc, "pid", "?")
                 except (AttributeError, ValueError):

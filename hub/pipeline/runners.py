@@ -73,11 +73,47 @@ def is_transient_text(text: str) -> bool:
     return any(m in low for m in TRANSIENT_MARKERS)
 
 
+def _error_field_texts(data: dict) -> list[str]:
+    """Строковые тексты ошибки из JSON-события (только поля ошибки).
+
+    Проверяем только текст ошибки, а не всю JSON-строку: постороннее
+    «429» в других полях (например, `took 429ms`) — не транзиент.
+    """
+    out: list[str] = []
+    try:
+        keys = ("error", "message", "text", "details")
+    except Exception:
+        return out
+    for key in keys:
+        try:
+            val = data.get(key)
+        except (AttributeError, ValueError):
+            continue
+        if isinstance(val, str) and val.strip():
+            out.append(val.strip())
+        elif isinstance(val, dict):
+            try:
+                for sub in val.values():
+                    if isinstance(sub, str) and sub.strip():
+                        out.append(sub.strip())
+            except (AttributeError, ValueError):
+                continue
+        elif isinstance(val, list):
+            try:
+                for sub in val:
+                    if isinstance(sub, str) and sub.strip():
+                        out.append(sub.strip())
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
 def transient_error_of_line(line: str) -> str | None:
     """Текст транзиентной ошибки из JSON-события stdout, иначе None.
 
-    Только событие {"type": "error"} с текстом из TRANSIENT_MARKERS —
-    любая другая ошибка ведёт себя как раньше.
+    Только событие {"type": "error"}, чей текст ошибки (поля
+    error/message/text/details) содержит маркеры п.1, — любая другая
+    ошибка ведёт себя как раньше.
     """
     try:
         s = str(line or "")
@@ -97,19 +133,17 @@ def transient_error_of_line(line: str) -> str | None:
             return None
     except (AttributeError, ValueError):
         return None
-    if not is_transient_text(stripped):
+    try:
+        candidates = _error_field_texts(data)
+    except (ValueError, AttributeError):
         return None
-    # Короткий текст ошибки для TransientError: поле error/message, иначе строка.
-    for key in ("error", "message", "text", "details"):
+    for cand in candidates:
         try:
-            val = data.get(key)
-        except (AttributeError, ValueError):
-            val = None
-        if isinstance(val, str) and val.strip():
-            if is_transient_text(val):
-                return val.strip()[:2000]
-            return stripped[:2000]
-    return stripped[:2000]
+            if is_transient_text(cand):
+                return cand[:2000]
+        except (ValueError, AttributeError):
+            continue
+    return None
 
 
 class Runner(Protocol):
@@ -338,6 +372,7 @@ class OpencodeRunner:
         stderr_box: list[str] = [""]
         sid_box: list[str | None] = [None]
         notified_box: list[bool] = [False]
+        transient_box: list[str | None] = [None]
         last_event: list[float] = [time.monotonic()]
 
         def _maybe_notify(cand: str | None) -> None:
@@ -362,6 +397,19 @@ class OpencodeRunner:
                 return str(sid)
             return _extract_session_id(line)
 
+        def _first_transient_in(text: str) -> str | None:
+            try:
+                for _ln in str(text or "").splitlines():
+                    try:
+                        cand = transient_error_of_line(_ln)
+                    except (ValueError, AttributeError):
+                        continue
+                    if cand:
+                        return cand
+            except (ValueError, AttributeError):
+                return None
+            return None
+
         def _read_stdout() -> None:
             try:
                 stream = proc.stdout
@@ -374,6 +422,13 @@ class OpencodeRunner:
                             last_event[0] = time.monotonic()
                     except Exception:
                         pass
+                    if transient_box[0] is None:
+                        try:
+                            cand = transient_error_of_line(line)
+                        except (ValueError, AttributeError):
+                            cand = None
+                        if cand:
+                            transient_box[0] = cand
                     if sid_box[0] is None:
                         _maybe_notify(_sid_of_line(line))
             except Exception:
@@ -433,6 +488,11 @@ class OpencodeRunner:
                             f.write(combined)
                     except OSError:
                         pass
+                    # Error-событие уже в частичном stdout (потом завис) —
+                    # это TransientError, а не таймаут.
+                    transient_seen = transient_box[0] or _first_transient_in(partial)
+                    if transient_seen is not None:
+                        raise TransientError(transient_seen[:2000])
                     raise RuntimeError(
                         f"opencode: таймаут {timeout_s} c (лог {log_path})")
                 if idle_s and idle_s > 0 and (now - last_event[0] >= idle_s):
@@ -462,6 +522,11 @@ class OpencodeRunner:
                             pass
                         _close_quietly(proc.stdout)
                         _close_quietly(proc.stderr)
+                        # Error-событие уже в частичном stdout (потом тишина) —
+                        # это TransientError, а не тишина.
+                        transient_seen = transient_box[0] or _first_transient_in(partial)
+                        if transient_seen is not None:
+                            raise TransientError(transient_seen[:2000])
                         # Sid из stdout до тишины — в текст ошибки: fallback
                         # в cycle продолжает ту же сессию на muse через resume.
                         known_sid = sid_box[0] or _extract_session_id(partial)
@@ -505,16 +570,8 @@ class OpencodeRunner:
             return sid
         if session_id:
             return session_id
-        # Без sid и без JSON-error, но с транзиентным текстом в хвосте —
-        # тоже сбой сети/сервера (обрыв до JSON-события).
-        try:
-            if is_transient_text(combined[-2000:]):
-                tail = combined.strip().replace("\n", " ")[:500] or combined[-500:]
-                raise TransientError(tail[:2000])
-        except TransientError:
-            raise
-        except (ValueError, AttributeError):
-            pass
+        # Строго по контракту п.1: только событие {"type": "error"} в stdout —
+        # остальное (включая голые «429»/«status 5» в хвосте) как раньше.
         raise RuntimeError(
             f"opencode: нет sessionID в выводе (exit {rc}, лог {log_path}): "
             + combined[-2000:])

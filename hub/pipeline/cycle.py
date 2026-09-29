@@ -750,53 +750,6 @@ def _consume_exec_fresh(store, task_id: str) -> None:
         pass
 
 
-def _detect_card_change(store, task_id: str, project) -> bool:
-    """Сверить sha256 карточки с task.card_hash (страховка, если continue без флага).
-
-    Изменилась — обновить card_hash, событие
-    «карточка изменена → новая сессия исполнителя», вернуть True (новая сессия).
-    Нет файла/без изменений — False.
-    """
-    try:
-        task = store.get_task(task_id)
-    except (OSError, sqlite3.Error, ValueError):
-        return False
-    if not task:
-        return False
-    try:
-        card_path = _resolve_card(task, project)
-    except (OSError, ValueError):
-        return False
-    if card_path is None:
-        return False
-    try:
-        import hashlib as _hl
-
-        raw = card_path.read_bytes()
-    except OSError:
-        return False
-    try:
-        new_hash = _hl.sha256(raw).hexdigest()
-    except (ValueError, AttributeError):
-        return False
-    try:
-        old_hash = str(task.get("card_hash") or "")
-    except (AttributeError, TypeError):
-        old_hash = ""
-    if not new_hash or new_hash == old_hash:
-        return False
-    try:
-        store.upsert_task(id=task_id, card_hash=new_hash)
-    except (OSError, sqlite3.Error, ValueError):
-        pass
-    try:
-        store.add_event(task_id, "stage",
-                        {"reason": "карточка изменена → новая сессия исполнителя"})
-    except (OSError, sqlite3.Error, ValueError):
-        pass
-    return True
-
-
 def run_task(store, project, task_id: str, runners, rounds: int = 2,
              blind: bool = False, opencode_db: str | None = None,
              cost_fn=None) -> str:
@@ -837,10 +790,22 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
     except (OSError, ValueError, AttributeError):
         retry_max, retry_base = 3, 120.0
 
-    _set_stage(store, task_id, "preflight", 0, "старт")
+    # H13 п.4: взятая очередью задача уже «exec rN» (_mark_taken в _run_one) —
+    # предполёт её не затирает, иначе метка видна лишь миллисекунды.
+    try:
+        _cur = store.get_task(task_id) or {}
+        _cur_stage = str(_cur.get("stage") or "")
+    except (OSError, sqlite3.Error, ValueError, AttributeError):
+        _cur_stage = ""
+    _is_work = (_cur_stage == "preflight" or _cur_stage.startswith("exec r")
+                or _cur_stage.startswith("gate r") or _cur_stage.startswith("review r"))
+    if not _is_work:
+        _set_stage(store, task_id, "preflight", 0, "старт")
     _clean_pycache(worktree)
     continued = _continued_flag(store, task_id)
     # H13 п.3: новая или прежняя сессия исполнителя после continue.
+    # Единственное место решения — флаг exec_new_session от continue
+    # (card_hash и событие пишет только continue_.py).
     exec_fresh = False
     old_exec_sid: str | None = None
     if continued:
@@ -848,12 +813,6 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
             exec_fresh = _exec_fresh_required(store, task_id)
         except (OSError, ValueError, sqlite3.Error):
             exec_fresh = False
-        if not exec_fresh:
-            try:
-                if _detect_card_change(store, task_id, project):
-                    exec_fresh = True
-            except (OSError, ValueError, sqlite3.Error):
-                pass
         if not exec_fresh:
             try:
                 old_exec_sid = _last_exec_sid(store, task_id)
@@ -1371,13 +1330,28 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         if reviewers:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(reviewers))) as pool:
                 list(pool.map(_run_one, list(reviewers.items())))
-        # Молчавших ревьюеров видно в findings (low), вердикт — по ответившим.
+        over, _, _ = _over_budget(round_no)
+        if over:
+            return _do_budget_stop("бюджет 100 %", exec_sid, round_no)
+        # H13 п.2: любой ревьюер исчерпал повторы сети/сервера — arbiter
+        # с честной причиной, а не stub-approve «не дал JSON» + ready.
+        if transient_review_errs:
+            try:
+                first = sorted(transient_review_errs.items())[0][1]
+            except (ValueError, AttributeError, IndexError):
+                first = "сбой opencode"
+            _set_stage(store, task_id, "arbiter", round_no,
+                       _transient_reason(first))
+            return "arbiter"
+        # Молчавших (не транзиентно) видно в findings (low), вердикт — по ответившим.
         if reviewers:
             valid_names = {p.stem.removeprefix(f"review_r{round_no}_")
                            for p in (Path(worktree) / ".agent").glob(f"review_r{round_no}_*.json")
                            if _review_file_valid(p)}
             if valid_names and len(valid_names) < len(reviewers):
                 for name in sorted(set(reviewers) - valid_names):
+                    if name in transient_review_errs:
+                        continue
                     try:
                         (Path(worktree) / ".agent" / f"review_r{round_no}_{name}.json"
                          ).write_text(json.dumps({
@@ -1388,9 +1362,6 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                          }, ensure_ascii=False), encoding="utf-8")
                     except OSError:
                         continue
-        over, _, _ = _over_budget(round_no)
-        if over:
-            return _do_budget_stop("бюджет 100 %", exec_sid, round_no)
 
         reviews = _collect_reviews(worktree, round_no)
         try:
@@ -1422,11 +1393,7 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
             _set_stage(store, task_id, "ready", round_no, "панель approve")
             return "ready"
         if decision == "arbiter":
-            if not reviews and transient_review_errs:
-                first = sorted(transient_review_errs.items())[0][1]
-                reason = _transient_reason(first)
-            else:
-                reason = ",".join(r.verdict for r in reviews) or "панель молчит"
+            reason = ",".join(r.verdict for r in reviews) or "панель молчит"
             _set_stage(store, task_id, "arbiter", round_no, reason[:500])
             return "arbiter"
         # next → следующий круг. verdict() на последнем круге сам отдаёт

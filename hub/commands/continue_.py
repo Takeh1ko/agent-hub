@@ -17,39 +17,27 @@ CARD_CHANGED_MSG = "карточка изменена → новая сесси�
 
 
 def _current_card_hash(task: dict, project) -> str | None:
-    """sha256 текущего файла карточки, иначе None (нет файла)."""
-    import hashlib as _hl
+    """sha256 текущего файла карточки через общий поиск и хеш.
 
-    rel = str(task.get("card_path") or "")
-    if not rel:
+    Переиспользует `_resolve_card` (тот же, что review/merge/cycle) и
+    `card_hash_of`: набор кандидатов пути и sha256 в одном месте.
+    Нет файла — None.
+    """
+    try:
+        from hub.pipeline.common import card_hash_of
+        from hub.pipeline.cycle import _resolve_card as _resolve
+    except ImportError:
         return None
-    p = Path(rel)
     try:
-        if p.is_absolute() and p.is_file():
-            return _hl.sha256(p.read_bytes()).hexdigest()
-    except OSError:
+        path = _resolve(task, project)
+    except (OSError, ValueError, AttributeError):
         return None
-    cands: list[Path] = []
+    if path is None:
+        return None
     try:
-        root = str(getattr(project, "root", "") or "")
-    except (AttributeError, ValueError):
-        root = ""
-    try:
-        wt = str(task.get("worktree") or "")
-    except (AttributeError, TypeError):
-        wt = ""
-    if root:
-        cands.append(Path(root) / rel)
-    if wt:
-        cands.append(Path(wt) / rel)
-    cands.append(Path(rel))
-    for c in cands:
-        try:
-            if c.is_file():
-                return _hl.sha256(c.read_bytes()).hexdigest()
-        except OSError:
-            continue
-    return None
+        return card_hash_of(path)
+    except (OSError, ValueError):
+        return None
 
 
 def _wip_commit(worktree: str) -> int:

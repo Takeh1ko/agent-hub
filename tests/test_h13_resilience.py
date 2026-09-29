@@ -119,6 +119,16 @@ def test_transient_error_line_only_type_error():
     other = json.dumps({"type": "error", "error": "invalid tool call"})
     assert transient_error_of_line(other) is None
     assert transient_error_of_line("не json") is None
+    # Постороннее 429 вне текста ошибки — не транзиент.
+    assert transient_error_of_line(json.dumps({
+        "type": "error", "error": "invalid tool call",
+        "elapsed_ms": 429})) is None
+    assert transient_error_of_line(json.dumps({
+        "type": "error", "error": "invalid tool call",
+        "note": "took 429ms"})) is None
+    # А в самом тексте ошибки 429 — транзиент.
+    assert transient_error_of_line(json.dumps({
+        "type": "error", "error": "HTTP 429 too many requests"})) is not None
 
 
 def test_opencode_runner_raises_transient(tmp_path, monkeypatch):
@@ -155,6 +165,94 @@ def test_opencode_runner_raises_transient(tmp_path, monkeypatch):
         assert "Unexpected server error" in str(e)
     else:
         raise AssertionError("ожидался TransientError")
+
+
+def test_opencode_runner_plain_429_without_event_not_transient(tmp_path, monkeypatch):
+    """Голые «429» без {"type":"error"} — как раньше (RuntimeError, не повтор)."""
+    import subprocess as _sp
+
+    from hub.pipeline.runners import OpencodeRunner
+
+    class _FakeErr:
+        def read(self):
+            return ""
+
+    class _Proc:
+        def __init__(self):
+            self.stdout = iter(["какая-то строка 429 без json\n"])
+            self.stderr = _FakeErr()
+            self.returncode = 1
+            self.pid = 2_000_000_032
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(_sp, "Popen", lambda *a, **k: _Proc())
+    try:
+        OpencodeRunner(idle_s=0, timeout_s=30).start(
+            "промпт", str(tmp_path), log=str(tmp_path / "p.log"))
+    except TransientError:
+        raise AssertionError("голые 429 без error-события — не TransientError")
+    except RuntimeError as e:
+        assert "нет sessionID" in str(e)
+    else:
+        raise AssertionError("ожидался RuntimeError")
+
+
+def test_opencode_runner_error_then_hang_is_transient(tmp_path, monkeypatch):
+    """Error-событие п.1, потом завис: приоритет TransientError, а не тишина."""
+    import subprocess as _sp
+    import threading
+
+    from hub.pipeline.runners import OpencodeRunner
+
+    class _FakeErr:
+        def read(self):
+            return ""
+
+    class _HangAfterError:
+        def __init__(self):
+            self.stdout = self._gen()
+            self.stderr = _FakeErr()
+            self.returncode = None
+            self.pid = 2_000_000_031
+            self._killed = threading.Event()
+
+        def _gen(self):
+            yield json.dumps({"sessionID": "s-hang"}) + "\n"
+            yield json.dumps({"type": "error",
+                              "error": "Unexpected server error"}) + "\n"
+            # Дальше тишина: генератор висит до kill.
+            while not self._killed.is_set():
+                import time as _t
+                _t.sleep(0.05)
+                yield ""
+
+        def wait(self, timeout=None):
+            if self._killed.is_set():
+                self.returncode = 1
+                return 1
+            import time as _t
+            _t.sleep(timeout if timeout else 0.2)
+            if self._killed.is_set():
+                self.returncode = 1
+                return 1
+            raise _sp.TimeoutExpired(cmd="opencode", timeout=timeout)
+
+        def kill(self):
+            self._killed.set()
+
+    monkeypatch.setattr(_sp, "Popen", lambda *a, **k: _HangAfterError())
+    try:
+        OpencodeRunner(idle_s=1, timeout_s=30).start(
+            "промпт", str(tmp_path), log=str(tmp_path / "hang.log"))
+    except TransientError as e:
+        assert "Unexpected server error" in str(e)
+    else:
+        raise AssertionError("ожидался TransientError, а не тишина")
 
 
 def test_opencode_runner_other_error_not_transient(tmp_path, monkeypatch):
@@ -394,6 +492,158 @@ def test_exec_all_transients_arbiter(tmp_path):
     assert "сбой сети/сервера opencode" in reason, reason
 
 
+def test_retry_pause_grows_x2(monkeypatch, tmp_path):
+    """Паузы растут ×2: при base=120 → 120/240/480."""
+    repo, base = _mk_repo(tmp_path)
+    proj = _mk_project(repo, retry_max=3, retry_pause=120.0)
+    _mk_task(tmp_path, repo, base, tid="TPZ")
+    sleeps: list[float] = []
+    monkeypatch.setattr(cyc.time, "sleep", lambda s: sleeps.append(float(s)))
+    rev = AlwaysTransientRev()
+    got = cyc.run_task(Store(), proj, "TPZ",
+                       {"executor": ExecOk(), "reviewers": {"muse": rev}},
+                       rounds=1)
+    assert got == "arbiter"
+    assert sleeps == [120.0, 240.0, 480.0], sleeps
+    assert cyc._fmt_pause(120.0) == "120"
+    assert cyc._fmt_pause(0.01) == "0.01"
+
+
+def test_retry_max_zero_no_retry(tmp_path):
+    repo, base = _mk_repo(tmp_path)
+    proj = _mk_project(repo, retry_max=0, retry_pause=0.01)
+    _mk_task(tmp_path, repo, base, tid="TR0")
+    rev = AlwaysTransientRev()
+    got = cyc.run_task(Store(), proj, "TR0",
+                       {"executor": ExecOk(), "reviewers": {"muse": rev}},
+                       rounds=1)
+    assert got == "arbiter"
+    assert rev.calls == 1, rev.calls
+    events = [e for e in Store().events_since(0) if e["task_id"] == "TR0"]
+    assert not any("повтор" in (e.get("payload_json") or "") for e in events)
+
+
+def test_retry_cfg_defaults():
+    proj = ProjectConfig(name="T", root="r", worktrees="w", rules="",
+                         python=sys.executable, test_lock="",
+                         work_branch="main", push="", allowed_paths=[],
+                         defaults=Defaults(executor="muse", reviewers=["muse"]))
+    max_r, base = cyc._retry_cfg(proj)
+    assert (max_r, base) == (3, 120.0)
+    assert cyc._retry_cfg(type("P", (), {"retry_max": "мусор",
+                                         "retry_pause_s": "мусор"})()) == (3, 120.0)
+
+
+def test_exec_round2_same_session_retry(tmp_path):
+    """Круг ≥2: повтор исполнителя — тот же --session (resume того же sid)."""
+    repo, base = _mk_repo(tmp_path)
+    proj = _mk_project(repo)
+    _mk_task(tmp_path, repo, base, tid="TR2S")
+    calls: list = []
+
+    class ExecRound2:
+        tool = "opencode"
+        model = "muse"
+
+        def __init__(self):
+            self.resume_n = 0
+
+        def start(self, prompt, cwd, log=None):
+            calls.append(("start", None))
+            _commit_ok(Path(cwd))
+            return "exec-r1"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            calls.append(("resume", sid))
+            # Первый resume круга 2 — транзиент, повтор — успех.
+            if "fix" in (prompt or "").lower() or True:
+                self.resume_n += 1
+                if self.resume_n == 1:
+                    raise TransientError("socket hang up")
+            _commit_ok(Path(cwd), text="3\n")
+            return sid or "exec-r1"
+
+    class RevChangesOnce:
+        tool = "opencode"
+        model = "muse"
+
+        def __init__(self):
+            self.n = 0
+
+        def start(self, prompt, cwd, log=None):
+            import re as _re
+
+            self.n += 1
+            # Круг — по логу (reviewer_rN_), промпт содержит и историю r1.
+            m2 = _re.search(r"reviewer_r(\d+)_", log or "")
+            if m2:
+                rnd = int(m2.group(1))
+            else:
+                m = _re.search(r"review_r(\d+)\.json", prompt or "")
+                rnd = int(m.group(1)) if m else 1
+            if rnd == 1:
+                (Path(cwd) / ".agent" / f"review_r{rnd}_muse.json").write_text(
+                    json.dumps({"verdict": "changes",
+                                "findings": [{"file": "sub/a.txt", "line": 1,
+                                              "issue": "поправь",
+                                              "severity": "high"}]}),
+                    encoding="utf-8")
+            else:
+                (Path(cwd) / ".agent" / f"review_r{rnd}_muse.json").write_text(
+                    json.dumps({"verdict": "approve", "findings": []}),
+                    encoding="utf-8")
+            return f"rev-{rnd}"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            return sid
+
+    exe = ExecRound2()
+    got = cyc.run_task(Store(), proj, "TR2S",
+                       {"executor": exe, "reviewers": {"muse": RevChangesOnce()}},
+                       rounds=2)
+    assert got == "ready", Store().get_task("TR2S")
+    resumes = [c for c in calls if c[0] == "resume"]
+    assert len(resumes) >= 2, calls
+    assert all(sid == "exec-r1" for _, sid in resumes), calls
+
+
+def test_mixed_reviewers_transient_goes_arbiter(tmp_path):
+    """Один ревьюер всегда TransientError, второй approve → arbiter, не ready."""
+    repo, base = _mk_repo(tmp_path)
+    proj = _mk_project(repo)
+    _mk_task(tmp_path, repo, base, tid="TMIX")
+    Store().upsert_task(id="TMIX", reviewers_json='["muse", "mimoflash"]')
+
+    class RevApprove2:
+        def __init__(self, name):
+            self.name = name
+            self.tool = "opencode"
+            self.model = name
+
+        def start(self, prompt, cwd, log=None):
+            import re as _re
+
+            m = _re.search(r"review_r(\d+)\.json", prompt or "")
+            rnd = int(m.group(1)) if m else 1
+            (Path(cwd) / ".agent" / f"review_r{rnd}_{self.name}.json").write_text(
+                json.dumps({"verdict": "approve", "findings": []}),
+                encoding="utf-8")
+            return f"rev-{self.name}"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            return sid
+
+    revs = {"muse": AlwaysTransientRev("muse"),
+            "mimoflash": RevApprove2("mimoflash")}
+    got = cyc.run_task(Store(), proj, "TMIX",
+                       {"executor": ExecOk(), "reviewers": revs}, rounds=1)
+    assert got == "arbiter", Store().get_task("TMIX")
+    reason = (Store().get_task("TMIX") or {}).get("stage_reason", "")
+    assert "сбой сети/сервера opencode" in reason, reason
+    # Упавшему ревьюеру stub-approve не пишем.
+    assert not (repo / ".agent" / "review_r1_muse.json").is_file()
+
+
 # --- п.3: continue новая/старая сессия ---
 
 def _mk_continue_proj(tmp_path, root_name="root"):
@@ -589,10 +839,54 @@ def test_queue_taken_marks_exec(tmp_path):
                         base_sha="b", stage="queued", round=0, executor="muse",
                         reviewers_json="[]", stage_reason="",
                         budget_go=0.5, budget_usd=0.0, created_at=1000)
-    q._mark_taken(Store(), "Q1")
+    assert q._mark_taken(Store(), "Q1") is True
     got = Store().get_task("Q1")
     assert got["stage"] == "exec r1", got
     assert int(got["round"] or 0) == 1
+    # Повторная метка и чужой этап — не перетираем (атомарно).
+    assert q._mark_taken(Store(), "Q1") is False
+    Store().upsert_task(id="Q1", stage="gate r1", round=1)
+    assert q._mark_taken(Store(), "Q1") is False
+    assert Store().get_task("Q1")["stage"] == "gate r1"
+
+
+def _unified_fake(stage_sink: dict, tid: str):
+    """Один фейк на executor+reviewer (оба muse): различает по промпту."""
+
+    class UnifiedFake:
+        tool = "opencode"
+        model = "muse"
+
+        def start(self, prompt, cwd, log=None):
+            import re as _re
+
+            if "review_r" in (prompt or ""):
+                m0 = _re.search(r"reviewer_r(\d+)_", log or "")
+                if m0:
+                    rnd = int(m0.group(1))
+                else:
+                    m = _re.search(r"review_r(\d+)\.json", prompt or "")
+                    rnd = int(m.group(1)) if m else 1
+                m2 = _re.search(r"review_r\d+_([A-Za-z0-9_-]+)\.json", prompt or "")
+                nm = m2.group(1) if m2 else "muse"
+                (Path(cwd) / ".agent" / f"review_r{rnd}_{nm}.json").write_text(
+                    json.dumps({"verdict": "approve", "findings": []}),
+                    encoding="utf-8")
+                return f"rev-{nm}-{rnd}"
+            stage_sink["stage"] = (Store().get_task(tid) or {}).get("stage")
+            _commit_ok(Path(cwd))
+            return "exec-1"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            import re as _re
+
+            if "review_r" in (prompt or ""):
+                return sid
+            stage_sink["stage"] = (Store().get_task(tid) or {}).get("stage")
+            _commit_ok(Path(cwd), text="3\n")
+            return sid or "exec-1"
+
+    return UnifiedFake()
 
 
 def test_queue_exec_stage_during_work(tmp_path, monkeypatch):
@@ -608,46 +902,53 @@ def test_queue_exec_stage_during_work(tmp_path, monkeypatch):
                         reviewers_json='["muse"]', stage_reason="",
                         budget_go=0.5, budget_usd=0.0)
     seen: dict = {}
-
-    class UnifiedFake:
-        """Один фейк на executor+reviewer (оба muse): различает по промпту."""
-
-        tool = "opencode"
-        model = "muse"
-
-        def start(self, prompt, cwd, log=None):
-            import re as _re
-
-            if "review_r" in (prompt or ""):
-                m = _re.search(r"review_r(\d+)\.json", prompt or "")
-                rnd = int(m.group(1)) if m else 1
-                # Имя ревьюера — из per-file в промпте.
-                m2 = _re.search(r"review_r\d+_([A-Za-z0-9_-]+)\.json", prompt or "")
-                nm = m2.group(1) if m2 else "muse"
-                (Path(cwd) / ".agent" / f"review_r{rnd}_{nm}.json").write_text(
-                    json.dumps({"verdict": "approve", "findings": []}),
-                    encoding="utf-8")
-                return f"rev-{nm}-{rnd}"
-            seen["stage"] = (Store().get_task("TQ1") or {}).get("stage")
-            _commit_ok(Path(cwd))
-            return "exec-1"
-
-        def resume(self, sid, prompt, cwd, log=None):
-            import re as _re
-
-            if "review_r" in (prompt or ""):
-                return sid
-            seen["stage"] = (Store().get_task("TQ1") or {}).get("stage")
-            _commit_ok(Path(cwd), text="3\n")
-            return sid or "exec-1"
-
-    exe = UnifiedFake()
+    exe = _unified_fake(seen, "TQ1")
     monkeypatch.setattr("hub.pipeline.runners.make_runner", lambda name: exe)
     monkeypatch.setattr(q, "_resolve_project",
                         lambda task, src: _mk_project(repo))
     got = q._run_one("TQ1", None)
     assert got == "ready", Store().get_task("TQ1")
     assert seen.get("stage") == "exec r1", seen
+
+
+def test_queue_stage_exec_during_preflight(tmp_path, monkeypatch):
+    """Метка видна весь предполёт: без _mark_taken тут preflight, не exec.
+
+    Мутация «return False» в начале _mark_taken валит этот тест
+    (а слабый scenarный — нет: run_task сам ставит exec перед стартом).
+    """
+    import hub.commands.queue as q
+    from hub.gate.preflight import PreflightResult
+
+    repo, base = _mk_repo(tmp_path, name="wtqp")
+    card = tmp_path / "TQP.md"
+    card.write_text(CARD, encoding="utf-8")
+    h = hashlib.sha256(card.read_bytes()).hexdigest()
+    Store().upsert_task(id="TQP", project="T", card_path=str(card), card_hash=h,
+                        level="hard", branch="agent/TQP", worktree=str(repo),
+                        base_sha=base, stage="queued", round=0, executor="muse",
+                        reviewers_json='["muse"]', stage_reason="",
+                        budget_go=0.5, budget_usd=0.0)
+    entry: dict = {}
+
+    def _slow(store, task_id, project):
+        try:
+            entry["stage"] = (Store().get_task("TQP") or {}).get("stage")
+        except Exception:
+            entry["stage"] = None
+        time.sleep(0.3)
+        return PreflightResult(ok=True, reason="")
+
+    monkeypatch.setattr(cyc, "preflight", _slow)
+    seen: dict = {}
+    exe = _unified_fake(seen, "TQP")
+    monkeypatch.setattr("hub.pipeline.runners.make_runner", lambda name: exe)
+    monkeypatch.setattr(q, "_resolve_project",
+                        lambda task, src: _mk_project(repo))
+    got = q._run_one("TQP", None)
+    assert got == "ready", Store().get_task("TQP")
+    # На входе в предполёт метка уже exec (очередь взяла), а не queued/preflight.
+    assert entry.get("stage") == "exec r1", entry
 
 
 def test_config_retry_defaults():
@@ -659,10 +960,145 @@ def test_config_retry_defaults():
     assert _from_dict({"retry_max": "мусор"}).retry_max == 3
 
 
-def test_observer_has_retry():
-    text = (Path(__file__).resolve().parents[1] / "tools" / "observer.sh").read_text(
+def _observer_stubs(tmp_path: Path, mode: str) -> dict:
+    """Фейки bin/{opencode,sleep,hub} + H/P/R/D для одного прогона observer.sh."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    fake_d = tmp_path / "faked"
+    fake_d.mkdir(parents=True, exist_ok=True)
+    hub = tmp_path / "hub"
+    (hub / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+    (hub / "docs").mkdir(parents=True, exist_ok=True)
+    (hub / "docs" / "observer_prompt.md").write_text(
+        "snap {SNAP} out {OUT} prev {PREV}\n", encoding="utf-8")
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    (bindir / "opencode").write_text(
+        "#!/bin/bash\n"
+        "n=$(cat \"$FAKE_D/count\" 2>/dev/null || echo 0)\n"
+        "n=$((n+1)); echo \"$n\" > \"$FAKE_D/count\"\n"
+        "if [ \"$FAKE_MODE\" = \"transient-always\" ]; then\n"
+        "  echo '{\"type\":\"error\",\"error\":\"unexpected server error (proxy)\"}'\n"
+        "elif [ \"$FAKE_MODE\" = \"transient-then-clean\" ]; then\n"
+        "  if [ \"$n\" = \"1\" ]; then\n"
+        "    echo '{\"type\":\"error\",\"error\":\"unexpected server error\"}'\n"
+        "  else\n"
+        "    echo '{\"sessionID\":\"ok-1\"}'\n"
+        "  fi\n"
+        "else\n"
+        "  echo '{\"sessionID\":\"ok-1\"}'\n"
+        "fi\n"
+        "exit 0\n", encoding="utf-8")
+    (bindir / "sleep").write_text(
+        "#!/bin/bash\necho \"$*\" >> \"$FAKE_D/sleep.log\"\nexit 0\n",
         encoding="utf-8")
-    assert "сбой сети/сервера opencode" in text
-    assert "sleep 120" in text
-    assert "Unexpected server error" in text
-    assert "retry" in text.lower() or "_retry" in text or "повтор" in text
+    (bindir / "hub").write_text(
+        "#!/bin/bash\necho \"$*\" >> \"$FAKE_D/hub.log\"\n"
+        "if [ \"$1\" = \"status\" ]; then echo ok; fi\n"
+        "if [ \"$1\" = \"roster\" ]; then echo ok; fi\n"
+        "exit 0\n", encoding="utf-8")
+    import os as _os
+
+    for f in ("opencode", "sleep", "hub"):
+        _os.chmod(bindir / f, 0o755)
+    (hub / ".venv" / "bin" / "hub").write_text(
+        (bindir / "hub").read_text(encoding="utf-8"), encoding="utf-8")
+    import os as _os2
+
+    _os2.chmod(hub / ".venv" / "bin" / "hub", 0o755)
+    try:
+        import sys as _sys
+
+        (hub / ".venv" / "bin" / "python").symlink_to(_sys.executable)
+    except (OSError, FileExistsError):
+        pass
+    return {"bindir": bindir, "fake_d": fake_d, "hub": hub, "proj": proj,
+            "obs": tmp_path / "obs"}
+
+
+def _run_observer_once(env: dict, timeout_s: int = 60) -> None:
+    import subprocess as _sp
+
+    script = (Path(__file__).resolve().parents[1] / "tools" / "observer.sh")
+    _sp.run(["bash", str(script)], env=env, capture_output=True, text=True,
+            timeout=timeout_s, check=False)
+
+
+def _observer_env(tmp_path: Path, stubs: dict, mode: str) -> dict:
+    import os as _os
+
+    env = dict(_os.environ)
+    env["H"] = str(stubs["hub"])
+    env["P"] = str(stubs["proj"])
+    env["R"] = str(tmp_path / "run")
+    env["D"] = str(stubs["obs"])
+    env["EVERY"] = "0.05"
+    env["OBSERVER_ONCE"] = "1"
+    env["OBSERVER_MODEL"] = "dummy"
+    env["FAKE_MODE"] = mode
+    env["FAKE_D"] = str(stubs["fake_d"])
+    env["PATH"] = str(stubs["bindir"]) + ":" + env.get("PATH", "")
+    return env
+
+
+def test_observer_retry_then_clean(tmp_path):
+    """Первый лог транзиентный (другой регистр) → повтор; второй чистый."""
+    stubs = _observer_stubs(tmp_path / "a", "transient-then-clean")
+    _run_observer_once(_observer_env(tmp_path / "a", stubs,
+                                      "transient-then-clean"))
+    fake_d = stubs["fake_d"]
+    try:
+        count = int((fake_d / "count").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        count = 0
+    assert count == 2, count
+    sleep_log = ""
+    try:
+        sleep_log = (fake_d / "sleep.log").read_text(encoding="utf-8")
+    except OSError:
+        pass
+    assert "120" in sleep_log.split(), sleep_log
+    logs = sorted((stubs["obs"]).glob("agy_*.log"))
+    assert len(logs) == 2, [p.name for p in logs]
+    first = logs[0].read_text(encoding="utf-8")
+    second = logs[1].read_text(encoding="utf-8")
+    assert "unexpected server error" in first.lower()
+    assert "unexpected server error" not in second.lower()
+
+
+def test_observer_double_transient_network_problem(tmp_path):
+    """Оба прогона с ошибкой сети → hub say про сбой сети/сервера."""
+    stubs = _observer_stubs(tmp_path / "b", "transient-always")
+    _run_observer_once(_observer_env(tmp_path / "b", stubs,
+                                      "transient-always"))
+    fake_d = stubs["fake_d"]
+    try:
+        count = int((fake_d / "count").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        count = 0
+    assert count == 2, count
+    hub_log = ""
+    try:
+        hub_log = (fake_d / "hub.log").read_text(encoding="utf-8")
+    except OSError:
+        pass
+    assert "сбой сети/сервера opencode" in hub_log, hub_log
+
+
+def test_observer_no_transient_no_retry(tmp_path):
+    """Чистый первый прогон → повтора нет."""
+    stubs = _observer_stubs(tmp_path / "c", "clean")
+    _run_observer_once(_observer_env(tmp_path / "c", stubs, "clean"))
+    fake_d = stubs["fake_d"]
+    try:
+        count = int((fake_d / "count").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        count = 0
+    assert count == 1, count
+    assert len(list((stubs["obs"]).glob("agy_*.log"))) == 1
+    sleep_log = ""
+    try:
+        sleep_log = (fake_d / "sleep.log").read_text(encoding="utf-8")
+    except OSError:
+        pass
+    assert "120" not in sleep_log.split(), sleep_log
