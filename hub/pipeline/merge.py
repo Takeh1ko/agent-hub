@@ -21,7 +21,8 @@ def _run_git(cwd: str, *args: str, timeout: int = 120) -> subprocess.CompletedPr
                                            stdout="", stderr=str(e))
 
 
-def _run_acceptance(root: str, py: str, lock: str | None) -> tuple[bool, str]:
+def _run_acceptance(root: str, py: str, lock: str | None, cmd: list[str] | None = None,
+                    timeout_s: int = 1800) -> tuple[bool, str]:
     """Приёмка на слитом дереве: pytest -q под замком, без проверки диффа/грязи."""
     import fcntl
     import os as _os
@@ -36,22 +37,31 @@ def _run_acceptance(root: str, py: str, lock: str | None) -> tuple[bool, str]:
             lock_fd = _os.open(str(lock), _os.O_CREAT | _os.O_RDWR, 0o644)
         except OSError as e:
             return False, f"lock-error: {e}"
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError):
-            try:
-                from hub.read.procs import lock_holder as _lh
+        # Ждём общий замок (как ворота), а не отказываем сразу.
+        import time as _time
 
-                holder = _lh(str(lock))
-                msg = f"locked: pid {holder.pid}" if holder is not None else "locked: pid ?"
-            except (OSError, ValueError):
-                msg = "locked: pid ?"
-            _os.close(lock_fd)
-            return False, msg
+        deadline = _time.monotonic() + int(_os.environ.get("HUB_GATE_LOCK_WAIT_S", timeout_s))
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                if _time.monotonic() < deadline:
+                    _time.sleep(5)
+                    continue
+                try:
+                    from hub.read.procs import lock_holder as _lh
+
+                    holder = _lh(str(lock))
+                    msg = f"locked: pid {holder.pid}" if holder is not None else "locked: pid ?"
+                except (OSError, ValueError):
+                    msg = "locked: pid ?"
+                _os.close(lock_fd)
+                return False, msg
     try:
         try:
-            r = subprocess.run([py, "-m", "pytest", "-q"], cwd=root,
-                               capture_output=True, text=True, timeout=600)
+            r = subprocess.run(cmd or [py, "-m", "pytest", "-q"], cwd=root,
+                               capture_output=True, text=True, timeout=timeout_s)
         except subprocess.TimeoutExpired as e:
             out = e.stdout if isinstance(e.stdout, str) else ""
             err = e.stderr if isinstance(e.stderr, str) else ""
@@ -188,7 +198,20 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
     merged = _run_git(root, "rev-parse", "HEAD")
     merged_sha = merged.stdout.strip() if merged.returncode == 0 else ""
     # Приёмка на слитом дереве (только тесты, без проверки диффа/грязи root).
-    acc_ok, acc_msg = _run_acceptance(root, py, lock)
+    # Приёмка карточки + изменённые задачей тесты (не весь набор проекта — десятки минут под замком).
+    try:
+        from hub.gate.acceptance import acceptance_cmd
+        from hub.gate.gate import _with_changed_tests
+        from hub.pipeline.cycle import _resolve_card
+
+        _cp = _resolve_card(task, project)
+        _ct = _cp.read_text(encoding="utf-8") if _cp is not None else ""
+        _names = [l for l in _run_git(root, "diff", "--no-renames", "--name-only",
+                                      f"{base_sha}..{merged_sha}", "--").stdout.splitlines() if l.strip()]
+        acc_cmd = _with_changed_tests(acceptance_cmd(_ct, py), _names, root)
+    except (OSError, ValueError):
+        acc_cmd = None
+    acc_ok, acc_msg = _run_acceptance(root, py, lock, acc_cmd)
     # pytest в корне оставляет .pytest_cache/__pycache__ — чистим, как worktree
     # перед воротами, иначе каждое слияние грязнит work_branch.
     _clean(root)
