@@ -93,7 +93,8 @@ def test_roster_and_cost(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(status_cmd, "default_opencode_db", lambda: db)
     monkeypatch.setattr(cost_cmd, "DEFAULT_OPENCODB", db)
     assert main(["roster"]) == 0
-    assert "executor" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "T00" in out and "пишет код" in out  # сводка для владельца: этап словами
     for by in ("task", "model", "role", "day"):
         assert main(["cost", "--by", by]) == 0
         out = capsys.readouterr().out
@@ -147,4 +148,5 @@ def test_import_legacy_cmd(tmp_path, capsys):
         "round": 1, "verdicts": [], "status": "failed"}), encoding="utf-8")
     assert main(["import-legacy", "--worktrees", str(wt)]) == 0
     assert "T09-x" in capsys.readouterr().out
-    assert Store().get_task("T09-x")["stage"] == "failed"
+    # Без summary.md задача старого конвейера в работе (status=failed — его заглушка), а не провал.
+    assert Store().get_task("T09-x")["stage"] == "exec r1"

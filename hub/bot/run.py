@@ -302,10 +302,15 @@ def _sync_status(now_ms: int) -> str:
 
 
 def _sync_roster(now_ms: int) -> str:
+    from hub.commands.status import auto_import
     from hub.read import snapshot as snap
     from hub.store import Store
 
     store = Store()
+    try:
+        auto_import(store)
+    except Exception:
+        pass
     s = snap.build(store, int(now_ms),
                    opencode_db=_opencode_db(), proc_root="/proc")
     return bc.format_roster(s)

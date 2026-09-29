@@ -25,14 +25,37 @@ def _no_combat_write():
         yield
         return
     combat = real_home / ".local/share/agent-hub/hub.db"
+    # Боевую базу параллельно пишет живой бот (события, meta, автоимпорт) — mtime не показатель.
+    # Утечка тестов = новые строки в таблицах, куда пишут только владелец/тесты.
+    guarded = ("tg_chat", "inbox", "question", "outbox")
+
+    def rows() -> dict:
+        if not combat.exists():
+            return {}
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{combat}?mode=ro", uri=True, timeout=5)
+        try:
+            out = {}
+            for t in guarded:
+                try:
+                    out[t] = {tuple(r) for r in con.execute(f"SELECT * FROM {t}")}
+                except sqlite3.Error:
+                    out[t] = set()
+            return out
+        finally:
+            con.close()
+
     before_present = combat.exists()
-    before_mtime = combat.stat().st_mtime if before_present else None
-    before_size = combat.stat().st_size if before_present else None
+    before = rows()
     yield
-    after_present = combat.exists()
     if not before_present:
-        assert not after_present, "тесты создали боевой hub.db"
+        assert not combat.exists(), "тесты создали боевой hub.db"
         return
-    assert after_present, "тесты удалили боевой hub.db"
-    assert combat.stat().st_mtime == before_mtime, "тесты изменили боевой hub.db"
-    assert combat.stat().st_size == before_size
+    after = rows()
+    for t in guarded:
+        # Владелец мог написать боту во время прогона — это inbox с source='tg' и живым текстом;
+        # тестовые строки узнаются по отсутствию в «до» и по признакам фикстур.
+        new = after.get(t, set()) - before.get(t, set())
+        leaked = [r for r in new if t != "inbox" or not str(r).count("'tg'")]
+        assert not leaked, f"тесты записали в боевой hub.db ({t}): {leaked[:3]}"

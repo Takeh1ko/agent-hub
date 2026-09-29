@@ -915,19 +915,14 @@ def new_questions_to_send(store: Store) -> list[dict]:
 
 
 def format_roster(snapshot) -> str:
-    """Модель → роль → задача → этап → пульс → $ + итог и лимит Go."""
-    base = str(snapshot.roster_text())
-    footer = (
-        f"Итого сегодня: go ${float(snapshot.total_go):.3f}"
-        f" + usd ${float(snapshot.total_usd):.3f}"
-        f" (лимит Go ${GO_LIMIT:.0f})"
-    )
-    return _wrap_pre(f"{base}\n{footer}".strip(), MSG_LIMIT)
+    """Для владельца: деньги сверху, дальше задачи и кто над ними работает («сотрудники»)."""
+    head = snapshot.head_text() if hasattr(snapshot, "head_text") else ""
+    return _wrap_pre(f"{head}\n\n{snapshot.roster_text()}".strip(), MSG_LIMIT)
 
 
 def format_status(snapshot) -> str:
-    """Компактная картина (= hub status) в <pre>."""
-    return _wrap_pre(str(snapshot.to_text()), MSG_LIMIT)
+    """В TG /status = /roster: владельцу нужна понятная картина, не машинная строка."""
+    return format_roster(snapshot)
 
 
 def format_task(store: Store, task_id: str, limit: int = TASK_LIMIT,

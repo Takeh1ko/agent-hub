@@ -268,6 +268,18 @@ class Store:
 
 def _legacy_stage(status: str, round_no: int, verdicts: list, worktree: Path) -> str:
     """Этап из status/round/verdicts (+ review-файлы при failed)."""
+    # Старый конвейер пишет status=failed с первой секунды как заглушку: пока нет
+    # summary.md, задача в работе — этап по файлам текущего круга.
+    agent = worktree / ".agent"
+    n = max(int(round_no or 0), 1)
+    vals = [str(v) for v in (verdicts or [])]
+    if (status == "failed" and not (agent / "summary.md").exists() and len(vals) < n
+            and not any(v in ("dispute", "invalid") for v in vals)):
+        try:
+            reviewing = any(agent.glob(f"reviewer_r{n}*.log")) or any(agent.glob(f"review_r{n}*.json"))
+        except OSError:
+            reviewing = False
+        return f"review r{n}" if reviewing else f"exec r{n}"
     if status in KNOWN_STAGES:
         if status == "failed" and round_no > 0:
             rev = _last_review_verdict(worktree, round_no)

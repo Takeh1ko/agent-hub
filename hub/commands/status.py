@@ -69,7 +69,7 @@ def cmd_status(args) -> int:
     if getattr(args, "json", False):
         print(s.to_json())
     else:
-        print(s.to_text())
+        print(s.to_text(include_done=getattr(args, "all", False)))
     return 0
 
 

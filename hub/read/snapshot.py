@@ -41,9 +41,11 @@ def clean_activity(text: str, limit: int = 60) -> str:
     Первая строка до смысла: парные маркеры снимаются,
     одиночные _/* внутри слов (snake_case, пути, арифметика) целы.
     """
-    s = str(text or "").splitlines()
-    s = s[0] if s else ""
-    s = s.strip()
+    parts = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    s = parts[0] if parts else ""
+    if s.endswith(":") and len(parts) > 1:  # «bash:» + команда на следующей строке
+        s = f"{s} {parts[1]}"
+    s = re.sub(r"^\d+[.)]\s+", "", s)  # «1. Сделано» → «Сделано»
     if not s or s == "-":
         return s or "-"
     # Убрать markdown: код, жирность, заголовки, ссылки, цитаты.
@@ -60,9 +62,11 @@ def clean_activity(text: str, limit: int = 60) -> str:
     s = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", s)
     s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)
     s = re.sub(r"^>\s*", "", s)
+    # Непарные остатки разметки у края слова (не «2**3», не «__init__»).
+    s = re.sub(r"(?<!\w)(\*\*|~~)|(\*\*|~~)(?!\w)", "", s)
     s = re.sub(r"\s+", " ", s).strip()
     if len(s) > limit:
-        s = s[:limit].rstrip()
+        s = s[:limit - 1].rstrip() + "…"
     return s or "-"
 
 
@@ -109,9 +113,11 @@ class TaskSnap:
 @dataclass
 class Snapshot:
     tasks: list[TaskSnap]
-    total_go: float
-    total_usd: float
+    total_go: float          # сегодня, только сессии задач hub (подписка Go, «по прайсу»)
+    total_usd: float         # сегодня, только сессии задач hub (реальные деньги)
     now_ms: int
+    all_go: float = 0.0      # сегодня, все сессии opencode (все проекты) — для лимита подписки
+    all_usd: float = 0.0
 
     def to_json(self) -> str:
         return json.dumps({
@@ -132,11 +138,19 @@ class Snapshot:
             } for t in self.tasks],
         }, ensure_ascii=False)
 
-    def to_text(self, limit: int = 1500) -> str:
-        """Компактно, ≤ limit байт: усечение снизу."""
-        head = f"$ сегодня: go {self.total_go:.2f} / usd {self.total_usd:.2f}"
+    def head_text(self) -> str:
+        return (f"Итого сегодня: задачи Go ${self.total_go:.2f} · все проекты Go ${self.all_go:.2f}"
+                f" (лимит Go $60/мес) · реальные ${self.all_usd:.2f}")
+
+    def active_tasks(self) -> list["TaskSnap"]:
+        return [t for t in self.tasks if t.stage not in DONE_STAGES]
+
+    def to_text(self, limit: int = 1500, include_done: bool = False) -> str:
+        """Компактно, ≤ limit байт: усечение снизу. Слитые/брошенные — только при include_done."""
+        head = self.head_text()
         lines = [head]
-        for t in self.tasks:
+        shown = list(self.tasks) if include_done else self.active_tasks()
+        for t in shown:
             cost = t.cost_go + t.cost_usd
             sess = ",".join(f"{s.role}:{s.model}" for s in t.sessions[:2]) or "-"
             last = t.last_activity[:28]
@@ -146,7 +160,7 @@ class Snapshot:
         if encoded <= limit:
             return text
         # Усекаем: сначала режем last_activity, потом число задач.
-        tasks = list(self.tasks)
+        tasks = list(shown)
         while tasks:
             probe = [head] + [
                 f"{t.pulse} {t.id} {t.stage} "
@@ -160,15 +174,62 @@ class Snapshot:
             tasks.pop()
         return head.encode("utf-8")[:limit].decode("utf-8", "ignore")
 
-    def roster_text(self) -> str:
-        """Модель → роль → задача → этап → пульс → $."""
-        rows = []
-        for t in self.tasks:
-            for s in t.sessions:
-                rows.append((s.model, s.role, t.id, t.stage, s.pulse, s.cost))
-        rows.sort()
-        lines = [f"{m} {r} {tid} {st} {p} ${c:.3f}" for m, r, tid, st, p, c in rows]
-        return "\n".join(lines) if lines else "(пусто)"
+    def roster_text(self, recent_ms: int = 10 * 60_000) -> str:
+        """«Сотрудники» по задачам: задача (пульс, этап, $), под ней — кто работал за последние recent_ms."""
+        blocks = []
+        for t in self.active_tasks():
+            head = f"{t.pulse} {t.id} — {STAGE_RU(t.stage)} · ${t.cost_go + t.cost_usd:.2f}"
+            rows = []
+            for s in sorted(t.sessions, key=lambda x: -x.pulse_ms):
+                age = self.now_ms - s.pulse_ms
+                if age > recent_ms:
+                    continue
+                rows.append(f"   {pretty_model(s.model, s.provider)} · {ROLE_RU.get(s.role, s.role)} · {_ago(age)}"
+                            + (f" · {s.last_activity}" if s.last_activity not in ("", "-") else ""))
+            if not rows:
+                last = max((s.pulse_ms for s in t.sessions), default=0)
+                rows.append(f"   ждёт (тесты/замок/очередь), пульс {_ago(self.now_ms - last) if last else '—'}")
+            blocks.append("\n".join([head, *rows]))
+        return "\n\n".join(blocks) if blocks else "Активных задач нет."
+
+
+def STAGE_RU(stage: str) -> str:
+    s = str(stage or "")
+    m = re.match(r"^(exec|review|gate) r(\d+)$", s)
+    if m:
+        return {"exec": "пишет код", "review": "ревью", "gate": "тесты"}[m.group(1)] + f", круг {m.group(2)}"
+    return {"queued": "в очереди", "preflight": "предполёт", "ready": "готово к слиянию", "arbiter": "ждёт Claude",
+            "failed": "провал", "stopped": "остановлена", "merged": "слита", "dropped": "брошена"}.get(s, s)
+
+
+ROLE_RU = {"executor": "исполнитель", "reviewer": "ревьюер", "critic": "критик",
+           "scout": "разведчик", "repair": "починка"}
+
+
+def pretty_model(model: str, provider: str = "") -> str:
+    m = (model or "?").lower()
+    name = ("Spark 1.3" if "muse-spark" in m else "MiMo Flash" if "mimo" in m and "flash" in m
+            else "MiMo Pro" if "mimo" in m else "DeepSeek" if "deepseek" in m
+            else "GLM" if "glm" in m else "Gemini" if "gemini" in m else model or "?")
+    if "free" in m or (provider == "opencode" and "spark" in name.lower()):
+        name += " free"
+    return name
+
+
+def _ago(ms: int) -> str:
+    mins = max(int(ms // 60_000), 0)
+    return "сейчас" if mins < 1 else f"{mins} мин назад" if mins < 60 else f"{mins // 60} ч {mins % 60} мин назад"
+
+
+def _in_wt(path: str, wt: str) -> bool:
+    return bool(wt) and (path == wt or path.startswith(wt.rstrip("/") + "/"))
+
+
+def _exec_session_id(wt: str) -> str:
+    try:
+        return str(json.loads((Path(wt) / ".agent" / "state.json").read_text()).get("executor_session") or "")
+    except (OSError, ValueError):
+        return ""
 
 
 def _day_start_ms(now_ms: int) -> int:
@@ -182,26 +243,35 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
     """Собрать картину. store — hub.store.Store."""
     tasks = store.list_tasks(active_only=False)
     oc_by_id: dict[str, oc.OcSession] = {}
-    totals_go = totals_usd = 0.0
+    all_go = all_usd = 0.0
+    day0 = _day_start_ms(now_ms)
     if opencode_db is not None and Path(opencode_db).exists():
         for s in oc.sessions(opencode_db, 0):
             oc_by_id[s.id] = s
-        day0 = _day_start_ms(now_ms)
         for s in oc_by_id.values():
             if s.started_ms >= day0:
                 if s.provider == "opencode-go":
-                    totals_go += s.cost
+                    all_go += s.cost
                 else:
-                    totals_usd += s.cost
+                    all_usd += s.cost
     try:
         live = pr.agent_procs(proc_root)
     except OSError:
         live = []
     snaps: list[TaskSnap] = []
+    totals_go = totals_usd = 0.0
     for t in tasks:
-        links = store.list_sessions(t["id"])
+        links = [dict(e) for e in store.list_sessions(t["id"])]
         wt = str(t.get("worktree") or "")
-        alive = [p for p in live if wt and (p.cwd == wt or p.cwd.startswith(wt + "/"))]
+        # Сессии без линка (старый run_task, панель «panel»): opencode-сессия в каталоге worktree — этой задачи.
+        linked = {e["external_id"] for e in links}
+        exec_sid = _exec_session_id(wt) if wt else ""
+        for s in oc_by_id.values():
+            if s.id not in linked and _in_wt(s.directory or "", wt):
+                links.append({"external_id": s.id, "role": "executor" if s.id == exec_sid else "reviewer",
+                              "model": s.model})
+        # Жив: процесс агента работает в worktree или получил его аргументом (--dir/--worktree).
+        alive = [p for p in live if wt and (_in_wt(p.cwd, wt) or any(_in_wt(a, wt) for a in p.args))]
         pytest_kid = any(p.kind in ("pytest", "flock") for p in alive)
         # Пульс задачи — по всем её сессиям (исполнитель + ревьюеры):
         # свежий пульс — max, объяснение — если хоть одна сессия активна.
@@ -227,17 +297,30 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
             ss.append(SessionSnap(s.id, e["role"], s.model, s.provider, s.pulse_ms,
                                   smark, s.cost, go, s.context_tokens,
                                   clean_activity(s.last_activity)))
+        stage = str(t.get("stage") or "")
+        if stage.startswith("exec") and ss:
+            newest = max(ss, key=lambda x: x.pulse_ms)
+            if newest.role == "reviewer" and now_ms - newest.pulse_ms < GREEN_MS * 5:
+                stage = "review" + stage[4:]  # ревьюеры уже работают, лог появится в конце
         cost_go = sum(s.cost for s in ss if s.go)
         cost_usd = sum(s.cost for s in ss if not s.go)
+        for e in links:
+            s = oc_by_id.get(e["external_id"])
+            if s is not None and s.started_ms >= day0:
+                if s.provider == "opencode-go":
+                    totals_go += s.cost
+                else:
+                    totals_usd += s.cost
         ctx = max([s.context_tokens for s in ss] + [0])
         last = next((s.last_activity for s in ss if s.last_activity != "-"), "-")
         snaps.append(TaskSnap(
             id=str(t["id"]), project=str(t.get("project") or ""),
-            stage=str(t.get("stage") or ""), round=int(t.get("round") or 0),
+            stage=stage, round=int(t.get("round") or 0),
             pulse=pulse, cost_go=cost_go, cost_usd=cost_usd,
             context=ctx, last_activity=clean_activity(last), sessions=ss,
         ))
-    return Snapshot(tasks=snaps, total_go=totals_go, total_usd=totals_usd, now_ms=now_ms)
+    return Snapshot(tasks=snaps, total_go=totals_go, total_usd=totals_usd, now_ms=now_ms,
+                    all_go=all_go, all_usd=all_usd)
 
 
 def _pulse_mark(stage: str, age_ms: int, explained: bool, alive: list,

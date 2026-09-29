@@ -226,7 +226,8 @@ def _fake_snapshot() -> Snapshot:
 def test_roster_fake_snapshot():
     text = bc.format_roster(_fake_snapshot())
     assert "<pre>" in text
-    for needle in ("muse", "executor", "H01", "exec r1", "🟢"):
+    # Формат для владельца: роль по-русски, этап словами (hub/read/snapshot.roster_text).
+    for needle in ("muse", "исполнитель", "H01", "пишет код, круг 1", "🟢"):
         assert needle in text
     assert "лимит Go" in text and "$60" in text
     assert len(text) <= bc.MSG_LIMIT
