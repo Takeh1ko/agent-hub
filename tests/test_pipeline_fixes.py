@@ -543,6 +543,43 @@ def test_review_unknown_file(tmp_path, capsys):
     assert "unknown-file" in capsys.readouterr().out
 
 
+def test_review_link_session_db_error_survives(tmp_path, monkeypatch):
+    """LOW: sqlite3.Error в link_session не валит `hub review` (как в cycle)."""
+    import sqlite3 as _sq
+
+    card = tmp_path / "TSQ.md"
+    card.write_text(CARD, encoding="utf-8")
+    root, wt, base, _ = _review_wt(tmp_path, "TSQ", ["sub/a.txt"])
+    Store().upsert_task(id="TSQ", project="T", card_path=str(card), card_hash="h",
+                        level="hard", branch="agent/TSQ", worktree=str(wt),
+                        base_sha=base, stage="review r1", round=1, executor="muse",
+                        reviewers_json='["muse"]', stage_reason="")
+
+    class FakeRev:
+        tool = "opencode"
+        model = "muse"
+
+        def start(self, prompt, cwd, log=None):
+            (Path(cwd) / ".agent" / "review_r1_muse.json").write_text(
+                json.dumps({"verdict": "approve", "findings": []}), encoding="utf-8")
+            return "rev-1"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            return sid
+
+    import hub.commands.review as _rv
+    import hub.pipeline.runners as _rn
+
+    class BoomStore(Store):
+        def link_session(self, *a, **k):
+            raise _sq.Error("база занята")
+
+    monkeypatch.setattr(_rv, "Store", BoomStore)
+    monkeypatch.setattr(_rn, "make_runner", lambda name: FakeRev())
+    assert main(["review", "TSQ", "--project", str(root)]) == 0
+    assert Store().get_task("TSQ")["stage"] == "ready"
+
+
 def test_budget_stop_keeps_round(tmp_path):
     repo, base = _mk_repo(tmp_path)
     proj = _mk_project(repo)

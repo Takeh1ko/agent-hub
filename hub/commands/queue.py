@@ -356,5 +356,5 @@ def register(subparsers) -> None:
     r.add_argument("--once", action="store_true",
                    help="один проход очереди (для тестов)")
     r.add_argument("--poll-secs", type=float, default=10,
-                   help="опрос очереди и owner_command в цикле, c")
+                   help="пауза опроса очереди и owner_command в цикле, сек")
     r.set_defaults(func=cmd_queue_run)

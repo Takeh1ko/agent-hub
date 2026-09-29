@@ -167,11 +167,15 @@ def test_executor_prompt_has_template():
 
 
 def test_review_blind_strips_arbiter():
+    """Н11: эталон не уходит ревьюеру — и без флага, и с ним."""
     card = CARD + "\n## Решения арбитра\n\nЭТАЛОН-СЕКРЕТ\n"
-    full = prompts.review_prompt("r", card, "d", {}, 1, blind=False)
-    assert "ЭТАЛОН-СЕКРЕТ" in full
-    blinded = prompts.review_prompt("r", card, "d", {}, 1, blind=True)
-    assert "ЭТАЛОН-СЕКРЕТ" not in blinded
+    for blind in (False, True):
+        full = prompts.review_prompt("r", card, "d", {}, 1, blind=blind)
+        assert "ЭТАЛОН-СЕКРЕТ" not in full, blind
+        assert "Решения арбитра" not in full, blind
+    # Карточка без раздела — промпт собирается как раньше.
+    plain = prompts.review_prompt("r", CARD, "d", {}, 1)
+    assert "КАРТОЧКА ЗАДАЧИ" in plain
 
 
 def test_ready_one_round(tmp_path):

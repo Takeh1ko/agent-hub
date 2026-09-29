@@ -174,6 +174,44 @@ def test_merge_red_tests_rollback(tmp_path):
     assert _git(root, "rev-parse", "HEAD") == pre
 
 
+def test_merge_card_resolved_from_worktree(tmp_path):
+    """LOW: относительный card_path, которого нет в корне, не блокирует merge.
+
+    merge использует тот же _resolve_card, что cycle/review (root → worktree →
+    как есть): иначе globs=[], allowed=[] и ворота помечают весь дифф
+    forbidden уже готовой к слиянию задаче.
+    """
+    root, wt_dir = _proj_root(tmp_path)
+    base = _git(root, "rev-parse", "HEAD")
+    wt = wt_dir / "T60"
+    _git(root, "worktree", "add", str(wt), "-b", "agent/T60", base)
+    # Карточка лежит только в worktree: в корне такого файла нет.
+    card = wt / "docs" / "T60.md"
+    card.parent.mkdir(exist_ok=True)
+    card.write_text(
+        CARD_TMPL.replace("`sub/**`, `a.txt`", "`sub/**`, `docs/**`")
+                 .format(net="нет"), encoding="utf-8")
+    (wt / "sub" / "a.txt").write_text("2\n", encoding="utf-8")
+    _git(wt, "add", "sub/a.txt", "docs/T60.md")
+    _git(wt, "commit", "-m", "работа")
+    head = _git(wt, "rev-parse", "HEAD")
+    (wt / ".agent").mkdir(exist_ok=True)
+    (wt / ".agent" / "done.json").write_text(json.dumps({
+        "commit": head, "files": ["sub/a.txt"],
+        "tests": {"cmd": sys.executable + " -m pytest -q", "ok": True, "tail": "ok"},
+        "notes": ""}), encoding="utf-8")
+    Store().upsert_task(id="T60", project="T", card_path="docs/T60.md",
+                        card_hash="h", level="medium", branch="agent/T60",
+                        worktree=str(wt), base_sha=base, stage="ready", round=1,
+                        executor="muse", reviewers_json='["muse"]',
+                        stage_reason="", budget_go=0.5)
+    assert not (root / "docs" / "T60.md").exists()
+    ok, msg = merge_task(Store(), _load_project(root), "T60")
+    assert ok, msg
+    assert Store().get_task("T60")["stage"] == "merged"
+    assert not (wt_dir / "T60").exists()
+
+
 def test_merge_only_from_ready(tmp_path, capsys):
     root, wt_dir = _proj_root(tmp_path)
     base = _git(root, "rev-parse", "HEAD")

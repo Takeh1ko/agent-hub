@@ -78,14 +78,18 @@ REVIEW_SCHEMA = (
 
 def review_prompt(rules: str, card: str, diff: str, gate, round: int,
                   blind: bool = False) -> str:
-    """Промпт ревьюера в чистой сессии; при blind карточка без «Решений арбитра»."""
-    if blind:
-        try:
-            from hub.gate.lint import strip_arbiter
+    """Промпт ревьюера в чистой сессии; эталон вырезается всегда (Н11).
 
-            card = strip_arbiter(card)
-        except (ImportError, AttributeError):
-            pass
+    `blind` остаётся в сигнатуре контракта карточки, но по Н11 ничего не
+    решает: «Решения арбитра» не уходят ревьюеру ни при каком флаге —
+    иначе эталон по умолчанию обесценивает панель.
+    """
+    try:
+        from hub.gate.lint import strip_arbiter
+
+        card = strip_arbiter(card)
+    except (ImportError, AttributeError):
+        pass
     if isinstance(gate, dict):
         tests = gate.get("tests", {}) if isinstance(gate.get("tests"), dict) else {}
         gate_line = (

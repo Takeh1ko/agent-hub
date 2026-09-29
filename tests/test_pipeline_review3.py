@@ -4,7 +4,9 @@ HIGH: per-reviewer файлы панели, owner_command из event.task_id.
 MEDIUM: цикл queue run, fix_prompt «зелёные», clean префиксов веток,
 budget_usd == 0 — запрет, start при ушедшей базе.
 LOW (попутно): первый finding с file:line, уникальные prompt-файлы,
-флаг continued после упавшего preflight, link сессии до resume.
+флаг continued после упавшего preflight, link сессии до resume,
+ворота в fix_prompt второго круга, карточка merge из worktree,
+sqlite3.Error при link_session в `hub review`.
 Фейковые раннеры, без сети.
 """
 
@@ -460,3 +462,47 @@ def test_continued_flag_kept_on_prefail(tmp_path):
                         "reviewers": {"muse": HonestRev("muse")}}, rounds=2)
     assert got == "failed"
     assert meta_get(Store(), "continued:T01") == "1"
+
+
+def test_gate_error_reaches_fix_prompt(tmp_path):
+    """LOW: approve при красных воротах → 2-й круг несёт ворота в fix_prompt.
+
+    Мёртвая подстановка finding из ворот убрана: находка идёт через last_gate
+    в fix_prompt, второй круг обязан увидеть «tests-fail», а не «зелёные».
+    """
+    repo, base = _mk_repo(tmp_path)
+    proj = _mk_project(repo)
+    _mk_task(tmp_path, repo, base)
+
+    class RedExec:
+        tool = "opencode"
+        model = "muse"
+
+        def __init__(self) -> None:
+            self.fix_prompts: list[str] = []
+
+        def start(self, prompt, cwd, log=None):
+            p = Path(cwd) / "sub" / "test_red.py"
+            p.write_text("def test_red():\n    assert False\n", encoding="utf-8")
+            _git(cwd, "add", "sub/test_red.py")
+            _git(cwd, "commit", "-m", "red")
+            head = _git(cwd, "rev-parse", "HEAD")
+            (Path(cwd) / ".agent").mkdir(exist_ok=True)
+            (Path(cwd) / ".agent" / "done.json").write_text(json.dumps({
+                "commit": head, "files": ["sub/test_red.py"],
+                "tests": {"cmd": "x", "ok": True, "tail": "t"}, "notes": ""}),
+                encoding="utf-8")
+            return "exec-1"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            self.fix_prompts.append(prompt)
+            return sid
+
+    exe = RedExec()
+    got = cyc.run_task(Store(), proj, "T01",
+                       {"executor": exe,
+                        "reviewers": {"muse": HonestRev("muse")}}, rounds=2)
+    assert got == "arbiter"
+    assert len(exe.fix_prompts) == 1, exe.fix_prompts
+    assert "tests-fail" in exe.fix_prompts[0]
+    assert "зелёные" not in exe.fix_prompts[0]
