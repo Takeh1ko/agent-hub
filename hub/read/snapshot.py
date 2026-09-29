@@ -231,6 +231,28 @@ def _in_wt(path: str, wt: str) -> bool:
     return bool(wt) and (path == wt or path.startswith(wt.rstrip("/") + "/"))
 
 
+def _task_arg_hit(args: list | None, tid: str) -> bool:
+    """id задачи в аргументах процесса: точное совпадение токена.
+
+    Подстрока запрещена: процесс чужой T10 (`hub review T10`) не даёт
+    живость задаче T1. Форма `--флаг=ID` тоже считается.
+    """
+    t = str(tid or "").strip()
+    if not t:
+        return False
+    for a in (args or []):
+        s = str(a or "").strip()
+        if not s:
+            continue
+        if s == t:
+            return True
+        if s.startswith("-") and "=" in s:
+            _, _, tail = s.rpartition("=")
+            if tail.strip() == t:
+                return True
+    return False
+
+
 def _run_one_pids(proc_root: str | Path, task_id: str) -> list[tuple[int, int]]:
     """Живые `--run-one <id>`: [(pid, started_ms)] прямым чтением cmdline.
 
@@ -294,7 +316,7 @@ def _hub_task_procs(live: list, proc_root: str | Path, task_id: str,
             pid = int(p.pid)
         except (AttributeError, TypeError, ValueError):
             continue
-        if kind == "hub_task" and tid and any(tid in a for a in args):
+        if kind == "hub_task" and _task_arg_hit(args, tid):
             if pid not in seen:
                 seen.add(pid)
                 found.append(p)
@@ -384,7 +406,7 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
         # они видны и без worktree, иначе ручной запуск даёт ложные ⚫/🔴.
         tid = str(t["id"])
         alive = [p for p in live if wt and (_in_wt(p.cwd, wt) or any(_in_wt(a, wt) for a in p.args)
-                                             or (p.kind == "hub_task" and any(tid in a for a in p.args)))]
+                                             or (p.kind == "hub_task" and _task_arg_hit(p.args, tid)))]
         hub_procs = _hub_task_procs(live, proc_root, tid, now_ms)
         _alive_pids = {int(p.pid) for p in alive
                        if isinstance(getattr(p, "pid", None), int)}

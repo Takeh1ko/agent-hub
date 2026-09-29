@@ -74,12 +74,15 @@ def _short(sha: str) -> str:
     return sha[:8] if len(sha) > 8 else sha
 
 
-_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
 def _new_ranges(worktree: str, base: str, head: str, rel: str) -> list[tuple[int, int]] | None:
-    """New-диапазоны диффа base..head для файла (для пометки по строке).
+    """Диапазоны диффа base..head для файла (для пометки по строке).
 
+    Обычно new-сторона ханка; чистое удаление (new count 0) new-стороны
+    не имеет — диапазон берётся по old-стороне: удалённая строка тоже
+    изменение файл:строки (иначе удаления никогда не помечаются).
     None — git не ответил (пометок нет, без ложных); [] — файл не менялся.
     """
     out = _git_out(worktree, "diff", "-U0", f"{base}..{head}", "--", rel)
@@ -91,13 +94,18 @@ def _new_ranges(worktree: str, base: str, head: str, rel: str) -> list[tuple[int
         if not m:
             continue
         try:
-            start = int(m.group(1))
-            count = int(m.group(2)) if m.group(2) is not None else 1
+            old_start = int(m.group(1))
+            old_count = int(m.group(2)) if m.group(2) is not None else 1
+            new_start = int(m.group(3))
+            new_count = int(m.group(4)) if m.group(4) is not None else 1
         except (TypeError, ValueError):
             continue
-        if count <= 0:
+        if new_count <= 0:
+            if old_count <= 0:
+                continue
+            ranges.append((old_start, old_start + old_count - 1))
             continue
-        ranges.append((start, start + count - 1))
+        ranges.append((new_start, new_start + new_count - 1))
     return ranges
 
 
@@ -111,8 +119,9 @@ def _stale_files(worktree: str, base: str, head: str) -> set[str] | None:
 def _stale_of(items, worktree: str, base: str, head: str) -> set[int]:
     """Индексы замечаний, чья файл:строка менялась в base..HEAD.
 
-    Консервативно: строка внутри new-ханка `git diff -U0`; line<=0 —
-    по факту изменения файла; файл без пути («?») — не помечаем.
+    Консервативно: строка внутри new-ханка `git diff -U0` (чистое удаление —
+    внутри old-диапазона того же ханка); line<=0 — по факту изменения
+    файла; файл без пути («?») — не помечаем.
     """
     if not base or not head or base == head:
         return set()
@@ -182,6 +191,9 @@ def cmd_findings(args) -> int:
         return 1
     wt = str(task.get("worktree") or "")
     items = dedup_findings(load_findings(Path(wt), getattr(args, "round", None)) if wt else [])
+    if not items:
+        # Замечаний нет — пустой вывод, как до шапки (парсеры ждут пустоту).
+        return 0
     # --fix: та же дедуп-печать для починки, файлы не правим.
     if not wt:
         from hub.read.findings import format_findings as _fmt

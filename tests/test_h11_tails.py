@@ -13,7 +13,8 @@ from hub.commands import findings as fcmd
 from hub.config import ProjectConfig
 from hub.gate import lint as lint_mod
 from hub.gate.lint import card_level, lint_card
-from hub.pipeline.runners import OpencodeRunner
+from hub.pipeline.runners import AgyRunner, OpencodeRunner
+from hub.read import procs as pr
 from hub.read import snapshot as snap
 from hub.store import Store
 
@@ -184,6 +185,7 @@ def test_findings_review_commit_and_stale(tmp_path, capsys):
         "verdict": "changes",
         "findings": [
             {"file": "a.py", "line": 3, "issue": "баг в третьей", "severity": "high"},
+            {"file": "a.py", "line": 9, "issue": "далёкий баг", "severity": "medium"},
             {"file": "b.py", "line": 1, "issue": "мелочь", "severity": "low"},
         ],
     })
@@ -212,8 +214,64 @@ def test_findings_review_commit_and_stale(tmp_path, capsys):
     assert review[:8] in out.splitlines()[0] and head[:8] in out.splitlines()[0]
     line_a = next(l for l in out.splitlines()[1:] if l.startswith("a.py:3"))
     line_b = next(l for l in out.splitlines()[1:] if l.startswith("b.py:1"))
+    line_far = next(l for l in out.splitlines()[1:] if l.startswith("a.py:9"))
     assert fcmd.STALE_MARK in line_a
     assert fcmd.STALE_MARK not in line_b
+    # Тот же файл, но строка вне изменённого ханка — не stale
+    # (ловит грубую реализацию «весь изменённый файл = stale»).
+    assert fcmd.STALE_MARK not in line_far
+
+
+def test_findings_stale_deleted_lines(tmp_path, capsys):
+    """Удалённые строки тоже помечаются: old-диапазон ханка с new count 0."""
+    repo = tmp_path / "repo-del"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    a = repo / "a.py"
+    a.write_text("".join(f"строка {i}\n" for i in range(1, 11)), encoding="utf-8")
+    _write(repo / ".agent" / "review_r1.json", {
+        "verdict": "changes",
+        "findings": [
+            {"file": "a.py", "line": 3, "issue": "баг в третьей", "severity": "high"},
+            {"file": "a.py", "line": 9, "issue": "далёкий баг", "severity": "medium"},
+        ],
+    })
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "ревью")
+    review = _head(repo)
+    (repo / ".agent" / "done.json").write_text(
+        json.dumps({"commit": review}), encoding="utf-8")
+    s = Store()
+    s.upsert_task(id="TD", stage="review r1", worktree=str(repo))
+    body = a.read_text(encoding="utf-8").splitlines()
+    del body[2:4]
+    a.write_text("\n".join(body) + "\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "удалил строки")
+    assert main(["findings", "TD"]) == 0
+    out = capsys.readouterr().out
+    line_del = next(l for l in out.splitlines()[1:] if l.startswith("a.py:3"))
+    line_far = next(l for l in out.splitlines()[1:] if l.startswith("a.py:9"))
+    assert fcmd.STALE_MARK in line_del
+    assert fcmd.STALE_MARK not in line_far
+
+
+def test_findings_empty_no_output(tmp_path, capsys):
+    """Без замечаний — пустой вывод, без одинокой шапки (как до H11)."""
+    repo = tmp_path / "repo-empty"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "код")
+    s = Store()
+    s.upsert_task(id="TE", stage="review r1", worktree=str(repo))
+    assert main(["findings", "TE"]) == 0
+    assert capsys.readouterr().out == ""
 
 
 def _proc(root: Path, pid: int, argv: list[str]) -> Path:
@@ -249,3 +307,66 @@ def test_run_one_exact_id_no_false_alive(tmp_path):
                   updated_at=NOW - 30_000)
     got = snap.build(s, NOW, proc_root=root).tasks[0]
     assert got.pulse == "⚫", got.pulse
+
+
+def test_hub_task_exact_id(tmp_path):
+    """hub_task чужой задачи (подстрока T1 в T10) — не живой; свой — живой."""
+    live = [
+        pr.Proc(pid=60, kind="hub_task", cwd="", args=["hub", "review", "T10"],
+                started_ms=NOW - 300_000, children=[]),
+        pr.Proc(pid=61, kind="hub_task", cwd="", args=["hub", "review", "T1"],
+                started_ms=NOW - 300_000, children=[]),
+    ]
+    root = tmp_path / "proc"
+    root.mkdir()
+    assert [p.pid for p in snap._hub_task_procs(live, root, "T1", NOW)] == [61]
+    assert snap._task_arg_hit(["hub", "review", "T10"], "T1") is False
+    assert snap._task_arg_hit(["--run-one=T10"], "T1") is False
+    assert snap._task_arg_hit(["--run-one=T1"], "T1") is True
+    assert snap._task_arg_hit(["--id", "T1"], "T1") is True
+    assert snap._task_arg_hit([], "T1") is False
+    assert snap._task_arg_hit(["hub", "review", "T1"], "") is False
+
+
+def test_hub_task_foreign_no_alive(tmp_path):
+    """Задача с worktree: чужой hub_task T10 не делает T1 живой."""
+    s = Store()
+    wt = tmp_path / "wt-f"
+    wt.mkdir()
+    s.upsert_task(id="T1", stage="exec r1", round=1, worktree=str(wt),
+                  updated_at=NOW - 30_000)
+    root = tmp_path / "proc"
+    _proc(root, 60, ["hub", "review", "T10"])
+    got = snap.build(s, NOW, proc_root=root).tasks[0]
+    assert got.pulse == "⚫", got.pulse
+
+
+def test_hub_task_own_alive(tmp_path):
+    """Свой hub_task-процесс — живость без регрессии (🟢 на свежем пульсе)."""
+    s = Store()
+    wt = tmp_path / "wt-o"
+    wt.mkdir()
+    s.upsert_task(id="T1", stage="exec r1", round=1, worktree=str(wt),
+                  updated_at=NOW - 30_000)
+    root = tmp_path / "proc"
+    _proc(root, 61, ["hub", "review", "T1"])
+    got = snap.build(s, NOW, proc_root=root).tasks[0]
+    assert got.pulse == "🟢", got.pulse
+
+
+def test_agy_on_session(tmp_path, monkeypatch):
+    """AgyRunner зовёт on_session, когда id известен (контракт Runner)."""
+    import types
+
+    seen: list[str] = []
+
+    def _fake_run(*a, **k):
+        return types.SimpleNamespace(
+            stdout='{"conversation_id": "c-1"}\n', stderr="", returncode=0)
+
+    monkeypatch.setattr(_sp, "run", _fake_run)
+    got = AgyRunner().start("промпт", str(tmp_path),
+                            log=str(tmp_path / "agy.log"),
+                            on_session=seen.append)
+    assert got == "c-1"
+    assert seen == ["c-1"]

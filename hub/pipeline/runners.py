@@ -44,12 +44,20 @@ AGENT_DIR = ".agent"
 
 
 class Runner(Protocol):
-    """Общий интерфейс: старт сессии и продолжение."""
+    """Общий интерфейс: старт сессии и продолжение.
 
-    def start(self, prompt: str, cwd: str, log: str | None = None) -> str:
+    `on_session` — колбэк линка в store: opencode зовёт его сразу при
+    появлении sessionID в stdout (во время шага), agy — когда id известен.
+    Ошибки колбэка глотаются.
+    """
+
+    def start(self, prompt: str, cwd: str, log: str | None = None, *,
+              on_session: Callable[[str], None] | None = None) -> str:
         ...
 
-    def resume(self, session_id: str, prompt: str, cwd: str, log: str | None = None) -> str:
+    def resume(self, session_id: str, prompt: str, cwd: str,
+               log: str | None = None, *,
+               on_session: Callable[[str], None] | None = None) -> str:
         ...
 
 
@@ -57,6 +65,17 @@ def _default_log(cwd: str, name: str) -> str:
     path = Path(cwd) / AGENT_DIR / name
     path.parent.mkdir(parents=True, exist_ok=True)
     return str(path)
+
+
+def _close_quietly(stream) -> None:
+    """Закрыть пайп процесса; best effort (фейки в тестах без close — мимо)."""
+    close = getattr(stream, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception:
+        pass
 
 
 def prompt_arg(prompt: str, cwd: str) -> str:
@@ -163,8 +182,8 @@ class OpencodeRunner:
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1,
             )
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"opencode: таймаут {self.timeout_s} c (лог {log_path})") from e
+        except OSError as e:
+            raise RuntimeError(f"opencode: не запустился (лог {log_path}): {e}") from e
         stdout_lines: list[str] = []
         stderr_box: list[str] = [""]
         sid_box: list[str | None] = [None]
@@ -220,19 +239,24 @@ class OpencodeRunner:
         t_out.start()
         t_err.start()
         try:
-            proc.wait(timeout=self.timeout_s)
-        except subprocess.TimeoutExpired as e:
             try:
-                proc.kill()
-            except (OSError, ValueError):
-                pass
-            try:
-                proc.wait(timeout=10)
-            except (OSError, ValueError, subprocess.SubprocessError):
-                pass
-            raise RuntimeError(f"opencode: таймаут {self.timeout_s} c (лог {log_path})") from e
-        t_out.join(timeout=10)
-        t_err.join(timeout=10)
+                proc.wait(timeout=self.timeout_s)
+            except subprocess.TimeoutExpired as e:
+                try:
+                    proc.kill()
+                except (OSError, ValueError):
+                    pass
+                try:
+                    proc.wait(timeout=10)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    pass
+                raise RuntimeError(f"opencode: таймаут {self.timeout_s} c (лог {log_path})") from e
+            t_out.join(timeout=10)
+            t_err.join(timeout=10)
+        finally:
+            # Пайпы закрыть явно: в долгоживущем воркере иначе висят fd до GC.
+            _close_quietly(proc.stdout)
+            _close_quietly(proc.stderr)
         stdout_text = "".join(stdout_lines)
         stderr_text = stderr_box[0]
         try:
@@ -275,7 +299,8 @@ class AgyRunner:
         self.model = model
 
     def _call(self, prompt: str, cwd: str, session_id: str | None,
-              log: str | None) -> str:
+              log: str | None, *,
+              on_session: Callable[[str], None] | None = None) -> str:
         log_path = log or _default_log(cwd, "agy.log")
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         before = _newest_agy_conversation()
@@ -299,22 +324,31 @@ class AgyRunner:
             pass
         cid = _agy_conversation_id(r.stdout or "")
         if cid:
-            return cid
-        if session_id:
-            return session_id
-        newest = _newest_agy_conversation()
-        if newest and newest != before:
-            return newest
-        raise RuntimeError(
-            f"agy: нет conversation_id в выводе (exit {r.returncode}, лог {log_path}): "
-            + combined[-2000:])
+            result = cid
+        elif session_id:
+            result = session_id
+        else:
+            newest = _newest_agy_conversation()
+            if not newest or newest == before:
+                raise RuntimeError(
+                    f"agy: нет conversation_id в выводе (exit {r.returncode}, лог {log_path}): "
+                    + combined[-2000:])
+            result = newest
+        if on_session is not None:
+            try:
+                on_session(result)
+            except Exception:
+                pass
+        return result
 
-    def start(self, prompt: str, cwd: str, log: str | None = None) -> str:
-        return self._call(prompt, cwd, None, log)
+    def start(self, prompt: str, cwd: str, log: str | None = None, *,
+              on_session: Callable[[str], None] | None = None) -> str:
+        return self._call(prompt, cwd, None, log, on_session=on_session)
 
     def resume(self, session_id: str, prompt: str, cwd: str,
-               log: str | None = None) -> str:
-        return self._call(prompt, cwd, session_id, log)
+               log: str | None = None, *,
+               on_session: Callable[[str], None] | None = None) -> str:
+        return self._call(prompt, cwd, session_id, log, on_session=on_session)
 
 
 def make_runner(name: str, timeout_s: int = DEFAULT_TIMEOUT_S) -> OpencodeRunner | AgyRunner:
