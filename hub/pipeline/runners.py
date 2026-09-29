@@ -11,6 +11,7 @@ store.link_session(...)`; без колбэка поведение прежне�
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -39,8 +40,11 @@ AGY_BIN = shutil.which("agy") or "agy"
 
 PROMPT_ARG_LIMIT = 60_000  # байт; лимит одного аргумента Linux 128 КБ
 DEFAULT_TIMEOUT_S = 90 * 60
+DEFAULT_IDLE_S = 900  # сторож тишины бесплатного Spark: нет JSON-событий N c
+_IDLE_POLL_S = 0.2  # шаг опроса процесса сторожем
 
 AGENT_DIR = ".agent"
+HUBHOME_DIR = "hubhome"
 
 
 class Runner(Protocol):
@@ -76,6 +80,67 @@ def _close_quietly(stream) -> None:
         close()
     except Exception:
         pass
+
+
+def agent_hubhome(cwd: str) -> Path:
+    """Каталог изоляции hub.db агента: <worktree>/.agent/hubhome."""
+    p = Path(cwd) / AGENT_DIR / HUBHOME_DIR
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return p
+
+
+def agent_env(cwd: str) -> dict[str, str]:
+    """Env для дочерней сессии агента: копия окружения + AGENT_HUB_HOME.
+
+    Процесс самого hub окружение не меняет — только дочерний opencode/agy.
+    `Store()` внутри агента пишет в hubhome, не в боевую базу.
+    """
+    hubhome = agent_hubhome(cwd)
+    env = dict(os.environ)
+    env["AGENT_HUB_HOME"] = str(hubhome)
+    return env
+
+
+def _is_json_event(line: str) -> bool:
+    """Строка stdout — JSON-событие opencode (сбрасывает сторож тишины)."""
+    s = line.strip()
+    if not s.startswith("{"):
+        return False
+    try:
+        data = json.loads(s)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(data, dict)
+
+
+def _has_children(pid: int | None) -> bool:
+    """Есть ли живые дочерние процессы у pid (дешёво через /proc).
+
+    Нет pid или нет /proc — детей нет (сторож вправе прервать).
+    """
+    if pid is None:
+        return False
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+    try:
+        taskdir = Path(f"/proc/{pid_int}/task")
+        if not taskdir.is_dir():
+            return False
+        for tid in taskdir.iterdir():
+            try:
+                txt = (tid / "children").read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if txt:
+                return True
+        return False
+    except OSError:
+        return False
 
 
 def prompt_arg(prompt: str, cwd: str) -> str:
@@ -140,6 +205,9 @@ class OpencodeRunner:
     stdout читается потоково (Popen): как только в очередной JSON-строке
     появляется sessionID, он сразу отдаётся в `on_session` — вызывающая
     сторона линкует его в store во время шага, не дожидаясь конца.
+    Сторож тишины: нет JSON-событий `idle_s` c и нет дочерних процессов —
+    процесс прерывается, `RuntimeError("opencode: тишина N c")`.
+    Каждая сессия получает env `AGENT_HUB_HOME=<worktree>/.agent/hubhome`.
     """
 
     tool = "opencode"
@@ -149,10 +217,15 @@ class OpencodeRunner:
         model: str = MUSE_MODEL,
         variant: str | None = MUSE_VARIANT,
         timeout_s: int = DEFAULT_TIMEOUT_S,
+        idle_s: int = DEFAULT_IDLE_S,
     ) -> None:
         self.model = model
         self.variant = variant
         self.timeout_s = timeout_s
+        try:
+            self.idle_s = int(idle_s)
+        except (TypeError, ValueError):
+            self.idle_s = DEFAULT_IDLE_S
 
     def _cmd(self, prompt: str, cwd: str, session_id: str | None) -> list[str]:
         cmd = [OPENCODE_BIN, "run", "--format", "json",
@@ -172,15 +245,22 @@ class OpencodeRunner:
         `on_session(sid)` вызывается СРАЗУ, как только sid виден в stdout
         (ещё до конца процесса) — для линка в store во время шага.
         Ошибки колбэка глотаются: линк — best effort, id всё равно вернётся.
+        Сторож тишины: нет JSON-событий `idle_s` c и нет дочерних процессов —
+        процесс прерывается, `RuntimeError("opencode: тишина N c [sid=...]")`
+        (sid — если успел появиться в stdout до тишины).
         """
         notify = on_session
         log_path = log or _default_log(cwd, "opencode.log")
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         try:
+            idle_env = agent_env(cwd)
+        except OSError:
+            idle_env = dict(os.environ)
+        try:
             proc = subprocess.Popen(
                 self._cmd(prompt, cwd, session_id), cwd=cwd,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1,
+                text=True, bufsize=1, env=idle_env,
             )
         except OSError as e:
             raise RuntimeError(f"opencode: не запустился (лог {log_path}): {e}") from e
@@ -188,6 +268,7 @@ class OpencodeRunner:
         stderr_box: list[str] = [""]
         sid_box: list[str | None] = [None]
         notified_box: list[bool] = [False]
+        last_event: list[float] = [time.monotonic()]
 
         def _maybe_notify(cand: str | None) -> None:
             if cand and not notified_box[0]:
@@ -218,6 +299,11 @@ class OpencodeRunner:
                     return
                 for line in stream:
                     stdout_lines.append(line)
+                    try:
+                        if _is_json_event(line):
+                            last_event[0] = time.monotonic()
+                    except Exception:
+                        pass
                     if sid_box[0] is None:
                         _maybe_notify(_sid_of_line(line))
             except Exception:
@@ -239,18 +325,80 @@ class OpencodeRunner:
         t_out.start()
         t_err.start()
         try:
+            idle_s = self.idle_s
             try:
-                proc.wait(timeout=self.timeout_s)
-            except subprocess.TimeoutExpired as e:
+                idle_s = int(idle_s)
+            except (TypeError, ValueError):
+                idle_s = DEFAULT_IDLE_S
+            try:
+                timeout_s = int(self.timeout_s)
+            except (TypeError, ValueError):
+                timeout_s = DEFAULT_TIMEOUT_S
+            deadline = time.monotonic() + max(1, timeout_s)
+            while True:
                 try:
-                    proc.kill()
-                except (OSError, ValueError):
+                    proc.wait(timeout=_IDLE_POLL_S)
+                    break
+                except subprocess.TimeoutExpired:
                     pass
-                try:
-                    proc.wait(timeout=10)
-                except (OSError, ValueError, subprocess.SubprocessError):
-                    pass
-                raise RuntimeError(f"opencode: таймаут {self.timeout_s} c (лог {log_path})") from e
+                now = time.monotonic()
+                if now >= deadline:
+                    try:
+                        proc.kill()
+                    except (OSError, ValueError):
+                        pass
+                    try:
+                        proc.wait(timeout=10)
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        pass
+                    t_out.join(timeout=10)
+                    t_err.join(timeout=10)
+                    _close_quietly(proc.stdout)
+                    _close_quietly(proc.stderr)
+                    partial = "".join(stdout_lines)
+                    err_txt = stderr_box[0] or ""
+                    combined = partial + ("\n" + err_txt if err_txt else "")
+                    try:
+                        with open(log_path, "w", encoding="utf-8") as f:
+                            f.write(combined)
+                    except OSError:
+                        pass
+                    raise RuntimeError(
+                        f"opencode: таймаут {timeout_s} c (лог {log_path})")
+                if idle_s and idle_s > 0 and (now - last_event[0] >= idle_s):
+                    try:
+                        pid = getattr(proc, "pid", None)
+                    except (AttributeError, ValueError):
+                        pid = None
+                    if not _has_children(pid):
+                        try:
+                            proc.kill()
+                        except (OSError, ValueError):
+                            pass
+                        try:
+                            proc.wait(timeout=10)
+                        except (OSError, ValueError, subprocess.SubprocessError):
+                            pass
+                        t_out.join(timeout=10)
+                        t_err.join(timeout=10)
+                        secs = max(int(now - last_event[0]), int(idle_s))
+                        partial = "".join(stdout_lines)
+                        err_txt = stderr_box[0] or ""
+                        combined = partial + ("\n" + err_txt if err_txt else "")
+                        try:
+                            with open(log_path, "w", encoding="utf-8") as f:
+                                f.write(combined)
+                        except OSError:
+                            pass
+                        _close_quietly(proc.stdout)
+                        _close_quietly(proc.stderr)
+                        # Sid из stdout до тишины — в текст ошибки: fallback
+                        # в cycle продолжает ту же сессию на muse через resume.
+                        known_sid = sid_box[0] or _extract_session_id(partial)
+                        suffix = f" sid={known_sid}" if known_sid else ""
+                        raise RuntimeError(
+                            f"opencode: тишина {secs} c{suffix} (лог {log_path})")
+                    # Есть дети (pytest/flock) — молчание объяснено, ждём дальше.
             t_out.join(timeout=10)
             t_err.join(timeout=10)
         finally:
@@ -289,7 +437,11 @@ class OpencodeRunner:
 
 
 class AgyRunner:
-    """`agy -p …`: id — conversation_id; запускать с cwd = worktree."""
+    """`agy -p …`: id — conversation_id; запускать с cwd = worktree.
+
+    Блокирующий `subprocess.run` — потокового сторожа тишины нет
+    (таймаут через `timeout_s`).
+    """
 
     tool = "agy"
 
@@ -303,6 +455,10 @@ class AgyRunner:
               on_session: Callable[[str], None] | None = None) -> str:
         log_path = log or _default_log(cwd, "agy.log")
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            idle_env = agent_env(cwd)
+        except OSError:
+            idle_env = dict(os.environ)
         before = _newest_agy_conversation()
         cmd = ["-p", prompt_arg(prompt, cwd), "--model", self.model,
                "--output-format", "json",
@@ -313,6 +469,7 @@ class AgyRunner:
             r = subprocess.run(
                 [AGY_BIN, *cmd], cwd=cwd,
                 capture_output=True, text=True, timeout=self.timeout_s,
+                env=idle_env,
             )
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(f"agy: таймаут {self.timeout_s} c (лог {log_path})") from e
@@ -351,11 +508,17 @@ class AgyRunner:
         return self._call(prompt, cwd, session_id, log, on_session=on_session)
 
 
-def make_runner(name: str, timeout_s: int = DEFAULT_TIMEOUT_S) -> OpencodeRunner | AgyRunner:
+def make_runner(name: str, timeout_s: int = DEFAULT_TIMEOUT_S,
+                idle_s: int = DEFAULT_IDLE_S) -> OpencodeRunner | AgyRunner:
     """Раннер по короткому имени из MODELS."""
     if name not in MODELS:
         raise ValueError(f"неизвестная модель: {name}")
     model, variant = MODELS[name]
     if name == "gemini":
         return AgyRunner(timeout_s=timeout_s, model=model)
-    return OpencodeRunner(model=model, variant=variant, timeout_s=timeout_s)
+    try:
+        idle_v = int(idle_s)
+    except (TypeError, ValueError):
+        idle_v = DEFAULT_IDLE_S
+    return OpencodeRunner(model=model, variant=variant,
+                          timeout_s=timeout_s, idle_s=idle_v)

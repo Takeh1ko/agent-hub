@@ -42,6 +42,17 @@ class ProjectConfig:
     hooks: Hooks = field(default_factory=Hooks)
     defaults: Defaults = field(default_factory=Defaults)
     levels: dict[str, str] = field(default_factory=dict)
+    idle_s: int = 900  # сторож тишины opencode: нет JSON-событий N c
+
+
+def _idle_of(data: dict) -> int:
+    """Порог тишины opencode: топ-level idle_s, иначе 900."""
+    raw = data.get("idle_s", data.get("opencode_idle_s", 900))
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return 900
+    return v if v >= 0 else 900
 
 
 def _from_dict(data: dict) -> ProjectConfig:
@@ -72,6 +83,7 @@ def _from_dict(data: dict) -> ProjectConfig:
             budget_usd=float(defaults.get("budget_usd", 0.0)),
         ),
         levels={str(k): str(v) for k, v in (data.get("levels", {}) or {}).items()},
+        idle_s=_idle_of(data),
     )
 
 
