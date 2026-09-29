@@ -193,14 +193,17 @@ def preflight(
     if r.returncode != 0:
         return PreflightResult(ok=False, reason="collect-fail")
     lock_path = (project.test_lock or "").strip()
+    note = ""
     if lock_path:
         try:
             holder = lock_holder(lock_path, proc_root)
         except (OSError, subprocess.SubprocessError) as e:
             return PreflightResult(ok=False, reason=f"lock-fail: {e}"[-2000:])
         if holder is not None:
+            # Замок общий на проект и почти всегда кем-то занят — это не отказ (spec §7: «замок доступен
+            # или виден держатель»): ворота дождутся его сами. Держателя — в причину для картины.
             when = _lock_time_text(holder.started_ms)
-            return PreflightResult(ok=False, reason=f"locked: pid {holder.pid} since {when}")
+            note = f"locked: pid {holder.pid} since {when} (ворота дождутся)"
     # Всё чисто — записать sha256 правил (только при успехе всех проверок).
     try:
         digest = hashlib.sha256(rp.read_bytes()).hexdigest()
@@ -209,4 +212,4 @@ def preflight(
     ok_write, write_reason = _write_rules_sha(store, task_id, digest)
     if not ok_write:
         return PreflightResult(ok=False, reason=write_reason or "store-fail")
-    return PreflightResult(ok=True, reason="")
+    return PreflightResult(ok=True, reason=note)

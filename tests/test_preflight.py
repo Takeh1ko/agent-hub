@@ -193,8 +193,9 @@ def test_locked(tmp_path):
     proc_root.mkdir()
     _proc_flock(proc_root, 4242, lock, repo)
     got = preflight(store, "T-lock", proj, proc_root=str(proc_root))
-    assert got.reason.startswith("locked:")
-    assert "4242" in got.reason
+    # Занятый замок — не отказ: держатель виден, ворота дождутся (spec §7).
+    assert got.ok
+    assert got.reason.startswith("locked:") and "4242" in got.reason
 
 
 def test_ok_and_rules_sha(tmp_path):

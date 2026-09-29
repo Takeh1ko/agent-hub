@@ -27,7 +27,7 @@ EXPECTED_LEVEL = {
     "S03-sale-link.md": "hard",
     "T14b-daily-budget.md": "hard",
     "T17-liveness-schedule.md": "hard",
-    "T18b-streams-tails.md": "medium",
+    "T18b-streams-tails.md": "background",  # musefree → background (решение владельца 2026-09-29)
     "T19-geo-tier.md": "hard",
     "T20-own-coverage.md": "hard",
 }
