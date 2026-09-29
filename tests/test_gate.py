@@ -6,6 +6,7 @@ import json
 import re
 import shlex
 import subprocess
+import os
 import sys
 import time
 import types
@@ -237,7 +238,7 @@ def test_locked_skips_command(tmp_path):
             time.sleep(0.05)
         cmd = [sys.executable, "-c", "open(%r,'w').write('x')" % str(marker)]
         res = check_gate(repo, base, "HEAD", ["**"], cmd,
-                         lock_path=str(lock), timeout_s=30)
+                         lock_path=str(lock), timeout_s=30, lock_wait_s=1, lock_poll_s=0.2)
     finally:
         holder.terminate()
         holder.wait(timeout=10)
@@ -589,7 +590,11 @@ def test_gate_uses_project_lock(tmp_path, capsys):
             if time.time() > deadline:
                 pytest.fail("держатель не взял замок")
             time.sleep(0.05)
-        assert main(["gate", "T11", "--project", str(proj)]) == 1
+        os.environ["HUB_GATE_LOCK_WAIT_S"] = "1"  # ворота ждут замок; в тесте — секунду
+        try:
+            assert main(["gate", "T11", "--project", str(proj)]) == 1
+        finally:
+            os.environ.pop("HUB_GATE_LOCK_WAIT_S", None)
         out = capsys.readouterr().out
         assert "locked:" in out
         assert "pid" in out
@@ -712,3 +717,22 @@ def test_gate_no_card(tmp_path, capsys):
     _write_done(repo, _git(repo, "rev-parse", "HEAD"), ["sub/a.txt"])
     assert main(["gate", "T17"]) == 1
     assert "no-card:" in capsys.readouterr().out
+
+
+def test_gate_waits_for_lock_then_runs(tmp_path):
+    """Занятый замок, освобождается через ~1 с → ворота дождались и прогнали приёмку (не отказ)."""
+    import fcntl
+    import threading
+
+    repo, base = _repo(tmp_path)
+    _commit(repo, "b.txt", "2\n")
+    lock = tmp_path / "t.lock"
+    fd = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    threading.Timer(1.0, lambda: (fcntl.flock(fd, fcntl.LOCK_UN), os.close(fd))).start()
+    marker = tmp_path / "ran"
+    cmd = [sys.executable, "-c", "open(%r,'w').write('x')" % str(marker)]
+    res = check_gate(repo, base, "HEAD", ["**"], cmd, lock_path=str(lock), timeout_s=30,
+                     lock_wait_s=10, lock_poll_s=0.2)
+    assert not any(e.startswith("locked:") for e in res.errors)
+    assert marker.exists()

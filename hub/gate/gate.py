@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import time
 import fnmatch
 import os
 import subprocess
@@ -118,7 +119,9 @@ def check_gate(
     allowed: list[str] | None = None,
     test_cmd: list[str] | None = None,
     lock_path: str | None = None,
-    timeout_s: int = 1800,  # вкл. ожидание общего замка тестов проекта (PlayerUP: тесты ~2–4 мин + очередь)
+    timeout_s: int = 1800,  # на сам прогон приёмки
+    lock_wait_s: int | None = None,  # ожидание общего замка тестов; None — как timeout_s
+    lock_poll_s: float = 5.0,
 ) -> GateResult:
     """Проверить ворота по порядку: чистота, дифф, allowed, приёмка под замком.
 
@@ -184,16 +187,22 @@ def check_gate(
         except OSError as e:
             errors.append(f"lock-error: {e}")
             return GateResult(ok=False, errors=errors, diff_stat=stat, tests_tail="")
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError):
-            holder = lock_holder(str(lock_path))
-            if holder is not None:
-                errors.append(f"locked: pid {holder.pid}")
-            else:
-                errors.append("locked: pid ?")
-            os.close(lock_fd)
-            return GateResult(ok=False, errors=errors, diff_stat=stat, tests_tail="")
+        # Замок общий на проект: ждём его в пределах таймаута ворот (раньше — мгновенный отказ,
+        # и при нескольких параллельных задачах ворота валили почти всех, 2026-09-29).
+        if lock_wait_s is None:
+            lock_wait_s = int(os.environ.get("HUB_GATE_LOCK_WAIT_S", timeout_s))
+        deadline = time.monotonic() + max(int(lock_wait_s), 0)
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    holder = lock_holder(str(lock_path))
+                    errors.append(f"locked: pid {holder.pid}" if holder is not None else "locked: pid ?")
+                    os.close(lock_fd)
+                    return GateResult(ok=False, errors=errors, diff_stat=stat, tests_tail="")
+                time.sleep(lock_poll_s)
 
     try:
         try:
