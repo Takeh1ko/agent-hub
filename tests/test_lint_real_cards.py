@@ -117,14 +117,13 @@ def test_real_cards_blind_hides_arbiter():
 
 def test_real_card_scope_defect_still_caught(tmp_path):
     # Настоящий дефект scope на реальной карточке ловится и без read/acceptance.
-    card = CARDS[0].name  # любая; берём T18b с хвостами интерфейса
     src = REPO / "tests" / "fixtures" / "real_cards" / "T18b-streams-tails.md"
     text = src.read_text(encoding="utf-8").replace(
         "`docs/market/spec.md` (§4.7).",
         "`docs/market/spec.md` (§4.7), `other/secret.py`.",
         1,
     )
-    tmp = tmp_path / card
+    tmp = tmp_path / src.name
     tmp.write_text(text, encoding="utf-8")
     r = lint_card(tmp, _proj(src), check_read_paths=False, check_acceptance=False)
     assert not r.ok
