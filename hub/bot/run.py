@@ -401,6 +401,159 @@ def _sync_forget(chat_id: int) -> None:
     bc.forget_chat(Store(), int(chat_id))
 
 
+# --- H15 /new: черновики в фоне, бот не блокируется ---
+
+# chat_id → {"stage": "project"|"text", "project": str}: ждём выбора/текста.
+_NEW_PENDING: dict[int, dict] = {}
+# (chat_id, bot_msg_id) → draft_id: предпросмотр для «Изменить» ответом.
+_DMSG: dict[tuple[int, int], int] = {}
+_DMSG_MAX = 1000
+
+
+def _remember_dmsg(chat_id: int, bot_msg_id: int, draft_id: int) -> None:
+    key = (int(chat_id), int(bot_msg_id))
+    _DMSG[key] = int(draft_id)
+    while len(_DMSG) > _DMSG_MAX:
+        _DMSG.pop(next(iter(_DMSG)))
+
+
+def _resolve_draft(chat_id: int, replied_msg_id: int) -> int | None:
+    return _DMSG.get((int(chat_id), int(replied_msg_id)))
+
+
+def _sync_projects() -> list:
+    from hub.config import load_projects
+
+    try:
+        return load_projects()
+    except (OSError, ValueError):
+        return []
+
+
+def _sync_make_draft(project_name: str, text: str, chat_id: int,
+                     now_ms: int) -> int:
+    """Создать черновик моделью (блокирует — звать через to_thread)."""
+    from hub.config import load_projects
+    from hub.pipeline.draft import make_draft, make_runner_for_project
+    from hub.store import Store
+
+    store = Store()
+    project = None
+    for p in load_projects():
+        if str(getattr(p, "name", "") or "") == str(project_name):
+            project = p
+            break
+    if project is None:
+        raise ValueError(f"нет проекта {project_name}")
+    runner = make_runner_for_project(project)
+    return int(make_draft(store, project, str(text), "tg", runner,
+                          chat_id=int(chat_id), now_ms=int(now_ms)))
+
+
+def _sync_draft_preview(draft_id: int) -> tuple[str, list]:
+    """Текст предпросмотра + кнопки. Пусто — черновик не ready."""
+    from hub.store import Store
+
+    store = Store()
+    row = store.get_draft(int(draft_id))
+    if row is None:
+        return "Черновик не найден.", []
+    if str(row.get("status") or "") != "ready":
+        errs = str(row.get("lint_errors") or "").strip()
+        head = f"Черновик {draft_id} не готов ({row.get('status')})."
+        return (head + ("\n" + errs[:1000] if errs else "")), []
+    text = bc.format_draft_preview(row, str(row.get("card_text") or ""))
+    return text, bc.draft_buttons(int(draft_id))
+
+
+def _sync_start_draft(draft_id: int, now_ms: int) -> str:
+    """Запустить черновик: задача в очереди. Возвращает task_id."""
+    from hub.pipeline.draft import start_draft
+    from hub.store import Store
+
+    return str(start_draft(Store(), int(draft_id), now_ms=int(now_ms)))
+
+
+def _sync_cancel_draft(draft_id: int) -> None:
+    from hub.pipeline.draft import cancel_draft
+    from hub.store import Store
+
+    cancel_draft(Store(), int(draft_id))
+
+
+async def _draft_bg(bot, chat_id: int, project_name: str, text: str,
+                    now_ms: int) -> None:
+    """Фоновая готовка черновика: «Пишу карточку…» → предпросмотр с кнопками."""
+    log = logging.getLogger("hub.bot")
+    try:
+        wait_msg = await bot.send_message(int(chat_id), bc.NEW_WRITING)
+        wait_id = int(getattr(wait_msg, "message_id", 0) or 0)
+    except Exception as e:  # noqa: BLE001 — не отправилось «Пишу…», дальше всё равно
+        log.warning("draft wait → %s: %s", chat_id, e)
+        wait_id = 0
+    try:
+        draft_id = await asyncio.to_thread(
+            _sync_make_draft, str(project_name), str(text),
+            int(chat_id), int(now_ms))
+    except Exception as e:  # noqa: BLE001 — модель/проект упал, владелец видит причину
+        try:
+            await bot.send_message(int(chat_id), f"Не вышло: {e}"[:500])
+        except Exception:
+            pass
+        return
+    preview, buttons = await asyncio.to_thread(_sync_draft_preview, draft_id)
+    try:
+        sent = await bot.send_message(
+            int(chat_id), bc.clip(preview),
+            reply_markup=_markup(buttons) if buttons else None)
+        _remember_dmsg(int(chat_id), int(sent.message_id), int(draft_id))
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.warning("draft preview → %s: %s", chat_id, e)
+        return
+    if wait_id:
+        try:
+            await bot.edit_message_text(
+                text=bc.NEW_WRITING + f" готово: черновик {draft_id}",
+                chat_id=int(chat_id), message_id=wait_id)
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
+
+
+async def handle_draft_callback(bot, chat_id: int, data: str,
+                                now_ms: int) -> str | None:
+    """Тап по кнопкам черновика: проект → просим текст; старт/отмена → применяем.
+
+    None — кнопку не понял. Тестируется без сети (бот — фейк).
+    """
+    await asyncio.to_thread(_sync_remember, int(chat_id), int(now_ms))
+    parsed = bc.parse_draft_callback(str(data or ""))
+    if parsed is None:
+        return None
+    action, target = parsed
+    if action == "project":
+        projects = await asyncio.to_thread(_sync_projects)
+        names = {str(getattr(p, "name", "") or "") for p in projects}
+        if target not in names:
+            return bc.NEW_UNKNOWN_PROJECT
+        _NEW_PENDING[int(chat_id)] = {"stage": "text", "project": target}
+        return bc.NEW_ASK_TEXT
+    if action == "cancel":
+        try:
+            await asyncio.to_thread(_sync_cancel_draft, int(target))
+        except (ValueError, OSError) as e:
+            return f"Не отменился: {e}"[:300]
+        _NEW_PENDING.pop(int(chat_id), None)
+        return f"Черновик {target} отменён."
+    # action == "start": запуск без ожидания модели — быстро, в этом же апдейте.
+    try:
+        task_id = await asyncio.to_thread(
+            _sync_start_draft, int(target), int(now_ms))
+    except (ValueError, OSError) as e:
+        return f"Не запустился: {e}"[:500]
+    _NEW_PENDING.pop(int(chat_id), None)
+    return f"OK {task_id}: задача в очереди, Claude уведомлён."
+
+
 def _sync_tick(prev_snap, now_ms: int, pending: dict | None = None):
     """Продюсер сводок: snapshot.build → дифф → события в store.
 
@@ -792,6 +945,43 @@ def build_dispatcher() -> Dispatcher:
         text = await asyncio.to_thread(_sync_pause, False)
         await msg.answer(text)
 
+    @router.message(Command("new"))
+    async def _new(msg: Message) -> None:
+        from hub import time as ht
+
+        chat = int(msg.chat.id)
+        now = ht.now_ms()
+        await asyncio.to_thread(_sync_remember, chat, now)
+        _, arg = bc.split_command(msg.text or "")
+        projects = await asyncio.to_thread(_sync_projects)
+        if not projects:
+            await msg.answer(bc.NEW_NO_PROJECTS)
+            return
+        want, rest = bc.parse_new_args(arg, projects)
+        if want is not None and rest:
+            # /new проект текст — сразу без вопросов, черновик в фоне.
+            await msg.answer(bc.NEW_WRITING)
+            asyncio.create_task(_draft_bg(msg.bot, chat, want, rest, now))
+            return
+        if want is not None:
+            _NEW_PENDING[chat] = {"stage": "text", "project": want}
+            await msg.answer(bc.NEW_ASK_TEXT)
+            return
+        if rest and len(projects) == 1:
+            only = str(getattr(projects[0], "name", "") or "")
+            await msg.answer(bc.NEW_WRITING)
+            asyncio.create_task(_draft_bg(msg.bot, chat, only, rest, now))
+            return
+        if rest:
+            # Текст есть, проекта нет — выбрать проект кнопкой, текст запомнить.
+            _NEW_PENDING[chat] = {"stage": "project", "text": rest}
+            await msg.answer(bc.NEW_ASK_PROJECT,
+                             reply_markup=_markup(bc.project_buttons(projects)))
+            return
+        _NEW_PENDING[chat] = {"stage": "project"}
+        await msg.answer(bc.NEW_ASK_PROJECT,
+                         reply_markup=_markup(bc.project_buttons(projects)))
+
     @router.callback_query(F.data.startswith("qans:"))
     async def _qans(call: CallbackQuery) -> None:
         from hub import time as ht
@@ -821,6 +1011,47 @@ def build_dispatcher() -> Dispatcher:
         await show_confirm_result(call.message, text)
         await call.answer("Готово")
 
+    @router.callback_query(F.data.startswith("draft:"))
+    async def _draft(call: CallbackQuery) -> None:
+        from hub import time as ht
+
+        try:
+            chat = int(call.message.chat.id)
+        except (AttributeError, TypeError, ValueError):
+            chat = int(call.from_user.id)
+        now = ht.now_ms()
+        parsed = bc.parse_draft_callback(str(call.data or ""))
+        if parsed is None:
+            await call.answer("Не понял кнопку.")
+            return
+        action, target = parsed
+        if action == "project":
+            # Проект выбран кнопкой: был ли текст заранее — сразу в фон.
+            pend = _NEW_PENDING.get(chat, {})
+            saved = str(pend.get("text", "") or "").strip()
+            _NEW_PENDING[chat] = {"stage": "text", "project": target}
+            if saved:
+                _NEW_PENDING.pop(chat, None)
+                await call.answer("Пишу карточку…")
+                try:
+                    await call.message.answer(bc.NEW_WRITING)
+                except Exception:  # noqa: BLE001 — best-effort
+                    pass
+                asyncio.create_task(_draft_bg(call.bot, chat, target, saved, now))
+                return
+            text = await handle_draft_callback(call.bot, chat,
+                                               str(call.data or ""), now)
+            await call.answer("Проект выбран")
+            try:
+                await call.message.answer(bc.clip(text or ""))
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
+            return
+        text = await handle_draft_callback(call.bot, chat,
+                                           str(call.data or ""), now)
+        await show_confirm_result(call.message, text or "")
+        await call.answer("Готово")
+
     @router.message(F.text)
     async def _text(msg: Message) -> None:
         from hub import time as ht
@@ -836,14 +1067,39 @@ def build_dispatcher() -> Dispatcher:
         qid: int | None = None
         replied = getattr(msg, "reply_to_message", None)
         replied_id = 0
+        replied_text = ""
         if replied is not None:
             replied_id = int(getattr(replied, "message_id", 0) or 0)
-            qid = _resolve_qid(chat, replied_id,
-                               str(getattr(replied, "text", "") or ""))
+            replied_text = str(getattr(replied, "text", "") or "")
+            qid = _resolve_qid(chat, replied_id, replied_text)
         if qid is not None:
             ok, short = await handle_reply(
                 msg.bot, chat, qid, body, replied_id, now)
             await msg.answer(bc.clip(short))
+            return
+        # H15: «Изменить» — ответ на предпросмотр: текст правки → новый черновик.
+        if replied_id:
+            draft_id = _resolve_draft(chat, replied_id)
+            if draft_id is not None:
+                from hub.store import Store
+
+                store = Store()
+                row = store.get_draft(int(draft_id))
+                if row is not None:
+                    base_text = str(row.get("text") or "")
+                    proj = str(row.get("project") or "")
+                    merged = f"{base_text}\nПравка владельца: {body.strip()}"
+                    await msg.answer(bc.NEW_WRITING)
+                    asyncio.create_task(
+                        _draft_bg(msg.bot, chat, proj, merged, now))
+                    return
+        # H15: ждём текст задачи после /new (выбор проекта → текст).
+        pend = _NEW_PENDING.get(chat)
+        if pend is not None and pend.get("stage") == "text" and pend.get("project"):
+            _NEW_PENDING.pop(chat, None)
+            await msg.answer(bc.NEW_WRITING)
+            asyncio.create_task(
+                _draft_bg(msg.bot, chat, str(pend["project"]), body.strip(), now))
             return
         text = await asyncio.to_thread(_sync_owner_text, chat, body, now)
         await msg.answer(bc.clip(text))

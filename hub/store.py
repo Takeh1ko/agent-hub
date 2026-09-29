@@ -176,6 +176,73 @@ class Store:
         finally:
             con.close()
 
+    # --- черновики H15: текст владельца → карточка модели → запуск по кнопке ---
+
+    def create_draft(self, project: str, text: str, source: str,
+                     chat_id: int = 0, now_ms: int | None = None) -> int:
+        """Завести черновик в статусе drafting. Возвращает id."""
+        if source not in ("tg", "top", "cli"):
+            raise ValueError(f"плохой source черновика: {source!r}")
+        ts = int(now_ms) if now_ms is not None else int(time.time() * 1000)
+        con = self._connect()
+        try:
+            cur = con.execute(
+                "INSERT INTO draft(ts, project, text, card_path, card_text,"
+                " lint_errors, status, task_id, source, chat_id)"
+                " VALUES (?, ?, ?, '', '', '', 'drafting', '', ?, ?)",
+                (ts, str(project or ""), str(text or ""),
+                 str(source), int(chat_id or 0)),
+            )
+            con.commit()
+            return int(cur.lastrowid)
+        finally:
+            con.close()
+
+    def get_draft(self, draft_id: int) -> dict | None:
+        con = self._connect()
+        try:
+            row = con.execute("SELECT * FROM draft WHERE id=?",
+                              (int(draft_id),)).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            con.close()
+
+    def list_drafts(self, status: str | None = None) -> list[dict]:
+        con = self._connect()
+        try:
+            if status:
+                rows = con.execute(
+                    "SELECT * FROM draft WHERE status=? ORDER BY id",
+                    (str(status),)).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT * FROM draft ORDER BY id").fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            con.close()
+
+    def update_draft(self, draft_id: int, **fields) -> None:
+        """Обновить поля черновика. Статус/source проверяются по контракту H15."""
+        allowed = ("ts", "project", "text", "card_path", "card_text",
+                   "lint_errors", "status", "task_id", "source", "chat_id")
+        if "status" in fields and str(fields["status"]) not in (
+                "drafting", "ready", "failed", "started", "cancelled"):
+            raise ValueError(f"плохой status черновика: {fields['status']!r}")
+        if "source" in fields and str(fields["source"]) not in ("tg", "top", "cli"):
+            raise ValueError(f"плохой source черновика: {fields['source']!r}")
+        cols = [c for c in allowed if c in fields]
+        if not cols:
+            return
+        con = self._connect()
+        try:
+            con.execute(
+                f"UPDATE draft SET {', '.join(f'{c}=?' for c in cols)} WHERE id=?",
+                [fields[c] for c in cols] + [int(draft_id)],
+            )
+            con.commit()
+        finally:
+            con.close()
+
     # --- сессии ---
 
     def link_session(
