@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import threading
+import time
 import tomllib
+from pathlib import Path
 
 from hub.config import load_project, load_projects
 from hub.pipeline.common import (
@@ -52,6 +56,146 @@ def _eligible(store: Store, task: dict, project) -> tuple[bool, str]:
     if is_paused(store):
         return False, "пауза"
     return True, ""
+
+
+def _project_worktrees_root(project) -> str:
+    """Корень worktrees проекта (строкой, без слэша в конце)."""
+    try:
+        root = str(getattr(project, "worktrees", "") or "").strip()
+    except (AttributeError, ValueError):
+        return ""
+    return root.rstrip("/")
+
+
+def _belongs_to_project(task: dict, project) -> bool:
+    """Задача — своего проекта: project == имя или пустой project + worktree внутри worktrees."""
+    if project is None:
+        return True
+    try:
+        want = str(getattr(project, "name", "") or "")
+    except (AttributeError, ValueError):
+        return False
+    tp = str(task.get("project") or "").strip()
+    if tp:
+        return tp == want
+    wt = str(task.get("worktree") or "").strip()
+    if not wt:
+        return False
+    root = _project_worktrees_root(project)
+    if not root:
+        return False
+    try:
+        if not wt.startswith("/"):
+            wt = str(Path.cwd() / wt)
+        return wt == root or wt.startswith(root + "/")
+    except (OSError, ValueError):
+        return False
+
+
+def _is_work_stage(stage: str) -> bool:
+    """Этапы, которые ведёт конвейер (не трогаем при перезапуске с живым процессом)."""
+    s = str(stage or "")
+    return s == "preflight" or s.startswith("exec r") or s.startswith("gate r") \
+        or s.startswith("review r")
+
+
+def _lock_key_of(task: dict, project) -> str:
+    """Общий замок проекта (§11): задачи с ним — строго по одной."""
+    try:
+        return (getattr(project, "test_lock", "") or "").strip()
+    except (AttributeError, ValueError):
+        return ""
+
+
+def _is_playerok(task: dict, project) -> bool:
+    """Задача с «Сеть: playerok» — только одна одновременно."""
+    try:
+        txt = card_text_of(task, project) or ""
+    except (OSError, ValueError):
+        txt = ""
+    try:
+        return bool(card_network_is_playerok(txt))
+    except (ValueError, AttributeError):
+        return False
+
+
+def _live_run_one(proc_root: str | Path = "/proc") -> dict[str, int]:
+    """Живые дочерние `--run-one`: task_id → pid (прямое чтение cmdline)."""
+    out: dict[str, int] = {}
+    try:
+        entries = list(Path(proc_root).iterdir())
+    except OSError:
+        return {}
+    for e in entries:
+        if not e.name.isdigit():
+            continue
+        try:
+            raw = (e / "cmdline").read_bytes().decode("utf-8", "replace")
+        except OSError:
+            continue
+        args = [a for a in raw.split("\x00") if a]
+        if "--run-one" not in args:
+            continue
+        try:
+            idx = args.index("--run-one")
+        except ValueError:
+            continue
+        if idx + 1 >= len(args):
+            continue
+        tid = str(args[idx + 1]).strip()
+        if not tid or tid.startswith("-"):
+            continue
+        try:
+            out[tid] = int(e.name)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _run_one_cmd(task_id: str, proj_src: str | None) -> list[str]:
+    """Команда дочернего процесса: свежий код hub на каждую задачу."""
+    cmd = [sys.executable, "-m", "hub.commands.queue", "--run-one", str(task_id)]
+    if proj_src:
+        cmd += ["--project", str(proj_src)]
+    return cmd
+
+
+def _spawn_one(task_id: str, proj_src: str | None):
+    """Запустить задачу в отдельном процессе (своя группа — переживает рестарт воркера)."""
+    cmd = _run_one_cmd(str(task_id), proj_src)
+    env = dict(os.environ)
+    env["HUB_QUEUE_CHILD"] = "1"
+    return subprocess.Popen(cmd, start_new_session=True, env=env)
+
+
+class _ThreadSlot:
+    """Слот --once: _run_one в потоке (синхронный проход, моки раннеров видны)."""
+
+    def __init__(self, task_id: str, proj_src: str | None) -> None:
+        self.tid = str(task_id)
+        self.pid: int | None = None
+        self.returncode: int | None = None
+        self.result: str = ""
+        self._done = threading.Event()
+        th = threading.Thread(target=self._boot, args=(str(task_id), proj_src),
+                              daemon=True)
+        th.start()
+        try:
+            self.pid = th.ident
+        except (AttributeError, ValueError):
+            self.pid = None
+
+    def _boot(self, task_id: str, proj_src: str | None) -> None:
+        try:
+            self.result = _run_one(task_id, proj_src)
+            self.returncode = 0
+        except (OSError, sqlite3.Error, ValueError):
+            self.returncode = 1
+        finally:
+            self._done.set()
+
+    def poll(self):
+        return self.returncode if self._done.is_set() else None
 
 
 def _owner_commands(store: Store) -> None:
@@ -196,99 +340,183 @@ def _max_par_of(args) -> int:
         return 1
 
 
-def _pump(store: Store, project, proj_src: str | None, max_par: int) -> int:
-    """Один проход очереди: owner-команды → снимок queued → запуск.
+def _list_queued_all(store: Store) -> list[dict]:
+    """Все queued по created_at (фолбэк, если нет store.list_queued)."""
+    try:
+        fn = getattr(store, "list_queued", None)
+        if callable(fn):
+            return list(fn())
+    except (OSError, sqlite3.Error, ValueError):
+        pass
+    try:
+        return [t for t in store.list_tasks(active_only=False)
+                if str(t.get("stage") or "") == "queued"]
+    except (OSError, sqlite3.Error, ValueError):
+        return []
 
-    Owner-команды перечитываются и после каждой завершённой задачи —
-    /stop и /merge, пришедшие во время многочасового прогона, не ждут
-    следующего запуска.
+
+def _pump(store: Store, project, proj_src: str | None, max_par: int,
+          spawn_fn=None, poll_secs: float = 0.05, proc_root: str | Path = "/proc") -> int:
+    """Проход очереди со слотами: свободное место + eligible queued — сразу взять.
+
+    Слоты разбираются по мере освобождения (не ждём всю пачку), снимок queued
+    перечитывается каждую итерацию. Playerok — строго одна одновременно; общий
+    test_lock — тоже по одному. Чужие проекты (при --project) не трогаем никогда.
+    Задачи в работе с живым `--run-one` при перезапуске не трогаем (только queued).
+    По умолчанию слот — поток с _run_one в этом процессе (синхронный --once,
+    моки раннеров видны); фон передает spawn_fn с отдельным процессом.
     """
     _owner_commands(store)
     if is_paused(store):
         print("пауза: meta.queue_paused")
         return 0
     try:
-        queued = [t for t in store.list_tasks(active_only=False)
-                  if str(t.get("stage") or "") == "queued"]
-    except (OSError, sqlite3.Error, ValueError) as e:
-        print(f"store-fail: {e}")
-        return 1
-    queued.sort(key=lambda t: int(t.get("created_at") or 0))
-    todo: list[dict] = []
+        max_par = max(1, int(max_par or 1))
+    except (TypeError, ValueError):
+        max_par = 1
+    try:
+        poll_secs = max(0.01, float(poll_secs or 0.05))
+    except (TypeError, ValueError):
+        poll_secs = 0.05
+    if spawn_fn is None:
+        def _default_spawn(tid: str):
+            return _ThreadSlot(tid, proj_src)
+        spawn_fn = _default_spawn
+
+    running: dict[str, object] = {}
+    info: dict[str, tuple[bool, str]] = {}  # tid -> (playerok, lock_key)
     code = 0
-    for t in queued:
-        proj = project
-        if proj is None:
+    first_pass = True
+    while True:
+        # Завершившиеся — снять со слотов.
+        for tid in list(running):
+            proc = running[tid]
             try:
-                proj = _resolve_project(t, None)
-            except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
-                print(f"NO-PROJECT {t['id']}: .hub.toml не найден "
-                      f"(ни worktree, ни ~/.config/agent-hub/config.toml)")
-                # Не висим в queued вечно с exit 1 на каждом прогоне.
-                try:
-                    store.upsert_task(id=t["id"], stage="failed",
-                                      stage_reason="no-project: .hub.toml не найден")
-                    store.add_event(t["id"], "stage",
-                                    {"stage": "failed", "reason": "no-project"})
-                except (OSError, sqlite3.Error, ValueError):
-                    pass
-                code = 1
+                rc = proc.poll()  # type: ignore[attr-defined]
+            except (OSError, ValueError, AttributeError):
+                rc = 0
+            if rc is None:
                 continue
-        ok, why = _eligible(store, t, proj)
-        if not ok:
-            print(f"SKIP {t['id']}: {why}")
+            try:
+                fresh = store.get_task(tid)
+                stage = str((fresh or {}).get("stage") or "?")
+            except (OSError, sqlite3.Error, ValueError):
+                stage = "?"
+            try:
+                pid = getattr(proc, "pid", "?")
+            except (AttributeError, ValueError):
+                pid = "?"
+            if rc != 0:
+                print(f"FAIL {tid}: rc={rc} stage={stage} pid={pid}")
+                code = 1
+            else:
+                print(f"DONE {tid}: {stage} pid={pid}")
+            running.pop(tid, None)
+            info.pop(tid, None)
+            _owner_commands(store)
+        if is_paused(store):
+            if not running:
+                print("пауза: meta.queue_paused")
+                return code
+            time.sleep(poll_secs)
             continue
-        todo.append(t)
-    if not todo:
-        print("(пусто)" if code == 0 else "(пусто, были ошибки проекта)")
-        return code
-    # playerok-задачи — строго по одной, не параллельно с такой же.
-    normals: list[dict] = []
-    playeroks: list[dict] = []
-    for t in todo:
+        # Снимок queued на каждую итерацию — новые задачи подбираем сразу.
         try:
-            proj = project or _resolve_project(t, None)
-            txt = card_text_of(t, proj) or ""
-        except (FileNotFoundError, OSError, tomllib.TOMLDecodeError, ValueError):
-            txt = ""
-        (playeroks if card_network_is_playerok(txt) else normals).append(t)
-
-    def _lock_of(t: dict) -> str:
-        try:
-            proj = project or _resolve_project(t, None)
-        except (FileNotFoundError, OSError, tomllib.TOMLDecodeError, ValueError):
-            return ""
-        return (getattr(proj, "test_lock", "") or "").strip()
-
-    free, serial_groups = _partition(normals, _lock_of)
-    if free:
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(max_par, len(free))) as pool:
-            futs = {pool.submit(_run_one, t["id"], proj_src): t["id"] for t in free}
-            for f in concurrent.futures.as_completed(futs):
-                tid = futs[f]
+            if project is not None:
                 try:
-                    print(f"DONE {tid}: {f.result()}")
+                    fn = getattr(store, "list_queued_for_project", None)
+                    if callable(fn):
+                        queued = list(fn(project.name,
+                                         getattr(project, "worktrees", "") or ""))
+                    else:
+                        queued = [t for t in _list_queued_all(store)
+                                  if _belongs_to_project(t, project)]
                 except (OSError, sqlite3.Error, ValueError) as e:
+                    print(f"store-fail: {e}")
+                    return 1
+            else:
+                queued = _list_queued_all(store)
+        except (OSError, sqlite3.Error, ValueError) as e:
+            print(f"store-fail: {e}")
+            return 1
+        try:
+            queued.sort(key=lambda t: int(t.get("created_at") or 0))
+        except (TypeError, ValueError):
+            pass
+        try:
+            live = _live_run_one(proc_root)
+        except (OSError, ValueError):
+            live = {}
+        playerok_busy = any(v[0] for v in info.values())
+        locks_busy = {v[1] for v in info.values() if v[1]}
+        spawnable: list[tuple[dict, bool, str]] = []
+        skips: list[str] = []
+        for t in queued:
+            if len(running) + len(spawnable) >= max_par:
+                break
+            tid = str(t.get("id") or "")
+            if not tid or tid in running or tid in live:
+                continue
+            if project is not None and not _belongs_to_project(t, project):
+                continue
+            proj_for = project
+            if proj_for is None:
+                try:
+                    proj_for = _resolve_project(t, None)
+                except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
+                    print(f"NO-PROJECT {tid}: .hub.toml не найден "
+                          f"(ни worktree, ни ~/.config/agent-hub/config.toml)")
+                    try:
+                        store.upsert_task(id=tid, stage="failed",
+                                          stage_reason="no-project: .hub.toml не найден")
+                        store.add_event(tid, "stage",
+                                        {"stage": "failed", "reason": "no-project"})
+                    except (OSError, sqlite3.Error, ValueError):
+                        pass
+                    code = 1
+                    continue
+            ok, why = _eligible(store, t, proj_for)
+            if not ok:
+                if first_pass:
+                    skips.append(f"SKIP {tid}: {why}")
+                continue
+            is_pok = _is_playerok(t, proj_for)
+            lock_key = _lock_key_of(t, proj_for)
+            if is_pok and playerok_busy:
+                continue
+            if lock_key and lock_key in locks_busy:
+                continue
+            spawnable.append((t, is_pok, lock_key))
+            if is_pok:
+                playerok_busy = True
+            if lock_key:
+                locks_busy.add(lock_key)
+        if first_pass:
+            for line in skips:
+                print(line)
+            first_pass = False
+        if spawnable:
+            for t, is_pok, lock_key in spawnable:
+                tid = str(t["id"])
+                try:
+                    proc = spawn_fn(tid)
+                except (OSError, ValueError, RuntimeError) as e:
                     print(f"FAIL {tid}: {e}")
                     code = 1
-                _owner_commands(store)
-    for grp in serial_groups:
-        for t in grp:
-            try:
-                print(f"DONE {t['id']}: {_run_one(t['id'], proj_src)}")
-            except (OSError, sqlite3.Error, ValueError) as e:
-                print(f"FAIL {t['id']}: {e}")
-                code = 1
-            _owner_commands(store)
-    for t in playeroks:
-        try:
-            print(f"DONE {t['id']}: {_run_one(t['id'], proj_src)}")
-        except (OSError, sqlite3.Error, ValueError) as e:
-            print(f"FAIL {t['id']}: {e}")
-            code = 1
-        _owner_commands(store)
-    return code
+                    continue
+                running[tid] = proc
+                info[tid] = (is_pok, lock_key)
+                try:
+                    pid = getattr(proc, "pid", "?")
+                except (AttributeError, ValueError):
+                    pid = "?"
+                print(f"START {tid} pid={pid}")
+            continue
+        if not running:
+            if not queued:
+                print("(пусто)")
+            return code
+        time.sleep(poll_secs)
 
 
 def _queue_stop(store: Store) -> bool:
@@ -300,6 +528,19 @@ def _queue_stop(store: Store) -> bool:
 
 
 def cmd_queue_run(args) -> int:
+    # Дочерний процесс одной задачи: свежий код, свой результат в store.
+    run_one = getattr(args, "run_one", None) or getattr(args, "run_one_id", None)
+    if run_one:
+        tid = str(run_one)
+        proj_src = getattr(args, "project", None)
+        try:
+            res = _run_one(tid, proj_src)
+        except (OSError, sqlite3.Error, ValueError) as e:
+            print(f"FAIL {tid}: {e}")
+            return 1
+        if os.environ.get("HUB_QUEUE_CHILD") != "1":
+            print(f"DONE {tid}: {res}")
+        return 0
     proj_src = getattr(args, "project", None)
     project = None
     if proj_src:
@@ -309,15 +550,22 @@ def cmd_queue_run(args) -> int:
             print(f"нет проекта: {e}")
             return 1
     max_par = _max_par_of(args)
-    store = Store()
-    if bool(getattr(args, "once", False)):
-        return _pump(store, project, proj_src, max_par)
-    # Долгоживущий цикл: опрос очереди и owner_command; выход —
-    # SIGTERM/SIGINT или meta queue_stop=1 (по умолчанию раз в 10 с).
     try:
-        poll = max(0.05, float(getattr(args, "poll_secs", 10) or 10))
+        poll = max(0.01, float(getattr(args, "poll_secs", 10) or 10))
     except (TypeError, ValueError):
         poll = 10.0
+    store = Store()
+    if bool(getattr(args, "once", False)):
+        # Синхронный проход в этом процессе (потоки): --once для тестов/скриптов,
+        # моки раннеров видны, результат печатается сразу. Устаревания кода нет —
+        # процесс выходит после прохода.
+        return _pump(store, project, proj_src, max_par, poll_secs=poll)
+    # Долгоживущий фон: каждая задача — отдельный процесс --run-one в своей
+    # группе (свежий код hub на задачу, рестарт воркера идущие не убивает);
+    # перезапуск не трогает exec/gate/review с живым --run-one
+    # (берём только queued, см. _pump). Выход — SIGTERM/SIGINT или queue_stop=1.
+    def _proc_spawn(tid: str):
+        return _spawn_one(tid, proj_src)
     stop_ev = threading.Event()
 
     def _on_sig(signum, frame) -> None:
@@ -337,7 +585,8 @@ def cmd_queue_run(args) -> int:
     while True:
         if stop_ev.is_set() or _queue_stop(store):
             break
-        code = _pump(store, project, proj_src, max_par)
+        code = _pump(store, project, proj_src, max_par,
+                     spawn_fn=_proc_spawn, poll_secs=poll)
         if stop_ev.is_set() or _queue_stop(store):
             break
         # time.sleep — воркер не держит store дольше транзакции.
@@ -345,6 +594,99 @@ def cmd_queue_run(args) -> int:
             break
     print("стоп: очередь остановлена")
     return code
+
+
+def cmd_queue_status(args) -> int:
+    """Кто в работе (pid, задача, этап), сколько в очереди, свободных мест."""
+    proj_src = getattr(args, "project", None)
+    project = None
+    if proj_src:
+        try:
+            project = load_project(proj_src)
+        except (FileNotFoundError, OSError, tomllib.TOMLDecodeError) as e:
+            print(f"нет проекта: {e}")
+            return 1
+    max_par = _max_par_of(args)
+    as_json = bool(getattr(args, "json", False))
+    store = Store()
+    try:
+        live = _live_run_one("/proc")
+    except (OSError, ValueError):
+        live = {}
+    running: list[dict] = []
+    for tid, pid in sorted(live.items(), key=lambda kv: kv[1]):
+        try:
+            t = store.get_task(tid)
+        except (OSError, sqlite3.Error, ValueError):
+            t = None
+        if t is None:
+            continue
+        if project is not None and not _belongs_to_project(t, project):
+            # Чужой проект в статусе своего не показываем в работе.
+            continue
+        running.append({"pid": pid, "task": tid,
+                        "stage": str(t.get("stage") or "")})
+    try:
+        if project is not None:
+            fn = getattr(store, "list_queued_for_project", None)
+            if callable(fn):
+                queued = list(fn(project.name,
+                                 getattr(project, "worktrees", "") or ""))
+            else:
+                queued = [t for t in _list_queued_all(store)
+                          if _belongs_to_project(t, project)]
+        else:
+            queued = _list_queued_all(store)
+    except (OSError, sqlite3.Error, ValueError) as e:
+        print(f"store-fail: {e}")
+        return 1
+    # Живые --run-one уже не queued (стадия ушла), но на случай гонки —
+    # из очереди их вычитаем.
+    live_ids = set(live)
+    queued_ids = [str(t.get("id") or "") for t in queued
+                  if str(t.get("id") or "") not in live_ids]
+    free = max(0, max_par - len(running))
+    if as_json:
+        print(json.dumps({
+            "running": running,
+            "queued": len(queued_ids),
+            "queued_ids": sorted(queued_ids),
+            "max_parallel": max_par,
+            "free": free,
+        }, ensure_ascii=False))
+        return 0
+    if running:
+        for r in sorted(running, key=lambda x: int(x["pid"] or 0)):
+            print(f"RUN {r['pid']} {r['task']} {r['stage']}")
+    else:
+        print("в работе: —")
+    print(f"очередь: {len(queued_ids)}")
+    print(f"в работе: {len(running)}/{max_par}, свободно: {free}")
+    return 0
+
+
+def _child_main(argv: list[str] | None = None) -> int:
+    """Точка `python -m hub.commands.queue --run-one ID [--project P]`."""
+    import argparse as _ap
+
+    ap = _ap.ArgumentParser(prog="hub.commands.queue")
+    ap.add_argument("--run-one", default=None)
+    ap.add_argument("--project", default=None)
+    ns = ap.parse_args(argv)
+    if not ns.run_one:
+        ap.print_help()
+        return 2
+    try:
+        res = _run_one(str(ns.run_one), ns.project)
+    except (OSError, sqlite3.Error, ValueError) as e:
+        print(f"FAIL {ns.run_one}: {e}")
+        return 1
+    if os.environ.get("HUB_QUEUE_CHILD") != "1":
+        print(f"DONE {ns.run_one}: {res}")
+    return 0
+
+
+main = _child_main
 
 
 def register(subparsers) -> None:
@@ -357,4 +699,15 @@ def register(subparsers) -> None:
                    help="один проход очереди (для тестов)")
     r.add_argument("--poll-secs", type=float, default=10,
                    help="пауза опроса очереди и owner_command в цикле, сек")
+    r.add_argument("--run-one", default=None,
+                   help="одна задача ID в этом процессе (дочерний слот очереди)")
     r.set_defaults(func=cmd_queue_run)
+    s = sub.add_parser("status", help="кто в работе, очередь, свободные места")
+    s.add_argument("--project", default=None, help="корень проекта (.hub.toml)")
+    s.add_argument("--max-parallel", type=int, default=4)
+    s.add_argument("--json", action="store_true", help="машинный JSON")
+    s.set_defaults(func=cmd_queue_status)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_child_main())

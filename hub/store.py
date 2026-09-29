@@ -109,6 +109,64 @@ class Store:
         finally:
             con.close()
 
+    # --- очередь H10: только выборки (без записи) ---
+
+    def list_queued(self) -> list[dict]:
+        """Задачи в stage=queued по created_at (порядок очереди)."""
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT * FROM task WHERE stage='queued' ORDER BY created_at"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            con.close()
+
+    def list_queued_for_project(self, project_name: str, worktrees: str = "") -> list[dict]:
+        """Queued своего проекта: project == имя или (пустой project + worktree внутри worktrees).
+
+        Чужие проекты не возвращаются никогда. Без worktrees пустые project не берём.
+        """
+        want = str(project_name or "")
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT * FROM task WHERE stage='queued' ORDER BY created_at"
+            ).fetchall()
+            tasks = [dict(r) for r in rows]
+        finally:
+            con.close()
+        wt_root = str(worktrees or "").rstrip("/")
+        out: list[dict] = []
+        for t in tasks:
+            tp = str(t.get("project") or "")
+            if tp:
+                if tp == want:
+                    out.append(t)
+                continue
+            if not wt_root:
+                continue
+            wt = str(t.get("worktree") or "")
+            if wt == wt_root or wt.startswith(wt_root + "/"):
+                out.append(t)
+        return out
+
+    def list_running_tasks(self) -> list[dict]:
+        """Задачи в работе конвейера: preflight/exec/gate/review (для queue status)."""
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT * FROM task WHERE stage IN ('preflight', 'exec r1', 'exec r2',"
+                " 'exec r3', 'exec r4', 'exec r5', 'gate r1', 'gate r2', 'gate r3',"
+                " 'gate r4', 'gate r5', 'review r1', 'review r2', 'review r3',"
+                " 'review r4', 'review r5')"
+                " OR stage LIKE 'exec r%' OR stage LIKE 'gate r%' OR stage LIKE 'review r%'"
+                " ORDER BY updated_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            con.close()
+
     # --- сессии ---
 
     def link_session(
