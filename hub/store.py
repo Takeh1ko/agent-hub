@@ -126,6 +126,8 @@ class Store:
         """Queued своего проекта: project == имя или (пустой project + worktree внутри worktrees).
 
         Чужие проекты не возвращаются никогда. Без worktrees пустые project не берём.
+        Нормализация — как у воркера (_belongs_to_project): имя/пути со strip,
+        относительный worktree — от cwd.
         """
         want = str(project_name or "")
         con = self._connect()
@@ -136,17 +138,24 @@ class Store:
             tasks = [dict(r) for r in rows]
         finally:
             con.close()
-        wt_root = str(worktrees or "").rstrip("/")
+        wt_root = str(worktrees or "").strip().rstrip("/")
         out: list[dict] = []
         for t in tasks:
-            tp = str(t.get("project") or "")
+            tp = str(t.get("project") or "").strip()
             if tp:
                 if tp == want:
                     out.append(t)
                 continue
             if not wt_root:
                 continue
-            wt = str(t.get("worktree") or "")
+            wt = str(t.get("worktree") or "").strip()
+            if not wt:
+                continue
+            try:
+                if not wt.startswith("/"):
+                    wt = str(Path.cwd() / wt)
+            except (OSError, ValueError):
+                continue
             if wt == wt_root or wt.startswith(wt_root + "/"):
                 out.append(t)
         return out

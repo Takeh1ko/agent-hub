@@ -324,11 +324,15 @@ def test_restart_keeps_live_task(tmp_path, monkeypatch):
     proj = _proj(tmp_path, "P")
     _seed("LIVE", project="P", stage="exec r1", created=1000)
     _seed("Q", project="P", stage="queued", created=1001)
-    # Фейковый /proc: живой --run-one для LIVE.
+    # Гонка рестарта: RACE ещё queued, но её --run-one уже жив — не дублируем.
+    _seed("RACE", project="P", stage="queued", created=1002)
+    # Фейковый /proc: живые --run-one для LIVE и RACE.
     proot = tmp_path / "proc"
-    d = proot / "1234"
-    d.mkdir(parents=True)
-    (d / "cmdline").write_bytes(b"python\x00-m\x00hub.commands.queue\x00--run-one\x00LIVE\x00")
+    for pid, tid in (("1234", "LIVE"), ("1235", "RACE")):
+        d = proot / pid
+        d.mkdir(parents=True)
+        (d / "cmdline").write_bytes(
+            f"python\x00-m\x00hub.commands.queue\x00--run-one\x00{tid}\x00".encode())
     started: list[str] = []
 
     def _spawn(tid):
@@ -339,8 +343,40 @@ def test_restart_keeps_live_task(tmp_path, monkeypatch):
     code = q._pump(Store(), proj, None, 2, spawn_fn=_spawn,
                    poll_secs=0.01, proc_root=str(proot))
     assert Store().get_task("LIVE")["stage"] == "exec r1"
+    assert Store().get_task("RACE")["stage"] == "queued"
     assert started == ["Q"]
     assert code == 0
+
+
+def test_pump_stop_fn_stops_intake(tmp_path):
+    """stop_fn (SIGTERM/queue_stop): новых не берём, выходим сразу."""
+    proj = _proj(tmp_path, "P")
+    _seed("S1", project="P", created=1000)
+    started: list[str] = []
+
+    def _spawn(tid):
+        started.append(tid)
+        return _Done()
+
+    code = q._pump(Store(), proj, None, 2, spawn_fn=_spawn,
+                   poll_secs=0.01, proc_root=str(tmp_path / "nproc"),
+                   stop_fn=lambda: True)
+    assert code == 0
+    assert started == []
+    assert Store().get_task("S1")["stage"] == "queued"
+
+
+def test_thread_slot_unexpected_error(monkeypatch):
+    """Сюрприз из _run_one — слот завершается провалом, а не виснет на poll()=None."""
+    def _boom(tid, src):
+        raise RuntimeError("бум")
+
+    monkeypatch.setattr(q, "_run_one", _boom)
+    slot = q._ThreadSlot("ZX", None)
+    t0 = time.time()
+    while slot.poll() is None and time.time() - t0 < 5:
+        time.sleep(0.01)
+    assert slot.poll() == 1
 
 
 def test_live_scan_parses_run_one(tmp_path):
@@ -380,6 +416,19 @@ def test_status_json(tmp_path, capsys, monkeypatch):
     data2 = json.loads(capsys.readouterr().out)
     assert "ALIEN" not in data2["queued_ids"]
     assert "Q1" in data2["queued_ids"]
+
+
+def test_status_shows_orphan(tmp_path, capsys, monkeypatch):
+    """Орфан (exec без живого процесса) виден в статусе и занимает место."""
+    _seed("ORPH", project="P", stage="exec r1", created=1000)
+    _seed("Q2", project="P", stage="queued", created=1001)
+    monkeypatch.setattr(q, "_live_run_one", lambda root="/proc": {})
+    ns = type("A", (), {"project": None, "max_parallel": 2, "json": True})()
+    assert q.cmd_queue_status(ns) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert any(r["task"] == "ORPH" and r.get("orphan") for r in data["running"])
+    assert data["free"] == 1
+    assert data["queued_ids"] == ["Q2"]
 
 
 def test_store_queued_for_project(tmp_path):

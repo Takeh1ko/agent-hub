@@ -189,13 +189,18 @@ class _ThreadSlot:
         try:
             self.result = _run_one(task_id, proj_src)
             self.returncode = 0
-        except (OSError, sqlite3.Error, ValueError):
+        except Exception:
+            # Любой сюрприз из _run_one — слот обязан завершиться, иначе
+            # _pump ждёт poll() вечно (у процессов тот же контракт даёт код выхода).
             self.returncode = 1
         finally:
             self._done.set()
 
     def poll(self):
-        return self.returncode if self._done.is_set() else None
+        if not self._done.is_set():
+            return None
+        # Страховка: done без кода (сторонний spawn_fn) — провал, не вечное ожидание.
+        return self.returncode if self.returncode is not None else 1
 
 
 def _owner_commands(store: Store) -> None:
@@ -356,7 +361,8 @@ def _list_queued_all(store: Store) -> list[dict]:
 
 
 def _pump(store: Store, project, proj_src: str | None, max_par: int,
-          spawn_fn=None, poll_secs: float = 0.05, proc_root: str | Path = "/proc") -> int:
+          spawn_fn=None, poll_secs: float = 0.05, proc_root: str | Path = "/proc",
+          stop_fn=None) -> int:
     """Проход очереди со слотами: свободное место + eligible queued — сразу взять.
 
     Слоты разбираются по мере освобождения (не ждём всю пачку), снимок queued
@@ -365,6 +371,8 @@ def _pump(store: Store, project, proj_src: str | None, max_par: int,
     Задачи в работе с живым `--run-one` при перезапуске не трогаем (только queued).
     По умолчанию слот — поток с _run_one в этом процессе (синхронный --once,
     моки раннеров видны); фон передает spawn_fn с отдельным процессом.
+    stop_fn (SIGTERM/SIGINT/queue_stop) проверяется каждую итерацию: новых не берём,
+    идущие продолжают в фоне — рестарт быстрый и никого не убивает.
     """
     _owner_commands(store)
     if is_paused(store):
@@ -383,6 +391,14 @@ def _pump(store: Store, project, proj_src: str | None, max_par: int,
             return _ThreadSlot(tid, proj_src)
         spawn_fn = _default_spawn
 
+    def _stopped() -> bool:
+        if stop_fn is None:
+            return False
+        try:
+            return bool(stop_fn())
+        except (OSError, ValueError):
+            return False
+
     running: dict[str, object] = {}
     info: dict[str, tuple[bool, str]] = {}  # tid -> (playerok, lock_key)
     code = 0
@@ -393,8 +409,14 @@ def _pump(store: Store, project, proj_src: str | None, max_par: int,
             proc = running[tid]
             try:
                 rc = proc.poll()  # type: ignore[attr-defined]
-            except (OSError, ValueError, AttributeError):
-                rc = 0
+            except (OSError, ValueError, AttributeError) as e:
+                # Состояние процесса неизвестно — честный FAIL, не ложный DONE.
+                print(f"FAIL {tid}: poll-error: {e}")
+                code = 1
+                running.pop(tid, None)
+                info.pop(tid, None)
+                _owner_commands(store)
+                continue
             if rc is None:
                 continue
             try:
@@ -414,6 +436,12 @@ def _pump(store: Store, project, proj_src: str | None, max_par: int,
             running.pop(tid, None)
             info.pop(tid, None)
             _owner_commands(store)
+        if _stopped():
+            # Быстрый выход: новых не берём, идущие продолжают в фоне
+            # (своя группа у процессов, daemon-потоки у --once).
+            if running:
+                print(f"стоп: {len(running)} продолжают в фоне")
+            return code
         if is_paused(store):
             if not running:
                 print("пауза: meta.queue_paused")
@@ -581,13 +609,16 @@ def cmd_queue_run(args) -> int:
                 pass
     except ImportError:
         pass
+    def _stopped() -> bool:
+        return stop_ev.is_set() or _queue_stop(store)
+
     code = 0
     while True:
-        if stop_ev.is_set() or _queue_stop(store):
+        if _stopped():
             break
         code = _pump(store, project, proj_src, max_par,
-                     spawn_fn=_proc_spawn, poll_secs=poll)
-        if stop_ev.is_set() or _queue_stop(store):
+                     spawn_fn=_proc_spawn, poll_secs=poll, stop_fn=_stopped)
+        if _stopped():
             break
         # time.sleep — воркер не держит store дольше транзакции.
         if stop_ev.wait(poll):
@@ -613,8 +644,39 @@ def cmd_queue_status(args) -> int:
         live = _live_run_one("/proc")
     except (OSError, ValueError):
         live = {}
+    # В работе: живые --run-one плюс орфаны — задачи в exec/gate/review/preflight
+    # без живого процесса (убит -9, воркер упал). Орфаны занимают места тоже,
+    # иначе свободные места завышаются.
+    try:
+        fn = getattr(store, "list_running_tasks", None)
+        if callable(fn):
+            work = list(fn())
+        else:
+            work = [t for t in store.list_tasks(active_only=False)
+                    if _is_work_stage(str(t.get("stage") or ""))]
+    except (OSError, sqlite3.Error, ValueError):
+        work = []
+    work = [t for t in work if _is_work_stage(str(t.get("stage") or ""))]
+    if project is not None:
+        work = [t for t in work if _belongs_to_project(t, project)]
+    live_ids = set(live)
     running: list[dict] = []
+    for t in work:
+        tid = str(t.get("id") or "")
+        if not tid:
+            continue
+        stage = str(t.get("stage") or "")
+        if tid in live_ids:
+            running.append({"pid": live[tid], "task": tid, "stage": stage,
+                            "orphan": False})
+        else:
+            running.append({"pid": None, "task": tid, "stage": stage,
+                            "orphan": True})
+    # Живые --run-one, чья стадия ещё не ушла из queued (гонка старта),
+    # тоже в работе — не в очереди.
     for tid, pid in sorted(live.items(), key=lambda kv: kv[1]):
+        if any(r["task"] == tid for r in running):
+            continue
         try:
             t = store.get_task(tid)
         except (OSError, sqlite3.Error, ValueError):
@@ -625,7 +687,7 @@ def cmd_queue_status(args) -> int:
             # Чужой проект в статусе своего не показываем в работе.
             continue
         running.append({"pid": pid, "task": tid,
-                        "stage": str(t.get("stage") or "")})
+                        "stage": str(t.get("stage") or ""), "orphan": False})
     try:
         if project is not None:
             fn = getattr(store, "list_queued_for_project", None)
@@ -635,6 +697,8 @@ def cmd_queue_status(args) -> int:
             else:
                 queued = [t for t in _list_queued_all(store)
                           if _belongs_to_project(t, project)]
+            # Перепроверка воркером, как в _pump (store — только предвыборка).
+            queued = [t for t in queued if _belongs_to_project(t, project)]
         else:
             queued = _list_queued_all(store)
     except (OSError, sqlite3.Error, ValueError) as e:
@@ -642,7 +706,6 @@ def cmd_queue_status(args) -> int:
         return 1
     # Живые --run-one уже не queued (стадия ушла), но на случай гонки —
     # из очереди их вычитаем.
-    live_ids = set(live)
     queued_ids = [str(t.get("id") or "") for t in queued
                   if str(t.get("id") or "") not in live_ids]
     free = max(0, max_par - len(running))
@@ -656,8 +719,10 @@ def cmd_queue_status(args) -> int:
         }, ensure_ascii=False))
         return 0
     if running:
-        for r in sorted(running, key=lambda x: int(x["pid"] or 0)):
-            print(f"RUN {r['pid']} {r['task']} {r['stage']}")
+        for r in sorted(running, key=lambda x: int(x["pid"] or 0) if x["pid"] else 0):
+            pid = r["pid"] if r["pid"] is not None else "—"
+            tail = " (орфан)" if r.get("orphan") else ""
+            print(f"RUN {pid} {r['task']} {r['stage']}{tail}")
     else:
         print("в работе: —")
     print(f"очередь: {len(queued_ids)}")
