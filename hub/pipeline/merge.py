@@ -121,11 +121,11 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
     if done.commit != head_sha:
         return False, f"mismatch: done={done.commit} head={head_sha}"
     try:
+        from hub.pipeline.cycle import _resolve_card
         from hub.pipeline.common import card_globs as _cg
 
-        card_rel = str(task.get("card_path") or "")
-        card_p = Path(card_rel) if Path(card_rel).is_absolute() else Path(root) / card_rel
-        card_text = card_p.read_text(encoding="utf-8") if card_p.is_file() else ""
+        card_p = _resolve_card(task, project)
+        card_text = card_p.read_text(encoding="utf-8") if card_p is not None else ""
         globs = _cg(card_text) if card_text else []
     except (OSError, ValueError):
         globs = []
@@ -249,12 +249,12 @@ def list_orphans(project, store) -> tuple[list[dict], list[str]]:
     branches = []
     if r.returncode == 0:
         for b in r.stdout.splitlines():
-            s = b.strip()
+            # Ветка, checkout-нутая в worktree, помечена '+' («+ agent/orph»,
+            # «*+ ...»); срезаем оба префикса, иначе `branch -D "+ agent/orph"`
+            # молча падает, а clean печатает OK.
+            s = b.strip().lstrip("*+").strip()
             if not s:
                 continue
-            # Текущая ветка помечена '* ': срезаем префикс, не символы.
-            if s.startswith("* "):
-                s = s[2:].strip()
             branches.append(s)
     orph_br = [b for b in branches if b not in known_br]
     return orph_wt, orph_br

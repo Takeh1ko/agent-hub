@@ -199,6 +199,10 @@ def test_stop_and_clean(tmp_path, capsys):
     assert "orph" in out
     assert main(["clean", "--project", str(root), "--yes"]) == 0
     assert not orph.exists()
+    # Ветка из worktree (префикс '+' в branch --list) тоже удалена.
+    branches = subprocess.run(["git", "branch", "--list", "agent/orph"], cwd=str(root),
+                              capture_output=True, text=True, timeout=60).stdout
+    assert "agent/orph" not in branches
 
 
 def test_queue_paused_and_after(tmp_path, capsys):
@@ -215,7 +219,7 @@ def test_queue_paused_and_after(tmp_path, capsys):
         con.commit()
     finally:
         con.close()
-    assert main(["queue", "run", "--project", str(root)]) == 0
+    assert main(["queue", "run", "--project", str(root), "--once"]) == 0
     assert "пауза" in capsys.readouterr().out
 
 

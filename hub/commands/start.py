@@ -82,6 +82,19 @@ def cmd_start(args) -> int:
     except (OSError, ValueError):
         pass
     task_id = card.stem
+    # Та же карточка, но база ушла вперёд (ветка уже слита): молча затирать
+    # финальный этап нельзя — отказываем, дальше решает владелец/continue.
+    try:
+        old = store.get_task(task_id)
+    except (OSError, ValueError):
+        old = None
+    if old is not None and str(old.get("card_hash") or "") == chash \
+            and str(old.get("base_sha") or "") != base \
+            and str(old.get("stage") or "") in ("merged", "ready", "arbiter"):
+        print(f"уже есть {task_id} stage={old.get('stage')} "
+              f"base={str(old.get('base_sha') or '')[:8]} ≠ {base[:8]}: "
+              "дай hub continue или новую карточку")
+        return 1
     executor = getattr(args, "executor", None) or project.defaults.executor
     reviewers = getattr(args, "reviewers", None)
     if reviewers:
@@ -102,6 +115,12 @@ def cmd_start(args) -> int:
         budget_go_f = float(budget_go) if budget_go is not None else float(project.defaults.budget_go)
     except (TypeError, ValueError):
         budget_go_f = 0.5
+    budget_usd = getattr(args, "budget_usd", None)
+    try:
+        budget_usd_f = (float(budget_usd) if budget_usd is not None
+                        else float(getattr(project.defaults, "budget_usd", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        budget_usd_f = 0.0
     after = (getattr(args, "after", None) or "").strip()
     blind = bool(getattr(args, "blind", False))
     level = parse_level(text)
@@ -116,9 +135,9 @@ def cmd_start(args) -> int:
                           card_hash=chash, level=level, branch=branch,
                           worktree=worktree, base_sha=base, stage="queued",
                           round=0, executor=executor,
-                          reviewers_json=json.dumps(rev_list, ensure_ascii=False),
-                          stage_reason="очередь", budget_go=budget_go_f,
-                          budget_usd=0.0)
+                           reviewers_json=json.dumps(rev_list, ensure_ascii=False),
+                           stage_reason="очередь", budget_go=budget_go_f,
+                           budget_usd=budget_usd_f)
         write_extra(store, task_id, rounds, after, blind)
         store.add_event(task_id, "stage", {"stage": "queued", "card": str(card)})
     except (OSError, ValueError) as e:
@@ -136,6 +155,8 @@ def register(subparsers) -> None:
     p.add_argument("--reviewers", default=None, help="ревьюеры через запятую")
     p.add_argument("--rounds", type=int, default=2, help="кругов ревью")
     p.add_argument("--budget-go", type=float, default=None, help="бюджет Go $")
+    p.add_argument("--budget-usd", type=float, default=None,
+                   help="бюджет реальных $ (0 — запрет трат)")
     p.add_argument("--after", default=None, help="ждать задачу ID")
     p.add_argument("--blind", action="store_true", help="слепое ревью без эталона")
     p.set_defaults(func=cmd_start)

@@ -56,12 +56,19 @@ def _default_log(cwd: str, name: str) -> str:
 
 
 def prompt_arg(prompt: str, cwd: str) -> str:
-    """Короткий промпт — как есть; длинный — в файл .agent/."""
+    """Короткий промпт — как есть; длинный — в файл .agent/.
+
+    Имя файла с pid/uuid: два параллельных ревьюера в одну мс
+    не перезаписывают чужой промпт.
+    """
     if len(prompt.encode("utf-8")) <= PROMPT_ARG_LIMIT:
         return prompt
+    import os as _os
+    import uuid as _uuid
+
     d = Path(cwd) / AGENT_DIR
     d.mkdir(parents=True, exist_ok=True)
-    path = d / f"prompt_{int(time.time() * 1000)}.md"
+    path = d / f"prompt_{int(time.time() * 1000)}_{_os.getpid()}_{_uuid.uuid4().hex[:8]}.md"
     path.write_text(prompt, encoding="utf-8")
     return (
         f"Твоё задание целиком — в файле {path}. Прочитай его полностью (он длинный, "

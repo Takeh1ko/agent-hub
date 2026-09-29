@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import sqlite3
+import threading
 import tomllib
 
 from hub.config import load_project, load_projects
@@ -73,7 +74,10 @@ def _owner_commands(store: Store) -> None:
         except (TypeError, ValueError):
             continue
         cmd = str(payload.get("cmd") or payload.get("action") or "")
-        tid = str(payload.get("task_id") or payload.get("id") or "")
+        # Бот H05 кладёт id задачи в колонку event.task_id, а в payload —
+        # только {"action": "stop"}; читаем оба места.
+        tid = str(payload.get("task_id") or payload.get("id")
+                  or e.get("task_id") or "")
         if not tid:
             continue
         if cmd == "stop":
@@ -185,24 +189,24 @@ def _run_one(task_id: str, project_src: str | None) -> str:
         return "failed"
 
 
-def cmd_queue_run(args) -> int:
-    proj_src = getattr(args, "project", None)
-    project = None
-    if proj_src:
-        try:
-            project = load_project(proj_src)
-        except (FileNotFoundError, OSError, tomllib.TOMLDecodeError) as e:
-            print(f"нет проекта: {e}")
-            return 1
-    store = Store()
+def _max_par_of(args) -> int:
+    try:
+        return max(1, int(getattr(args, "max_parallel", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _pump(store: Store, project, proj_src: str | None, max_par: int) -> int:
+    """Один проход очереди: owner-команды → снимок queued → запуск.
+
+    Owner-команды перечитываются и после каждой завершённой задачи —
+    /stop и /merge, пришедшие во время многочасового прогона, не ждут
+    следующего запуска.
+    """
     _owner_commands(store)
     if is_paused(store):
         print("пауза: meta.queue_paused")
         return 0
-    try:
-        max_par = max(1, int(getattr(args, "max_parallel", 1) or 1))
-    except (TypeError, ValueError):
-        max_par = 1
     try:
         queued = [t for t in store.list_tasks(active_only=False)
                   if str(t.get("stage") or "") == "queued"]
@@ -220,6 +224,14 @@ def cmd_queue_run(args) -> int:
             except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
                 print(f"NO-PROJECT {t['id']}: .hub.toml не найден "
                       f"(ни worktree, ни ~/.config/agent-hub/config.toml)")
+                # Не висим в queued вечно с exit 1 на каждом прогоне.
+                try:
+                    store.upsert_task(id=t["id"], stage="failed",
+                                      stage_reason="no-project: .hub.toml не найден")
+                    store.add_event(t["id"], "stage",
+                                    {"stage": "failed", "reason": "no-project"})
+                except (OSError, sqlite3.Error, ValueError):
+                    pass
                 code = 1
                 continue
         ok, why = _eligible(store, t, proj)
@@ -260,6 +272,7 @@ def cmd_queue_run(args) -> int:
                 except (OSError, ValueError) as e:
                     print(f"FAIL {tid}: {e}")
                     code = 1
+                _owner_commands(store)
     for grp in serial_groups:
         for t in grp:
             try:
@@ -267,12 +280,70 @@ def cmd_queue_run(args) -> int:
             except (OSError, ValueError) as e:
                 print(f"FAIL {t['id']}: {e}")
                 code = 1
+            _owner_commands(store)
     for t in playeroks:
         try:
             print(f"DONE {t['id']}: {_run_one(t['id'], proj_src)}")
         except (OSError, ValueError) as e:
             print(f"FAIL {t['id']}: {e}")
             code = 1
+        _owner_commands(store)
+    return code
+
+
+def _queue_stop(store: Store) -> bool:
+    """Мягкий стоп цикла (для тестов и ручной остановки без сигналов)."""
+    try:
+        return (meta_get(store, "queue_stop") or "") == "1"
+    except (OSError, ValueError):
+        return False
+
+
+def cmd_queue_run(args) -> int:
+    proj_src = getattr(args, "project", None)
+    project = None
+    if proj_src:
+        try:
+            project = load_project(proj_src)
+        except (FileNotFoundError, OSError, tomllib.TOMLDecodeError) as e:
+            print(f"нет проекта: {e}")
+            return 1
+    max_par = _max_par_of(args)
+    store = Store()
+    if bool(getattr(args, "once", False)):
+        return _pump(store, project, proj_src, max_par)
+    # Долгоживущий цикл: опрос очереди и owner_command; выход —
+    # SIGTERM/SIGINT или meta queue_stop=1 (по умолчанию раз в 10 с).
+    try:
+        poll = max(0.05, float(getattr(args, "poll_secs", 10) or 10))
+    except (TypeError, ValueError):
+        poll = 10.0
+    stop_ev = threading.Event()
+
+    def _on_sig(signum, frame) -> None:
+        stop_ev.set()
+
+    try:
+        import signal as _sig
+
+        for _s in (_sig.SIGTERM, _sig.SIGINT):
+            try:
+                _sig.signal(_s, _on_sig)
+            except (OSError, ValueError, RuntimeError):
+                pass
+    except ImportError:
+        pass
+    code = 0
+    while True:
+        if stop_ev.is_set() or _queue_stop(store):
+            break
+        code = _pump(store, project, proj_src, max_par)
+        if stop_ev.is_set() or _queue_stop(store):
+            break
+        # time.sleep — воркер не держит store дольше транзакции.
+        if stop_ev.wait(poll):
+            break
+    print("стоп: очередь остановлена")
     return code
 
 
@@ -282,4 +353,8 @@ def register(subparsers) -> None:
     r = sub.add_parser("run", help="прогнать queued (фон: nohup hub queue run &)")
     r.add_argument("--max-parallel", type=int, default=4)
     r.add_argument("--project", default=None, help="корень проекта (.hub.toml)")
+    r.add_argument("--once", action="store_true",
+                   help="один проход очереди (для тестов)")
+    r.add_argument("--poll-secs", type=float, default=10,
+                   help="опрос очереди и owner_command в цикле, c")
     r.set_defaults(func=cmd_queue_run)

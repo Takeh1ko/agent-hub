@@ -52,7 +52,7 @@ def fix_prompt(findings, gate) -> str:
         out = str(tests.get("output", ""))[:MAX_OUTPUT_CHARS]
     else:
         errs = getattr(gate, "errors", []) or []
-        gate_line = f"ворота: {'; '.join(str(e) for e in errs) or 'красные'}"
+        gate_line = f"ворота: {'; '.join(str(e) for e in errs) or 'зелёные'}"
         out = str(getattr(gate, "tests_tail", ""))[:MAX_OUTPUT_CHARS]
     import json as _json
 

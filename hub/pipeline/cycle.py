@@ -276,8 +276,13 @@ def _preflight_continued(store, project, task_id: str,
         except (OSError, subprocess.SubprocessError) as e:
             return PreflightResult(ok=False, reason=f"lock-fail: {e}"[:2000])
         if holder is not None:
+            # Формат как в H02 (pid + время), иначе причины расходятся.
+            try:
+                when = ht.fmt_local(holder.started_ms)
+            except (OSError, ValueError, AttributeError, TypeError):
+                when = str(holder.started_ms)
             return PreflightResult(
-                ok=False, reason=f"locked: pid {holder.pid}")
+                ok=False, reason=f"locked: pid {holder.pid} since {when}")
     try:
         digest = _hl.sha256(rp.read_bytes()).hexdigest()
         store.upsert_task(id=task_id, rules_sha=digest)
@@ -351,7 +356,15 @@ def _ask_extend(store, task_id: str, text: str) -> None:
 
 
 def _budget_exceeded(cost: float, budget: float) -> bool:
+    """Лимит Go: 0 — лимит не задан."""
     return budget > 0 and cost >= budget
+
+
+def _usd_exceeded(cost: float, budget: float) -> bool:
+    """Лимит usd: 0 — запрет трат реальных денег (стоп при usd > 0)."""
+    if budget > 0:
+        return cost >= budget
+    return cost > 0
 
 
 def _stop_requested(worktree: str) -> bool:
@@ -396,10 +409,19 @@ def _collect_reviews(worktree: str, round_no: int) -> list[Review]:
             continue
         first: dict = {}
         if isinstance(findings, list):
-            for f in findings:
-                if isinstance(f, dict):
-                    first = f
-                    break
+            dicts = [f for f in findings if isinstance(f, dict)]
+            # Судьба dispute не должна зависеть от порядка: сначала ищем
+            # finding с file:line, иначе берём первый.
+            def _has_pos(f: dict) -> bool:
+                if not str(f.get("file") or f.get("path") or ""):
+                    return False
+                try:
+                    return int(f.get("line") or 0) > 0
+                except (TypeError, ValueError):
+                    return False
+
+            first = next((f for f in dicts if _has_pos(f)),
+                         dicts[0] if dicts else {})
         fname = str(first.get("file") or first.get("path") or "")
         try:
             lineno = int(first.get("line") or 0)
@@ -468,8 +490,6 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
     _set_stage(store, task_id, "preflight", 0, "старт")
     _clean_pycache(worktree)
     continued = _continued_flag(store, task_id)
-    if continued:
-        _consume_continued_flag(store, task_id)
     try:
         if continued:
             pf = _preflight_continued(store, project, task_id, worktree, base_sha)
@@ -479,8 +499,13 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         _set_stage(store, task_id, "failed", 0, f"preflight-fail: {e}"[:500])
         return "failed"
     if not pf.ok:
+        # Флаг продолжения съедаем только после успеха: транзиентный провал
+        # (dirty/locked/collect-fail) иначе переведёт повтор на строгий
+        # HEAD == base_sha и даст base-moved без причины.
         _set_stage(store, task_id, "failed", 0, pf.reason[:500])
         return "failed"
+    if continued:
+        _consume_continued_flag(store, task_id)
     _clean_pycache(worktree)
 
     card_path = _resolve_card(store.get_task(task_id) or task, project)
@@ -516,7 +541,11 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         budget_go = float(task.get("budget_go") or 0.0)
     except (TypeError, ValueError):
         budget_go = 0.0
-    budget_usd = float(task.get("budget_usd") or 0.0)
+    budget_usd = 0.0
+    try:
+        budget_usd = float(task.get("budget_usd") or 0.0)
+    except (TypeError, ValueError):
+        budget_usd = 0.0
 
     def _cost() -> tuple[float, float]:
         if cost_fn is not None:
@@ -530,7 +559,7 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
 
     def _over_budget(round_no: int = 0) -> tuple[bool, float, float]:
         go, usd = _cost()
-        if _budget_exceeded(go, budget_go) or _budget_exceeded(usd, budget_usd):
+        if _budget_exceeded(go, budget_go) or _usd_exceeded(usd, budget_usd):
             return True, go, usd
         # 80 % — мягкое событие, один раз на круг (не спамим).
         key = f"soft:{round_no}"
@@ -768,26 +797,38 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                 return None
             prompt = prompts.review_prompt(rules_text, card_text, diff_text,
                                            gate_for_prompt, round_no, task_blind)
+            # Каждому ревьюеру свой файл (как PanelReviewer): иначе все пишут
+            # в общий review_rN.json — гонка, лишний resume и потеря вердикта.
+            per_file = f"review_r{round_no}_{name}.json"
+            prompt = prompt.replace(f"review_r{round_no}.json", per_file)
             log = str(Path(worktree) / ".agent" / f"reviewer_r{round_no}_{name}.log")
             try:
                 rsid = runner.start(prompt, worktree, log)
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 return None
-            # Один повтор не записавшему валидный JSON (как PanelReviewer).
-            own = Path(worktree) / ".agent" / f"review_r{round_no}_{name}.json"
-            if not _review_file_valid(own):
-                try:
-                    runner.resume(rsid, REVIEW_FIX_TEXT.replace(
-                        "review_rN.json", f"review_r{round_no}_{name}.json"),
-                        worktree, log)
-                except (OSError, RuntimeError, subprocess.SubprocessError):
-                    pass
+            # Сессия линкуется сразу, как только id известен (до resume).
             try:
-                rtool, rmodel = _runner_tool_model(runner, {"executor": name})
+                rtool, _rm = _runner_tool_model(runner, {"executor": name})
                 store.link_session(rsid, rtool, task_id, "reviewer", round_no,
                                    str(getattr(runner, "model", name) or name).split("/")[-1])
             except (OSError, sqlite3.Error):
                 pass
+            # Один повтор не записавшему валидный JSON (как PanelReviewer).
+            own = Path(worktree) / ".agent" / per_file
+            if not _review_file_valid(own):
+                try:
+                    rsid2 = runner.resume(rsid, REVIEW_FIX_TEXT.replace(
+                        "review_rN.json", per_file),
+                        worktree, log)
+                    try:
+                        rtool, _rm = _runner_tool_model(runner, {"executor": name})
+                        store.link_session(rsid2, rtool, task_id, "reviewer", round_no,
+                                           str(getattr(runner, "model", name) or name
+                                               ).split("/")[-1])
+                    except (OSError, sqlite3.Error):
+                        pass
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    pass
             return rsid
 
         if reviewers:
@@ -829,12 +870,11 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         if decision == "ready":
             if not gate_green:
                 # approve при красных воротах — не ready (как run_task:
-                # approve→changes «ворота не пройдены»).
+                # approve→changes «ворота не пройдены»). Находка для
+                # следующего круга перечитается с диска (fix rN+1),
+                # сюда её класть не нужно.
                 gate_tail = "; ".join(getattr(gate, "errors", []) or [])[:300] \
                     if gate is not None else "нет ворот"
-                last_findings = [{"file": "", "line": 0,
-                                  "issue": f"ворота не пройдены: {gate_tail}",
-                                  "severity": "high", "author": "gate"}]
                 if round_no >= max(1, int(rounds)):
                     _set_stage(store, task_id, "arbiter", round_no,
                                 f"approve при красных воротах: {gate_tail}"[:500])
@@ -848,10 +888,8 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
             reason = ",".join(r.verdict for r in reviews) or "панель молчит"
             _set_stage(store, task_id, "arbiter", round_no, reason[:500])
             return "arbiter"
-        # next → следующий круг (если есть).
-        if round_no >= max(1, int(rounds)):
-            _set_stage(store, task_id, "arbiter", round_no, "круги кончились")
-            return "arbiter"
+        # next → следующий круг. verdict() на последнем круге сам отдаёт
+        # arbiter, а конец цикла ниже — страховка, если вердикт изменится.
         _set_stage(store, task_id, f"review r{round_no}", round_no, "changes → круг")
         continue
     _set_stage(store, task_id, "arbiter", int(rounds), "круги кончились")

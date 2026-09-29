@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import sqlite3
 import tomllib
 from pathlib import Path
 
@@ -131,25 +132,36 @@ def cmd_review(args) -> int:
         name, runner = item
         prompt = prompts.review_prompt(rules_text, card_text, diff_text,
                                        gate, round_no, blind)
+        # Каждому ревьюеру свой файл (как PanelReviewer).
+        per_file = f"review_r{round_no}_{name}.json"
+        prompt = prompt.replace(f"review_r{round_no}.json", per_file)
         log = str(Path(worktree) / ".agent" / f"reviewer_r{round_no}_{name}.log")
         try:
             rsid = runner.start(prompt, worktree, log)
         except (OSError, RuntimeError, _sp.SubprocessError):
             return
-        own = Path(worktree) / ".agent" / f"review_r{round_no}_{name}.json"
-        if not _review_file_valid(own):
-            try:
-                runner.resume(rsid, REVIEW_FIX_TEXT.replace(
-                    "review_rN.json", f"review_r{round_no}_{name}.json"),
-                    worktree, log)
-            except (OSError, RuntimeError, _sp.SubprocessError):
-                pass
+        # Сессия линкуется сразу, как только id известен (до resume).
         try:
             rtool, _m = _runner_tool_model(runner, {"executor": name})
             store.link_session(rsid, rtool, task_id, "reviewer", round_no,
                                str(getattr(runner, "model", name) or name).split("/")[-1])
-        except (OSError, ValueError):
+        except (OSError, sqlite3.Error, ValueError):
             pass
+        own = Path(worktree) / ".agent" / per_file
+        if not _review_file_valid(own):
+            try:
+                rsid2 = runner.resume(rsid, REVIEW_FIX_TEXT.replace(
+                    "review_rN.json", per_file),
+                    worktree, log)
+                try:
+                    rtool, _m = _runner_tool_model(runner, {"executor": name})
+                    store.link_session(rsid2, rtool, task_id, "reviewer", round_no,
+                                       str(getattr(runner, "model", name) or name
+                                           ).split("/")[-1])
+                except (OSError, sqlite3.Error, ValueError):
+                    pass
+            except (OSError, RuntimeError, _sp.SubprocessError):
+                pass
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(reviewers)) as pool:
         list(pool.map(_one, list(reviewers.items())))

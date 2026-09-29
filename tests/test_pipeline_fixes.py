@@ -379,22 +379,28 @@ def test_continue_then_run_ok(tmp_path, capsys):
     assert got == "ready", Store().get_task("TC")
 
 
-# --- high: owner_command ровно один раз ---
+# --- high: owner_command ровно один раз (формат H05: id в event.task_id) ---
 
 def test_owner_command_once(tmp_path):
+    from hub.commands.queue import _owner_commands
+
     repo, base = _mk_repo(tmp_path)
     Store().upsert_task(id="TQ", project="T", card_path="x", branch="agent/TQ",
                         worktree=str(repo), base_sha=base, stage="exec r1")
     (repo / ".agent").mkdir(exist_ok=True)
-    Store().add_event("TQ", "owner_command", {"cmd": "stop", "task_id": "TQ"})
-    from hub.commands.queue import _owner_commands
-
+    # Реальный payload H05: id только в колонке event.task_id.
+    Store().add_event("TQ", "owner_command", {"action": "stop"})
     _owner_commands(Store())
     assert Store().get_task("TQ")["stage"] == "stopped"
     # Как после continue: снова queued — повтор не должен останавливать.
     Store().upsert_task(id="TQ", stage="queued", stage_reason="continue")
     _owner_commands(Store())
     assert Store().get_task("TQ")["stage"] == "queued"
+    # Старый формат (id в payload) тоже работает.
+    Store().upsert_task(id="TQ", stage="exec r1")
+    Store().add_event("OTHER", "owner_command", {"cmd": "stop", "task_id": "TQ"})
+    _owner_commands(Store())
+    assert Store().get_task("TQ")["stage"] == "stopped"
 
 
 # --- medium: модели громко, stop финал, rtool, бюджет ---
@@ -630,8 +636,10 @@ def test_queue_no_project_exit1(tmp_path, capsys):
     empty.mkdir()
     Store().upsert_task(id="TN", project="NOPE", card_path="x", branch="agent/TN",
                         worktree=str(empty), base_sha="b", stage="queued")
-    assert main(["queue", "run"]) == 1
+    assert main(["queue", "run", "--once"]) == 1
     assert "NO-PROJECT" in capsys.readouterr().out
+    # Не висит в queued вечно: помечена failed.
+    assert Store().get_task("TN")["stage"] == "failed"
 
 
 # --- low: stale, retry, раннеры ---
