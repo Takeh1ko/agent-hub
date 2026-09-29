@@ -100,11 +100,10 @@ def _is_work_stage(stage: str) -> bool:
 
 
 def _lock_key_of(task: dict, project) -> str:
-    """Общий замок проекта (§11): задачи с ним — строго по одной."""
-    try:
-        return (getattr(project, "test_lock", "") or "").strip()
-    except (AttributeError, ValueError):
-        return ""
+    """Замок тестов проекта НЕ сериализует задачи: его ждут только прогоны приёмки в воротах
+    (check_gate ждёт замок), а писать код агенты могут параллельно (2026-09-29: сериализация
+    гнала все задачи PlayerUP гуськом при 3 свободных местах)."""
+    return ""
 
 
 def _is_playerok(task: dict, project) -> bool:
