@@ -82,15 +82,17 @@ def cmd_start(args) -> int:
     except (OSError, ValueError):
         pass
     task_id = card.stem
-    # Та же карточка, но база ушла вперёд (ветка уже слита): молча затирать
-    # финальный этап нельзя — отказываем, дальше решает владелец/continue.
+    # Та же карточка, но база ушла вперёд: молча перетирать существующую
+    # задачу нельзя на любом этапе (не только финальном) — иначе queued
+    # падает с base-moved, stopped/failed тихо воскресает, а exec rN
+    # у работающего воркера получает второй run_task на тот же worktree.
+    # Дальше решает владелец: hub continue или новая карточка.
     try:
         old = store.get_task(task_id)
     except (OSError, ValueError):
         old = None
     if old is not None and str(old.get("card_hash") or "") == chash \
-            and str(old.get("base_sha") or "") != base \
-            and str(old.get("stage") or "") in ("merged", "ready", "arbiter"):
+            and str(old.get("base_sha") or "") != base:
         print(f"уже есть {task_id} stage={old.get('stage')} "
               f"base={str(old.get('base_sha') or '')[:8]} ≠ {base[:8]}: "
               "дай hub continue или новую карточку")
@@ -130,6 +132,14 @@ def cmd_start(args) -> int:
     if not worktree:
         # Без worktree задачу всё равно заводим (preflight скажет dirty/no-worktree).
         worktree = str(Path(wt_dir) / task_id) if wt_dir else ""
+    if worktree:
+        # Переиспользованный worktree мог остаться с флагом stop_requested
+        # от прошлого /stop (continue сносит его переименованием .agent,
+        # start — нет): новый прогон мгновенно ушёл бы в stopped.
+        try:
+            (Path(worktree) / ".agent" / "stop_requested").unlink(missing_ok=True)
+        except OSError:
+            pass
     try:
         store.upsert_task(id=task_id, project=project.name, card_path=str(card),
                           card_hash=chash, level=level, branch=branch,

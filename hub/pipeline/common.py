@@ -152,6 +152,27 @@ def parse_level(card_text: str) -> str:
     return "medium"
 
 
+def _split_top_level(body: str) -> list[str]:
+    """Делить по запятым верхнего уровня (вложенные скобки — целиком)."""
+    parts: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for ch in body:
+        if ch == "{":
+            depth += 1
+            cur.append(ch)
+        elif ch == "}":
+            depth = max(0, depth - 1)
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return parts
+
+
 def _expand_braces_str(s: str) -> list[str]:
     """Раскрыть первую {a,b}-группу в строке (рекурсивно)."""
     start = s.find("{")
@@ -170,7 +191,7 @@ def _expand_braces_str(s: str) -> list[str]:
     if end < 0:
         return [s]
     pre, body, post = s[:start], s[start + 1:end], s[end + 1:]
-    parts = body.split(",")
+    parts = _split_top_level(body)
     if len(parts) < 2:
         return [s]
     # Не трогаем JSON/прозу: альтернативы — только токены без пробелов и пунктуации.

@@ -322,6 +322,7 @@ def test_budget_usd_zero_forbids(tmp_path):
                        rounds=2, cost_fn=lambda s, t: (0.0, 5.0))
     assert got == "stopped"
     assert Store().get_task("T01")["stage"] == "stopped"
+    assert "(usd)" in (Store().get_task("T01") or {}).get("stage_reason", "")
     import sqlite3 as _sq
 
     con = _sq.connect(str(Store().path))
@@ -330,6 +331,8 @@ def test_budget_usd_zero_forbids(tmp_path):
     finally:
         con.close()
     assert rows
+    # Вопрос честный: какой счётчик сработал и оба лимита, не «go $0.00/0.00».
+    assert any("usd" in r[0] and "go $" in r[0] and "usd $" in r[0] for r in rows)
 
 
 def test_budget_go_zero_no_limit(tmp_path):
@@ -506,3 +509,160 @@ def test_gate_error_reaches_fix_prompt(tmp_path):
     assert len(exe.fix_prompts) == 1, exe.fix_prompts
     assert "tests-fail" in exe.fix_prompts[0]
     assert "зелёные" not in exe.fix_prompts[0]
+
+
+def _mk_start_proj(tmp_path):
+    """Корень с .hub.toml для CLI-тестов hub start."""
+    root = tmp_path / "proj"
+    root.mkdir(exist_ok=True)
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "t@t")
+    _git(root, "config", "user.name", "t")
+    (root / "sub").mkdir(exist_ok=True)
+    (root / "sub" / "test_ok.py").write_text("def test_ok():\n    pass\n", encoding="utf-8")
+    (root / "docs").mkdir(exist_ok=True)
+    (root / "docs" / "rules.md").write_text("# п\n", encoding="utf-8")
+    (root / ".hub.toml").write_text(
+        "schema_version = 1\nname = \"T\"\n"
+        f"root = \"{root}\"\nworktrees = \"{tmp_path}\"\n"
+        "rules = \"docs/rules.md\"\n"
+        f"python = \"{sys.executable}\"\ntest_lock = \"\"\nwork_branch = \"main\"\n"
+        "push = \"\"\nallowed_paths = [\"sub/**\", \"docs/**\"]\n"
+        "[hooks]\n[defaults]\nexecutor = \"muse\"\nreviewers = [\"muse\"]\nbudget_go = 0.5\n",
+        encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "init")
+    return root
+
+
+def test_start_same_card_new_base_nonfinal_refuses(tmp_path, capsys):
+    """MEDIUM: та же карточка + новая база + этап exec r1 → отказ без затирания."""
+    root = _mk_start_proj(tmp_path)
+    card = tmp_path / "TN.md"
+    card.write_text(CARD, encoding="utf-8")
+    chash = card_hash_of(card)
+    old_base = _git(root, "rev-parse", "HEAD")
+    Store().upsert_task(id="TN", project="T", card_path=str(card), card_hash=chash,
+                        level="hard", branch="agent/TN", worktree=str(root),
+                        base_sha=old_base, stage="exec r1", round=1,
+                        stage_reason="исполнитель")
+    (root / "sub" / "next.txt").write_text("x\n", encoding="utf-8")
+    _git(root, "add", "sub/next.txt")
+    _git(root, "commit", "-m", "вперёд")
+    assert main(["start", str(card), "--project", str(root)]) == 1
+    assert "уже есть TN" in capsys.readouterr().out
+    got = Store().get_task("TN")
+    assert got["stage"] == "exec r1" and got["base_sha"] == old_base
+    assert int(got["round"] or 0) == 1
+
+
+def test_start_clears_stale_stop_flag(tmp_path, capsys):
+    """LOW: перезапись same-ID сносит stop_requested от прошлого /stop."""
+    root = _mk_start_proj(tmp_path)
+    card = tmp_path / "TS.md"
+    card.write_text(CARD, encoding="utf-8")
+    assert main(["start", str(card), "--project", str(root)]) == 0
+    capsys.readouterr()
+    wt = Path(Store().get_task("TS")["worktree"])
+    flag = wt / ".agent" / "stop_requested"
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text("stop\n", encoding="utf-8")
+    # Правка карточки (тот же stem, другой хеш) → перезапись задачи.
+    card.write_text(CARD.replace("**Цель.** ц", "**Цель.** ц2"), encoding="utf-8")
+    assert main(["start", str(card), "--project", str(root)]) == 0
+    capsys.readouterr()
+    assert Store().get_task("TS")["stage"] == "queued"
+    assert not flag.exists()
+
+
+def test_merge_event_db_error_survives(tmp_path):
+    """LOW: add_event с sqlite3.Error не роняет merge_task (gate-red)."""
+    import sqlite3 as _sq
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "t@t")
+    _git(root, "config", "user.name", "t")
+    (root / "sub").mkdir()
+    (root / "sub" / "test_ok.py").write_text("def test_ok():\n    pass\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "init")
+    base = _git(root, "rev-parse", "HEAD")
+    wt = tmp_path / "wt"
+    _git(root, "worktree", "add", str(wt), "-b", "agent/TE", base)
+    (wt / "sub" / "test_red.py").write_text("def test_red():\n    assert False\n",
+                                            encoding="utf-8")
+    _git(wt, "add", "sub/test_red.py")
+    _git(wt, "commit", "-m", "red")
+    head = _git(wt, "rev-parse", "HEAD")
+    (wt / ".agent").mkdir(exist_ok=True)
+    (wt / ".agent" / "done.json").write_text(json.dumps({
+        "commit": head, "files": ["sub/test_red.py"],
+        "tests": {"cmd": "x", "ok": True, "tail": "t"}, "notes": ""}),
+        encoding="utf-8")
+    card = tmp_path / "TE.md"
+    card.write_text(CARD, encoding="utf-8")
+    Store().upsert_task(id="TE", project="T", card_path=str(card), card_hash="h",
+                        level="hard", branch="agent/TE", worktree=str(wt),
+                        base_sha=base, stage="ready", round=1, executor="muse",
+                        reviewers_json='["muse"]', stage_reason="")
+    proj = ProjectConfig(name="T", root=str(root), rules="docs/rules.md",
+                         python=sys.executable, test_lock="", work_branch="main",
+                         push="", allowed_paths=["sub/**"],
+                         defaults=Defaults(executor="muse", reviewers=["muse"]))
+
+    class _FailEventStore(Store):
+        def add_event(self, *a, **k):
+            raise _sq.Error("база занята")
+
+    from hub.pipeline.merge import merge_task
+
+    ok, msg = merge_task(_FailEventStore(), proj, "TE")
+    assert ok is False and "tests-fail" in msg
+    assert Store().get_task("TE")["stage"] == "ready"
+
+
+def test_budget_go_garbage_no_crash(tmp_path):
+    """LOW: неконвертируемый budget_go — лимит 0 (без лимита), не исключение."""
+    repo, base = _mk_repo(tmp_path)
+    proj = _mk_project(repo)
+    _mk_task(tmp_path, repo, base)
+    Store().upsert_task(id="T01", budget_go="мусор")
+    got = cyc.run_task(Store(), proj, "T01",
+                       {"executor": ExecOk(),
+                        "reviewers": {"muse": HonestRev("muse")}}, rounds=2)
+    assert got == "ready"
+
+
+def test_collect_body_from_other_finding(tmp_path):
+    """LOW: file:line и обоснование ≥50 симв. в разных findings → arbiter."""
+    from hub.gate.verdict import verdict as _v
+
+    repo, base = _mk_repo(tmp_path)
+    agent = repo / ".agent"
+    agent.mkdir(exist_ok=True)
+    long_body = "о" * 60
+    variants = [
+        [{"file": "sub/a.txt", "line": 5, "issue": "см. ниже"},
+         {"issue": long_body}],
+        [{"issue": long_body},
+         {"file": "sub/a.txt", "line": 5, "issue": "см. ниже"}],
+    ]
+    for findings in variants:
+        (agent / "review_r1_a.json").write_text(json.dumps({
+            "verdict": "dispute", "findings": findings}), encoding="utf-8")
+        revs = cyc._collect_reviews(str(repo), 1)
+        assert len(revs) == 1
+        assert revs[0].file == "sub/a.txt" and revs[0].line == 5
+        assert _v(revs, 1, 2) == "arbiter"
+
+
+def test_expand_braces_top_level(tmp_path):
+    """LOW: запятые верхнего уровня делят, вложенные скобки — как есть."""
+    from hub.pipeline.common import _expand_braces_str
+
+    assert _expand_braces_str("hub/{a,b}.py") == ["hub/a.py", "hub/b.py"]
+    assert _expand_braces_str("hub/{a,{x,y}}.py") == ["hub/{a,{x,y}}.py"]
+    assert _expand_braces_str("x{a,b}y{c,d}z") == ["xaycz", "xaydz",
+                                                  "xbycz", "xbydz"]

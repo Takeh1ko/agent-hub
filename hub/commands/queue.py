@@ -210,7 +210,7 @@ def _pump(store: Store, project, proj_src: str | None, max_par: int) -> int:
     try:
         queued = [t for t in store.list_tasks(active_only=False)
                   if str(t.get("stage") or "") == "queued"]
-    except (OSError, ValueError) as e:
+    except (OSError, sqlite3.Error, ValueError) as e:
         print(f"store-fail: {e}")
         return 1
     queued.sort(key=lambda t: int(t.get("created_at") or 0))
@@ -269,7 +269,7 @@ def _pump(store: Store, project, proj_src: str | None, max_par: int) -> int:
                 tid = futs[f]
                 try:
                     print(f"DONE {tid}: {f.result()}")
-                except (OSError, ValueError) as e:
+                except (OSError, sqlite3.Error, ValueError) as e:
                     print(f"FAIL {tid}: {e}")
                     code = 1
                 _owner_commands(store)
@@ -277,14 +277,14 @@ def _pump(store: Store, project, proj_src: str | None, max_par: int) -> int:
         for t in grp:
             try:
                 print(f"DONE {t['id']}: {_run_one(t['id'], proj_src)}")
-            except (OSError, ValueError) as e:
+            except (OSError, sqlite3.Error, ValueError) as e:
                 print(f"FAIL {t['id']}: {e}")
                 code = 1
             _owner_commands(store)
     for t in playeroks:
         try:
             print(f"DONE {t['id']}: {_run_one(t['id'], proj_src)}")
-        except (OSError, ValueError) as e:
+        except (OSError, sqlite3.Error, ValueError) as e:
             print(f"FAIL {t['id']}: {e}")
             code = 1
         _owner_commands(store)

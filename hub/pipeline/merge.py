@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -152,8 +153,11 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
     gate = check_gate(Path(worktree), base_sha, head_sha, allowed,
                       [py, "-m", "pytest", "-q"], lock)
     if not gate.ok:
-        store.add_event(task_id, "stage", {"stage": stage, "merge": "gate-red",
-                                           "errors": gate.errors})
+        try:
+            store.add_event(task_id, "stage", {"stage": stage, "merge": "gate-red",
+                                               "errors": gate.errors})
+        except (OSError, sqlite3.Error, ValueError):
+            pass
         return False, "; ".join(gate.errors)[:500] or "ворота красные"
 
     # Слияние строго в work_branch: проверяем checkout, иначе работа
@@ -171,7 +175,10 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
                   f"Merge {branch} в {work_branch} ({task_id})", branch)
     if mg.returncode != 0:
         _run_git(root, "merge", "--abort")
-        store.add_event(task_id, "stage", {"stage": stage, "merge": "conflict"})
+        try:
+            store.add_event(task_id, "stage", {"stage": stage, "merge": "conflict"})
+        except (OSError, sqlite3.Error, ValueError):
+            pass
         tail = (mg.stdout + "\n" + mg.stderr).strip().splitlines()
         one = tail[-1] if tail else "конфликт"
         return False, f"conflict: {one}"[:500]
@@ -179,6 +186,9 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
     merged_sha = merged.stdout.strip() if merged.returncode == 0 else ""
     # Приёмка на слитом дереве (только тесты, без проверки диффа/грязи root).
     acc_ok, acc_msg = _run_acceptance(root, py, lock)
+    # pytest в корне оставляет .pytest_cache/__pycache__ — чистим, как worktree
+    # перед воротами, иначе каждое слияние грязнит work_branch.
+    _clean(root)
     if not acc_ok and acc_msg.startswith("locked:"):
         if pre_sha:
             _run_git(root, "reset", "--hard", pre_sha)
@@ -186,7 +196,10 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
     if not acc_ok:
         if pre_sha:
             _run_git(root, "reset", "--hard", pre_sha)
-        store.add_event(task_id, "stage", {"stage": stage, "merge": "rollback-tests"})
+        try:
+            store.add_event(task_id, "stage", {"stage": stage, "merge": "rollback-tests"})
+        except (OSError, sqlite3.Error, ValueError):
+            pass
         return False, acc_msg[:500]
     # Push по конфигу (пусто — не пушить).
     push = (getattr(project, "push", "") or "").strip()
@@ -198,7 +211,10 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
                 _run_git(root, "reset", "--hard", pre_sha)
             tail = (pr.stdout + "\n" + pr.stderr).strip().splitlines()
             one = tail[-1] if tail else "push не удался"
-            store.add_event(task_id, "stage", {"stage": stage, "merge": "push-fail"})
+            try:
+                store.add_event(task_id, "stage", {"stage": stage, "merge": "push-fail"})
+            except (OSError, sqlite3.Error, ValueError):
+                pass
             return False, f"push-fail: {one}"[:500]
     # Хук task_cleanup (best-effort, не валит слияние).
     hook = ""
@@ -220,7 +236,7 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
         store.upsert_task(id=task_id, stage="merged", merged_sha=merged_sha,
                           stage_reason=f"слито в {work_branch}")
         store.add_event(task_id, "stage", {"stage": "merged", "sha": merged_sha})
-    except (OSError, ValueError):
+    except (OSError, sqlite3.Error, ValueError):
         pass
     return True, f"OK {task_id} {merged_sha}"
 

@@ -30,19 +30,32 @@ def cmd_clean(args) -> int:
         print("показано без удаления (дайте --yes)")
         return 0
     root = str(getattr(project, "root", "") or "")
+    failed: list[str] = []
     for w in orph_wt:
+        path = str(w.get("path") or "")
         try:
-            subprocess.run(["git", "worktree", "remove", "--force",
-                            str(w.get("path") or "")],
-                           cwd=root, capture_output=True, text=True, timeout=120)
-        except (OSError, subprocess.SubprocessError):
+            r = subprocess.run(["git", "worktree", "remove", "--force", path],
+                               cwd=root, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.SubprocessError) as e:
+            failed.append(f"worktree {path}: {e}")
             continue
+        if r.returncode != 0:
+            err = (r.stderr.strip() or r.stdout.strip() or f"код {r.returncode}")
+            failed.append(f"worktree {path}: {err}")
     for b in orph_br:
         try:
-            subprocess.run(["git", "branch", "-D", b], cwd=root,
-                           capture_output=True, text=True, timeout=60)
-        except (OSError, subprocess.SubprocessError):
+            r = subprocess.run(["git", "branch", "-D", b], cwd=root,
+                               capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            failed.append(f"branch {b}: {e}")
             continue
+        if r.returncode != 0:
+            err = (r.stderr.strip() or r.stdout.strip() or f"код {r.returncode}")
+            failed.append(f"branch {b}: {err}")
+    if failed:
+        for f in failed:
+            print(f"fail: {f}")
+        return 1
     print("OK clean")
     return 0
 

@@ -408,6 +408,7 @@ def _collect_reviews(worktree: str, round_no: int) -> list[Review]:
             out.append(Review("approve"))
             continue
         first: dict = {}
+        dicts: list = []
         if isinstance(findings, list):
             dicts = [f for f in findings if isinstance(f, dict)]
             # Судьба dispute не должна зависеть от порядка: сначала ищем
@@ -427,8 +428,14 @@ def _collect_reviews(worktree: str, round_no: int) -> list[Review]:
             lineno = int(first.get("line") or 0)
         except (TypeError, ValueError):
             lineno = 0
-        body = str(first.get("issue") or first.get("text")
-                    or first.get("message") or first.get("fix") or "")
+        # Обоснование — самый длинный текст среди всех findings: file:line
+        # и суть могут лежать в разных элементах, судьба dispute не должна
+        # зависеть от распределения полей между ними.
+        def _text(f: dict) -> str:
+            return str(f.get("issue") or f.get("text")
+                       or f.get("message") or f.get("fix") or "")
+
+        body = max((_text(f) for f in dicts), key=len, default="")
         out.append(Review(v, file=fname, line=lineno, body=body))
     return out
 
@@ -536,7 +543,7 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
     except (TypeError, ValueError):
         pass
 
-    budget_go = float(task.get("budget_go") or 0.0)
+    budget_go = 0.0
     try:
         budget_go = float(task.get("budget_go") or 0.0)
     except (TypeError, ValueError):
@@ -581,13 +588,21 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
             go, usd = _cost()
         except (OSError, sqlite3.Error):
             go, usd = 0.0, 0.0
-        _set_stage(store, task_id, "stopped", round_no, reason[:500])
+        # Какой счётчик сработал — в причину и в вопрос, оба — в текст:
+        # иначе usd-стоп спрашивает «продлить go $0.00/0.00».
+        hit = "/".join([s for s, bad in (("go", _budget_exceeded(go, budget_go)),
+                                          ("usd", _usd_exceeded(usd, budget_usd)))
+                        if bad]) or "?"
+        full_reason = f"{reason} ({hit})"[:500]
+        _set_stage(store, task_id, "stopped", round_no, full_reason)
         try:
             store.add_event(task_id, "budget_hard", {"go": go, "usd": usd})
         except (OSError, sqlite3.Error):
             pass
         _ask_extend(store, task_id,
-                     f"Бюджет задачи исчерпан (go ${go:.2f}/{budget_go:.2f}). "
+                     f"Бюджет задачи исчерпан ({hit}: "
+                     f"go ${go:.2f}/{budget_go:.2f}, "
+                     f"usd ${usd:.2f}/{budget_usd:.2f}). "
                      f"Продлить на ${extend_usd:.2f}?")
         if exec_sid:
             try:
@@ -647,7 +662,7 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         try:
             tool, model = _runner_tool_model(executor, store.get_task(task_id) or task)
             store.link_session(sid, tool, task_id, "executor", round_no, model)
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error, ValueError):
             pass
 
         # --- ворота: done.json + дифф + приёмка ---
@@ -811,7 +826,7 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                 rtool, _rm = _runner_tool_model(runner, {"executor": name})
                 store.link_session(rsid, rtool, task_id, "reviewer", round_no,
                                    str(getattr(runner, "model", name) or name).split("/")[-1])
-            except (OSError, sqlite3.Error):
+            except (OSError, sqlite3.Error, ValueError):
                 pass
             # Один повтор не записавшему валидный JSON (как PanelReviewer).
             own = Path(worktree) / ".agent" / per_file
@@ -825,7 +840,7 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                         store.link_session(rsid2, rtool, task_id, "reviewer", round_no,
                                            str(getattr(runner, "model", name) or name
                                                ).split("/")[-1])
-                    except (OSError, sqlite3.Error):
+                    except (OSError, sqlite3.Error, ValueError):
                         pass
                 except (OSError, RuntimeError, subprocess.SubprocessError):
                     pass
