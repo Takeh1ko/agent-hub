@@ -61,6 +61,12 @@ def test_unknown_schema_empty(tmp_path, caplog):
     assert caplog.text.strip() != ""
 
 
+def test_empty_root_is_empty(tmp_path):
+    assert ag.conversations("", 0) == []
+    assert ag.conversations(None, 0) == []
+    assert ag.window_usage("", NOW, 5) == (0, 0)
+
+
 def test_since_filters_by_pulse(tmp_path):
     conv = tmp_path / "conv3"
     conv.mkdir()
@@ -85,12 +91,18 @@ def test_snapshot_binds_agy_and_header(tmp_path):
     assert "Gemini:" in got.head_text() and "за 5 ч" in got.head_text()
     assert "agy n/a" not in got.head_text()
     t = {x.id: x for x in got.tasks}["T01"]
-    assert any(x.model == "Gemini" for x in t.sessions)
+    gem = [x for x in t.sessions if x.model == "Gemini"]
+    assert gem, t.sessions
+    # Привязка именно к conversations/*.db, а не к фолбэку tool==agy:
+    # в активности — шаги из БД.
+    assert any("3 шагов" in x.last_activity for x in gem)
     assert t.cost_go == 0.0 and t.cost_usd == 0.0
     assert "Gemini:" in got.to_text()
 
 
 def test_snapshot_agy_proc_without_link(tmp_path):
+    import os
+
     s = Store()
     wt = tmp_path / "wt-p"
     wt.mkdir()
@@ -105,11 +117,64 @@ def test_snapshot_agy_proc_without_link(tmp_path):
         (d / "stat").write_text(
             f"{pid} (agy) R 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0\n",
             encoding="utf-8")
+        # Детерминированный старт процесса: свежая задача — зелёная.
+        ts = NOW / 1000
+        os.utime(d / "stat", (ts, ts))
     got = snap.build(s, NOW, opencode_db=None, proc_root=root,
                      agy_root=tmp_path / "нет-conv")
     t = {x.id: x for x in got.tasks}["T02"]
     assert any(x.model == "Gemini" for x in t.sessions)
     assert t.pulse == "🟢"
+
+
+def test_stale_agy_with_live_proc_not_green(tmp_path):
+    """Живой, но молчащий agy: mtime старый → 🟡, а не вечный 🟢."""
+    import os
+
+    conv = tmp_path / "conv-stale"
+    conv.mkdir()
+    db = conv / "old.db"
+    _mk_conv(db, 2, 0)
+    old_s = (NOW - 60 * 60_000) / 1000
+    os.utime(db, (old_s, old_s))
+    s = Store()
+    wt = tmp_path / "wt-stale"
+    wt.mkdir()
+    s.upsert_task(id="TS", stage="exec r1", round=1,
+                  worktree=str(wt), updated_at=NOW - 60 * 60_000)
+    s.link_session("old", "agy", "TS", "executor", 1, "gemini")
+    root = tmp_path / "proc-stale"
+    d = root / "11"
+    d.mkdir(parents=True)
+    (d / "cmdline").write_bytes(b"agy\x00-p\x00x\x00")
+    (d / "cwd").symlink_to(str(wt))
+    (d / "stat").write_text(
+        "11 (agy) R 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0\n",
+        encoding="utf-8")
+    os.utime(d / "stat", (old_s, old_s))
+    got = snap.build(s, NOW, opencode_db=None, proc_root=root, agy_root=conv)
+    t = {x.id: x for x in got.tasks}["TS"]
+    assert t.pulse == "🟡"
+
+
+def test_tui_header_shows_gemini_window(tmp_path):
+    from hub.read.snapshot import Snapshot, TaskSnap
+    from hub.tui.app import HubApp
+
+    proc = tmp_path / "proc-пусто"
+    proc.mkdir(exist_ok=True)
+    app = HubApp(store=Store(), opencode_db=None, proc_root=str(proc))
+    app._schedule_refresh = lambda: None
+    empty = Snapshot(tasks=[], total_go=0.0, total_usd=0.0, now_ms=NOW,
+                     agy_runs=0, agy_steps=0)
+    assert "agy n/a" not in app._header_text(empty)
+    assert "Gemini: 0 запусков / 0 шагов за 5 ч" in app._header_text(empty)
+    full = Snapshot(tasks=[], total_go=0.0, total_usd=0.0, now_ms=NOW,
+                    agy_runs=2, agy_steps=7)
+    text = app._header_text(full)
+    assert "Gemini: 2 запусков / 7 шагов за 5 ч" in text
+    assert "agy n/a" not in text
+    _ = TaskSnap  # контракт таблицы не менялся
 
 
 def _git(cwd, *args):
@@ -190,7 +255,7 @@ def test_start_explicit_executor_wins(tmp_path, capsys):
     assert Store().get_task("TE-exp")["executor"] == "muse"
 
 
-def test_agy_runner_cmd_flags():
+def test_agy_runner_cmd_flags(tmp_path, monkeypatch):
     from hub.pipeline.runners import AgyRunner
 
     seen: dict = {}
@@ -206,14 +271,97 @@ def test_agy_runner_cmd_flags():
         seen["cmd"] = list(cmd)
         return _R()
 
-    orig = _sp.run
-    _sp.run = _fake  # type: ignore
-    try:
-        AgyRunner().start("привет", "/tmp", log="/tmp/agy-test.log")
-    finally:
-        _sp.run = orig  # type: ignore
+    monkeypatch.setattr(_sp, "run", _fake)
+    log = str(tmp_path / "agy-test.log")
+    AgyRunner().start("привет", str(tmp_path), log=log)
     cmd = seen["cmd"]
     assert cmd[0].endswith("agy") or cmd[0] == "agy"
     assert "-p" in cmd and "--output-format" in cmd and "json" in cmd
     assert "--model" in cmd and "gemini-3.8-flash-high" in cmd
     assert "--dangerously-skip-permissions" in cmd
+
+
+def _mk_start_repo(tmp_path, name, levels_toml):
+    root = tmp_path / name
+    root.mkdir()
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "t@t")
+    _git(root, "config", "user.name", "t")
+    (root / "sub").mkdir()
+    (root / "sub" / "test_ok.py").write_text("def test_ok():\n    pass\n", encoding="utf-8")
+    (root / "docs").mkdir()
+    (root / "docs" / "rules.md").write_text("# правила\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "init")
+    (root / ".hub.toml").write_text(
+        "schema_version = 1\nname = \"T\"\n"
+        f"root = \"{root}\"\nworktrees = \"{tmp_path / (name + '-wt')}\"\n"
+        "rules = \"docs/rules.md\"\n"
+        f"python = \"{sys.executable}\"\ntest_lock = \"\"\nwork_branch = \"main\"\n"
+        "push = \"\"\nallowed_paths = [\"sub/**\", \"docs/**\", \"tests/**\"]\n"
+        "[hooks]\n[defaults]\nexecutor = \"muse\"\nreviewers = [\"muse\"]\nbudget_go = 0.5\n"
+        + levels_toml,
+        encoding="utf-8")
+    return root
+
+
+def _card_text(executor="muse", level="easy"):
+    lvl = f"**Уровень.** {level}\n" if level else ""
+    return (
+        "# T\n**Цель.** ц\n**Прочитать.** docs/rules.md\n"
+        "**Можно менять.** `sub/**`\n**Интерфейс.** `f()`\n"
+        "**Приёмка.** `pytest -q sub/test_ok.py`\n**Нельзя.** сеть\n"
+        f"**Сеть.** нет\n**Исполнитель.** {executor}\n{lvl}**Коммит.** `feat: x`\n"
+    )
+
+
+def test_start_custom_levels_not_builtin(tmp_path, capsys):
+    """Кастомный [levels] побеждает builtin: easy → mimoflash, а не gemini."""
+    from hub.cli import main
+
+    root = _mk_start_repo(tmp_path, "proj-custom",
+                          "[levels]\neasy = \"mimoflash\"\nmedium = \"musefree\"\nhard = \"muse\"\n")
+    card = tmp_path / "TC-easy.md"
+    card.write_text(_card_text(executor="muse", level="easy"), encoding="utf-8")
+    assert main(["start", str(card), "--project", str(root)]) == 0
+    capsys.readouterr()
+    assert Store().get_task("TC-easy")["executor"] == "mimoflash"
+
+
+def test_start_medium_hard_levels(tmp_path, capsys):
+    from hub.cli import main
+
+    root = _mk_start_repo(tmp_path, "proj-mh",
+                          "[levels]\neasy = \"gemini\"\nmedium = \"musefree\"\nhard = \"muse\"\n")
+    for lvl, want in (("medium", "musefree"), ("hard", "muse")):
+        card = tmp_path / f"TMH-{lvl}.md"
+        card.write_text(_card_text(executor="gemini", level=lvl), encoding="utf-8")
+        assert main(["start", str(card), "--project", str(root)]) == 0
+        capsys.readouterr()
+        assert Store().get_task(f"TMH-{lvl}")["executor"] == want
+
+
+def test_start_no_level_uses_executor_section(tmp_path, capsys):
+    """Без Уровня — исполнитель из раздела Исполнитель, а не дефолт."""
+    from hub.cli import main
+
+    root = _mk_start_repo(tmp_path, "proj-no-lvl",
+                          "[levels]\neasy = \"gemini\"\nmedium = \"musefree\"\nhard = \"muse\"\n")
+    card = tmp_path / "TNL.md"
+    card.write_text(_card_text(executor="musefree", level=""), encoding="utf-8")
+    assert main(["start", str(card), "--project", str(root)]) == 0
+    capsys.readouterr()
+    assert Store().get_task("TNL")["executor"] == "musefree"
+
+
+def test_executor_section_isolation():
+    """Соседние секции не протекают: уровень и исполнитель режутся по заголовкам."""
+    from hub.commands.start import _executor_for_card
+    from hub.config import ProjectConfig
+
+    proj = ProjectConfig(levels={"easy": "gemini", "medium": "musefree", "hard": "muse"})
+    proj.defaults.executor = "muse"
+    leak_level = "**Сеть.** playerok hard. **Уровень.** easy. **Исполнитель.** muse."
+    assert _executor_for_card(leak_level, proj) == "gemini"
+    leak_exec = "**Сеть.** не трогать gemini-консоль. **Исполнитель.** muse"
+    assert _executor_for_card(leak_exec, proj) == "muse"

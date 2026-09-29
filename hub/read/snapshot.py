@@ -270,18 +270,17 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
                 else:
                     all_usd += s.cost
     # agy: окно 5 ч для шапки + привязка разговоров к задачам.
+    # Метрика окна одна — window_usage (карточка H08 п.1), без дублей.
     agy_dir: str | Path | None = agy_root if agy_root is not None else _default_agy_root()
+    if isinstance(agy_dir, str) and not agy_dir.strip():
+        agy_dir = None
     agy_by_id: dict[str, ag.AgyConv] = {}
     agy_runs = agy_steps = 0
     try:
         if agy_dir is not None and Path(agy_dir).is_dir():
             for c in ag.conversations(agy_dir, 0):
                 agy_by_id[c.id] = c
-            window_ms = 5 * 3600_000
-            for c in agy_by_id.values():
-                if c.pulse_ms >= now_ms - window_ms:
-                    agy_runs += 1
-                    agy_steps += c.steps
+            agy_runs, agy_steps = ag.window_usage(agy_dir, now_ms, 5)
     except OSError:
         pass
     try:
@@ -306,12 +305,17 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
         agy_alive = [p for p in alive if p.kind == "agy"]
         # Пульс задачи — по всем её сессиям (исполнитель + ревьюеры):
         # свежий пульс — max, объяснение — если хоть одна сессия активна.
+        # Живой процесс в пульс не подмешивается (как в ветке opencode):
+        # mtime файла — пульс (карточка H08), возраст живого, но молчащего
+        # agy честно даёт 🟡, а не вечный 🟢.
         task_oc = [oc_by_id[e["external_id"]] for e in links if e["external_id"] in oc_by_id]
         task_agy = [agy_by_id[str(e["external_id"])] for e in links
                     if str(e["external_id"]) in agy_by_id]
-        pulses = [s.pulse_ms for s in task_oc] + [c.pulse_ms for c in task_agy]
-        if agy_alive:
-            pulses.append(now_ms)
+        pulses = (
+            [s.pulse_ms for s in task_oc]
+            + [c.pulse_ms for c in task_agy]
+            + [p.started_ms for p in agy_alive]
+        )
         if pulses:
             pulse_ms = max(pulses)
             active = next((s for s in task_oc if s.active_tool), None)
@@ -336,7 +340,7 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
             c = agy_by_id.get(cid)
             if c is not None:
                 smark = _pulse_mark(str(t.get("stage") or ""), now_ms - c.pulse_ms,
-                                    True, alive, pytest_kid)
+                                    bool(agy_alive) or pytest_kid, alive, pytest_kid)
                 ss.append(SessionSnap(c.id, e["role"], "Gemini", "gemini", c.pulse_ms,
                                       smark, 0.0, False, 0, _agy_activity(c)))
                 continue
@@ -350,14 +354,16 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
             ss.append(SessionSnap(e["external_id"], e["role"], e.get("model") or "?",
                                   "", pulse_ms, pulse, 0.0, False, 0, "-"))
         # agy-процесс в worktree без линка — тоже сессия задачи (модель Gemini).
+        # Пульс синтетики — старт процесса из /proc (wall-time, Н6), не now_ms:
+        # иначе живая, но молчащая задача вечно 🟢.
         have_agy = any(s.model == "Gemini" for s in ss)
         if agy_alive and not have_agy:
             for p in agy_alive:
-                smark = _pulse_mark(str(t.get("stage") or ""), 0, True, alive, pytest_kid)
+                smark = _pulse_mark(str(t.get("stage") or ""), now_ms - p.started_ms,
+                                    True, alive, pytest_kid)
                 ss.append(SessionSnap(f"agy-{p.pid}", "executor", "Gemini", "gemini",
-                                      now_ms, smark, 0.0, False, 0, "agy работает"))
-            pulse_ms = now_ms
-            explained = True
+                                      p.started_ms, smark, 0.0, False, 0, "agy работает"))
+            pulse_ms = max([pulse_ms] + [p.started_ms for p in agy_alive])
             pulse = _pulse_mark(str(t.get("stage") or ""), now_ms - pulse_ms,
                                 explained, alive, pytest_kid)
         stage = str(t.get("stage") or "")

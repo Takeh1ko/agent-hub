@@ -28,14 +28,6 @@ def _pulse_ms(path: Path) -> int | None:
         return None
 
 
-def _started_ms(path: Path, pulse_ms: int) -> int:
-    try:
-        ctime = int(path.stat().st_ctime * 1000)
-        return min(ctime, pulse_ms) if ctime > 0 else pulse_ms
-    except OSError:
-        return pulse_ms
-
-
 def _one(db_path: Path, pulse_ms: int) -> AgyConv | None:
     """Одна conversations/*.db. Незнакомая схема → None + warning."""
     try:
@@ -74,9 +66,10 @@ def _one(db_path: Path, pulse_ms: int) -> AgyConv | None:
         except sqlite3.Error as e:
             log.warning("agy %s: незнакомая схема: %s", db_path, e)
             return None
-        started = _started_ms(db_path, pulse_ms)
+        # Старта в схеме нет, а st_ctime на Linux обновляется при каждой
+        # записи — за старт его выдавать нельзя. Честно: старт = пульс (mtime).
         return AgyConv(id=db_path.stem, path=str(db_path),
-                       started_ms=started, pulse_ms=pulse_ms,
+                       started_ms=pulse_ms, pulse_ms=pulse_ms,
                        steps=steps, errors=errors)
     finally:
         try:
@@ -88,6 +81,8 @@ def _one(db_path: Path, pulse_ms: int) -> AgyConv | None:
 def conversations(root: str | Path | None, since_ms: int) -> list[AgyConv]:
     """Разговоры agy. Незнакомая схема файла → пропуск + warning, не падение."""
     if root is None:
+        return []
+    if isinstance(root, str) and not root.strip():
         return []
     base = Path(root)
     try:

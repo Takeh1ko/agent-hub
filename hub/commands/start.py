@@ -18,19 +18,75 @@ from hub.pipeline.common import (
 from hub.store import Store
 
 
+_SECTION_NAMES = (
+    "Решения арбитра",
+    "Можно менять",
+    "Интерфейс",
+    "Прочитать",
+    "Приёмка",
+    "Исполнитель",
+    "Уровень",
+    "Коммит",
+    "Цель",
+    "Нельзя",
+    "Сеть",
+)
+
+
+def _section_value(text: str, name: str) -> str:
+    """Значение раздела карточки до следующего заголовка (свой разбор).
+
+    Соседние секции на одной комбинированной строке
+    (`**Сеть.** нет. **Уровень.** easy.`) не протекают друг в друга:
+    режем по следующему заголовку, а не по границам строк lint.
+    """
+    import re
+
+    names = sorted(_SECTION_NAMES, key=len, reverse=True)
+    events: list[tuple[int, int, str, str]] = []  # (start, end, section, tail)
+
+    def _match(inner: str) -> tuple[str, str] | None:
+        s = inner.strip()
+        for n in names:
+            if s == n:
+                return n, ""
+            if s.startswith(n):
+                after = s[len(n):]
+                if after and after[0] in " .:()/*—-–":
+                    return n, after[1:].strip()
+        return None
+
+    # Заголовки внутри `кода` (`sub/**`) — не заголовки: маскируем спаны
+    # пробелами с сохранением позиций, иначе `**` из `sub/**` съедает
+    # открывающее `**` следующей секции.
+    masked = re.sub(r"`[^`]*`", lambda m: " " * len(m.group(0)), text)
+    for m in re.finditer(r"\*\*([^*]+?)\*\*", masked):
+        hit = _match(m.group(1))
+        if hit is not None:
+            events.append((m.start(), m.end(), hit[0], hit[1]))
+    for m in re.finditer(r"(?m)^(#{1,6})\s*(.+?)\s*$", masked):
+        hit = _match(m.group(2))
+        if hit is not None:
+            tail = hit[1]
+            # `# Уровень: easy` — значение внутри заголовка тоже забираем.
+            events.append((m.start(), m.end(), hit[0], tail))
+    events.sort(key=lambda e: e[0])
+    for i, (st, en, sec, tail) in enumerate(events):
+        if sec != name:
+            continue
+        nxt = events[i + 1][0] if i + 1 < len(events) else len(text)
+        return (tail + " " + text[en:nxt]).strip()
+    return ""
+
+
 def _executor_for_card(text: str, project) -> str:
     """Исполнитель без --executor: Уровень → [levels], иначе Исполнитель."""
-    default = str(getattr(project.defaults, "executor", "") or "muse")
-    try:
-        from hub.gate import lint as lint_mod
-    except ImportError:
-        return default
-    try:
-        lines = text.splitlines()
-        lvl_sec = lint_mod._section_text(lines, "Уровень").lower()
-    except (AttributeError, ValueError):
-        lvl_sec = ""
     import re as _re
+
+    from hub.pipeline.runners import MODELS
+
+    default = str(getattr(project.defaults, "executor", "") or "muse")
+    lvl_sec = _section_value(text, "Уровень").lower()
     m = _re.search(r"(?<![\w])(easy|medium|hard)(?![\w])", lvl_sec)
     if m:
         lvl = m.group(1)
@@ -39,14 +95,7 @@ def _executor_for_card(text: str, project) -> str:
             return str(levels[lvl]).strip()
         builtin = {"easy": "gemini", "medium": "musefree", "hard": "muse"}
         return builtin.get(lvl, default)
-    try:
-        exec_sec = lint_mod._section_text(lines, "Исполнитель").lower()
-    except (AttributeError, ValueError):
-        return default
-    try:
-        from hub.pipeline.runners import MODELS
-    except ImportError:
-        return default
+    exec_sec = _section_value(text, "Исполнитель").lower()
     for name in sorted(MODELS, key=len, reverse=True):
         if not name:
             continue
