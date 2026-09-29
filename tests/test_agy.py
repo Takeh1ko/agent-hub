@@ -172,7 +172,7 @@ def test_tui_header_shows_gemini_window(tmp_path):
     full = Snapshot(tasks=[], total_go=0.0, total_usd=0.0, now_ms=NOW,
                     agy_runs=2, agy_steps=7)
     text = app._header_text(full).plain
-    assert "Gemini: 2 запусков / 7 шагов за 5 ч" in text
+    assert "Gemini: 2 запуска / 7 шагов за 5 ч" in text
     assert "agy n/a" not in text
     _ = TaskSnap  # контракт таблицы не менялся
 

@@ -983,30 +983,14 @@ def format_task(store: Store, task_id: str, limit: int = TASK_LIMIT,
                 break
     if tsnap is not None:
         return _wrap_pre(_task_story(task, tsnap, snapshot, lim_go, lim_usd), int(limit))
-    lines = [f"{tid} {stage} r{rnd}"]
-    if tsnap is not None:
-        lines.append(f"$ go ${float(tsnap.cost_go):.3f}"
-                     f" + usd ${float(tsnap.cost_usd):.3f}"
-                     f" (бюджет go ${lim_go:.2f} usd ${lim_usd:.2f})")
-    else:
-        lines.append(f"$ бюджет go ${lim_go:.2f} usd ${lim_usd:.2f}")
+    # Задачи нет в снимке (снимок не собрался) — короткая справка из hub.db.
+    lines = [f"{tid} {stage} r{rnd}", f"$ бюджет go ${lim_go:.2f} usd ${lim_usd:.2f}"]
     if sessions:
-        cost_by_ext: dict[str, float] = {}
-        if tsnap is not None:
-            for s in (getattr(tsnap, "sessions", None) or []):
-                try:
-                    cost_by_ext[str(s.external_id)] = float(s.cost)
-                except (TypeError, ValueError, AttributeError):
-                    continue
         lines.append("Сессии:")
         for s in sessions[:6]:
             role = str(s.get("role") or "?")
             model = str(s.get("model") or "?")
-            ext = str(s.get("external_id") or "")
-            if ext in cost_by_ext:
-                lines.append(f"- {role} {model} ({ext}) ${cost_by_ext[ext]:.3f}")
-            else:
-                lines.append(f"- {role} {model} ({ext})")
+            lines.append(f"- {role} {model} ({s.get('external_id') or ''})")
     else:
         lines.append("Сессии: —")
     notes = _task_findings_text(task)

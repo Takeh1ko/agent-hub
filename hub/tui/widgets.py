@@ -42,7 +42,7 @@ def working_now(task: TaskSnap, now_ms: int) -> str:
     """Кто работает над задачей прямо сейчас: «Spark Go», «Spark Go, MiMo Flash», «никто»."""
     names: list[str] = []
     for s in sorted(task.sessions or [], key=lambda x: -hm.to_int(x.pulse_ms)):
-        if hm.to_int(now_ms) - hm.to_int(s.pulse_ms) > WORKING_MS:
+        if hm.to_int(now_ms) - hm.to_int(s.pulse_ms) > WORKING_MS or not hm.is_alive(s.pulse):
             continue
         name = hm.model_name(s.model, s.provider)
         if name not in names:
@@ -86,19 +86,23 @@ class TaskTable(DataTable):
         self._cols_ready = False
         self._keys: set[str] = set()
         self.compact = False
+        self._keep: str | None = None  # задача под курсором при смене колонок
 
     @property
     def keys_now(self) -> list[str]:
         return COMPACT_KEYS if self.compact else COL_KEYS
 
-    def set_compact(self, compact: bool) -> None:
-        """Сменить набор колонок; строки перерисуются следующим update."""
+    def set_compact(self, compact: bool) -> bool:
+        """Сменить набор колонок. True — сменился: вызывающий сразу перерисовывает строки
+        (курсор вернётся на ту же задачу)."""
         if compact == self.compact:
-            return
+            return False
+        self._keep = self.selected_task_id()
         self.compact = compact
         self.clear(columns=True)
         self._cols_ready = False
         self._keys.clear()
+        return True
 
     def _ensure_columns(self) -> None:
         if self._cols_ready:
@@ -125,7 +129,8 @@ class TaskTable(DataTable):
         if current != order:
             # Состав или порядок поменялся — перестраиваем (строк единицы),
             # курсор остаётся на той же задаче.
-            keep = self.selected_task_id()
+            keep = self.selected_task_id() or self._keep
+            self._keep = None
             self.clear()
             self._keys.clear()
             for tid in order:
@@ -182,10 +187,12 @@ class EventFeed(RichLog):
             try:
                 kind = str(ev.get("kind") or "")
                 tid = str(ev.get("task_id") or "")
-                if kind in FEED_DUPES and self._shown_stage.get(tid) == kind:
-                    continue
-                if kind == "stage" or kind in FEED_DUPES:
-                    self._shown_stage[tid] = str(hm.event_payload(ev).get("stage") or kind).strip()
+                stage = str(hm.event_payload(ev).get("stage") or kind).strip()
+                if kind in FEED_DUPES or kind == "stage":
+                    # Пара «stage X» + «X для бота» — в любом порядке и разными тиками — одна строка.
+                    if stage in FEED_DUPES and self._shown_stage.get(tid) == stage:
+                        continue
+                    self._shown_stage[tid] = stage
                 t = tasks.get(tid)
                 text = hm.event_text(ev, t.executor if t else "", t.reviewers if t else None)
                 style = ("bold yellow" if ("Claude" in text or kind in ("stuck", "crashed"))

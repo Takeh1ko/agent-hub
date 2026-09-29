@@ -100,7 +100,6 @@ def test_time_money_words():
     assert hm.ago(65 * 60_000) == "1 ч 05 мин"
     assert hm.ago(3 * 24 * 60 * 60_000) == "3 дн"
     assert hm.money(0.256) == "$0.26"
-    assert hm.tokens(127_508) == "127 тыс."
     assert hm.plural(1, "запуск", "запуска", "запусков") == "1 запуск"
     assert hm.plural(3, "запуск", "запуска", "запусков") == "3 запуска"
     assert hm.plural(11, "запуск", "запуска", "запусков") == "11 запусков"
@@ -261,8 +260,8 @@ def test_roster_text_plain_words(tmp_path):
         reviewers=["muse", "mimoflash"], max_rounds=2, stage_since_ms=NOW - 13 * 60_000)
     text = snap.Snapshot(tasks=[t], total_go=0.25, total_usd=0.0, now_ms=NOW).roster_text()
     assert text.splitlines()[0] == "🟢 E4 · Досье лотов для модели-торговца"
-    assert "Проверка кода (круг 2 из 2) · 13 мин в этапе · $0.25" in text
-    assert "MiMo Flash проверяет код: думает (1 мин)" in text
+    assert "Проверка кода (круг 2 из 2) · 13 мин в этапе · 🟢 работает · $0.25" in text
+    assert "🟢 MiMo Flash — проверяет код: думает (1 мин назад)" in text
     assert "Дальше: замечаний нет — готово; есть — решает Claude" in text
 
 
@@ -272,7 +271,6 @@ def test_bad_data_never_raises():
     assert hm.ago(None) == "сейчас" and hm.ago("abc") == "сейчас"
     assert hm.money("abc") == "$0.00" and hm.money(None) == "$0.00"
     assert hm.clock("abc") == "--:--" and hm.clock(None) == "--:--"
-    assert hm.tokens(None) == "0"
     assert hm.plural("x", "запуск", "запуска", "запусков") == "0 запусков"
     assert hm.stage_view(None).now == "—"
 
@@ -303,7 +301,7 @@ def test_describe_story(tmp_path):
     idle = dict(hm.describe(snap.TaskSnap(
         id="Q1", project="p", stage="queued", round=0, pulse="⚫", cost_go=0, cost_usd=0,
         context=0, last_activity=""), NOW))
-    assert idle["Сейчас работают"] == "никто — ждёт" and "Путь" in idle
+    assert idle["Сейчас работают"] == "никто" and "Путь" in idle
 
 
 def test_stage_since_only_for_matching_stage(tmp_path):
@@ -340,3 +338,62 @@ def test_bot_seen_with_interpreter_flags(tmp_path):
     assert hub_procs._kind_of(["/x/python3", "-u", ".venv/bin/hub", "bot"]) == "hub_bot"
     assert hub_procs._kind_of(["/x/python3", ".venv/bin/hub", "status"]) is None
     assert hub_procs._kind_of(["/x/python3", "-m", "hub.cli", "bot"]) == "hub_bot"
+
+
+# --- ревью MiMo: мёртвый процесс не «работает», честный лимит ---
+
+def _dead_task(pulse="⚫"):
+    return snap.TaskSnap(
+        id="T9-x", project="p", stage="exec r1", round=1, pulse=pulse, cost_go=0.1,
+        cost_usd=0, context=0, last_activity="bash: pytest",
+        sessions=[snap.SessionSnap("s", "executor", "muse", "opencode-go", NOW - 3 * 60_000,
+                                   pulse, 0.1, True, 0, "bash: pytest -q")],
+        max_rounds=2)
+
+
+def test_dead_process_is_not_working():
+    from hub.tui.widgets import working_now
+
+    for pulse in ("⚫", "🔴"):
+        t = _dead_task(pulse)
+        assert working_now(t, NOW) == "никто"
+        story = dict(hm.describe(t, NOW))
+        assert story["Сейчас работают"] == "никто"
+        assert story["Дальше"].startswith("если перезапустится: ")
+        roster = snap.Snapshot(tasks=[t], total_go=0, total_usd=0, now_ms=NOW).roster_text()
+        assert "пишет код: запускает тесты" not in roster
+        assert hm.health_text(pulse, "exec r1") in roster
+    alive = _dead_task("🟡")
+    assert working_now(alive, NOW) == "Spark Go"
+
+
+def test_limit_pct_honest_everywhere():
+    assert snap.limit_pct(9.6) == "16%"
+    assert snap.limit_pct(75.3) == "126% — лимит превышен"
+    head = snap.Snapshot(tasks=[], total_go=0, total_usd=0, now_ms=NOW, month_go=75.3).head_text()
+    assert "(126% — лимит превышен)" in head
+    assert snap.gemini_window(2, 7) == "2 запуска / 7 шагов за 5 ч"
+    assert snap.gemini_window(1, 21) == "1 запуск / 21 шаг за 5 ч"
+
+
+def test_build_survives_garbage_task_columns(tmp_path):
+    s = Store()
+    s.upsert_task(id="TX", stage="exec r1", round="мусор", worktree="", reviewers_json="{битый",
+                  updated_at=NOW)
+    con = sqlite3.connect(str(s.path))
+    con.execute("UPDATE task SET rounds='много' WHERE id='TX'")
+    con.commit()
+    con.close()
+    got = {t.id: t for t in snap.build(s, NOW, proc_root=tmp_path / "пусто").tasks}["TX"]
+    assert got.round == 0 and got.max_rounds == 2 and got.reviewers == []
+
+
+def test_open_questions_count():
+    s = Store()
+    assert s.count_open_questions() == 0
+    con = sqlite3.connect(str(s.path))
+    con.execute("INSERT INTO question(task_id, asked_by, text, options_json, status, ts)"
+                " VALUES ('T1','claude','идём?','[]','open',1)")
+    con.commit()
+    con.close()
+    assert s.count_open_questions() == 1

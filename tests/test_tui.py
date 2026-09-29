@@ -308,7 +308,7 @@ def test_details_content_plain_words():
         proc.mkdir()
         app = HubApp(store=Store(path=str(Path(td) / "hub.db")),
                      opencode_db=None, proc_root=str(proc))
-        base = _snap(last="bash: pytest -q tests/")
+        base = _snap(pulse="🟢", last="bash: pytest -q tests/")
         t = replace(base.tasks[0], title="Hub: повтор при сбое сети", goal="Чтобы не падало.",
                     executor="muse", reviewers=["muse", "mimoflash"], max_rounds=2,
                     stage_since_ms=NOW - 12 * 60_000)
@@ -347,14 +347,19 @@ def test_filtered_drops_merged_and_other_project(tmp_path):
 def test_header_counts_money_and_bot(tmp_path):
     app = _app(tmp_path)
     snap = Snapshot(tasks=[
-        _snap(task_id="T1", stage="exec r1").tasks[0],
-        _snap(task_id="T2", stage="queued").tasks[0],
+        _snap(task_id="T1", stage="exec r1", pulse="🟢").tasks[0],
+        _snap(task_id="T5", stage="review r1", pulse="⚫").tasks[0],
+        _snap(task_id="T2", stage="queued", pulse="⚫").tasks[0],
         _snap(task_id="T3", stage="merged").tasks[0],
         _snap(task_id="T4", stage="arbiter").tasks[0],
     ], total_go=0.2, total_usd=0.0, now_ms=NOW, all_go=0.5, month_go=12.0)
-    text = app._header_text(snap, bot_alive=False).plain
-    # Слитая не считается; очередь и «ждут Claude» — отдельно от работающих.
-    assert "работают 1 · в очереди 1 · ждут Claude 1" in text
+    text = app._header_text(snap, bot_alive=False, questions=0).plain
+    # «Работают» — только с живым процессом; этап без процесса — «тихо или зависли».
+    assert "работают 1 · тихо или зависли 1 · в очереди 1 · ждут Claude 1" in text
+    assert "вопросы вам" not in text
+    assert "вопросы вам: 2 (ответ в TG)" in app._header_text(snap, questions=2).plain
+    empty = Snapshot(tasks=[], total_go=0.0, total_usd=0.0, now_ms=NOW)
+    assert "сейчас ничего не работает" in app._header_text(empty, questions=0).plain
     # Нет процесса бота — «не вижу», а не «упал».
     assert "бот TG: не вижу" in text
     assert "месяц Go $12.00 из $60" in text and "сегодня задачи $0.20" in text
@@ -855,24 +860,68 @@ async def test_run_hub_cmd_error_shows_stderr(tmp_path, monkeypatch):
 
 
 async def test_compact_table_on_narrow_screen(tmp_path):
-    """Экран уже COMPACT_WIDTH: без колонки «Проект», «Что сейчас» видна без прокрутки."""
+    """Уже COMPACT_WIDTH — без «Проект»; смена размера сразу перерисовывает строки (без тика)
+    и оставляет курсор на той же задаче."""
     from hub.tui.widgets import COMPACT_KEYS
 
     app = _app(tmp_path)
-    async with app.run_test(size=(110, 30)) as pilot:
+    two = Snapshot(tasks=[_snap(task_id="TA").tasks[0], _snap(task_id="TB").tasks[0]],
+                   total_go=0.0, total_usd=0.0, now_ms=NOW)
+    async with app.run_test(size=(150, 40)) as pilot:
         await pilot.pause()
-        app._apply_snapshot(_snap(), bot_alive=False, events=[])
+        app._apply_snapshot(two, bot_alive=False, events=[])
         await pilot.pause()
         table = app.query_one("#tasks", TaskTable)
+        assert table.compact is False
+        table.focus()
+        await pilot.press("down")
+        await pilot.pause()
+        assert table.selected_task_id() == "TB"
+        await pilot.resize_terminal(110, 30)
+        await pilot.pause()
         assert table.compact is True
         assert [str(c.key.value) for c in table.ordered_columns] == COMPACT_KEYS
+        assert table.row_count == 2 and table.selected_task_id() == "TB"
         await pilot.resize_terminal(150, 40)
         await pilot.pause()
-        app._apply_snapshot(_snap(), bot_alive=False, events=[])
-        await pilot.pause()
-        assert table.compact is False
         assert [str(c.key.value) for c in table.ordered_columns] == COL_KEYS
-        assert table.row_count == 1
+        assert table.row_count == 2 and table.selected_task_id() == "TB"
+
+
+async def test_help_opens_and_closes(tmp_path):
+    from hub.tui.app import HelpScreen
+
+    app = _app(tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await pilot.pause()
+        assert isinstance(app.screen, HelpScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, HelpScreen)
+
+
+async def test_feed_bot_event_before_stage(tmp_path):
+    """Событие для бота раньше stage (другим тиком): «готово» одно, без дубля."""
+    app = _app(tmp_path)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        feed = app.query_one("#events", EventFeed)
+        feed.push([{"id": 1, "ts": NOW, "task_id": "T1", "kind": "ready",
+                    "payload_json": json.dumps({"stage": "ready"})}], {})
+        feed.push([{"id": 2, "ts": NOW, "task_id": "T1", "kind": "stage",
+                    "payload_json": json.dumps({"stage": "ready"})}], {})
+        await pilot.pause()
+        texts = [line.text for line in feed.lines]
+        assert len(texts) == 1 and "готово" in texts[0]
+        # Следующий круг той же задачи после «готово» — снова показывается.
+        feed.push([{"id": 3, "ts": NOW, "task_id": "T1", "kind": "stage",
+                    "payload_json": json.dumps({"stage": "exec r2"})},
+                   {"id": 4, "ts": NOW, "task_id": "T1", "kind": "stage",
+                    "payload_json": json.dumps({"stage": "ready"})}], {})
+        await pilot.pause()
+        assert len(feed.lines) == 3
 
 
 async def test_broken_task_does_not_break_table(tmp_path):

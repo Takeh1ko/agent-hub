@@ -155,12 +155,11 @@ class Snapshot:
         }, ensure_ascii=False)
 
     def head_text(self) -> str:
-        pct = int(round(100 * self.month_go / 60.0)) if self.month_go else 0
         text = (f"Сегодня: задачи хаба ${self.total_go + self.total_usd:.2f} · все проекты Go "
                 f"${self.all_go:.2f} · реальные деньги сегодня ${self.all_usd:.2f}"
-                f" · за месяц Go ${self.month_go:.2f} из лимита $60/мес ({pct}%)")
+                f" · за месяц Go ${self.month_go:.2f} из лимита $60/мес ({limit_pct(self.month_go)})")
         if self.agy_runs:
-            text += f" · Gemini: {self.agy_runs} запусков / {self.agy_steps} шагов за 5 ч"
+            text += f" · Gemini: {gemini_window(self.agy_runs, self.agy_steps)}"
         return text
 
     def active_tasks(self) -> list["TaskSnap"]:
@@ -196,33 +195,23 @@ class Snapshot:
         return head.encode("utf-8")[:limit].decode("utf-8", "ignore")
 
     def roster_text(self, recent_ms: int = 10 * 60_000) -> str:
-        """Для владельца: задача словами, что сейчас, кто работает, что дальше."""
-        blocks = []
-        for t in self.active_tasks():
-            view = hm.stage_view(t.stage, t.round, t.max_rounds, t.reason, t.reviewers)
-            code = t.id.split("-", 1)[0]
-            name = t.short or t.title or t.id
-            since = f" · {hm.ago(self.now_ms - t.stage_since_ms)} в этапе" if t.stage_since_ms else ""
-            rows = [f"{t.pulse} {code} · {name}",
-                    f"   {view.now}{since} · {hm.money(t.cost_go + t.cost_usd)}"]
-            working = []
-            for x in sorted(t.sessions, key=lambda x: -x.pulse_ms):
-                age = self.now_ms - x.pulse_ms
-                if age > recent_ms:
-                    continue
-                act = hm.activity_text(x.last_activity)
-                working.append(f"   {hm.model_name(x.model, x.provider)} {hm.role_name(x.role)}"
-                               + (f": {act}" if act else "") + f" ({hm.ago(age)})")
-            if working:
-                rows.extend(working)
-            else:
-                health = hm.health_text(t.pulse, t.stage)
-                if health:
-                    rows.append(f"   {health}")
-            if view.next and view.next != "—":
-                rows.append(f"   Дальше: {view.next}")
-            blocks.append("\n".join(rows))
+        """Для владельца: задача словами, что сейчас, кто работает, что дальше (hm.describe)."""
+        blocks = ["\n".join(hm.roster_lines(t, self.now_ms)) for t in self.active_tasks()]
         return "\n\n".join(blocks) if blocks else "Активных задач нет."
+
+
+GO_LIMIT_USD = 60.0
+
+
+def limit_pct(month_go: float) -> str:
+    """«16%» или честно «126% — лимит превышен» (одинаково в шапке top и в TG)."""
+    pct = int(round(100 * hm.to_float(month_go) / GO_LIMIT_USD))
+    return f"{pct}%" if pct <= 100 else f"{pct}% — лимит превышен"
+
+
+def gemini_window(runs: int, steps: int) -> str:
+    return (f"{hm.plural(runs, 'запуск', 'запуска', 'запусков')} / "
+            f"{hm.plural(steps, 'шаг', 'шага', 'шагов')} за 5 ч")
 
 
 def _in_wt(path: str, wt: str) -> bool:

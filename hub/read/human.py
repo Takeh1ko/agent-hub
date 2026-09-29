@@ -215,6 +215,14 @@ HEALTH = {
 }
 
 
+ALIVE = ("🟢", "🟡")  # процесс агента жив (работает или думает)
+
+
+def is_alive(pulse: str) -> bool:
+    """Сессия/задача с живым процессом. ⚫ (процесса нет) и 🔴 (зависла) — не «работает»."""
+    return str(pulse or "") in ALIVE
+
+
 def health_text(pulse: str, stage: str = "") -> str:
     if pulse == "⚫" and str(stage or "").strip() in ("queued", "preflight", "stopped"):
         return "ждёт"
@@ -306,15 +314,6 @@ def fit(text: str, limit: int) -> str:
 
 def money(x: float) -> str:
     return f"${to_float(x):.2f}"
-
-
-def tokens(n: int) -> str:
-    n = to_int(n)
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f} млн"
-    if n >= 1000:
-        return f"{n // 1000} тыс."
-    return str(n)
 
 
 # --- карточка задачи ---
@@ -494,13 +493,19 @@ def describe(task, now_ms: int, working_ms: int = 10 * 60_000) -> list[tuple[str
     if path:
         out.append(("Путь", path))
     if view.next and view.next != "—":
-        out.append(("Дальше", view.next))
+        # Процесса нет или завис посреди работы — продолжение не гарантировано.
+        stuck = (str(task.pulse or "") in ("⚫", "🔴")
+                 and str(task.stage or "").strip() not in ("queued", "preflight")
+                 and view.style == "ok")
+        out.append(("Дальше", ("если перезапустится: " if stuck else "") + view.next))
     if task.executor or task.reviewers:
         out.append(("Команда", team(task.executor, task.reviewers)))
     fresh = []
     for x in sorted(task.sessions or [], key=lambda x: -to_int(x.pulse_ms)):
         age_ms = to_int(now_ms) - to_int(x.pulse_ms)
-        if age_ms > working_ms:
+        # «Работает» — только свежая сессия с живым процессом: умерший 3 мин назад агент
+        # не должен выглядеть работающим.
+        if age_ms > working_ms or not is_alive(x.pulse):
             continue
         act = activity_text(x.last_activity)
         age = ago(age_ms)
@@ -510,7 +515,7 @@ def describe(task, now_ms: int, working_ms: int = 10 * 60_000) -> list[tuple[str
     if fresh:
         out.append(("Сейчас работают", "\n".join(fresh)))
     else:
-        out.append(("Сейчас работают", "никто — " + (health or view.now.lower())))
+        out.append(("Сейчас работают", "никто"))  # почему — уже сказано в «Сейчас»
     spent = money(to_float(task.cost_go) + to_float(task.cost_usd))
     agg: dict[str, list[float]] = {}
     for x in task.sessions or []:
@@ -523,3 +528,18 @@ def describe(task, now_ms: int, working_ms: int = 10 * 60_000) -> list[tuple[str
         spent += " — " + ", ".join(parts)
     out.append(("Потрачено", spent))
     return out
+
+
+def roster_lines(task, now_ms: int) -> list[str]:
+    """Коротко для TG /roster — те же слова, что describe (одна история на все экраны)."""
+    story = describe(task, now_ms)
+    tid = str(getattr(task, "id", "") or "")
+    code = tid.split("-", 1)[0] or tid
+    pairs = {label: text for label, text in story if label}
+    money_total = money(to_float(task.cost_go) + to_float(task.cost_usd))
+    lines = [f"{task.pulse} {code} · {task.short or task.title or tid}",
+             f"   {pairs.get('Сейчас', '')} · {money_total}"]
+    lines.extend(f"   {ln}" for ln in pairs.get("Сейчас работают", "").splitlines())
+    if pairs.get("Дальше"):
+        lines.append(f"   Дальше: {pairs['Дальше']}")
+    return lines
