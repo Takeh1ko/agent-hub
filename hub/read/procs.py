@@ -32,7 +32,12 @@ def _kind_of(args: list[str]) -> str | None:
     if stem == "hub":
         if "bot" in args[1:]:
             return "hub_bot"
+        # Процессы, ведущие задачу (цикл/ревью/слияние/очередь), — живость задачи между сессиями агентов.
+        if any(a in ("review", "continue", "merge", "queue") for a in args[1:3]):
+            return "hub_task"
         return None
+    if "_run_one(" in blob:
+        return "hub_task"
     if "-m" in args and any(a == "hub.cli" or a.startswith("hub.") for a in args):
         if "bot" in blob:
             return "hub_bot"

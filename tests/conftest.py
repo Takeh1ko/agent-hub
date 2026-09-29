@@ -59,3 +59,15 @@ def _no_combat_write():
         new = after.get(t, set()) - before.get(t, set())
         leaked = [r for r in new if t != "inbox" or not str(r).count("'tg'")]
         assert not leaked, f"тесты записали в боевой hub.db ({t}): {leaked[:3]}"
+
+
+@pytest.fixture(autouse=True)
+def _reset_pulse_cooldown():
+    """Кулдаун пульс-событий бота — состояние модуля; между тестами не переносим."""
+    try:
+        from hub.bot import core as _core
+
+        _core._LAST_PULSE.clear()
+    except Exception:
+        pass
+    yield

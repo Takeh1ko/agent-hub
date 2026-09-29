@@ -755,7 +755,32 @@ def _pulse_state(t) -> dict | None:
     return None
 
 
+_PULSE_COOLDOWN_S = 1800
+_LAST_PULSE: dict[tuple[str, str], float] = {}
+
+
+def _cooldown(events: list[dict]) -> list[dict]:
+    """stuck/crashed по одной задаче — не чаще раза в 30 мин (иначе серия «упал/ожил» спамит владельца)."""
+    import time as _t
+
+    now = _t.monotonic()
+    out = []
+    for e in events:
+        if e.get("kind") in ("stuck", "crashed"):
+            key = (str(e.get("task_id")), str(e.get("kind")))
+            last = _LAST_PULSE.get(key)
+            if last is not None and now - last < _PULSE_COOLDOWN_S:
+                continue
+            _LAST_PULSE[key] = now
+        out.append(e)
+    return out
+
+
 def snapshot_events(prev, cur, pending: dict | None = None) -> list[dict]:
+    return _cooldown(_snapshot_events(prev, cur, pending))
+
+
+def _snapshot_events(prev, cur, pending: dict | None = None) -> list[dict]:
     """Разница снимков → события (чисто, без БД).
 
     prev None — baseline, событий нет (не спамим при старте).

@@ -303,7 +303,9 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
                 role = "executor" if (s.id == exec_sid or (in_exec and not exec_sid)) else "reviewer"
                 links.append({"external_id": s.id, "role": role, "model": s.model})
         # Жив: процесс агента работает в worktree или получил его аргументом (--dir/--worktree).
-        alive = [p for p in live if wt and (_in_wt(p.cwd, wt) or any(_in_wt(a, wt) for a in p.args))]
+        tid = str(t["id"])
+        alive = [p for p in live if wt and (_in_wt(p.cwd, wt) or any(_in_wt(a, wt) for a in p.args)
+                                             or (p.kind == "hub_task" and any(tid in a for a in p.args)))]
         pytest_kid = any(p.kind in ("pytest", "flock") for p in alive)
         agy_alive = [p for p in alive if p.kind == "agy"]
         # Пульс задачи — по всем её сессиям (исполнитель + ревьюеры):
