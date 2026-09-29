@@ -384,6 +384,13 @@ def _sync_q_mark(qid: int) -> None:
     bc.mark_question_sent(Store(), int(qid))
 
 
+def _sync_forget(chat_id: int) -> None:
+    """Удалить мёртвый чат из tg_chat (Telegram: not found/blocked)."""
+    from hub.store import Store
+
+    bc.forget_chat(Store(), int(chat_id))
+
+
 def _sync_tick(prev_snap, now_ms: int, pending: dict | None = None):
     """Продюсер сводок: snapshot.build → дифф → события в store.
 
@@ -508,6 +515,8 @@ async def show_confirm_result(message, text: str) -> None:
 async def outbox_once(bot, state: BotState, now_ms: int) -> int:
     """Одна итерация outbox: каждому чату независимо, без дублей.
 
+    Мёртвый чат (chat not found / bot was blocked / Forbidden) удаляется
+    из tg_chat и не держит доставку остальным.
     Возвращает число строк, полностью доставленных на этом проходе.
     """
     log = logging.getLogger("hub.bot")
@@ -530,7 +539,12 @@ async def outbox_once(bot, state: BotState, now_ms: int) -> int:
             try:
                 await bot.send_message(int(chat), text)
             except Exception as e:  # noqa: BLE001 — ретрай только этому чату
-                log.warning("outbox %s → %s: %s", oid, chat, e)
+                if bc.is_dead_chat_error(e):
+                    log.warning("мёртвый чат %s, удаляю: %s", chat, e)
+                    await asyncio.to_thread(_sync_forget, int(chat))
+                    state.outbox_done.add((oid, int(chat)))
+                else:
+                    log.warning("outbox %s → %s: %s", oid, chat, e)
                 continue
             state.outbox_done.add((oid, int(chat)))
         if all((oid, int(c)) in state.outbox_done for c in chats):
@@ -563,7 +577,12 @@ async def poll_once(bot, state: BotState, now_ms: int) -> dict:
                     int(chat), bc.clip(text), reply_markup=markup)
                 _remember_qmsg(int(chat), int(sent.message_id), qid)
             except Exception as e:  # noqa: BLE001 — ретрай этому чату
-                log.warning("вопрос %s → %s: %s", qid, chat, e)
+                if bc.is_dead_chat_error(e):
+                    log.warning("мёртвый чат %s, удаляю: %s", chat, e)
+                    await asyncio.to_thread(_sync_forget, int(chat))
+                    state.q_done.add((qid, int(chat)))
+                else:
+                    log.warning("вопрос %s → %s: %s", qid, chat, e)
                 continue
             state.q_done.add((qid, int(chat)))
         if all((qid, int(c)) in state.q_done
@@ -594,7 +613,13 @@ async def poll_once(bot, state: BotState, now_ms: int) -> dict:
                 try:
                     await bot.send_message(int(chat), bc.clip(text))
                 except Exception as e:  # noqa: BLE001 — ретрай этому чату
-                    log.warning("сводка → %s: %s", chat, e)
+                    if bc.is_dead_chat_error(e):
+                        log.warning("мёртвый чат %s, удаляю: %s", chat, e)
+                        await asyncio.to_thread(_sync_forget, int(chat))
+                        for eid in batch:
+                            state.summary_done.add((int(eid), int(chat)))
+                    else:
+                        log.warning("сводка → %s: %s", chat, e)
                     continue
                 for eid in batch:
                     state.summary_done.add((int(eid), int(chat)))
@@ -631,7 +656,12 @@ async def poll_once(bot, state: BotState, now_ms: int) -> dict:
             try:
                 await bot.send_message(int(chat), roster, parse_mode="HTML")
             except Exception as e:  # noqa: BLE001 — ретрай этому чату
-                log.warning("авторостер → %s: %s", chat, e)
+                if bc.is_dead_chat_error(e):
+                    log.warning("мёртвый чат %s, удаляю: %s", chat, e)
+                    await asyncio.to_thread(_sync_forget, int(chat))
+                    state.roster_done.add((norm, int(chat)))
+                else:
+                    log.warning("авторостер → %s: %s", chat, e)
                 continue
             state.roster_done.add((norm, int(chat)))
         if chats and all((norm, int(c)) in state.roster_done for c in chats):

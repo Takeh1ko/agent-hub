@@ -172,49 +172,69 @@ class Store:
 
     # --- импорт старого конвейера ---
 
-    def import_legacy(self, worktrees_dir: str | Path) -> list[str]:
+    def import_legacy(self, worktrees_dir: str | Path | None) -> list[str]:
         """Прочитать <wt>/*/.agent/state.json (+ review_rN*.json).
 
         Возвращает ids заведённых/обновлённых задач.
+        Задачи со снятым worktree (пути нет на диске) переводятся
+        в финал: ready → merged, остальные → dropped, чтобы не висели.
+        Пустой/нет каталога — только sweep, без сканирования.
         """
-        wt_dir = Path(worktrees_dir)
         done: list[str] = []
-        if not wt_dir.is_dir():
-            return done
-        for child in sorted(wt_dir.iterdir()):
-            state_path = child / ".agent" / "state.json"
-            if not state_path.is_file():
-                continue
-            try:
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(state, dict):
-                continue
-            task_id = str(state.get("task") or child.name)
-            status = str(state.get("status") or "failed")
-            round_no = int(state.get("round") or 0)
-            verdicts = state.get("verdicts") or []
-            stage = _legacy_stage(status, round_no, verdicts, child)
-            reviewers = state.get("reviewer_sessions") or []
-            self.upsert_task(
-                id=task_id,
-                branch=f"agent/{task_id}",
-                worktree=str(child),
-                base_sha=str(state.get("base") or ""),
-                stage=stage,
-                round=round_no,
-                reviewers_json=json.dumps(reviewers, ensure_ascii=False),
-                stage_reason=",".join(str(v) for v in verdicts),
-            )
-            exec_sid = state.get("executor_session")
-            if exec_sid and str(exec_sid) not in ("noop", "panel"):
-                self.link_session(str(exec_sid), "opencode", task_id, "executor", round_no, "")
-            for rsid in reviewers:
-                if not rsid or str(rsid) in ("noop", "panel"):
+        wt_dir = Path(worktrees_dir) if worktrees_dir else None
+        if wt_dir is not None and wt_dir.is_dir():
+            for child in sorted(wt_dir.iterdir()):
+                state_path = child / ".agent" / "state.json"
+                if not state_path.is_file():
                     continue
-                self.link_session(str(rsid), "opencode", task_id, "reviewer", round_no, "")
-            done.append(task_id)
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(state, dict):
+                    continue
+                task_id = str(state.get("task") or child.name)
+                status = str(state.get("status") or "failed")
+                round_no = int(state.get("round") or 0)
+                verdicts = state.get("verdicts") or []
+                stage = _legacy_stage(status, round_no, verdicts, child)
+                reviewers = state.get("reviewer_sessions") or []
+                self.upsert_task(
+                    id=task_id,
+                    branch=f"agent/{task_id}",
+                    worktree=str(child),
+                    base_sha=str(state.get("base") or ""),
+                    stage=stage,
+                    round=round_no,
+                    reviewers_json=json.dumps(reviewers, ensure_ascii=False),
+                    stage_reason=",".join(str(v) for v in verdicts),
+                )
+                exec_sid = state.get("executor_session")
+                if exec_sid and str(exec_sid) not in ("noop", "panel"):
+                    self.link_session(str(exec_sid), "opencode", task_id, "executor", round_no, "")
+                for rsid in reviewers:
+                    if not rsid or str(rsid) in ("noop", "panel"):
+                        continue
+                    self.link_session(str(rsid), "opencode", task_id, "reviewer", round_no, "")
+                done.append(task_id)
+        # Sweep: снятые worktree → финал, чтобы не висели с ложным 🔴.
+        try:
+            for t in self.list_tasks(active_only=False):
+                if str(t.get("stage") or "") in FINAL_STAGES:
+                    continue
+                wt = str(t.get("worktree") or "")
+                if not wt:
+                    continue
+                try:
+                    exists = Path(wt).exists()
+                except OSError:
+                    continue
+                if exists:
+                    continue
+                new_stage = "merged" if str(t.get("stage") or "") == "ready" else "dropped"
+                self.upsert_task(id=str(t.get("id") or ""), stage=new_stage)
+        except (OSError, ValueError, sqlite3.Error):
+            pass
         return done
 
 

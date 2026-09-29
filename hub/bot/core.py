@@ -237,6 +237,46 @@ def list_chats(store: Store) -> list[int]:
         con.close()
 
 
+def forget_chat(store: Store, chat_id: int) -> None:
+    """Удалить мёртвый чат из рассылки (Telegram: chat not found/blocked)."""
+    con = _con(store)
+    try:
+        con.execute("DELETE FROM tg_chat WHERE chat_id=?", (int(chat_id),))
+        con.commit()
+    finally:
+        con.close()
+
+
+# Подстроки мёртвого чата (Telegram): такой чат удаляем, а не ретраим.
+_DEAD_HINTS = (
+    "chat not found",
+    "chat_not_found",
+    "bot was blocked",
+    "bot_was_blocked",
+    "bot blocked",
+    "forbidden",
+)
+
+
+def is_dead_chat_error(exc: BaseException | object) -> bool:
+    """Мёртвый ли чат по исключению отправки (удалить, не держать очередь).
+
+    Telegram отвечает «chat not found» / «bot was blocked» / «Forbidden»:
+    такой чат уже не оживёт — ретраить каждые 5 с бесконечно нельзя.
+    """
+    try:
+        name = type(exc).__name__.lower()
+    except Exception:
+        name = ""
+    if "forbidden" in name:
+        return True
+    try:
+        text = str(exc or "").lower()
+    except Exception:
+        return False
+    return any(h in text for h in _DEAD_HINTS)
+
+
 def all_chats(store: Store) -> list[int]:
     """Все получатели рассылки: tg_chat + OWNER_CHAT_ID."""
     from hub.tg_send import OWNER_CHAT_ID
