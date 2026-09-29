@@ -223,7 +223,7 @@ def test_findings_review_commit_and_stale(tmp_path, capsys):
 
 
 def test_findings_stale_deleted_lines(tmp_path, capsys):
-    """Удалённые строки тоже помечаются: old-диапазон ханка с new count 0."""
+    """Удалены строки 3–4 → замечание a.py:3 помечено (new count 0)."""
     repo = tmp_path / "repo-del"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
@@ -256,6 +256,77 @@ def test_findings_stale_deleted_lines(tmp_path, capsys):
     line_far = next(l for l in out.splitlines()[1:] if l.startswith("a.py:9"))
     assert fcmd.STALE_MARK in line_del
     assert fcmd.STALE_MARK not in line_far
+
+
+def test_findings_stale_deleted_neighbour(tmp_path, capsys):
+    """Удаление 3–4: соседняя строка 2 (±1 от new start) тоже помечена."""
+    repo = tmp_path / "repo-del-near"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    a = repo / "a.py"
+    a.write_text("".join(f"строка {i}\n" for i in range(1, 11)), encoding="utf-8")
+    _write(repo / ".agent" / "review_r1.json", {
+        "verdict": "changes",
+        "findings": [
+            {"file": "a.py", "line": 2, "issue": "рядом с удалением", "severity": "high"},
+            {"file": "a.py", "line": 9, "issue": "далёкий баг", "severity": "medium"},
+        ],
+    })
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "ревью")
+    review = _head(repo)
+    (repo / ".agent" / "done.json").write_text(
+        json.dumps({"commit": review}), encoding="utf-8")
+    s = Store()
+    s.upsert_task(id="TDN", stage="review r1", worktree=str(repo))
+    body = a.read_text(encoding="utf-8").splitlines()
+    del body[2:4]
+    a.write_text("\n".join(body) + "\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "удалил строки")
+    assert main(["findings", "TDN"]) == 0
+    out = capsys.readouterr().out
+    line_near = next(l for l in out.splitlines()[1:] if l.startswith("a.py:2"))
+    line_far = next(l for l in out.splitlines()[1:] if l.startswith("a.py:9"))
+    assert fcmd.STALE_MARK in line_near
+    assert fcmd.STALE_MARK not in line_far
+
+
+def test_findings_stale_non_ascii_path(tmp_path, capsys):
+    """Не-ASCII путь: `git diff --name-only` с quotepath=false (как cycle)."""
+    repo = tmp_path / "repo-uni"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    uni = "файл-юникод.py"
+    (repo / uni).write_text("x = 1\n", encoding="utf-8")
+    _write(repo / ".agent" / "review_r1.json", {
+        "verdict": "changes",
+        "findings": [
+            {"file": uni, "line": 1, "issue": "баг в юникоде", "severity": "high"},
+        ],
+    })
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "ревью")
+    review = _head(repo)
+    (repo / ".agent" / "done.json").write_text(
+        json.dumps({"commit": review}), encoding="utf-8")
+    s = Store()
+    s.upsert_task(id="TU", stage="review r1", worktree=str(repo))
+    changed = fcmd._stale_files(str(repo), review, review)
+    assert changed == set()
+    (repo / uni).write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "починка")
+    # Без `-c core.quotepath=false` имя пришло бы квотингом
+    # (`"\321\204..."`) и stale пропал бы.
+    assert main(["findings", "TU"]) == 0
+    out = capsys.readouterr().out
+    assert uni in out
+    assert fcmd.STALE_MARK in out
 
 
 def test_findings_empty_no_output(tmp_path, capsys):

@@ -81,11 +81,12 @@ def _new_ranges(worktree: str, base: str, head: str, rel: str) -> list[tuple[int
     """Диапазоны диффа base..head для файла (для пометки по строке).
 
     Обычно new-сторона ханка; чистое удаление (new count 0) new-стороны
-    не имеет — диапазон берётся по old-стороне: удалённая строка тоже
-    изменение файл:строки (иначе удаления никогда не помечаются).
+    не имеет — помечаем и удалённые строки (old-диапазон), и соседние
+    (±1 строка от new start: после удаления нумерация съезжает, замечание
+    на строке рядом с точкой удаления тоже «возможно исправлено»).
     None — git не ответил (пометок нет, без ложных); [] — файл не менялся.
     """
-    out = _git_out(worktree, "diff", "-U0", f"{base}..{head}", "--", rel)
+    out = _git_out(worktree, "-c", "core.quotepath=false", "diff", "-U0", f"{base}..{head}", "--", rel)
     if out is None:
         return None
     ranges: list[tuple[int, int]] = []
@@ -104,13 +105,24 @@ def _new_ranges(worktree: str, base: str, head: str, rel: str) -> list[tuple[int
             if old_count <= 0:
                 continue
             ranges.append((old_start, old_start + old_count - 1))
+            # Окрестность точки удаления в новых координатах: new_start
+            # для чистого удаления — строка перед вырезанным куском
+            # (например, удаление 3–4 даёт `@@ -3,2 +2,0 @@`), поэтому
+            # ±1 от new_start накрывает и удалённую строку, и соседей.
+            lo = max(1, new_start - 1)
+            hi = new_start + 1
+            if hi >= lo:
+                ranges.append((lo, hi))
             continue
         ranges.append((new_start, new_start + new_count - 1))
     return ranges
 
 
 def _stale_files(worktree: str, base: str, head: str) -> set[str] | None:
-    out = _git_out(worktree, "diff", "--name-only", f"{base}..{head}", "--")
+    # quotepath выключен, как в cycle._diff_files: иначе не-ASCII путь
+    # приходит октальным квотингом (`"\321\204..."`) и не совпадает с rel.
+    out = _git_out(worktree, "-c", "core.quotepath=false", "diff", "--no-renames",
+                   "--name-only", f"{base}..{head}", "--")
     if out is None:
         return None
     return {l.strip() for l in out.splitlines() if l.strip()}
