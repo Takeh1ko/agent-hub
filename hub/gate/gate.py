@@ -118,7 +118,7 @@ def check_gate(
     allowed: list[str] | None = None,
     test_cmd: list[str] | None = None,
     lock_path: str | None = None,
-    timeout_s: int = 600,
+    timeout_s: int = 1800,  # вкл. ожидание общего замка тестов проекта (PlayerUP: тесты ~2–4 мин + очередь)
 ) -> GateResult:
     """Проверить ворота по порядку: чистота, дифф, allowed, приёмка под замком.
 
