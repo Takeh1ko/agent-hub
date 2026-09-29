@@ -20,7 +20,7 @@ budget_go = 0.5
 budget_usd = 0.0
 
 [levels]  # easy — рутина Gemini; medium/hard — критический путь, Spark Go; background — не тормозит, бесплатный Spark
-easy = "gemini"
+easy = "deepseek"
 medium = "muse"
 hard = "muse"
 background = "musefree"
