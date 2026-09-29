@@ -200,8 +200,7 @@ class Store:
                 verdicts = state.get("verdicts") or []
                 stage = _legacy_stage(status, round_no, verdicts, child)
                 reviewers = state.get("reviewer_sessions") or []
-                self.upsert_task(
-                    id=task_id,
+                fields = dict(
                     branch=f"agent/{task_id}",
                     worktree=str(child),
                     base_sha=str(state.get("base") or ""),
@@ -210,6 +209,11 @@ class Store:
                     reviewers_json=json.dumps(reviewers, ensure_ascii=False),
                     stage_reason=",".join(str(v) for v in verdicts),
                 )
+                # Чтение (hub status, /status) не должно писать: обновляем строку, только
+                # если legacy-поля реально изменились — иначе updated_at и пульс не трогаем.
+                old = self.get_task(task_id)
+                if old is None or any(str(old.get(k) or "") != str(v) for k, v in fields.items()):
+                    self.upsert_task(id=task_id, **fields)
                 exec_sid = state.get("executor_session")
                 if exec_sid and str(exec_sid) not in ("noop", "panel"):
                     self.link_session(str(exec_sid), "opencode", task_id, "executor", round_no, "")
