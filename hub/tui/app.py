@@ -69,9 +69,14 @@ HELP_TEXT = """\
 
 [b]Цвет строки[/b]  жёлтый — нужно решение, красный — ошибка, голубой — готово, серый — ждёт.
 
+[b]Нужно ли что-то делать вам?[/b]
+  Обычно нет: жёлтые и красные строки разбирает Claude (он получает их сам).
+  Вам — только «вопросы вам» в шапке: ответ кнопкой в TG-боте.
+
 [b]Клавиши[/b]
   ↑ ↓ — выбрать задачу (подробности появляются сразу под таблицей)
-  ? — эта справка    q — выход
+  f — обновить замечания проверки    ? — эта справка    q — выход
+  Окно меньше 80×24 — подробности и лента скрыты: растяните окно
   s — остановить задачу, m — слить готовую (обе с подтверждением; обычно это делает Claude)
 
 Esc или ? — закрыть"""
@@ -164,6 +169,10 @@ class HubApp(App):
         self._bot_alive_flag: bool = False
         self._events_primed: bool = False
         self._refreshing: bool = False
+        self._questions: int = 0
+        # Замечания выбранной задачи: {worktree: (mtime .agent, результат)} — без чтения
+        # файлов ревью каждые 2 с.
+        self._findings_cache: dict[str, tuple[int, tuple[int, list[str]]]] = {}
 
     def compose(self) -> ComposeResult:
         yield Static("Пульт агентов — собираю картину (несколько секунд)…", id="top-header")
@@ -303,6 +312,11 @@ class HubApp(App):
 
     def _fetch_all(self) -> tuple[Snapshot | None, bool, list[dict]]:
         """Всё блокирующее чтение тика — одним куском в потоке воркера."""
+        store = self._store()
+        try:
+            self._questions = store.count_open_questions() if store is not None else 0
+        except Exception:
+            log.exception("не читаются вопросы")
         return (self._fetch_snapshot(), self._check_bot(), self._fetch_events())
 
     def _apply_snapshot(self, snap: Snapshot | None, bot_alive: bool = False,
@@ -346,12 +360,18 @@ class HubApp(App):
 
     # --- шапка ---
 
-    def _header_text(self, snap: Snapshot, bot_alive: bool | None = None) -> Text:
+    def _header_text(self, snap: Snapshot, bot_alive: bool | None = None,
+                     questions: int | None = None) -> Text:
         if bot_alive is None:
             bot_alive = self._bot_alive_flag
+        if questions is None:
+            questions = self._questions
         live = [t for t in snap.tasks if t.stage not in FINAL_STAGES]
-        working = sum(1 for t in live if t.stage not in ("queued", "ready", "arbiter",
-                                                          "failed", "stopped"))
+        waiting = ("queued", "ready", "arbiter", "failed", "stopped")
+        active = [t for t in live if t.stage not in waiting]
+        # «Работают» — только с живым процессом; этап «пишет код» без процесса — «тихо».
+        working = sum(1 for t in active if hm.is_alive(t.pulse))
+        silent = len(active) - working
         queued = sum(1 for t in live if t.stage == "queued")
         claude = sum(1 for t in live if t.stage in ("ready", "arbiter", "failed"))
         month = snap.month_go or 0.0
@@ -360,9 +380,18 @@ class HubApp(App):
         head = Text()
         head.append("Пульт агентов", style="bold")
         head.append(f" · {hm.clock(snap.now_ms)} · ")
-        head.append(f"работают {working}", style="bold green" if working else "")
-        head.append(f" · в очереди {queued} · ")
-        head.append(f"ждут Claude {claude}", style="bold yellow" if claude else "")
+        if not (working or silent or queued or claude):
+            head.append("сейчас ничего не работает")
+        else:
+            head.append(f"работают {working}", style="bold green" if working else "")
+            if silent:
+                head.append(" · ")
+                head.append(f"тихо или зависли {silent}", style="bold red")
+            head.append(f" · в очереди {queued} · ")
+            head.append(f"ждут Claude {claude}", style="bold yellow" if claude else "")
+        if questions:
+            head.append(" · ")
+            head.append(f"вопросы вам: {questions} (ответ в TG)", style="bold magenta")
         head.append(" · бот TG: ")
         # Нет процесса hub_bot — «не вижу», а не «упал»: бот мог быть запущен иначе.
         head.append("работает" if bot_alive else "не вижу", style="green" if bot_alive else "yellow")
@@ -370,9 +399,11 @@ class HubApp(App):
         head.append(hm.money((snap.total_go or 0) + (snap.total_usd or 0)), style="bold")
         head.append(f" · все проекты Go {hm.money(snap.all_go)}")
         head.append(f" · реальные деньги {hm.money(snap.all_usd)}")
-        head.append(f" · месяц Go {hm.money(month)} из $60 [{bar}] {int(round(frac * 100))}%")
+        pct = snapshot.limit_pct(month)
+        head.append(f" · месяц Go {hm.money(month)} из $60 [{bar}] ")
+        head.append(pct, style="bold red" if "превышен" in pct else "")
         if snap.agy_runs:  # Gemini выключен владельцем — показываем, только если работал
-            head.append(f" · Gemini: {snap.agy_runs} запусков / {snap.agy_steps} шагов за 5 ч")
+            head.append(f" · Gemini: {snapshot.gemini_window(snap.agy_runs, snap.agy_steps)}")
         head.append("    ? — что значат значки", style="dim")
         return head
 
@@ -387,7 +418,9 @@ class HubApp(App):
             return
         self._narrow = narrow
         try:
-            self.query_one("#tasks", TaskTable).set_compact(sz.width < COMPACT_WIDTH)
+            table = self.query_one("#tasks", TaskTable)
+            if table.set_compact(sz.width < COMPACT_WIDTH) and self._snap is not None:
+                table.update(self._filtered(self._snap))
         except Exception:
             log.exception("не переключилась компактная таблица")
         for wid_id in ("#details", "#events"):
@@ -471,10 +504,17 @@ class HubApp(App):
         if not wt or not Path(wt).is_dir():
             return 0, []
         try:
+            mtime = (Path(wt) / ".agent").stat().st_mtime_ns
+        except OSError:
+            mtime = 0
+        hit = self._findings_cache.get(wt)
+        if hit and hit[0] == mtime and mtime:
+            return hit[1]
+        try:
             rnd, items = latest_round(Path(wt))
         except Exception:
             log.exception("не читаются замечания")
-            return 0, []
+            return 1, ["  (файлы замечаний не читаются — подробности: hub findings)"]
         sev = {"high": "важное", "medium": "среднее", "low": "мелочь"}
         out = []
         for f in items[:FINDINGS_MAX]:
@@ -486,6 +526,7 @@ class HubApp(App):
                 log.exception("битое замечание")
         if len(items) > FINDINGS_MAX:
             out.append(f"  … и ещё {len(items) - FINDINGS_MAX} (hub findings {task_id})")
+        self._findings_cache[wt] = (mtime, (rnd, out))
         return rnd, out
 
     # --- клавиши и события ---

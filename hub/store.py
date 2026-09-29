@@ -266,6 +266,17 @@ class Store:
             out[str(r["task_id"])] = (ts, reason, stage)
         return out
 
+    def count_open_questions(self) -> int:
+        """Сколько вопросов владельцу ждут ответа (question.status='open')."""
+        con = self._connect()
+        try:
+            return int(con.execute(
+                "SELECT count(*) FROM question WHERE status='open'").fetchone()[0])
+        except sqlite3.Error:
+            return 0
+        finally:
+            con.close()
+
     def recent_events(self, limit: int = 12) -> list[dict]:
         """Последние limit событий по возрастанию id (история для ленты top)."""
         try:

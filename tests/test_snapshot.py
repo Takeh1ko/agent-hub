@@ -161,7 +161,9 @@ def test_roster_format(tmp_path):
     db = _mkdb(tmp_path / "oc.db", [{"id": "s1", "pulse": NOW, "model": "muse"}])
     text = snap.build(s, NOW, opencode_db=db, proc_root=tmp_path / "пустой").roster_text()
     assert "T01" in text and "Пишет код (круг 1 из 2)" in text
-    assert "Spark Go пишет код: думает" in text and "Дальше: потом тесты" in text
+    # Процесса агента нет (пустой /proc) — не «работает», а честно «процесса нет».
+    assert "процесса нет" in text and "Spark Go — пишет код" not in text
+    assert "Дальше: если перезапустится: потом тесты" in text
 
 
 def test_clean_activity_keeps_paths_and_math():
