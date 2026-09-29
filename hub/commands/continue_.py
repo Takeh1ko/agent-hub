@@ -8,7 +8,8 @@ import tomllib
 from pathlib import Path
 
 from hub.config import load_project
-from hub.pipeline.common import merge_base
+from hub.pipeline.common import clean_pycache, merge_base
+from hub.read.git import is_dirty
 from hub.store import Store
 
 WIP_MSG = "wip: наработка до continue"
@@ -23,20 +24,11 @@ def _wip_commit(worktree: str) -> int:
     wip захватит мусор pytest, а `is_dirty` увидит грязь там, где её нет.
     """
     try:
-        from hub.pipeline.common import clean_pycache
-    except ImportError:
-        clean_pycache = None  # type: ignore[assignment]
-    try:
-        if clean_pycache is not None:
-            clean_pycache(worktree)
+        clean_pycache(worktree)
     except (OSError, ValueError):
         pass
     try:
-        from hub.read.git import is_dirty
-    except ImportError:
-        is_dirty = None  # type: ignore[assignment]
-    try:
-        dirty = bool(is_dirty(worktree)) if is_dirty is not None else True
+        dirty = bool(is_dirty(worktree))
     except (OSError, subprocess.SubprocessError):
         dirty = True
     if not dirty:

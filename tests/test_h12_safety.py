@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess as _sp
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -127,10 +129,10 @@ class _SilentProc:
 
 
 def test_silence_watchdog_kills(tmp_path, monkeypatch):
-    """Фейк молчит дольше idle_s (1 c) — прерывается с 'тишина'."""
+    """Фейк молчит дольше idle_s (1 c) — прерывается с 'тишина N c'."""
     monkeypatch.setattr(_sp, "Popen", lambda *a, **k: _SilentProc())
     r = OpencodeRunner(idle_s=1, timeout_s=30)
-    with pytest.raises(RuntimeError, match="тишина 1 c"):
+    with pytest.raises(RuntimeError, match=r"тишина \d+ c"):
         r.start("промпт", str(tmp_path), log=str(tmp_path / "o.log"))
     # Изоляция заодно: каталог создан даже при тишине.
     assert (tmp_path / ".agent" / "hubhome").is_dir()
@@ -144,77 +146,151 @@ def test_silence_message_has_secs(tmp_path, monkeypatch):
         assert False, "должен упасть тишиной"
     except RuntimeError as e:
         assert "opencode: тишина" in str(e)
-        assert " c " in str(e) or " c(" in str(e)
+        secs = cyc._silence_secs(e)
+        assert secs is not None and secs >= 1, str(e)
 
 
 def test_json_resets_watchdog(tmp_path, monkeypatch):
-    """Говорящий процесс (JSON сразу) — сторож не срабатывает."""
-    def _gen2():
-        yield json.dumps({"sessionID": "ses-ok"}) + "\n"
+    """Пульс JSON-событий сбрасывает сторож: паузы < idle_s, общее время > idle_s.
 
-    class _Quick:
+    Фейк живёт ~2,4 с при idle_s=1: если сброс last_event сломан,
+    сторож убьёт процесс на первой секунде (проверено мутацией).
+    """
+    gap, beats, idle = 0.6, 4, 1
+    done = threading.Event()
+
+    def _gen():
+        yield json.dumps({"sessionID": "ses-ok"}) + "\n"
+        for _ in range(beats):
+            time.sleep(gap)
+            yield json.dumps({"type": "beat"}) + "\n"
+
+    class _Talkative:
         def __init__(self) -> None:
-            self.stdout = _gen2()
+            self.stdout = self._wrap()
             self.stderr = _FakeErr()
             self.returncode = 0
             self.pid = 2_000_000_002
+            self.killed = False
+
+        def _wrap(self):
+            try:
+                for line in _gen():
+                    yield line
+            finally:
+                done.set()
 
         def wait(self, timeout=None) -> int:
-            return 0
+            if self.killed:
+                self.returncode = 1
+                return 1
+            if done.is_set():
+                return 0
+            time.sleep(timeout if timeout else 0.2)
+            if done.is_set():
+                return 0
+            raise _sp.TimeoutExpired(cmd="opencode", timeout=timeout)
 
         def kill(self) -> None:
-            pass
+            self.killed = True
 
-    monkeypatch.setattr(_sp, "Popen", lambda *a, **k: _Quick())
-    got = OpencodeRunner(idle_s=1, timeout_s=10).start(
+    box: list = []
+    monkeypatch.setattr(_sp, "Popen", lambda *a, **k: box.append(_Talkative()) or box[-1])
+    got = OpencodeRunner(idle_s=idle, timeout_s=30).start(
         "промпт", str(tmp_path), log=str(tmp_path / "ok.log"))
     assert got == "ses-ok"
+    assert box and not box[0].killed
 
 
 def test_children_inhibit_watchdog(tmp_path, monkeypatch):
-    """Есть дочерние процессы — тишина объяснена, watchdog не убивает."""
+    """Есть дочерние процессы — тишина ~1,8 с при idle_s=1 объяснена, живём.
+
+    Фейк висит дольше idle_s (wait бросает TimeoutExpired до конца),
+    поэтому ветка `_has_children` реально достигается: мутация
+    `if not _has_children(pid)` -> `if True` валит тест.
+    """
     import hub.pipeline.runners as _rm
+
+    silence = 1.8
+    done = threading.Event()
 
     def _gen():
         yield json.dumps({"sessionID": "ses-kid"}) + "\n"
-        # Дальше молчим, но дети есть — процесс должен дожить до конца.
-        import time as _t
-
-        _t.sleep(1.5)
+        time.sleep(silence)
         yield json.dumps({"type": "done"}) + "\n"
 
     class _WithKid:
         def __init__(self) -> None:
-            self.stdout = _gen()
+            self.stdout = self._wrap()
             self.stderr = _FakeErr()
             self.returncode = 0
-            self.pid = 1  # init: дети точно есть
+            self.pid = 1
             self.killed = False
 
-        def wait(self, timeout=None) -> int:
-            import time as _t
+        def _wrap(self):
+            try:
+                for line in _gen():
+                    yield line
+            finally:
+                done.set()
 
-            _t.sleep(timeout if timeout else 0.2)
-            return 0
+        def wait(self, timeout=None) -> int:
+            if self.killed:
+                self.returncode = 1
+                return 1
+            if done.is_set():
+                return 0
+            time.sleep(timeout if timeout else 0.2)
+            if done.is_set():
+                return 0
+            raise _sp.TimeoutExpired(cmd="opencode", timeout=timeout)
 
         def kill(self) -> None:
             self.killed = True
 
     proc_box: list = []
-    orig = _WithKid
 
     def _mk(*a, **k):
-        p = orig()
+        p = _WithKid()
         proc_box.append(p)
         return p
 
     monkeypatch.setattr(_sp, "Popen", _mk)
-    # pid=1 имеет детей на Linux, но для надёжности подменяем проверку.
     monkeypatch.setattr(_rm, "_has_children", lambda pid: True)
-    got = OpencodeRunner(idle_s=1, timeout_s=10).start(
+    got = OpencodeRunner(idle_s=1, timeout_s=30).start(
         "промпт", str(tmp_path), log=str(tmp_path / "kid.log"))
     assert got == "ses-kid"
     assert proc_box and not proc_box[0].killed
+
+
+def test_has_children_real():
+    """Настоящая проверка /proc: без моков, на живых процессах."""
+    import hub.pipeline.runners as _rm
+
+    assert _rm._has_children(None) is False
+    assert _rm._has_children(2_000_000_007) is False
+    assert _rm._has_children("мусор") is False
+    solo = _sp.Popen(["sleep", "30"])
+    try:
+        assert _rm._has_children(solo.pid) is False
+    finally:
+        solo.kill()
+        solo.wait()
+    shell = _sp.Popen(["sh", "-c", "sleep 30 & wait"], start_new_session=True)
+    try:
+        ok = False
+        for _ in range(50):
+            if _rm._has_children(shell.pid):
+                ok = True
+                break
+            time.sleep(0.1)
+        assert ok, "у sh со спящим ребёнком должны быть дети"
+    finally:
+        try:
+            os.killpg(shell.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+        shell.wait()
 
 
 class _FreeSilent:
@@ -302,6 +378,173 @@ def test_no_fallback_for_muse(tmp_path):
     got = cyc.run_task(Store(), proj, "TGO", runners, rounds=1)
     assert got == "failed"
     assert Store().get_task("TGO")["executor"] == "muse"
+
+
+def test_silence_secs_strict():
+    """Слово «тишина» без счётчика N c — не сработка сторожа."""
+    assert cyc._silence_secs(RuntimeError("opencode: тишина 75 c (лог x)")) == 75
+    assert cyc._silence_secs(RuntimeError("промпт про тишину без счётчика")) is None
+    assert cyc._silence_secs(RuntimeError("opencode: таймаут 10 c")) is None
+    assert cyc._silence_secs(RuntimeError("другая ошибка")) is None
+    assert cyc._silence_sid(
+        RuntimeError("opencode: тишина 60 c sid=ses-1 (лог x)")) == "ses-1"
+    assert cyc._silence_sid(
+        RuntimeError("opencode: тишина 60 c (лог x)")) is None
+
+
+def test_is_musefree_only_musefree():
+    """Fallback только для musefree: mimofree не уводится на muse."""
+    from hub.pipeline.runners import MODELS as _MODELS
+
+    class _St:
+        def __init__(self, exe: str) -> None:
+            self._exe = exe
+
+        def get_task(self, tid: str):
+            return {"executor": self._exe}
+
+    class _Ex:
+        def __init__(self, model: str) -> None:
+            self.model = model
+
+    musefree_id = _MODELS["musefree"][0]
+    assert cyc._is_musefree_task(_St("musefree"), "T", _Ex("что угодно"), {}) is True
+    assert cyc._is_musefree_task(_St("muse"), "T", _Ex(musefree_id), {}) is True
+    assert cyc._is_musefree_task(
+        _St("muse"), "T", _Ex("opencode/mimo-v2.6-flash-free"), {}) is False
+    assert cyc._is_musefree_task(
+        _St("muse"), "T", _Ex("opencode-go/muse-spark-1.3-contributor"), {}) is False
+
+
+def test_silence_error_carries_sid(tmp_path, monkeypatch):
+    """Sid из stdout до тишины — в тексте ошибки для resume той же сессии."""
+    def _gen():
+        yield json.dumps({"sessionID": "ses-part"}) + "\n"
+
+    class _PartSilent:
+        def __init__(self) -> None:
+            self.stdout = _gen()
+            self.stderr = _FakeErr()
+            self.returncode = None
+            self.pid = 2_000_000_009
+            self._killed = threading.Event()
+
+        def wait(self, timeout=None) -> int:
+            if self._killed.is_set():
+                self.returncode = 1
+                return 1
+            time.sleep(timeout if timeout else 0.2)
+            if self._killed.is_set():
+                self.returncode = 1
+                return 1
+            raise _sp.TimeoutExpired(cmd="opencode", timeout=timeout)
+
+        def kill(self) -> None:
+            self._killed.set()
+
+    monkeypatch.setattr(_sp, "Popen", lambda *a, **k: _PartSilent())
+    with pytest.raises(RuntimeError) as ei:
+        OpencodeRunner(idle_s=1, timeout_s=30).start(
+            "промпт", str(tmp_path), log=str(tmp_path / "part.log"))
+    assert "тишина" in str(ei.value)
+    assert "ses-part" in str(ei.value)
+    assert cyc._silence_sid(ei.value) == "ses-part"
+
+
+def test_musefree_fallback_resumes_same_session(tmp_path, monkeypatch):
+    """Тишина в круге 1 с известным sid → resume той же сессии на muse."""
+    import hub.pipeline.runners as _rm
+
+    repo, base = _mk_repo(tmp_path)
+    proj = _mk_project(repo)
+    _mk_task(tmp_path, repo, base, tid="TSID", executor="musefree")
+    calls: dict = {}
+
+    class _GoSid:
+        tool = "opencode"
+        model = "opencode-go/muse-spark-1.3-contributor"
+        timeout_s = 30
+        idle_s = 1
+
+        def start(self, prompt, cwd, log=None, on_session=None):
+            calls["start"] = True
+            _commit_ok(Path(cwd))
+            return "go-new"
+
+        def resume(self, sid, prompt, cwd, log=None, on_session=None):
+            calls["resume_sid"] = sid
+            _commit_ok(Path(cwd))
+            return sid
+
+    class _FreeSid:
+        tool = "opencode"
+        model = "opencode/muse-spark-1.3-contributor-free"
+        timeout_s = 30
+        idle_s = 1
+
+        def start(self, prompt, cwd, log=None, on_session=None):
+            raise RuntimeError("opencode: тишина 60 c sid=ses-free (лог x)")
+
+        def resume(self, sid, prompt, cwd, log=None, on_session=None):
+            raise RuntimeError("opencode: тишина 60 c (лог x)")
+
+    monkeypatch.setattr(_rm, "make_runner",
+                        lambda name, timeout_s=0, idle_s=0: _GoSid())
+    runners = {"executor": _FreeSid(), "reviewers": {"muse": _RevApprove()}}
+    got = cyc.run_task(Store(), proj, "TSID", runners, rounds=1)
+    assert got == "ready", Store().get_task("TSID")
+    assert calls.get("resume_sid") == "ses-free", calls
+    assert "start" not in calls
+    assert Store().get_task("TSID")["executor"] == "muse"
+
+
+def test_apply_idle_from_project():
+    """Порог тишины из конфига расходится по раннерам."""
+
+    class _R:
+        idle_s = 900
+
+    class _P:
+        idle_s = 5
+
+    r = _R()
+    cyc._apply_idle_from_project(_P(), [r])
+    assert r.idle_s == 5
+    cyc._apply_idle_from_project(_P(), [object()])
+
+
+def test_timeout_writes_partial_log(tmp_path, monkeypatch):
+    """Ветка таймаута пишет частичный stdout в лог, как ветка тишины."""
+    def _gen():
+        yield json.dumps({"sessionID": "ses-t"}) + "\n"
+        yield "часть-вывода\n"
+
+    class _Hang:
+        def __init__(self) -> None:
+            self.stdout = _gen()
+            self.stderr = _FakeErr()
+            self.returncode = None
+            self.pid = 2_000_000_011
+            self._killed = threading.Event()
+
+        def wait(self, timeout=None) -> int:
+            if self._killed.is_set():
+                self.returncode = 1
+                return 1
+            time.sleep(timeout if timeout else 0.2)
+            if self._killed.is_set():
+                self.returncode = 1
+                return 1
+            raise _sp.TimeoutExpired(cmd="opencode", timeout=timeout)
+
+        def kill(self) -> None:
+            self._killed.set()
+
+    monkeypatch.setattr(_sp, "Popen", lambda *a, **k: _Hang())
+    log = str(tmp_path / "hang.log")
+    with pytest.raises(RuntimeError, match="таймаут"):
+        OpencodeRunner(idle_s=0, timeout_s=1).start("промпт", str(tmp_path), log=log)
+    assert "часть-вывода" in Path(log).read_text(encoding="utf-8")
 
 
 def test_agent_env_inside_worktree(tmp_path, monkeypatch):

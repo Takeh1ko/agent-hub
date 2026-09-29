@@ -465,7 +465,11 @@ def _split_runners(runners, task: dict):
 
 
 def _silence_secs(exc: BaseException) -> int | None:
-    """Секунды тишины из `RuntimeError("opencode: тишина N c")`, иначе None."""
+    """Секунды тишины из `RuntimeError("opencode: тишина N c")`, иначе None.
+
+    Совпадение только по полному шаблону `тишина N c`: чужой текст
+    со словом «тишина» без счётчика — не сработка сторожа.
+    """
     try:
         msg = str(exc)
     except Exception:
@@ -475,16 +479,39 @@ def _silence_secs(exc: BaseException) -> int | None:
     import re as _re
 
     m = _re.search(r"тишина\s+(\d+)\s*c", msg)
-    if m:
-        try:
-            return int(m.group(1))
-        except (TypeError, ValueError):
-            return 0
-    return 0
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _silence_sid(exc: BaseException) -> str | None:
+    """SessionID из ошибки тишины (`... тишина N c sid=<id> ...`), иначе None.
+
+    Сторож дописывает sid, увиденный в stdout до тишины, — fallback
+    продолжает ту же сессию на muse через resume, а не start.
+    """
+    try:
+        msg = str(exc)
+    except Exception:
+        return None
+    import re as _re
+
+    m = _re.search(r"sid=([\w.\-]+)", msg)
+    if not m:
+        return None
+    return m.group(1) or None
 
 
 def _is_musefree_task(store, task_id: str, executor, task: dict) -> bool:
-    """Исполнитель задачи — бесплатный Spark (по полю задачи или модели)."""
+    """Исполнитель задачи — бесплатный Spark (только musefree).
+
+    Поле задачи `executor == "musefree"` или модель — musefree-id
+    (`opencode/muse-spark-*-free`). Другие free-модели (mimofree и т.п.)
+    сюда не попадают: карточка ограничивает fallback исполнителем musefree.
+    """
     try:
         cur = store.get_task(task_id) or task
     except (OSError, sqlite3.Error):
@@ -498,7 +525,20 @@ def _is_musefree_task(store, task_id: str, executor, task: dict) -> bool:
         model = str(getattr(executor, "model", "") or "")
     except (AttributeError, ValueError):
         model = ""
-    return "free" in model
+    if not model:
+        return False
+    try:
+        from hub.pipeline.runners import MODELS as _MODELS
+    except ImportError:
+        _MODELS = {}
+    musefree_id = ""
+    try:
+        musefree_id = str((_MODELS.get("musefree") or ("", None))[0] or "")
+    except (AttributeError, TypeError, IndexError):
+        musefree_id = ""
+    if musefree_id and model == musefree_id:
+        return True
+    return "muse-spark" in model and "free" in model
 
 
 def _apply_idle_from_project(project, runners_list: list) -> None:
@@ -761,15 +801,29 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                                f"executor-fail: {e}"[:500])
                     return "failed"
                 _log_silence_fallback(store, task_id, secs)
+                # Та же сессия продолжается на muse: sid из stdout до тишины
+                # (или exec_sid прошлых кругов) — через resume; sid нет
+                # (тишина с первой секунды) — новый start в круге 1.
+                resume_sid = exec_sid or _silence_sid(e)
                 try:
-                    if round_no == 1:
+                    if resume_sid:
+                        if round_no == 1:
+                            sid = executor.resume(
+                                resume_sid,
+                                prompts.executor_prompt(rules_text, card_text),
+                                worktree, log_exec)
+                        else:
+                            sid = executor.resume(
+                                resume_sid,
+                                prompts.fix_prompt(last_findings, last_gate or {}),
+                                worktree, log_exec)
+                    elif round_no == 1:
                         sid = executor.start(
                             prompts.executor_prompt(rules_text, card_text),
                             worktree, log_exec)
                     else:
-                        sid = executor.resume(
-                            exec_sid or "",
-                            prompts.fix_prompt(last_findings, last_gate or {}),
+                        sid = executor.start(
+                            prompts.executor_prompt(rules_text, card_text),
                             worktree, log_exec)
                 except (OSError, RuntimeError, subprocess.SubprocessError) as e2:
                     _set_stage(store, task_id, "failed", round_no,
@@ -878,7 +932,7 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                     _log_silence_fallback(store, task_id, secs)
                     try:
                         sid2 = executor.resume(
-                            exec_sid or "", repair_prompt(repair_reason),
+                            exec_sid or _silence_sid(e) or "", repair_prompt(repair_reason),
                             worktree,
                             str(Path(worktree) / ".agent" / f"repair_r{round_no}.log"))
                         try:

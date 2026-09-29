@@ -45,7 +45,6 @@ _IDLE_POLL_S = 0.2  # шаг опроса процесса сторожем
 
 AGENT_DIR = ".agent"
 HUBHOME_DIR = "hubhome"
-WIP_MSG = "wip: наработка до continue"
 
 
 class Runner(Protocol):
@@ -247,7 +246,8 @@ class OpencodeRunner:
         (ещё до конца процесса) — для линка в store во время шага.
         Ошибки колбэка глотаются: линк — best effort, id всё равно вернётся.
         Сторож тишины: нет JSON-событий `idle_s` c и нет дочерних процессов —
-        процесс прерывается, `RuntimeError("opencode: тишина N c")`.
+        процесс прерывается, `RuntimeError("opencode: тишина N c [sid=...]")`
+        (sid — если успел появиться в stdout до тишины).
         """
         notify = on_session
         log_path = log or _default_log(cwd, "opencode.log")
@@ -355,6 +355,14 @@ class OpencodeRunner:
                     t_err.join(timeout=10)
                     _close_quietly(proc.stdout)
                     _close_quietly(proc.stderr)
+                    partial = "".join(stdout_lines)
+                    err_txt = stderr_box[0] or ""
+                    combined = partial + ("\n" + err_txt if err_txt else "")
+                    try:
+                        with open(log_path, "w", encoding="utf-8") as f:
+                            f.write(combined)
+                    except OSError:
+                        pass
                     raise RuntimeError(
                         f"opencode: таймаут {timeout_s} c (лог {log_path})")
                 if idle_s and idle_s > 0 and (now - last_event[0] >= idle_s):
@@ -384,7 +392,12 @@ class OpencodeRunner:
                             pass
                         _close_quietly(proc.stdout)
                         _close_quietly(proc.stderr)
-                        raise RuntimeError(f"opencode: тишина {secs} c (лог {log_path})")
+                        # Sid из stdout до тишины — в текст ошибки: fallback
+                        # в cycle продолжает ту же сессию на muse через resume.
+                        known_sid = sid_box[0] or _extract_session_id(partial)
+                        suffix = f" sid={known_sid}" if known_sid else ""
+                        raise RuntimeError(
+                            f"opencode: тишина {secs} c{suffix} (лог {log_path})")
                     # Есть дети (pytest/flock) — молчание объяснено, ждём дальше.
             t_out.join(timeout=10)
             t_err.join(timeout=10)
@@ -424,19 +437,18 @@ class OpencodeRunner:
 
 
 class AgyRunner:
-    """`agy -p …`: id — conversation_id; запускать с cwd = worktree."""
+    """`agy -p …`: id — conversation_id; запускать с cwd = worktree.
+
+    Блокирующий `subprocess.run` — потокового сторожа тишины нет
+    (таймаут через `timeout_s`).
+    """
 
     tool = "agy"
 
     def __init__(self, timeout_s: int = DEFAULT_TIMEOUT_S,
-                 model: str = GEMINI_MODEL,
-                 idle_s: int = DEFAULT_IDLE_S) -> None:
+                 model: str = GEMINI_MODEL) -> None:
         self.timeout_s = timeout_s
         self.model = model
-        try:
-            self.idle_s = int(idle_s)
-        except (TypeError, ValueError):
-            self.idle_s = DEFAULT_IDLE_S
 
     def _call(self, prompt: str, cwd: str, session_id: str | None,
               log: str | None, *,
