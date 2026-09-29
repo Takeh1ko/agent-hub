@@ -464,6 +464,93 @@ def _split_runners(runners, task: dict):
     return exe, revs
 
 
+def _silence_secs(exc: BaseException) -> int | None:
+    """Секунды тишины из `RuntimeError("opencode: тишина N c")`, иначе None."""
+    try:
+        msg = str(exc)
+    except Exception:
+        return None
+    if "тишина" not in msg:
+        return None
+    import re as _re
+
+    m = _re.search(r"тишина\s+(\d+)\s*c", msg)
+    if m:
+        try:
+            return int(m.group(1))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _is_musefree_task(store, task_id: str, executor, task: dict) -> bool:
+    """Исполнитель задачи — бесплатный Spark (по полю задачи или модели)."""
+    try:
+        cur = store.get_task(task_id) or task
+    except (OSError, sqlite3.Error):
+        cur = task
+    try:
+        if str((cur or {}).get("executor") or "") == "musefree":
+            return True
+    except (AttributeError, TypeError):
+        pass
+    try:
+        model = str(getattr(executor, "model", "") or "")
+    except (AttributeError, ValueError):
+        model = ""
+    return "free" in model
+
+
+def _apply_idle_from_project(project, runners_list: list) -> None:
+    """Порог тишины из конфига проекта — в раннеры (без смены queue.py)."""
+    try:
+        idle = int(getattr(project, "idle_s", 900))
+    except (TypeError, ValueError, AttributeError):
+        return
+    for r in runners_list:
+        try:
+            if hasattr(r, "idle_s"):
+                r.idle_s = idle
+        except (AttributeError, ValueError):
+            continue
+
+
+def _make_muse_runner(executor):
+    """Раннер Spark Go для fallback после тишины musefree (та же сессия)."""
+    from hub.pipeline import runners as _rm
+
+    try:
+        timeout = int(getattr(executor, "timeout_s", 90 * 60))
+    except (TypeError, ValueError):
+        timeout = 90 * 60
+    try:
+        idle = int(getattr(executor, "idle_s", 900))
+    except (TypeError, ValueError):
+        idle = 900
+    try:
+        return _rm.make_runner("muse", timeout_s=timeout, idle_s=idle)
+    except TypeError:
+        return _rm.make_runner("muse")
+
+
+def _log_silence_fallback(store, task_id: str, secs: int) -> None:
+    """Событие в журнал задачи: бесплатный Spark молчал → Spark Go."""
+    try:
+        if secs >= 60:
+            mins = secs // 60
+            txt = f"бесплатный Spark молчал {mins} мин ({secs} c) → Spark Go"
+        else:
+            txt = f"бесплатный Spark молчал {secs} c → Spark Go"
+        store.add_event(task_id, "stuck", {"reason": txt, "from": "musefree",
+                                           "to": "muse", "silence_s": secs})
+    except (OSError, sqlite3.Error, ValueError):
+        pass
+    try:
+        store.upsert_task(id=task_id, executor="muse")
+    except (OSError, sqlite3.Error, ValueError):
+        pass
+
+
 def run_task(store, project, task_id: str, runners, rounds: int = 2,
              blind: bool = False, opencode_db: str | None = None,
              cost_fn=None) -> str:
@@ -493,6 +580,12 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
     executor, reviewers = _split_runners(runners, task)
     if not reviewers:
         reviewers = {}
+    # Порог тишины из конфига — в раннеры (queue.py не меняем).
+    try:
+        _apply_idle_from_project(project, [executor, *list(reviewers.values())])
+    except (OSError, ValueError, AttributeError):
+        pass
+    _silence_fallback_done = False
 
     _set_stage(store, task_id, "preflight", 0, "старт")
     _clean_pycache(worktree)
@@ -657,8 +750,34 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                     prompts.fix_prompt(last_findings, last_gate or {}),
                     worktree, log_exec)
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
-            _set_stage(store, task_id, "failed", round_no, f"executor-fail: {e}"[:500])
-            return "failed"
+            secs = _silence_secs(e)
+            if (secs is not None and not _silence_fallback_done
+                    and _is_musefree_task(store, task_id, executor, task)):
+                _silence_fallback_done = True
+                try:
+                    executor = _make_muse_runner(executor)
+                except (ValueError, OSError, RuntimeError):
+                    _set_stage(store, task_id, "failed", round_no,
+                               f"executor-fail: {e}"[:500])
+                    return "failed"
+                _log_silence_fallback(store, task_id, secs)
+                try:
+                    if round_no == 1:
+                        sid = executor.start(
+                            prompts.executor_prompt(rules_text, card_text),
+                            worktree, log_exec)
+                    else:
+                        sid = executor.resume(
+                            exec_sid or "",
+                            prompts.fix_prompt(last_findings, last_gate or {}),
+                            worktree, log_exec)
+                except (OSError, RuntimeError, subprocess.SubprocessError) as e2:
+                    _set_stage(store, task_id, "failed", round_no,
+                               f"executor-fail: {e2}"[:500])
+                    return "failed"
+            else:
+                _set_stage(store, task_id, "failed", round_no, f"executor-fail: {e}"[:500])
+                return "failed"
         exec_sid = sid
         # Сразу, как только id известен (не в конце).
         try:
@@ -746,8 +865,38 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                     pass
                 exec_sid = sid2
             except (OSError, RuntimeError, subprocess.SubprocessError) as e:
-                _set_stage(store, task_id, "failed", round_no, f"repair-fail: {e}"[:500])
-                return "failed"
+                secs = _silence_secs(e)
+                if (secs is not None and not _silence_fallback_done
+                        and _is_musefree_task(store, task_id, executor, task)):
+                    _silence_fallback_done = True
+                    try:
+                        executor = _make_muse_runner(executor)
+                    except (ValueError, OSError, RuntimeError):
+                        _set_stage(store, task_id, "failed", round_no,
+                                   f"repair-fail: {e}"[:500])
+                        return "failed"
+                    _log_silence_fallback(store, task_id, secs)
+                    try:
+                        sid2 = executor.resume(
+                            exec_sid or "", repair_prompt(repair_reason),
+                            worktree,
+                            str(Path(worktree) / ".agent" / f"repair_r{round_no}.log"))
+                        try:
+                            tool, model = _runner_tool_model(
+                                executor, store.get_task(task_id) or task)
+                            store.link_session(sid2, tool, task_id,
+                                               "executor", round_no, model)
+                        except (OSError, sqlite3.Error):
+                            pass
+                        exec_sid = sid2
+                    except (OSError, RuntimeError, subprocess.SubprocessError) as e2:
+                        _set_stage(store, task_id, "failed", round_no,
+                                   f"repair-fail: {e2}"[:500])
+                        return "failed"
+                else:
+                    _set_stage(store, task_id, "failed", round_no,
+                               f"repair-fail: {e}"[:500])
+                    return "failed"
             # Повторная проверка один раз.
             _clean_pycache(worktree)
             head2 = _head_sha(worktree)

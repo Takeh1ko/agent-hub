@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .agent/
+.agent.prev_*/
 *.egg-info/
