@@ -662,6 +662,35 @@ def _transient_reason(err_text: str) -> str:
     return f"сбой сети/сервера opencode: {t}"[:500]
 
 
+def _retry_sleep(secs: float) -> None:
+    """Пауза перед повтором (своя функция модуля для тестов).
+
+    Тесты подменяют только её (`monkeypatch.setattr(cyc, "_retry_sleep", …)`),
+    а не глобальный `time.sleep`: иначе в окно теста попадают сны
+    subprocess/git и тест `test_retry_pause_grows_x2` красный в трети прогонов.
+    """
+    try:
+        time.sleep(secs)
+    except (OSError, ValueError, OverflowError):
+        pass
+
+
+def _transient_sid(exc: BaseException) -> str | None:
+    """SessionID из TransientError (увиден в stdout до сбоя), иначе None.
+
+    Исполнитель повторяет ту же сессию (`--session`), ревьюер — новой.
+    """
+    try:
+        sid = getattr(exc, "session_id", None)
+    except Exception:
+        return None
+    try:
+        s = str(sid or "").strip()
+    except (AttributeError, ValueError, TypeError):
+        return None
+    return s or None
+
+
 def _with_transient_retry(store, task_id: str, fn, retry_max: int,
                           retry_base: float):
     """Вызвать fn() с повторами при TransientError (до retry_max раз).
@@ -671,6 +700,7 @@ def _with_transient_retry(store, task_id: str, fn, retry_max: int,
     Не транзиентные ошибки пробрасываются сразу.
     """
     last_text = ""
+    last_sid: str | None = None
     total = max(0, int(retry_max)) + 1
     for attempt in range(total):
         try:
@@ -682,11 +712,150 @@ def _with_transient_retry(store, task_id: str, fn, retry_max: int,
                 last_text = str(e) or "сбой opencode"
             except Exception:
                 last_text = "сбой opencode"
+            try:
+                _sid = _transient_sid(e)
+                if _sid:
+                    last_sid = _sid
+            except (AttributeError, ValueError):
+                pass
             if attempt >= max(0, int(retry_max)):
                 try:
                     from hub.pipeline.runners import TransientError as _TE
 
-                    raise _TE(last_text[:2000]) from e
+                    raise _TE(last_text[:2000],
+                              session_id=last_sid) from e
+                except (ImportError, TypeError):
+                    raise
+            n = attempt + 1
+            try:
+                pause = float(retry_base) * (2 ** (n - 1)) if retry_base else 0.0
+            except (TypeError, ValueError):
+                pause = 0.0
+            _log_retry(store, task_id, last_text, n, max(0, int(retry_max)), pause)
+            try:
+                if pause and pause > 0:
+                    _retry_sleep(pause)
+            except (OSError, ValueError, OverflowError):
+                pass
+            continue
+    try:
+        from hub.pipeline.runners import TransientError as _TE
+
+        raise _TE((last_text or "сбой opencode")[:2000],
+                  session_id=last_sid)
+    except (ImportError, TypeError):
+        raise RuntimeError(last_text or "сбой opencode")
+
+
+def _exec_with_retry(store, task_id: str, executor, exec_prompt: str,
+                     worktree: str, log_exec: str, retry_max: int,
+                     retry_base: float, round_no: int,
+                     use_old_session: bool, old_exec_sid: str | None,
+                     exec_sid: str | None):
+    """Шаг исполнителя с повторами: та же сессия, если sid уже получен.
+
+    Круг 1 свежий старт: первая попытка — `start`, при `TransientError`
+    с `session_id` (sid уже был в stdout до сбоя) повтор — `resume(sid)`,
+    без sid — снова `start` (новая сессия). Круг ≥2 / continue старой
+    сессией / repair — всегда `resume` того же sid. Событие и пауза ×2 —
+    как `_with_transient_retry`; исчерпали — проброс `TransientError`.
+    """
+    last_sid: str | None = None
+    last_text = ""
+    total = max(0, int(retry_max)) + 1
+    for attempt in range(total):
+        # Какую сессию продолжаем на этой попытке.
+        resume_sid: str | None = None
+        do_start = False
+        if round_no == 1 and use_old_session and old_exec_sid and last_sid is None:
+            resume_sid = old_exec_sid
+        elif last_sid:
+            resume_sid = last_sid
+        elif round_no == 1 and attempt == 0 and not (use_old_session and old_exec_sid):
+            do_start = True
+        elif round_no == 1 and last_sid is None:
+            # Повтор без sid — новая сессия.
+            do_start = True
+        else:
+            resume_sid = exec_sid or old_exec_sid or last_sid
+            if not resume_sid:
+                do_start = True
+        try:
+            if do_start:
+                return executor.start(exec_prompt, worktree, log_exec)
+            return executor.resume(resume_sid or "", exec_prompt,
+                                   worktree, log_exec)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            if not _is_transient_exc(e):
+                raise
+            try:
+                last_text = str(e) or "сбой opencode"
+            except Exception:
+                last_text = "сбой opencode"
+            try:
+                _sid = _transient_sid(e)
+                if _sid:
+                    last_sid = _sid
+            except (AttributeError, ValueError):
+                pass
+            if attempt >= max(0, int(retry_max)):
+                try:
+                    from hub.pipeline.runners import TransientError as _TE
+
+                    raise _TE(last_text[:2000],
+                              session_id=last_sid) from e
+                except (ImportError, TypeError):
+                    raise
+            n = attempt + 1
+            try:
+                pause = float(retry_base) * (2 ** (n - 1)) if retry_base else 0.0
+            except (TypeError, ValueError):
+                pause = 0.0
+            _log_retry(store, task_id, last_text, n, max(0, int(retry_max)), pause)
+            try:
+                if pause and pause > 0:
+                    _retry_sleep(pause)
+            except (OSError, ValueError, OverflowError):
+                pass
+            continue
+    try:
+        from hub.pipeline.runners import TransientError as _TE
+
+        raise _TE((last_text or "сбой opencode")[:2000],
+                  session_id=last_sid)
+    except (ImportError, TypeError):
+        raise RuntimeError(last_text or "сбой opencode")
+
+
+def _review_fix_with_retry(store, task_id: str, runner, prompt: str,
+                           worktree: str, log: str, per_file: str,
+                           rsid: str, retry_max: int, retry_base: float):
+    """Добивка ревьюера (`_do_fix`): первая попытка — та же сессия, повторы — новой.
+
+    Ревьюер по контракту H13 — всегда новой сессией: если `resume(rsid)`
+    упал транзиентно, повтор — `start` (новый sid пишет тот же per-файл).
+    Всего 1 + retry_max вызовов (как у остальных шагов), на каждый повтор —
+    событие и пауза ×2. Успех возвращает sid (новый или старый).
+    """
+    last_text = ""
+    total = max(0, int(retry_max)) + 1
+    for attempt in range(total):
+        try:
+            if attempt == 0:
+                return runner.resume(rsid, prompt, worktree, log)
+            return runner.start(prompt, worktree, log)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e2:
+            if not _is_transient_exc(e2):
+                raise
+            try:
+                last_text = str(e2) or "сбой opencode"
+            except Exception:
+                last_text = "сбой opencode"
+            if attempt >= max(0, int(retry_max)):
+                try:
+                    from hub.pipeline.runners import TransientError as _TE
+
+                    raise _TE(last_text[:2000]) from e2
                 except ImportError:
                     raise
             n = attempt + 1
@@ -697,7 +866,7 @@ def _with_transient_retry(store, task_id: str, fn, retry_max: int,
             _log_retry(store, task_id, last_text, n, max(0, int(retry_max)), pause)
             try:
                 if pause and pause > 0:
-                    time.sleep(pause)
+                    _retry_sleep(pause)
             except (OSError, ValueError, OverflowError):
                 pass
             continue
@@ -979,19 +1148,15 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         use_old_session = bool(round_no == 1 and continued
                                and not exec_fresh and old_exec_sid)
 
-        def _do_exec():
-            if round_no == 1 and use_old_session and old_exec_sid:
-                return executor.resume(old_exec_sid, exec_prompt,
-                                       worktree, log_exec)
-            if round_no == 1:
-                return executor.start(exec_prompt, worktree, log_exec)
-            return executor.resume(exec_sid or "", exec_prompt,
-                                   worktree, log_exec)
-
+        # H13 п.2: при TransientError с известным sid — повтор той же
+        # сессией (`--session`), без sid в круге 1 — новой (start).
         try:
             try:
-                sid = _with_transient_retry(store, task_id, _do_exec,
-                                            retry_max, retry_base)
+                sid = _exec_with_retry(store, task_id, executor, exec_prompt,
+                                       worktree, log_exec, retry_max,
+                                       retry_base, round_no,
+                                       use_old_session, old_exec_sid,
+                                       exec_sid)
             except (OSError, RuntimeError, subprocess.SubprocessError) as e:
                 if _is_transient_exc(e):
                     _set_stage(store, task_id, "arbiter", round_no,
@@ -1297,17 +1462,16 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
             except (OSError, sqlite3.Error, ValueError):
                 pass
             # Один повтор не записавшему валидный JSON (как PanelReviewer).
+            # H13: добивка — первая попытка та же сессия, повторы — новой.
             own = Path(worktree) / ".agent" / per_file
             if not _review_file_valid(own):
                 fix_text = REVIEW_FIX_TEXT.replace("review_rN.json", per_file)
 
-                def _do_fix():
-                    return runner.resume(rsid, fix_text, worktree, log)
-
                 try:
                     try:
-                        rsid2 = _with_transient_retry(store, task_id, _do_fix,
-                                                      retry_max, retry_base)
+                        rsid2 = _review_fix_with_retry(
+                            store, task_id, runner, fix_text, worktree,
+                            log, per_file, rsid, retry_max, retry_base)
                     except (OSError, RuntimeError, subprocess.SubprocessError) as e:
                         if _is_transient_exc(e):
                             try:

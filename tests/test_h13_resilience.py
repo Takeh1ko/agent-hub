@@ -131,6 +131,20 @@ def test_transient_error_line_only_type_error():
         "type": "error", "error": "HTTP 429 too many requests"})) is not None
 
 
+def test_transient_only_type_error_text_event_not_transient():
+    """Событие {"type":"text"} с текстом сбоя — НЕ транзиент.
+
+    Закрепляет «только type == error»: мутация снятия проверки типа
+    (любой JSON с маркером — транзиент) должна валить набор.
+    """
+    assert transient_error_of_line(json.dumps({
+        "type": "text", "text": "UnknownError: Unexpected server error"})) is None
+    assert transient_error_of_line(json.dumps({
+        "type": "text", "error": "Unexpected server error"})) is None
+    assert transient_error_of_line(json.dumps({
+        "type": "message", "text": "socket hang up"})) is None
+
+
 def test_opencode_runner_raises_transient(tmp_path, monkeypatch):
     import subprocess as _sp
 
@@ -492,13 +506,171 @@ def test_exec_all_transients_arbiter(tmp_path):
     assert "сбой сети/сервера opencode" in reason, reason
 
 
+def test_exec_transient_same_session_when_sid_known(tmp_path):
+    """Исполнитель: sid уже получен до сбоя — повтор той же сессией (--session)."""
+    repo, base = _mk_repo(tmp_path)
+    proj = _mk_project(repo)
+    _mk_task(tmp_path, repo, base, tid="TES")
+
+    class ExecSidKnown:
+        tool = "opencode"
+        model = "muse"
+
+        def __init__(self):
+            self.calls: list = []
+
+        def start(self, prompt, cwd, log=None):
+            self.calls.append(("start", None))
+            # Sid уже в stdout до error-события — повтор той же сессией.
+            raise TransientError("socket hang up",
+                                 session_id="partial-sid-1")
+
+        def resume(self, sid, prompt, cwd, log=None):
+            self.calls.append(("resume", sid))
+            _commit_ok(Path(cwd))
+            return sid or "partial-sid-1"
+
+    class RevApprove:
+        tool = "opencode"
+        model = "muse"
+
+        def start(self, prompt, cwd, log=None):
+            import re as _re
+
+            m = _re.search(r"review_r(\d+)\.json", prompt or "")
+            rnd = int(m.group(1)) if m else 1
+            (Path(cwd) / ".agent" / f"review_r{rnd}_muse.json").write_text(
+                json.dumps({"verdict": "approve", "findings": []}),
+                encoding="utf-8")
+            return "rev-1"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            return sid
+
+    exe = ExecSidKnown()
+    got = cyc.run_task(Store(), proj, "TES",
+                       {"executor": exe, "reviewers": {"muse": RevApprove()}},
+                       rounds=1)
+    assert got == "ready", Store().get_task("TES")
+    assert exe.calls[0][0] == "start", exe.calls
+    assert exe.calls[1] == ("resume", "partial-sid-1"), exe.calls
+
+
+def test_exec_transient_no_sid_new_session(tmp_path):
+    """Исполнитель: sid нет — повтор новой сессией (start, не resume)."""
+    repo, base = _mk_repo(tmp_path)
+    proj = _mk_project(repo)
+    _mk_task(tmp_path, repo, base, tid="TEN")
+
+    class ExecNoSid:
+        tool = "opencode"
+        model = "muse"
+
+        def __init__(self):
+            self.calls: list = []
+
+        def start(self, prompt, cwd, log=None):
+            self.calls.append(("start", None))
+            if len([c for c in self.calls if c[0] == "start"]) == 1:
+                raise TransientError("socket hang up")
+            _commit_ok(Path(cwd))
+            return "exec-new"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            self.calls.append(("resume", sid))
+            _commit_ok(Path(cwd))
+            return sid or "exec-new"
+
+    class RevApprove:
+        tool = "opencode"
+        model = "muse"
+
+        def start(self, prompt, cwd, log=None):
+            import re as _re
+
+            m = _re.search(r"review_r(\d+)\.json", prompt or "")
+            rnd = int(m.group(1)) if m else 1
+            (Path(cwd) / ".agent" / f"review_r{rnd}_muse.json").write_text(
+                json.dumps({"verdict": "approve", "findings": []}),
+                encoding="utf-8")
+            return "rev-1"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            return sid
+
+    exe = ExecNoSid()
+    got = cyc.run_task(Store(), proj, "TEN",
+                       {"executor": exe, "reviewers": {"muse": RevApprove()}},
+                       rounds=1)
+    assert got == "ready", Store().get_task("TEN")
+    assert exe.calls == [("start", None), ("start", None)], exe.calls
+
+
+def test_review_fix_retries_new_session(tmp_path):
+    """Ревьюер `_do_fix`: первая добивка — та же сессия, повторы — новой."""
+    repo, base = _mk_repo(tmp_path)
+    proj = _mk_project(repo)
+    _mk_task(tmp_path, repo, base, tid="TRF2")
+
+    class RevFixNew:
+        tool = "opencode"
+        model = "muse"
+
+        def __init__(self):
+            self.calls: list = []
+            self.starts = 0
+
+        def start(self, prompt, cwd, log=None):
+            import re as _re
+
+            self.starts += 1
+            self.calls.append(("start", self.starts))
+            m = _re.search(r"review_r(\d+)\.json", prompt or "")
+            rnd = int(m.group(1)) if m else 1
+            m2 = _re.search(r"review_r\d+_([A-Za-z0-9_-]+)\.json", prompt or "")
+            nm = m2.group(1) if m2 else "muse"
+            if self.starts == 1:
+                # Первый старт — без валидного JSON (триггер _do_fix).
+                (Path(cwd) / ".agent" / f"review_r{rnd}_{nm}.json").write_text(
+                    "не json", encoding="utf-8")
+                return "rev-first"
+            (Path(cwd) / ".agent" / f"review_r{rnd}_{nm}.json").write_text(
+                json.dumps({"verdict": "approve", "findings": []}),
+                encoding="utf-8")
+            return f"rev-retry-{self.starts}"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            self.calls.append(("resume", sid))
+            raise TransientError("Unexpected server error")
+
+    rev = RevFixNew()
+    got = cyc.run_task(Store(), proj, "TRF2",
+                       {"executor": ExecOk(),
+                        "reviewers": {"muse": rev}},
+                       rounds=1)
+    assert got == "ready", Store().get_task("TRF2")
+    # Первая добивка — resume той же, повтор — start новой сессией.
+    assert rev.calls[0][0] == "start", rev.calls
+    assert rev.calls[1][0] == "resume", rev.calls
+    assert rev.calls[1][1] == "rev-first", rev.calls
+    assert rev.calls[2][0] == "start", rev.calls
+    assert (repo / ".agent" / "review_r1_muse.json").is_file()
+    data = json.loads((repo / ".agent" / "review_r1_muse.json").read_text(
+        encoding="utf-8"))
+    assert data.get("verdict") == "approve"
+
+
 def test_retry_pause_grows_x2(monkeypatch, tmp_path):
-    """Паузы растут ×2: при base=120 → 120/240/480."""
+    """Паузы растут ×2: при base=120 → 120/240/480.
+
+    Пауза — только через `cyc._retry_sleep` (не глобальный `time.sleep`):
+    иначе в окно теста попадают сны subprocess/git и тест флакает.
+    """
     repo, base = _mk_repo(tmp_path)
     proj = _mk_project(repo, retry_max=3, retry_pause=120.0)
     _mk_task(tmp_path, repo, base, tid="TPZ")
     sleeps: list[float] = []
-    monkeypatch.setattr(cyc.time, "sleep", lambda s: sleeps.append(float(s)))
+    monkeypatch.setattr(cyc, "_retry_sleep", lambda s: sleeps.append(float(s)))
     rev = AlwaysTransientRev()
     got = cyc.run_task(Store(), proj, "TPZ",
                        {"executor": ExecOk(), "reviewers": {"muse": rev}},
@@ -699,6 +871,17 @@ def test_continue_changed_card_new_session(tmp_path, capsys):
     events = [e for e in Store().events_since(0) if e["task_id"] == tid]
     assert any("карточка изменена" in (e.get("payload_json") or "") for e in events), \
         [e.get("payload_json") for e in events]
+    # Событие — stage-событие: в payload есть ключ stage, как у всех stage.
+    card_ev = [e for e in events
+               if "карточка изменена" in (e.get("payload_json") or "")]
+    assert card_ev, [e.get("payload_json") for e in events]
+    for e in card_ev:
+        try:
+            payload = json.loads(e.get("payload_json") or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        assert e.get("kind") == "stage", e
+        assert "stage" in payload, payload
     # Следующий прогон — новая сессия (start, не resume старой).
     proj = ProjectConfig(name="T", root=str(root), rules="docs/rules.md",
                          python=sys.executable, test_lock="", work_branch="main",
@@ -985,6 +1168,9 @@ def _observer_stubs(tmp_path: Path, mode: str) -> dict:
         "  else\n"
         "    echo '{\"sessionID\":\"ok-1\"}'\n"
         "  fi\n"
+        "elif [ \"$FAKE_MODE\" = \"text-429\" ]; then\n"
+        "  echo '{\"sessionID\":\"ok-1\"}'\n"
+        "  echo '{\"type\":\"text\",\"text\":\"отчёт: обработано 429 запросов, status 500 в эхе промпта\"}'\n"
         "else\n"
         "  echo '{\"sessionID\":\"ok-1\"}'\n"
         "fi\n"
@@ -1038,6 +1224,10 @@ def _observer_env(tmp_path: Path, stubs: dict, mode: str) -> dict:
     env["FAKE_MODE"] = mode
     env["FAKE_D"] = str(stubs["fake_d"])
     env["PATH"] = str(stubs["bindir"]) + ":" + env.get("PATH", "")
+    # Изоляция боевой базы: AGENT_HUB_HOME и HOME — во временный каталог.
+    hub_home = str(tmp_path / "hubhome")
+    env["AGENT_HUB_HOME"] = hub_home
+    env["HOME"] = str(tmp_path)
     return env
 
 
@@ -1067,10 +1257,16 @@ def test_observer_retry_then_clean(tmp_path):
 
 
 def test_observer_double_transient_network_problem(tmp_path):
-    """Оба прогона с ошибкой сети → hub say про сбой сети/сервера."""
+    """Оба прогона с ошибкой сети → hub say про сбой сети/сервера.
+
+    Inbox — в AGENT_HUB_HOME (временный каталог), а не в боевую базу;
+    подпись — из OBSERVER_MODEL (короткое имя), не Gemini.
+    """
     stubs = _observer_stubs(tmp_path / "b", "transient-always")
-    _run_observer_once(_observer_env(tmp_path / "b", stubs,
-                                      "transient-always"))
+    env = _observer_env(tmp_path / "b", stubs, "transient-always")
+    # Инит базы во временном AGENT_HUB_HOME (таблицы из миграций).
+    Store(path=Path(env["AGENT_HUB_HOME"]) / "hub.db")
+    _run_observer_once(env)
     fake_d = stubs["fake_d"]
     try:
         count = int((fake_d / "count").read_text(encoding="utf-8").strip())
@@ -1083,6 +1279,46 @@ def test_observer_double_transient_network_problem(tmp_path):
     except OSError:
         pass
     assert "сбой сети/сервера opencode" in hub_log, hub_log
+    assert "Наблюдатель (Gemini)" not in hub_log, hub_log
+    assert "Наблюдатель (dummy)" in hub_log, hub_log
+    # Сообщение — во временном ящике.
+    import sqlite3 as _sq
+
+    db = Path(env["AGENT_HUB_HOME"]) / "hub.db"
+    con = _sq.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+    try:
+        rows = list(con.execute("SELECT text FROM inbox WHERE source='observer'"))
+    finally:
+        con.close()
+    assert any("сбой сети/сервера opencode" in (r[0] or "") for r in rows), rows
+    # А не в боевом: HOME-база пуста (старый код писал в ~/.local/share/...).
+    home_db = Path(env["HOME"]) / ".local/share/agent-hub/hub.db"
+    if home_db.is_file():
+        con2 = _sq.connect(f"file:{home_db}?mode=ro", uri=True, timeout=5)
+        try:
+            try:
+                rows2 = list(con2.execute("SELECT text FROM inbox"))
+            except _sq.Error:
+                rows2 = []
+        finally:
+            con2.close()
+        assert not any("сбой сети/сервера opencode" in (r[0] or "")
+                       for r in rows2), rows2
+
+
+def test_observer_default_label_deepseek(tmp_path):
+    """Без OBSERVER_MODEL подпись — «Наблюдатель (DeepSeek)», не Gemini."""
+    stubs = _observer_stubs(tmp_path / "d", "transient-always")
+    env = _observer_env(tmp_path / "d", stubs, "transient-always")
+    env.pop("OBSERVER_MODEL", None)
+    Store(path=Path(env["AGENT_HUB_HOME"]) / "hub.db")
+    _run_observer_once(env)
+    try:
+        hub_log = (stubs["fake_d"] / "hub.log").read_text(encoding="utf-8")
+    except OSError:
+        hub_log = ""
+    assert "Наблюдатель (DeepSeek)" in hub_log, hub_log
+    assert "Gemini" not in hub_log, hub_log
 
 
 def test_observer_no_transient_no_retry(tmp_path):
@@ -1101,4 +1337,26 @@ def test_observer_no_transient_no_retry(tmp_path):
         sleep_log = (fake_d / "sleep.log").read_text(encoding="utf-8")
     except OSError:
         pass
+    assert "120" not in sleep_log.split(), sleep_log
+
+
+def test_observer_text_429_no_retry(tmp_path):
+    """«429»/«status 5» в тексте отчёта (type=text) — не сбой, повтора нет.
+
+    Закрепляет разбор как JSON (только type==error): grep по всему логу
+    давал ложный повтор на эхо промпта и текст отчёта.
+    """
+    stubs = _observer_stubs(tmp_path / "e", "text-429")
+    _run_observer_once(_observer_env(tmp_path / "e", stubs, "text-429"))
+    fake_d = stubs["fake_d"]
+    try:
+        count = int((fake_d / "count").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        count = 0
+    assert count == 1, count
+    assert len(list((stubs["obs"]).glob("agy_*.log"))) == 1
+    try:
+        sleep_log = (fake_d / "sleep.log").read_text(encoding="utf-8")
+    except OSError:
+        sleep_log = ""
     assert "120" not in sleep_log.split(), sleep_log

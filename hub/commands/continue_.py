@@ -159,7 +159,8 @@ def cmd_continue(args) -> int:
         return 1
     if card_changed:
         try:
-            store.add_event(task_id, "stage", {"reason": CARD_CHANGED_MSG})
+            store.add_event(task_id, "stage", {"stage": "queued",
+                                               "reason": CARD_CHANGED_MSG})
         except (OSError, ValueError):
             pass
     # Флаг продолжения: HEAD ветки уже впереди базы (работа прошлого

@@ -48,7 +48,19 @@ HUBHOME_DIR = "hubhome"
 
 
 class TransientError(RuntimeError):
-    """Сбой сети/сервера opencode: повтор, а не ответ модели."""
+    """Сбой сети/сервера opencode: повтор, а не ответ модели.
+
+    `session_id` — sid, уже увиденный в stdout до сбоя (если есть):
+    исполнитель повторяет ту же сессию (`--session`), ревьюер — новой.
+    """
+
+    def __init__(self, msg: str = "", session_id: str | None = None) -> None:
+        super().__init__(msg)
+        try:
+            sid = str(session_id).strip() if session_id else None
+        except (AttributeError, ValueError, TypeError):
+            sid = None
+        self.session_id: str | None = sid or None
 
 
 # Подстроки транзиентного сбоя (п.1 H13, регистронезависимо).
@@ -489,10 +501,13 @@ class OpencodeRunner:
                     except OSError:
                         pass
                     # Error-событие уже в частичном stdout (потом завис) —
-                    # это TransientError, а не таймаут.
+                    # это TransientError, а не таймаут (sid — для повтора
+                    # той же сессией исполнителя).
                     transient_seen = transient_box[0] or _first_transient_in(partial)
                     if transient_seen is not None:
-                        raise TransientError(transient_seen[:2000])
+                        _sid = sid_box[0] or _extract_session_id(partial)
+                        raise TransientError(transient_seen[:2000],
+                                             session_id=_sid)
                     raise RuntimeError(
                         f"opencode: таймаут {timeout_s} c (лог {log_path})")
                 if idle_s and idle_s > 0 and (now - last_event[0] >= idle_s):
@@ -523,10 +538,13 @@ class OpencodeRunner:
                         _close_quietly(proc.stdout)
                         _close_quietly(proc.stderr)
                         # Error-событие уже в частичном stdout (потом тишина) —
-                        # это TransientError, а не тишина.
+                        # это TransientError, а не тишина (sid — для повтора
+                        # той же сессией исполнителя).
                         transient_seen = transient_box[0] or _first_transient_in(partial)
                         if transient_seen is not None:
-                            raise TransientError(transient_seen[:2000])
+                            _sid = sid_box[0] or _extract_session_id(partial)
+                            raise TransientError(transient_seen[:2000],
+                                                 session_id=_sid)
                         # Sid из stdout до тишины — в текст ошибки: fallback
                         # в cycle продолжает ту же сессию на muse через resume.
                         known_sid = sid_box[0] or _extract_session_id(partial)
@@ -564,7 +582,8 @@ class OpencodeRunner:
         except (ValueError, AttributeError):
             transient_text = None
         if transient_text is not None:
-            raise TransientError(transient_text[:2000])
+            _sid = sid_box[0] or _extract_session_id(stdout_text)
+            raise TransientError(transient_text[:2000], session_id=_sid)
         sid = sid_box[0] or _extract_session_id(stdout_text)
         if sid:
             return sid
