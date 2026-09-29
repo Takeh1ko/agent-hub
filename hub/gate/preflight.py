@@ -188,10 +188,12 @@ def preflight(
             text=True,
             timeout=120,
         )
-    except (OSError, subprocess.SubprocessError):
-        return PreflightResult(ok=False, reason="collect-fail")
+    except (OSError, subprocess.SubprocessError) as e:
+        return PreflightResult(ok=False, reason=f"collect-fail: {e}"[-600:])
     if r.returncode != 0:
-        return PreflightResult(ok=False, reason="collect-fail")
+        # Хвост вывода — в причину: без него «collect-fail» не диагностируется.
+        tail = " ".join(((r.stdout or "") + " " + (r.stderr or "")).split())[-500:]
+        return PreflightResult(ok=False, reason=f"collect-fail: {tail}" if tail else "collect-fail")
     lock_path = (project.test_lock or "").strip()
     note = ""
     if lock_path:

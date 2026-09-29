@@ -177,7 +177,7 @@ def test_collect_fail(tmp_path):
     store = Store()
     store.upsert_task(id="T-coll", worktree=str(repo), base_sha=sha2)
     got = preflight(store, "T-coll", proj, proc_root=str(tmp_path / "proc-пусто"))
-    assert got.reason == "collect-fail"
+    assert got.reason.startswith("collect-fail")  # + хвост вывода pytest для диагностики
 
 
 def test_locked(tmp_path):
@@ -313,7 +313,7 @@ def test_python_missing_is_collect_fail(tmp_path):
     store = Store()
     store.upsert_task(id="T-pymiss", worktree=str(repo), base_sha=sha)
     got = preflight(store, "T-pymiss", proj, proc_root=str(tmp_path / "proc-пусто"))
-    assert got.reason == "collect-fail"
+    assert got.reason.startswith("collect-fail")  # + хвост вывода pytest для диагностики
 
 
 def test_order_dirty_beats_locked(tmp_path):
