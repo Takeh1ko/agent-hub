@@ -172,49 +172,97 @@ class Store:
 
     # --- импорт старого конвейера ---
 
-    def import_legacy(self, worktrees_dir: str | Path) -> list[str]:
+    def import_legacy(self, worktrees_dir: str | Path | None) -> list[str]:
         """Прочитать <wt>/*/.agent/state.json (+ review_rN*.json).
 
         Возвращает ids заведённых/обновлённых задач.
+        Sweep снятых worktree — только когда каталог worktrees известен:
+        задача из него пропала → ready → merged, остальные → dropped.
+        queued/preflight не трогаем (каталог ещё может создаваться).
+        Относительные пути сверяются от cwd.
         """
-        wt_dir = Path(worktrees_dir)
         done: list[str] = []
-        if not wt_dir.is_dir():
-            return done
-        for child in sorted(wt_dir.iterdir()):
-            state_path = child / ".agent" / "state.json"
-            if not state_path.is_file():
-                continue
-            try:
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(state, dict):
-                continue
-            task_id = str(state.get("task") or child.name)
-            status = str(state.get("status") or "failed")
-            round_no = int(state.get("round") or 0)
-            verdicts = state.get("verdicts") or []
-            stage = _legacy_stage(status, round_no, verdicts, child)
-            reviewers = state.get("reviewer_sessions") or []
-            self.upsert_task(
-                id=task_id,
-                branch=f"agent/{task_id}",
-                worktree=str(child),
-                base_sha=str(state.get("base") or ""),
-                stage=stage,
-                round=round_no,
-                reviewers_json=json.dumps(reviewers, ensure_ascii=False),
-                stage_reason=",".join(str(v) for v in verdicts),
-            )
-            exec_sid = state.get("executor_session")
-            if exec_sid and str(exec_sid) not in ("noop", "panel"):
-                self.link_session(str(exec_sid), "opencode", task_id, "executor", round_no, "")
-            for rsid in reviewers:
-                if not rsid or str(rsid) in ("noop", "panel"):
+        wt_dir = Path(worktrees_dir) if worktrees_dir else None
+        if wt_dir is not None and wt_dir.is_dir():
+            for child in sorted(wt_dir.iterdir()):
+                state_path = child / ".agent" / "state.json"
+                if not state_path.is_file():
                     continue
-                self.link_session(str(rsid), "opencode", task_id, "reviewer", round_no, "")
-            done.append(task_id)
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(state, dict):
+                    continue
+                task_id = str(state.get("task") or child.name)
+                status = str(state.get("status") or "failed")
+                round_no = int(state.get("round") or 0)
+                verdicts = state.get("verdicts") or []
+                stage = _legacy_stage(status, round_no, verdicts, child)
+                reviewers = state.get("reviewer_sessions") or []
+                fields = dict(
+                    branch=f"agent/{task_id}",
+                    worktree=str(child),
+                    base_sha=str(state.get("base") or ""),
+                    stage=stage,
+                    round=round_no,
+                    reviewers_json=json.dumps(reviewers, ensure_ascii=False),
+                    stage_reason=",".join(str(v) for v in verdicts),
+                )
+                # Чтение (hub status, /status) не должно писать: обновляем строку, только
+                # если legacy-поля реально изменились — иначе updated_at и пульс не трогаем.
+                old = self.get_task(task_id)
+                if old is None or any(str(old.get(k) or "") != str(v) for k, v in fields.items()):
+                    self.upsert_task(id=task_id, **fields)
+                exec_sid = state.get("executor_session")
+                if exec_sid and str(exec_sid) not in ("noop", "panel"):
+                    self.link_session(str(exec_sid), "opencode", task_id, "executor", round_no, "")
+                for rsid in reviewers:
+                    if not rsid or str(rsid) in ("noop", "panel"):
+                        continue
+                    self.link_session(str(rsid), "opencode", task_id, "reviewer", round_no, "")
+                done.append(task_id)
+        # Sweep: только когда каталог worktrees известен и задача из него
+        # пропала. queued/preflight не трогаем (каталог ещё создаётся).
+        # Без каталога (None/нет на диске) — только сканирование выше, без сноса.
+        if wt_dir is not None and wt_dir.is_dir():
+            try:
+                root = wt_dir.expanduser()
+                if not root.is_absolute():
+                    root = Path.cwd() / root
+            except OSError:
+                return done
+            try:
+                tasks = self.list_tasks(active_only=False)
+            except (OSError, ValueError, sqlite3.Error):
+                return done
+            for t in tasks:
+                stage = str(t.get("stage") or "")
+                if stage in FINAL_STAGES or stage in ("queued", "preflight"):
+                    continue
+                wt = str(t.get("worktree") or "")
+                if not wt:
+                    continue
+                try:
+                    p = Path(wt).expanduser()
+                    if not p.is_absolute():
+                        p = Path.cwd() / p
+                except OSError:
+                    continue
+                try:
+                    if p.exists():
+                        continue
+                except OSError:
+                    continue
+                try:
+                    p.relative_to(root)
+                except (ValueError, RuntimeError):
+                    continue
+                new_stage = "merged" if stage == "ready" else "dropped"
+                try:
+                    self.upsert_task(id=str(t.get("id") or ""), stage=new_stage)
+                except (OSError, ValueError, sqlite3.Error):
+                    continue
         return done
 
 

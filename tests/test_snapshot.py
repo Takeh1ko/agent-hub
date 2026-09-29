@@ -161,3 +161,14 @@ def test_roster_format(tmp_path):
     db = _mkdb(tmp_path / "oc.db", [{"id": "s1", "pulse": NOW, "model": "muse"}])
     text = snap.build(s, NOW, opencode_db=db, proc_root=tmp_path / "пустой").roster_text()
     assert "muse" in text and "executor" in text and "T01" in text and "exec r1" in text
+
+
+def test_clean_activity_keeps_paths_and_math():
+    from hub.read.snapshot import clean_activity as c
+
+    assert c("edit hub/__init__.py") == "edit hub/__init__.py"
+    assert c("2**3**2") == "2**3**2"
+    assert c("a * b * c") == "a * b * c"
+    assert c("snake_case_name") == "snake_case_name"
+    assert c("**Готово**, коммит") == "Готово, коммит"
+    assert c("*курсив* и _тоже_") == "курсив и тоже"

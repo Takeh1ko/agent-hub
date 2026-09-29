@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,49 @@ PYTEST_MS = 30 * 60_000
 
 DONE_STAGES = ("merged", "dropped")
 DONE_MARK = "✅"
+
+# Финальные этапы — свои значки, без ложного 🔴.
+FINAL_PULSE = {
+    "ready": "✅",
+    "merged": "✅",
+    "dropped": "✅",
+    "arbiter": "⚖️",
+    "failed": "❌",
+    "stopped": "⏹",
+}
+# Этапы без процесса в норме: 🔴 там — ложный, только ⚫.
+QUIET_NO_RED = ("queued", "preflight")
+
+
+def clean_activity(text: str, limit: int = 60) -> str:
+    """Последнее действие без markdown, ≤ limit символов.
+
+    Первая строка до смысла: парные маркеры снимаются,
+    одиночные _/* внутри слов (snake_case, пути, арифметика) целы.
+    """
+    s = str(text or "").splitlines()
+    s = s[0] if s else ""
+    s = s.strip()
+    if not s or s == "-":
+        return s or "-"
+    # Убрать markdown: код, жирность, заголовки, ссылки, цитаты.
+    s = re.sub(r"```.*?```", " ", s)
+    s = re.sub(r"`+", "", s)
+    # Парные маркеры — тоже только на границах слов и не после разделителя пути:
+    # «hub/__init__.py», «2**3**2», «a__b__c» остаются как есть.
+    s = re.sub(r"(?<![\w/\\])\*\*(\S(?:.*?\S)?)\*\*(?!\w)", r"\1", s)
+    s = re.sub(r"(?<![\w/\\])__(\S(?:.*?\S)?)__(?![\w.])", r"\1", s)
+    s = re.sub(r"(?<![\w/\\])~~(\S(?:.*?\S)?)~~(?!\w)", r"\1", s)
+    s = re.sub(r"(?<![\w/\\*])\*(?![*\s])(.+?)(?<![*\s])\*(?![\w*])", r"\1", s)
+    s = re.sub(r"(?<![\w/\\_])_(?![_\s])(.+?)(?<![_\s])_(?![\w_.])", r"\1", s)
+    s = re.sub(r"^#+\s*", "", s)
+    s = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", s)
+    s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)
+    s = re.sub(r"^>\s*", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if len(s) > limit:
+        s = s[:limit].rstrip()
+    return s or "-"
 
 
 def stage_threshold(stage: str) -> int:
@@ -159,6 +203,8 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
         wt = str(t.get("worktree") or "")
         alive = [p for p in live if wt and (p.cwd == wt or p.cwd.startswith(wt + "/"))]
         pytest_kid = any(p.kind in ("pytest", "flock") for p in alive)
+        # Пульс задачи — по всем её сессиям (исполнитель + ревьюеры):
+        # свежий пульс — max, объяснение — если хоть одна сессия активна.
         task_oc = [oc_by_id[e["external_id"]] for e in links if e["external_id"] in oc_by_id]
         if task_oc:
             pulse_ms = max(s.pulse_ms for s in task_oc)
@@ -179,7 +225,8 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
             smark = _pulse_mark(str(t.get("stage") or ""), now_ms - s.pulse_ms,
                                 bool(s.active_tool) or pytest_kid, alive, pytest_kid)
             ss.append(SessionSnap(s.id, e["role"], s.model, s.provider, s.pulse_ms,
-                                  smark, s.cost, go, s.context_tokens, s.last_activity))
+                                  smark, s.cost, go, s.context_tokens,
+                                  clean_activity(s.last_activity)))
         cost_go = sum(s.cost for s in ss if s.go)
         cost_usd = sum(s.cost for s in ss if not s.go)
         ctx = max([s.context_tokens for s in ss] + [0])
@@ -188,13 +235,16 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
             id=str(t["id"]), project=str(t.get("project") or ""),
             stage=str(t.get("stage") or ""), round=int(t.get("round") or 0),
             pulse=pulse, cost_go=cost_go, cost_usd=cost_usd,
-            context=ctx, last_activity=last, sessions=ss,
+            context=ctx, last_activity=clean_activity(last), sessions=ss,
         ))
     return Snapshot(tasks=snaps, total_go=totals_go, total_usd=totals_usd, now_ms=now_ms)
 
 
 def _pulse_mark(stage: str, age_ms: int, explained: bool, alive: list,
                 pytest_kid: bool = False) -> str:
+    mark = FINAL_PULSE.get(str(stage or "").lower())
+    if mark is not None:
+        return mark
     if stage in DONE_STAGES:
         return DONE_MARK
     # Порог — по факту pytest/flock-ребёнка, не по имени этапа.
@@ -203,6 +253,9 @@ def _pulse_mark(stage: str, age_ms: int, explained: bool, alive: list,
         # Процесса нет и этап не финальный → упал, но свежий пульс
         # без процесса считаем зависшим, а не упавшим (процесс мог
         # завершиться штатно между опросами).
+        # Тихие этапы (очередь/предполёт) без процесса — норма, не 🔴.
+        if str(stage or "").lower() in QUIET_NO_RED:
+            return "⚫"
         if age_ms >= threshold and not explained:
             return "🔴"
         return "⚫"

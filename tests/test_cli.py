@@ -51,7 +51,7 @@ def test_status_text_and_json(tmp_path, capsys, monkeypatch):
     _seed(Store())
     db = tmp_path / "oc.db"
     _oc(db)
-    monkeypatch.setattr(status_cmd, "DEFAULT_OPENCODB", db)
+    monkeypatch.setattr(status_cmd, "default_opencode_db", lambda: db)
     assert main(["status"]) == 0
     out = capsys.readouterr().out
     assert "T00" in out
@@ -67,7 +67,7 @@ def test_status_limit_20(tmp_path, capsys, monkeypatch):
                           updated_at=NOW - i)
     db = tmp_path / "oc.db"
     _oc(db, 0)
-    monkeypatch.setattr(status_cmd, "DEFAULT_OPENCODB", db)
+    monkeypatch.setattr(status_cmd, "default_opencode_db", lambda: db)
     assert main(["status"]) == 0
     out = capsys.readouterr().out
     assert len(out.encode("utf-8")) <= 1500
@@ -79,7 +79,7 @@ def test_status_all_shows_merged(tmp_path, capsys, monkeypatch):
     store.upsert_task(id="TM", stage="merged", updated_at=NOW)
     db = tmp_path / "oc.db"
     _oc(db, 0)
-    monkeypatch.setattr(status_cmd, "DEFAULT_OPENCODB", db)
+    monkeypatch.setattr(status_cmd, "default_opencode_db", lambda: db)
     main(["status"])
     assert "TM" not in capsys.readouterr().out
     main(["status", "--all"])
@@ -90,7 +90,7 @@ def test_roster_and_cost(tmp_path, capsys, monkeypatch):
     _seed(Store())
     db = tmp_path / "oc.db"
     _oc(db)
-    monkeypatch.setattr(status_cmd, "DEFAULT_OPENCODB", db)
+    monkeypatch.setattr(status_cmd, "default_opencode_db", lambda: db)
     monkeypatch.setattr(cost_cmd, "DEFAULT_OPENCODB", db)
     assert main(["roster"]) == 0
     assert "executor" in capsys.readouterr().out

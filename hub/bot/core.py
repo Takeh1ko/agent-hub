@@ -224,6 +224,11 @@ def remember_chat(store: Store, chat_id: int, now_ms: int) -> None:
         con.commit()
     finally:
         con.close()
+    # Чат снова написал — снимаем признак мёртвого (включая владельца).
+    try:
+        clear_chat_dead(store, int(chat_id))
+    except Exception:
+        pass
 
 
 def list_chats(store: Store) -> list[int]:
@@ -237,12 +242,117 @@ def list_chats(store: Store) -> list[int]:
         con.close()
 
 
+def forget_chat(store: Store, chat_id: int) -> None:
+    """Удалить мёртвый чат из рассылки (Telegram: chat not found/blocked).
+
+    Владельца (OWNER_CHAT_ID нет в tg_chat) помечаем мёртвым отдельно,
+    чтобы all_chats() его исключал до следующего сообщения.
+    """
+    con = _con(store)
+    try:
+        con.execute("DELETE FROM tg_chat WHERE chat_id=?", (int(chat_id),))
+        con.commit()
+    finally:
+        con.close()
+    try:
+        mark_chat_dead(store, int(chat_id))
+    except Exception:
+        pass
+
+
+# Подстроки мёртвого чата (Telegram): такой чат удаляем, а не ретраим.
+_DEAD_HINTS = (
+    "chat not found",
+    "chat_not_found",
+    "bot was blocked",
+    "bot_was_blocked",
+    "bot blocked",
+    "forbidden",
+    "was deleted",
+    "chat was deleted",
+    "group chat was deleted",
+    "user is deactivated",
+    "user was deleted",
+    "user not found",
+    "user_not_found",
+    "peer_id_invalid",
+    "peer id invalid",
+    "chat_id is empty",
+    "chat id is empty",
+    "chat_id_is_empty",
+)
+
+
+def _dead_set(store: Store) -> set[int]:
+    """Мёртвые чаты из meta.tg_dead_chats (JSON-список)."""
+    raw = meta_get(store, "tg_dead_chats")
+    if not raw:
+        return set()
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return set()
+    if not isinstance(data, list):
+        return set()
+    out: set[int] = set()
+    for x in data:
+        try:
+            out.add(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def mark_chat_dead(store: Store, chat_id: int) -> None:
+    """Запомнить мёртвый чат (включая владельца) — исключается из рассылки."""
+    dead = _dead_set(store) | {int(chat_id)}
+    meta_set(store, "tg_dead_chats", json.dumps(sorted(dead)[-1000:]))
+
+
+def clear_chat_dead(store: Store, chat_id: int) -> None:
+    """Чат ожил (написал боту) — убрать из мёртвых."""
+    dead = _dead_set(store)
+    if int(chat_id) not in dead:
+        return
+    dead.discard(int(chat_id))
+    meta_set(store, "tg_dead_chats", json.dumps(sorted(dead)[-1000:]))
+
+
+def is_dead_chat_error(exc: BaseException | object) -> bool:
+    """Мёртвый ли чат по исключению отправки (удалить, не держать очередь).
+
+    Telegram отвечает «chat not found» / «bot was blocked» / «Forbidden»:
+    такой чат уже не оживёт — ретраить каждые 5 с бесконечно нельзя.
+    """
+    try:
+        name = type(exc).__name__.lower()
+    except Exception:
+        name = ""
+    if "forbidden" in name:
+        return True
+    try:
+        text = str(exc or "").lower()
+    except Exception:
+        return False
+    return any(h in text for h in _DEAD_HINTS)
+
+
 def all_chats(store: Store) -> list[int]:
-    """Все получатели рассылки: tg_chat + OWNER_CHAT_ID."""
+    """Все получатели рассылки: tg_chat + OWNER_CHAT_ID без мёртвых.
+
+    Мёртвый владелец исключается, пока снова не напишет боту
+    (remember_chat снимает признак).
+    """
     from hub.tg_send import OWNER_CHAT_ID
 
+    try:
+        dead = _dead_set(store)
+    except Exception:
+        dead = set()
     seen: list[int] = []
     for cid in list_chats(store) + [int(OWNER_CHAT_ID)]:
+        if int(cid) in dead:
+            continue
         if cid not in seen:
             seen.append(cid)
     return seen
