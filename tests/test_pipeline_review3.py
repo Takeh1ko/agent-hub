@@ -666,3 +666,39 @@ def test_expand_braces_top_level(tmp_path):
     assert _expand_braces_str("hub/{a,{x,y}}.py") == ["hub/{a,{x,y}}.py"]
     assert _expand_braces_str("x{a,b}y{c,d}z") == ["xaycz", "xaydz",
                                                   "xbycz", "xbydz"]
+
+
+def test_review_cmd_honest_fake_single_call(tmp_path, monkeypatch):
+    """HIGH: `hub review` тоже даёт каждому ревьюеру свой файл (без гонки).
+
+    Вторая точка правки панели (hub/commands/review.py:136): честный фейк
+    пишет файл, названный в промпте, — второй вызов (resume) не нужен,
+    общего review_rN.json нет.
+    """
+    repo, base = _mk_repo(tmp_path)
+    (repo / ".hub.toml").write_text(
+        "schema_version = 1\nname = \"T\"\n"
+        f"root = \"{repo}\"\nworktrees = \"{tmp_path}\"\n"
+        "rules = \"docs/rules.md\"\n"
+        f"python = \"{sys.executable}\"\ntest_lock = \"\"\nwork_branch = \"main\"\n"
+        "push = \"\"\nallowed_paths = [\"sub/**\", \"docs/**\"]\n"
+        "[hooks]\n[defaults]\nexecutor = \"muse\"\nreviewers = [\"muse\"]\nbudget_go = 0.5\n",
+        encoding="utf-8")
+    _git(repo, "add", ".hub.toml")
+    _git(repo, "commit", "-m", "hub toml")
+    base = _git(repo, "rev-parse", "HEAD")
+    _commit_ok(repo)
+    card = _mk_task(tmp_path, repo, base, tid="TRH")
+    Store().upsert_task(id="TRH", reviewers_json='["muse", "mimoflash"]',
+                        stage="review r1", round=1)
+    revs = {"muse": HonestRev("muse"), "mimoflash": HonestRev("mimoflash")}
+    import hub.pipeline.runners as _rn
+
+    monkeypatch.setattr(_rn, "make_runner", lambda name: revs[name])
+    assert main(["review", "TRH", "--project", str(repo)]) == 0
+    assert Store().get_task("TRH")["stage"] == "ready"
+    for name, rev in revs.items():
+        assert rev.starts == 1, (name, rev.starts)
+        assert rev.resumes == 0, (name, rev.resumes)
+        assert f"review_r1_{name}.json" in rev.prompts[0]
+    assert not (repo / ".agent" / "review_r1.json").exists()
