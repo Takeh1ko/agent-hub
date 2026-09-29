@@ -89,6 +89,7 @@ class HubApp(App):
         self._narrow: bool = False
         self._bot_alive_flag: bool = False
         self._events_primed: bool = False
+        self._refreshing: bool = False
 
     def compose(self) -> ComposeResult:
         yield Static("hub top — загрузка…", id="top-header")
@@ -113,12 +114,20 @@ class HubApp(App):
     # --- опрос: весь блокирующий I/O — в потоке воркера ---
 
     def _schedule_refresh(self) -> None:
-        self.run_worker(self._do_refresh(), group="refresh", exclusive=True,
-                        exit_on_error=False)
+        # Снимок собирается дольше интервала (~5 с на 36 задачах): exclusive
+        # отменял бы незаконченный опрос каждые 2 с и кадр не приходил никогда —
+        # пока опрос идёт, тик пропускаем.
+        if self._refreshing:
+            return
+        self._refreshing = True
+        self.run_worker(self._do_refresh(), group="refresh", exit_on_error=False)
 
     async def _do_refresh(self) -> None:
-        snap, bot_alive, events = await asyncio.to_thread(self._fetch_all)
-        self._apply_snapshot(snap, bot_alive=bot_alive, events=events)
+        try:
+            snap, bot_alive, events = await asyncio.to_thread(self._fetch_all)
+            self._apply_snapshot(snap, bot_alive=bot_alive, events=events)
+        finally:
+            self._refreshing = False
 
     def _store_cached(self) -> Store | None:
         if self._store_cache is not None:
