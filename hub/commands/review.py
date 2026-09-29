@@ -101,8 +101,10 @@ def cmd_review(args) -> int:
             return 1
     py = (getattr(project, "python", "") or "").strip() or _sys.executable
     lock = (getattr(project, "test_lock", "") or "").strip() or None
+    from hub.gate.acceptance import acceptance_cmd
+
     gate = check_gate(Path(worktree), base_sha, head, allowed,
-                      [py, "-m", "pytest", "-q"], lock)
+                      acceptance_cmd(card_text, py), lock)
     if not gate.ok:
         for e in gate.errors:
             print(e)

@@ -129,6 +129,7 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
         card_text = card_p.read_text(encoding="utf-8") if card_p is not None else ""
         globs = _cg(card_text) if card_text else []
     except (OSError, ValueError):
+        card_text = ""
         globs = []
     import fnmatch as _fn
 
@@ -150,8 +151,10 @@ def merge_task(store, project, task_id: str, force: bool = False) -> tuple[bool,
     from hub.pipeline.common import clean_pycache as _clean
 
     _clean(worktree)
+    from hub.gate.acceptance import acceptance_cmd
+
     gate = check_gate(Path(worktree), base_sha, head_sha, allowed,
-                      [py, "-m", "pytest", "-q"], lock)
+                      acceptance_cmd(card_text, py), lock)
     if not gate.ok:
         try:
             store.add_event(task_id, "stage", {"stage": stage, "merge": "gate-red",

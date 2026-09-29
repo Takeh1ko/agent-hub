@@ -528,7 +528,9 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
     card_globs = _card_globs(card_text)
     allowed = _allowed_intersection(card_globs, list(getattr(project, "allowed_paths", []) or []))
     py = (getattr(project, "python", "") or "").strip() or sys.executable
-    test_cmd = [py, "-m", "pytest", "-q"]
+    from hub.gate.acceptance import acceptance_cmd
+
+    test_cmd = acceptance_cmd(card_text, py)  # приёмка карточки, не весь набор
     lock_path = (getattr(project, "test_lock", "") or "").strip() or None
     task_blind = bool(blind or (task.get("blind") if isinstance(task.get("blind"), int) else False))
     try:

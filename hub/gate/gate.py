@@ -112,6 +112,29 @@ def _tail(text: str, limit: int = TAIL_LIMIT) -> str:
     return text[-limit:] if len(text) > limit else text
 
 
+def _with_changed_tests(cmd: list[str], names: list[str], repo: str) -> list[str]:
+    """Приёмка карточки + все тестовые файлы, изменённые задачей (иначе красный тест вне путей приёмки
+    проскакивает). Команда без явных путей (весь набор) — как есть."""
+    if "pytest" not in cmd:
+        return cmd
+    args = cmd[cmd.index("pytest") + 1:]
+    given = [a for a in args if not a.startswith("-")]
+    if not given:
+        return cmd
+    covered = [g.split("::")[0].rstrip("/") for g in given]
+    for n in names:
+        base = n.rsplit("/", 1)[-1]
+        if not (base.startswith("test_") and base.endswith(".py")):
+            continue
+        if not Path(repo, n).exists():
+            continue
+        if any(n == c or n.startswith(c + "/") for c in covered):
+            continue
+        cmd.append(n)
+        covered.append(n)
+    return cmd
+
+
 def check_gate(
     repo: Path,
     base_sha: str,
@@ -175,6 +198,7 @@ def check_gate(
     if not cmd:
         errors.append("tests-fail: пустая команда приёмки")
         return GateResult(ok=False, errors=errors, diff_stat=stat, tests_tail="")
+    cmd = _with_changed_tests(list(cmd), names, repo_s)
 
     lock_fd: int | None = None
     if lock_path:
