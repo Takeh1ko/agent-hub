@@ -268,8 +268,11 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
         exec_sid = _exec_session_id(wt) if wt else ""
         for s in oc_by_id.values():
             if s.id not in linked and _in_wt(s.directory or "", wt):
-                links.append({"external_id": s.id, "role": "executor" if s.id == exec_sid else "reviewer",
-                              "model": s.model})
+                # Номер сессии исполнителя старый конвейер пишет только после её конца: пока
+                # этап «exec», непривязанная сессия — исполнитель.
+                in_exec = str(t.get("stage") or "").startswith("exec")
+                role = "executor" if (s.id == exec_sid or (in_exec and not exec_sid)) else "reviewer"
+                links.append({"external_id": s.id, "role": role, "model": s.model})
         # Жив: процесс агента работает в worktree или получил его аргументом (--dir/--worktree).
         alive = [p for p in live if wt and (_in_wt(p.cwd, wt) or any(_in_wt(a, wt) for a in p.args))]
         pytest_kid = any(p.kind in ("pytest", "flock") for p in alive)
