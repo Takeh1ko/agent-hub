@@ -13,6 +13,8 @@ from pathlib import Path
 from hub.config import ProjectConfig
 
 # Обязательные разделы карточки (§7, словарь §2).
+# «Уровень» — необязательный: выводится из «Исполнитель»
+# (gemini → easy, musefree → medium, muse → hard), см. card_level.
 REQUIRED_SECTIONS = [
     "Цель",
     "Прочитать",
@@ -22,9 +24,22 @@ REQUIRED_SECTIONS = [
     "Нельзя",
     "Сеть",
     "Исполнитель",
-    "Уровень",
     "Коммит",
 ]
+
+OPTIONAL_SECTIONS = [
+    "Уровень",
+]
+
+# Все именованные разделы (для поиска заголовков и границ секций).
+_ALL_SECTIONS = REQUIRED_SECTIONS + OPTIONAL_SECTIONS
+
+# Уровень по умолчанию из исполнителя (если нет раздела «Уровень»).
+DEFAULT_LEVEL_BY_EXECUTOR = {
+    "gemini": "easy",
+    "musefree": "medium",
+    "muse": "hard",
+}
 
 # Размер карточки ≤ 12 КБ.
 MAX_CARD_BYTES = 12 * 1024
@@ -32,7 +47,7 @@ MAX_CARD_BYTES = 12 * 1024
 _CYR = re.compile(r"[а-яА-ЯёЁ]")
 
 # Для поиска `**Имя` — от длинных к коротким (имён-префиксов среди разделов нет).
-_SECTIONS_BY_LEN = sorted(REQUIRED_SECTIONS, key=len, reverse=True)
+_SECTIONS_BY_LEN = sorted(_ALL_SECTIONS, key=len, reverse=True)
 
 
 @dataclass
@@ -42,13 +57,16 @@ class LintResult:
 
 
 def _bold_header_names(s: str) -> set[str]:
-    """Имена обязательных разделов, найденных жирными заголовками в строке.
+    """Имена обязательных и необязательных разделов, найденных жирными заголовками.
 
-    Первый сегмент — только в начале строки; дальше — только как продолжение
-    комбинированной строки карточки (`**Сеть.** нет. **Уровень.** …` — формат
-    `docs/tasks/*.md`): между заголовками лишь короткое plain-значение без
-    кода. Упоминание раздела в прозе (`см. **Приёмка.** `pytest…``) заголовком
-    не считается: строка в этом месте не «начинается» с `**Имя` (арбитр №1).
+    Заголовок в начале строки узнаётся с произвольным хвостом после имени:
+    `**Интерфейс / что сделать.**`, `**Интерфейс (контракт…).**` — имя должно
+    отделяться границей (конец строки, `**`, пробел, `/`, `.`, `(`, `:`, тире).
+    Дальше по строке — только как продолжение комбинированной строки карточки
+    (`**Сеть.** нет. **Уровень.** …` — формат `docs/tasks/*.md`): между
+    заголовками лишь короткое plain-значение без кода. Упоминание раздела
+    в прозе (`см. **Приёмка.** `pytest…``) заголовком не считается: строка
+    в этом месте не «начинается» с `**Имя` (арбитр №1).
     """
     found: set[str] = set()
     chain = False
@@ -65,11 +83,13 @@ def _bold_header_names(s: str) -> set[str]:
             continue
         after = rest[len(name):]
         if idx == 0:
+            # Хвост после имени — произвольный, но имя отделено границей:
+            # `**Интерфейс / что сделать.**`, `**Интерфейс (контракт…).**`.
+            # `**Интерфейсчик**` — не заголовок (нет границы после имени).
             ok = (
                 after == ""
                 or after.startswith("**")
-                or after.startswith(" (")
-                or after[:1] in (".", "(", ":")
+                or after[:1] in " \t./(:—-–"
             )
         else:
             gap = s[last_end:idx]
@@ -95,8 +115,9 @@ def _bold_header_names(s: str) -> set[str]:
 def _is_header_line(line: str, name: str) -> bool:
     """Строгий заголовок раздела.
 
-    Markdown `#{1,6} Имя` — только в начале строки. Жирный `**Имя` — только
-    начало строки (сразу `**`/`.`/`(`/`:`/` (`) либо продолжение
+    Markdown `#{1,6} Имя` — только в начале строки (хвост после имени
+    произвольный: `## Интерфейс / что сделать`). Жирный `**Имя` — только
+    начало строки (имя с границей и произвольным хвостом) либо продолжение
     комбинированной строки, начинающейся с жирного заголовка. Никаких
     «имя где-то в строке» (арбитр №1).
     """
@@ -113,13 +134,13 @@ def _is_header_line(line: str, name: str) -> bool:
         after = rest[len(name):]
         if after == "":
             return True
-        return after[0] in " \t.:()*—-–"
+        return after[0] in " \t.:()/*—-–"
     return name in _bold_header_names(s)
 
 
 def _is_required_bold_header(line: str) -> bool:
-    """Жирный заголовок известного обязательного раздела (строгий)."""
-    return any(_is_header_line(line, n) for n in REQUIRED_SECTIONS)
+    """Жирный заголовок известного раздела (строгий, вкл. необязательные)."""
+    return any(_is_header_line(line, n) for n in _ALL_SECTIONS)
 
 
 def _is_required_bold_line(line: str) -> bool:
@@ -190,7 +211,7 @@ def _section_bounds(lines: list[str], name: str) -> tuple[int, int] | None:
     start = start_no - 1
     body_from = start_no
     end = len(lines)
-    for other in REQUIRED_SECTIONS:
+    for other in _ALL_SECTIONS:
         if other == name:
             continue
         no = _header_line_no(lines[body_from:], other)
@@ -238,8 +259,38 @@ def _line_of_in_section(
     return None
 
 
+def card_level(lines: list[str], project: ProjectConfig | None = None) -> str:
+    """Уровень карточки: раздел «Уровень», иначе вывод из «Исполнитель».
+
+    Явный `easy|medium|hard` в «Уровне» — побеждает. Иначе исполнитель
+    отображается в уровень через `levels` проекта (по умолчанию
+    gemini → easy, musefree → medium, muse → hard); неизвестный — medium.
+    """
+    sec = _section_text(lines, "Уровень").lower()
+    m = re.search(r"(?<![\w])(easy|medium|hard)(?![\w])", sec)
+    if m:
+        return m.group(1)
+    mapping: dict[str, str] = dict(DEFAULT_LEVEL_BY_EXECUTOR)
+    if project is not None and project.levels:
+        mapping = {str(v): str(k) for k, v in project.levels.items()}
+    exec_sec = _section_text(lines, "Исполнитель").lower()
+    for name in sorted(mapping, key=len, reverse=True):
+        if not name:
+            continue
+        if re.search(r"(?<![\w])" + re.escape(name.lower()) + r"(?![\w])", exec_sec):
+            return mapping[name]
+    return "medium"
+
+
 def _can_change_globs(section: str) -> list[str]:
-    """Паттерны из «Можно менять»: бэктики (дробление по [,;\\s]+) + голые токены."""
+    """Паттерны из «Можно менять»: только бэктики внутри этого раздела.
+
+    Голый текст раздела путями не считается: разметка (`**MEDIUM.**`),
+    флаги CLI (`--proxy/--proxies`), слова с `/` без бэктиков (`ready/merged`,
+    `0008/0009`, `T16/T17`), идентификаторы (`import_legacy`, `Budget`) —
+    не пути. Поэтому содержимое чужих разделов даже при ошибке границ
+    в scope не течёт.
+    """
     out: list[str] = []
     seen: set[str] = set()
 
@@ -253,13 +304,23 @@ def _can_change_globs(section: str) -> list[str]:
             return
         if cand.startswith("~") or cand.startswith("$"):
             return
+        if cand.startswith("-"):
+            return  # флаг CLI (`--proxy`), не путь
         if any(ch in cand for ch in ("<", ">", "|")):
             return
         has_glob = any(c in cand for c in ("*", "?", "["))
         if has_glob:
-            # Glob без `/` — только файловый (`*.py`); `[project.scripts]` — не путь.
-            if "/" not in cand and cand not in (".hub.toml", "pyproject.toml"):
+            if "/" in cand:
+                pass  # glob-путь с `/` — кандидат
+            elif cand in (".hub.toml", "pyproject.toml"):
+                pass
+            else:
+                # Файловый glob без `/` — только `*.ext` с настоящим
+                # расширением (`*.py` — путь; `market.*`, `.**` — нет).
                 if ("*" not in cand and "?" not in cand) or "." not in cand:
+                    return
+                tail = cand.rsplit(".", 1)[-1]
+                if not tail or not re.fullmatch(r"[A-Za-z0-9]+", tail):
                     return
                 if not re.match(r"^[A-Za-z0-9_.\-/*?\[\]]+$", cand):
                     return
@@ -271,7 +332,7 @@ def _can_change_globs(section: str) -> list[str]:
             elif re.match(
                 r"^[\w.\-]+\.(md|py|toml|sql|json|sh|cfg|ini|txt|yaml|yml)$", cand
             ):
-                # Голое имя файла с известным расширением — тоже путь.
+                # Имя файла с известным расширением — тоже путь.
                 pass
             else:
                 return  # код (`register`, `project.scripts`, `state.status`), не путь
@@ -280,28 +341,13 @@ def _can_change_globs(section: str) -> list[str]:
             out.append(cand)
 
     def _add(cand: str) -> None:
-        # Содержимое бэктика дробится по `[,;\\s]+`, каждый токен — отдельно.
+        # Содержимое бэктика дробится по `[,;\s]+`, каждый токен — отдельно.
         for part in re.split(r"[,;\s]+", cand.strip()):
             if part:
                 _add_single(part)
 
     for m in re.finditer(r"`([^`]+)`", section):
         _add(m.group(1).strip())
-    no_tick = re.sub(r"`[^`]*`", " ", section)
-    # Голые пути с `/` (вне бэктиков).
-    for m in re.finditer(r"(?<![\w/`~])(/?(?:[\w.\-]+/)+[\w.\-]+(?:\.[\w]+)?)", no_tick):
-        _add_single(m.group(1))
-    # Голые glob-токены без `/` (например `*.py`).
-    for m in re.finditer(r"[^\s`'\",;:!?()]+[*?\[\]][^\s`'\",;:!?()]*", no_tick):
-        _add_single(m.group(0))
-    # Голые имена файлов без `/` (`Makefile`, `conftest.py`).
-    for m in re.finditer(r"(?<![\w/`.\-])(Makefile|Dockerfile|[\w.\-]+\.[\w]+)(?![\w.\-])", no_tick):
-        _add_single(m.group(0))
-    # Одиночные известные файлы без `/`.
-    for name in (".hub.toml", "pyproject.toml"):
-        if name in no_tick and name not in seen:
-            seen.add(name)
-            out.append(name)
     return out
 
 
@@ -466,8 +512,20 @@ def _collect_python(project: ProjectConfig) -> tuple[str | None, str | None]:
     return sys.executable, None
 
 
-def lint_card(path: Path, project: ProjectConfig) -> LintResult:
-    """Проверить карточку по §7. Ошибки вида `path:line: текст` или `path: текст`."""
+def lint_card(
+    path: Path,
+    project: ProjectConfig,
+    *,
+    check_read_paths: bool = True,
+    check_acceptance: bool = True,
+) -> LintResult:
+    """Проверить карточку по §7. Ошибки вида `path:line: текст` или `path: текст`.
+
+    «Уровень» необязателен (см. card_level). Флаги `check_read_paths`
+    и `check_acceptance` отключают проверки существования путей «Прочитать»
+    и сбора pytest-нод «Приёмки» — для корпусов чужих проектов, чьи файлы
+    в репозитории отсутствуют (структурные проверки остаются).
+    """
     card = Path(path)
     errors: list[str] = []
     try:
@@ -511,7 +569,7 @@ def lint_card(path: Path, project: ProjectConfig) -> LintResult:
                 msg = f"glob «{g}» вне allowed_paths"
                 errors.append(f"{card}:{ln}: {msg}" if ln is not None else f"{card}: {msg}")
     # 3. Пути из «Прочитать» существуют (относительно root проекта или абсолютные).
-    if "Прочитать" not in missing:
+    if check_read_paths and "Прочитать" not in missing:
         section = _section_text(lines, "Прочитать")
         for p in _read_paths(section):
             rp = _resolve(p, project, card.parent)
@@ -522,7 +580,7 @@ def lint_card(path: Path, project: ProjectConfig) -> LintResult:
     # 4. Приёмка: есть ноды из команд pytest и они собираются.
     # Нода на ещё не созданный файл из «Можно менять» — допустима (новый файл
     # задачи); `--collect-only` гоняем только для существующих.
-    if "Приёмка" not in missing:
+    if check_acceptance and "Приёмка" not in missing:
         section = _section_text(lines, "Приёмка")
         bounds = _section_bounds(lines, "Приёмка")
         nodes = _pytest_nodes(section)
