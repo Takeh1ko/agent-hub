@@ -186,19 +186,34 @@ def cmd_start(args) -> int:
     explicit = (getattr(args, "executor", None) or "").strip()
     executor = explicit or _executor_for_card(text, project)
     reviewers = getattr(args, "reviewers", None)
+    # Имена моделей — сразу: опечатка не должна молча исчезать в очереди.
+    from hub.pipeline.review_levels import plan_for_card
+    from hub.pipeline.runners import MODELS
+
+    # Уровень ревью из карточки (**Ревью.** 1–4 / «свой»); флаги --reviewers/--rounds сильнее.
+    plan, plan_err = plan_for_card(text, MODELS)
+    if plan_err:
+        print(f"{card}: {plan_err}")
+        return 1
     if reviewers:
         rev_list = [r.strip() for r in str(reviewers).split(",") if r.strip()]
+    elif plan is not None:
+        rev_list = list(plan.reviewers)
     else:
         rev_list = list(project.defaults.reviewers or [])
-    # Имена моделей — сразу: опечатка не должна молча исчезать в очереди.
-    from hub.pipeline.runners import MODELS
 
     bad = [m for m in [executor, *rev_list] if m not in MODELS]
     if bad:
         for m in bad:
             print(f"неизвестная модель: {m}")
         return 1
-    rounds = int(getattr(args, "rounds", 2) or 2)
+    explicit_rounds = getattr(args, "rounds", None)
+    if explicit_rounds:
+        rounds = int(explicit_rounds)
+    elif plan is not None:
+        rounds = plan.rounds
+    else:
+        rounds = 2
     budget_go = getattr(args, "budget_go", None)
     try:
         budget_go_f = float(budget_go) if budget_go is not None else float(project.defaults.budget_go)
@@ -240,7 +255,10 @@ def cmd_start(args) -> int:
     except (OSError, ValueError) as e:
         print(f"store-fail: {e}")
         return 1
-    print(f"OK {task_id}")
+    review = plan.label if plan is not None and not reviewers and not explicit_rounds else "вручную"
+    if plan is None and not reviewers and not explicit_rounds:
+        review = "по умолчанию проекта"
+    print(f"OK {task_id} · ревью: {review} — {', '.join(rev_list) or 'нет'}, кругов {rounds}")
     return 0
 
 
@@ -250,7 +268,8 @@ def register(subparsers) -> None:
     p.add_argument("--project", default=None, help="корень проекта (.hub.toml)")
     p.add_argument("--executor", default=None, help="исполнитель (короткое имя)")
     p.add_argument("--reviewers", default=None, help="ревьюеры через запятую")
-    p.add_argument("--rounds", type=int, default=2, help="кругов ревью")
+    p.add_argument("--rounds", type=int, default=None,
+                   help="кругов ревью (по умолчанию — из «Ревью» карточки, иначе 2)")
     p.add_argument("--budget-go", type=float, default=None, help="бюджет Go $")
     p.add_argument("--budget-usd", type=float, default=None,
                    help="бюджет реальных $ (0 — запрет трат)")

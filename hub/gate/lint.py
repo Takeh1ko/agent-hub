@@ -30,6 +30,7 @@ REQUIRED_SECTIONS = [
 
 OPTIONAL_SECTIONS = [
     "Уровень",
+    "Ревью",  # уровень ревью 1–4 или «свой: модели; круги N» (hub/pipeline/review_levels.py)
 ]
 
 # Все именованные разделы (для поиска заголовков и границ секций).
@@ -553,6 +554,13 @@ def lint_card(
         if _header_line_no(lines, name) is None:
             missing.append(name)
             errors.append(f"{card}: нет раздела «{name}»")
+    # 1a. «Ревью» (необязательный): уровень 1–4 или «свой: модели; круги N».
+    from hub.pipeline.review_levels import plan_for_card
+    from hub.pipeline.runners import MODELS
+
+    _plan, review_err = plan_for_card(text, MODELS)
+    if review_err:
+        errors.append(f"{card}: {review_err}")
     # 2. «Можно менять» ⊆ allowed_paths.
     if "Можно менять" not in missing:
         section = _section_text(lines, "Можно менять")
