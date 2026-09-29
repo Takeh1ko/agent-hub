@@ -198,11 +198,11 @@ def test_poll_roster_only_on_change():
         assert r1["roster"] is False  # baseline
         r2 = await poll_once(bot, state, NOW + HOUR + 1)
         assert r2["roster"] is False, "now_ms в to_json не считается изменением"
-        assert not [t for t in bot.texts() if "Итого сегодня" in t]
+        assert not [t for t in bot.texts() if "Сегодня: задачи хаба" in t]
         s.upsert_task(id="HN", stage="exec r1", worktree="")
         r3 = await poll_once(bot, state, NOW + 2 * HOUR + 2)
         assert r3["roster"] is True
-        rosters = [t for t in bot.texts() if "Итого сегодня" in t]
+        rosters = [t for t in bot.texts() if "Сегодня: задачи хаба" in t]
         assert len(rosters) == 2  # каждому чату по одному
 
     asyncio.run(_go())
@@ -612,7 +612,7 @@ def test_poll_roster_partial_per_chat_retry():
         r2 = await poll_once(bot, state, NOW + 3600_000 + 1)
         assert r2["roster"] is False, "дошло не всем — метка не движется"
         assert bot.count(_owner()) == 1 and bot.count(555) == 0
-        assert any("Итого сегодня" in t for t in bot.texts(_owner()))
+        assert any("Сегодня: задачи хаба" in t for t in bot.texts(_owner()))
         bot.fail.clear()
         r3 = await poll_once(bot, state, NOW + 3600_000 + 2)
         assert r3["roster"] is True

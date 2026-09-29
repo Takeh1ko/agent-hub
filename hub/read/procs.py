@@ -28,6 +28,10 @@ def _kind_of(args: list[str]) -> str | None:
     # hub_bot (H07): живой `hub bot` — консольный скрипт hub с подкомандой bot
     # либо `python -m hub.bot…` / `python -m hub.cli bot`. Другие подкоманды hub
     # (status, stop…) — короткие CLI-вызовы, не агенты: kind None, в список не идут.
+    # Скрипт hub, запущенный интерпретатором («python3 .venv/bin/hub bot»), —
+    # тот же hub: смотрим на аргументы после интерпретатора.
+    if base.startswith("python") and len(args) > 1 and Path(args[1]).name == "hub":
+        args = args[1:]
     stem = Path(args[0]).stem if args else ""
     if stem == "hub":
         if "bot" in args[1:]:

@@ -167,11 +167,11 @@ def test_tui_header_shows_gemini_window(tmp_path):
     app._schedule_refresh = lambda: None
     empty = Snapshot(tasks=[], total_go=0.0, total_usd=0.0, now_ms=NOW,
                      agy_runs=0, agy_steps=0)
-    assert "agy n/a" not in app._header_text(empty)
-    assert "Gemini: 0 запусков / 0 шагов за 5 ч" in app._header_text(empty)
+    # Gemini выключен (0 запусков) — в шапке не шумит.
+    assert "Gemini" not in app._header_text(empty).plain
     full = Snapshot(tasks=[], total_go=0.0, total_usd=0.0, now_ms=NOW,
                     agy_runs=2, agy_steps=7)
-    text = app._header_text(full)
+    text = app._header_text(full).plain
     assert "Gemini: 2 запусков / 7 шагов за 5 ч" in text
     assert "agy n/a" not in text
     _ = TaskSnap  # контракт таблицы не менялся

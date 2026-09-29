@@ -94,7 +94,7 @@ def test_roster_and_cost(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(cost_cmd, "DEFAULT_OPENCODB", db)
     assert main(["roster"]) == 0
     out = capsys.readouterr().out
-    assert "T00" in out and "пишет код" in out  # сводка для владельца: этап словами
+    assert "T00" in out and "Пишет код" in out  # сводка для владельца: этап словами
     for by in ("task", "model", "role", "day"):
         assert main(["cost", "--by", by]) == 0
         out = capsys.readouterr().out

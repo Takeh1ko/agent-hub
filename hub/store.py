@@ -237,6 +237,38 @@ class Store:
         finally:
             con.close()
 
+    def stage_marks(self) -> dict[str, tuple[int, str]]:
+        """{task_id: (ts начала текущего этапа, причина)} — последнее событие stage задачи."""
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT e.task_id, e.ts, e.payload_json FROM event e"
+                " JOIN (SELECT task_id, MAX(id) AS mid FROM event"
+                "       WHERE kind = 'stage' GROUP BY task_id) m ON e.id = m.mid",
+            ).fetchall()
+        finally:
+            con.close()
+        out: dict[str, tuple[int, str]] = {}
+        for r in rows:
+            try:
+                reason = str((json.loads(r["payload_json"] or "{}") or {}).get("reason") or "")
+            except (TypeError, ValueError, AttributeError):
+                reason = ""
+            out[str(r["task_id"])] = (int(r["ts"] or 0), reason)
+        return out
+
+    def recent_events(self, limit: int = 12) -> list[dict]:
+        """Последние limit событий по возрастанию id (история для ленты top)."""
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT * FROM (SELECT * FROM event ORDER BY id DESC LIMIT ?) ORDER BY id",
+                (int(limit),),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            con.close()
+
     # --- импорт старого конвейера ---
 
     def import_legacy(self, worktrees_dir: str | Path | None) -> list[str]:

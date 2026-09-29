@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from hub.read import agy as ag
+from hub.read import human as hm
 from hub.read import opencode as oc
 from hub.read import procs as pr
 
@@ -109,6 +110,15 @@ class TaskSnap:
     context: int
     last_activity: str
     sessions: list[SessionSnap] = field(default_factory=list)
+    # Для людей (hub top, roster, TG): из карточки и task-строки hub.db.
+    title: str = ""          # название задачи из заголовка карточки
+    short: str = ""          # коротко для таблицы
+    goal: str = ""           # первое предложение «Цели»
+    executor: str = ""       # короткое имя исполнителя (muse, musefree…)
+    reviewers: list[str] = field(default_factory=list)
+    max_rounds: int = 0      # сколько кругов исправлений разрешено
+    reason: str = ""         # причина текущего этапа (task.stage_reason)
+    stage_since_ms: int = 0  # когда начался текущий этап (последнее событие stage)
 
 
 @dataclass
@@ -121,6 +131,7 @@ class Snapshot:
     all_usd: float = 0.0
     agy_runs: int = 0        # запусков agy за 5 ч (окно квоты, не деньги)
     agy_steps: int = 0       # шагов agy за 5 ч
+    month_go: float = 0.0    # с 1-го числа, все сессии opencode-go — против лимита $60/мес
 
     def to_json(self) -> str:
         return json.dumps({
@@ -144,9 +155,12 @@ class Snapshot:
         }, ensure_ascii=False)
 
     def head_text(self) -> str:
-        return (f"Итого сегодня: задачи Go ${self.total_go:.2f} · все проекты Go ${self.all_go:.2f}"
-                f" (лимит Go $60/мес) · реальные ${self.all_usd:.2f}"
-                f" · Gemini: {self.agy_runs} запусков / {self.agy_steps} шагов за 5 ч")
+        text = (f"Сегодня: задачи хаба ${self.total_go + self.total_usd:.2f} · все проекты Go "
+                f"${self.all_go:.2f} · за месяц Go ${self.month_go:.2f} из лимита $60/мес"
+                f" · реальные деньги ${self.all_usd:.2f}")
+        if self.agy_runs:
+            text += f" · Gemini: {self.agy_runs} запусков / {self.agy_steps} шагов за 5 ч"
+        return text
 
     def active_tasks(self) -> list["TaskSnap"]:
         return [t for t in self.tasks if t.stage not in DONE_STAGES]
@@ -181,50 +195,33 @@ class Snapshot:
         return head.encode("utf-8")[:limit].decode("utf-8", "ignore")
 
     def roster_text(self, recent_ms: int = 10 * 60_000) -> str:
-        """«Сотрудники» по задачам: задача (пульс, этап, $), под ней — кто работал за последние recent_ms."""
+        """Для владельца: задача словами, что сейчас, кто работает, что дальше."""
         blocks = []
         for t in self.active_tasks():
-            head = f"{t.pulse} {t.id} — {STAGE_RU(t.stage)} · ${t.cost_go + t.cost_usd:.2f}"
-            rows = []
-            for s in sorted(t.sessions, key=lambda x: -x.pulse_ms):
-                age = self.now_ms - s.pulse_ms
+            view = hm.stage_view(t.stage, t.round, t.max_rounds, t.reason, t.reviewers)
+            code = t.id.split("-", 1)[0]
+            name = t.short or t.title or t.id
+            since = f" · {hm.ago(self.now_ms - t.stage_since_ms)} в этапе" if t.stage_since_ms else ""
+            rows = [f"{t.pulse} {code} · {name}",
+                    f"   {view.now}{since} · {hm.money(t.cost_go + t.cost_usd)}"]
+            working = []
+            for x in sorted(t.sessions, key=lambda x: -x.pulse_ms):
+                age = self.now_ms - x.pulse_ms
                 if age > recent_ms:
                     continue
-                rows.append(f"   {pretty_model(s.model, s.provider)} · {ROLE_RU.get(s.role, s.role)} · {_ago(age)}"
-                            + (f" · {s.last_activity}" if s.last_activity not in ("", "-") else ""))
-            if not rows:
-                last = max((s.pulse_ms for s in t.sessions), default=0)
-                rows.append(f"   ждёт (тесты/замок/очередь), пульс {_ago(self.now_ms - last) if last else '—'}")
-            blocks.append("\n".join([head, *rows]))
+                act = hm.activity_text(x.last_activity)
+                working.append(f"   {hm.model_name(x.model, x.provider)} {hm.role_name(x.role)}"
+                               + (f": {act}" if act else "") + f" ({hm.ago(age)})")
+            if working:
+                rows.extend(working)
+            else:
+                health = hm.health_text(t.pulse, t.stage)
+                if health:
+                    rows.append(f"   {health}")
+            if view.next and view.next != "—":
+                rows.append(f"   Дальше: {view.next}")
+            blocks.append("\n".join(rows))
         return "\n\n".join(blocks) if blocks else "Активных задач нет."
-
-
-def STAGE_RU(stage: str) -> str:
-    s = str(stage or "")
-    m = re.match(r"^(exec|review|gate) r(\d+)$", s)
-    if m:
-        return {"exec": "пишет код", "review": "ревью", "gate": "тесты"}[m.group(1)] + f", круг {m.group(2)}"
-    return {"queued": "в очереди", "preflight": "предполёт", "ready": "готово к слиянию", "arbiter": "ждёт Claude",
-            "failed": "провал", "stopped": "остановлена", "merged": "слита", "dropped": "брошена"}.get(s, s)
-
-
-ROLE_RU = {"executor": "исполнитель", "reviewer": "ревьюер", "critic": "критик",
-           "scout": "разведчик", "repair": "починка"}
-
-
-def pretty_model(model: str, provider: str = "") -> str:
-    m = (model or "?").lower()
-    name = ("Spark 1.3" if "muse-spark" in m else "MiMo Flash" if "mimo" in m and "flash" in m
-            else "MiMo Pro" if "mimo" in m else "DeepSeek" if "deepseek" in m
-            else "GLM" if "glm" in m else "Gemini" if "gemini" in m else model or "?")
-    if "free" in m or (provider == "opencode" and "spark" in name.lower()):
-        name += " free"
-    return name
-
-
-def _ago(ms: int) -> str:
-    mins = max(int(ms // 60_000), 0)
-    return "сейчас" if mins < 1 else f"{mins} мин назад" if mins < 60 else f"{mins // 60} ч {mins % 60} мин назад"
 
 
 def _in_wt(path: str, wt: str) -> bool:
@@ -343,6 +340,12 @@ def _day_start_ms(now_ms: int) -> int:
     return int(midnight.timestamp() * 1000)
 
 
+def _month_start_ms(now_ms: int) -> int:
+    local = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).astimezone(TZ)
+    first = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return int(first.timestamp() * 1000)
+
+
 def _default_agy_root() -> Path:
     return Path.home() / ".gemini" / "antigravity-cli" / "conversations"
 
@@ -357,12 +360,19 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
     """Собрать картину. store — hub.store.Store."""
     tasks = store.list_tasks(active_only=False)
     oc_by_id: dict[str, oc.OcSession] = {}
-    all_go = all_usd = 0.0
+    all_go = all_usd = month_go = 0.0
     day0 = _day_start_ms(now_ms)
+    month0 = _month_start_ms(now_ms)
+    try:
+        marks = store.stage_marks() if hasattr(store, "stage_marks") else {}
+    except Exception:  # чужая/старая схема — картина без «времени в этапе»
+        marks = {}
     if opencode_db is not None and Path(opencode_db).exists():
         for s in oc.sessions(opencode_db, 0):
             oc_by_id[s.id] = s
         for s in oc_by_id.values():
+            if s.provider == "opencode-go" and s.started_ms >= month0:
+                month_go += s.cost
             if s.started_ms >= day0:
                 if s.provider == "opencode-go":
                     all_go += s.cost
@@ -503,15 +513,23 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
                     totals_usd += s.cost
         ctx = max([s.context_tokens for s in ss] + [0])
         last = next((s.last_activity for s in ss if s.last_activity != "-"), "-")
+        info = hm.card_info(wt, str(t.get("card_path") or ""), tid)
+        since_ms, since_reason = marks.get(tid, (0, ""))
         snaps.append(TaskSnap(
             id=str(t["id"]), project=str(t.get("project") or ""),
             stage=stage, round=int(t.get("round") or 0),
             pulse=pulse, cost_go=cost_go, cost_usd=cost_usd,
             context=ctx, last_activity=clean_activity(last), sessions=ss,
+            title=info.title, short=info.short, goal=info.goal,
+            executor=str(t.get("executor") or ""),
+            reviewers=hm.parse_reviewers(t.get("reviewers_json")),
+            max_rounds=int(t.get("rounds") or 2),  # как pipeline.common: нет колонки — 2 круга
+            reason=str(t.get("stage_reason") or "") or since_reason,
+            stage_since_ms=int(since_ms or t.get("updated_at") or 0),
         ))
     return Snapshot(tasks=snaps, total_go=totals_go, total_usd=totals_usd, now_ms=now_ms,
                     all_go=all_go, all_usd=all_usd,
-                    agy_runs=agy_runs, agy_steps=agy_steps)
+                    agy_runs=agy_runs, agy_steps=agy_steps, month_go=month_go)
 
 
 def _pulse_mark(stage: str, age_ms: int, explained: bool, alive: list,
