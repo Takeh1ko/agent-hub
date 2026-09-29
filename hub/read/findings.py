@@ -109,6 +109,26 @@ def dedup_findings(items: list[Finding]) -> list[Finding]:
     return sorted(seen.values(), key=lambda f: (f.file, f.line))
 
 
+_RE_ROUND = re.compile(r"^review_r(\d+)(?:_.*)?\.json$")
+
+
+def latest_round(worktree: Path) -> tuple[int, list[Finding]]:
+    """Замечания ПОСЛЕДНЕГО круга проверки без дублей: (номер круга, замечания).
+
+    Ревью ещё не было — (0, []); круг был, замечаний нет — (N, []).
+    """
+    agent = Path(worktree) / ".agent"
+    try:
+        rounds = [int(m.group(1)) for f in agent.glob("review_r*.json")
+                  if (m := _RE_ROUND.match(f.name))]
+    except OSError:
+        return 0, []
+    if not rounds:
+        return 0, []
+    rnd = max(rounds)
+    return rnd, dedup_findings(load_findings(Path(worktree), round=rnd))
+
+
 def format_findings(items: list[Finding], limit: int = 1500) -> str:
     """По одному на строку, issue до 300 симв., вывод до limit байт."""
     lines: list[str] = []

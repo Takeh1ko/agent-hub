@@ -16,6 +16,21 @@ from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Asia/Yekaterinburg")
 
+
+def to_int(v, default: int = 0) -> int:
+    """Число из чего угодно (БД/proc/JSON): битое → default, без исключений."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def to_float(v, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
 # --- модели ---
 
 # Короткие имена из .hub.toml / task.executor → как их зовёт владелец.
@@ -107,7 +122,7 @@ _REASONS = {
     "no-diff": "исполнитель ничего не изменил",
 }
 
-_ROUND_RE = re.compile(r"^(exec|gate|review) r(\d+)$")
+_ROUND_RE = re.compile(r"^(exec|gate|review)(?:\s+r(\d+))?$")
 
 
 def reason_text(reason: str) -> str:
@@ -131,24 +146,25 @@ def reason_text(reason: str) -> str:
 
 def stage_view(stage: str, round_no: int = 0, max_rounds: int = 0,
                reason: str = "", reviewers: list[str] | None = None) -> StageView:
-    s = str(stage or "")
+    s = str(stage or "").strip()
     revs = ", ".join(model_name(r) for r in (reviewers or [])) or "проверяющие"
+    max_rounds = to_int(max_rounds)
     of = f" из {max_rounds}" if max_rounds else ""
     m = _ROUND_RE.match(s)
     if m:
-        kind, n = m.group(1), int(m.group(2))
-        circle = f"круг {n}{of}"
+        kind = m.group(1)
+        n = to_int(m.group(2)) if m.group(2) else to_int(round_no)
+        circle = f" (круг {n}{of})" if n > 0 else ""  # круг неизвестен — без «круг 0»
         if kind == "exec":
             now = "Пишет код" if n <= 1 else "Исправляет замечания проверки"
-            return StageView("✍", f"{now} ({circle})",
-                             "потом тесты и проверка кода", "ok")
+            return StageView("✍", now + circle, "потом тесты и проверка кода", "ok")
         if kind == "gate":
-            return StageView("🧪", f"Прогоняет тесты ({circle})",
+            return StageView("🧪", "Прогоняет тесты" + circle,
                              f"потом проверка кода: {revs}", "ok")
         last = bool(max_rounds) and n >= max_rounds
         nxt = ("замечаний нет — готово; есть — решает Claude" if last
                else "замечаний нет — готово; есть — исполнитель исправляет")
-        return StageView("🔍", f"Проверка кода ({circle})", nxt, "ok")
+        return StageView("🔍", "Проверка кода" + circle, nxt, "ok")
     why = reason_text(reason)
     table = {
         "queued": StageView("⏳", "Ждёт в очереди", "запустится, когда освободится место", "wait"),
@@ -173,7 +189,7 @@ def progress(stage: str) -> str:
 
     Для arbiter/failed/stopped/dropped — пусто: путь прерван, это видно в «Сейчас».
     """
-    s = str(stage or "")
+    s = str(stage or "").strip()
     m = _ROUND_RE.match(s)
     if m:
         idx = {"exec": 1, "gate": 2, "review": 3}[m.group(1)]
@@ -191,7 +207,7 @@ HEALTH = {
     "🟢": "работает",
     "🟡": "давно тихо — думает или ждёт тесты",
     "🔴": "похоже, зависла — давно ни одного действия",
-    "⚫": "процесса нет",
+    "⚫": "процесса нет — Claude разберётся",
     "✅": "готово",
     "⚖️": "ждёт решения",
     "❌": "ошибка",
@@ -200,7 +216,7 @@ HEALTH = {
 
 
 def health_text(pulse: str, stage: str = "") -> str:
-    if pulse == "⚫" and str(stage or "") in ("queued", "preflight"):
+    if pulse == "⚫" and str(stage or "").strip() in ("queued", "preflight", "stopped"):
         return "ждёт"
     return HEALTH.get(str(pulse or ""), "")
 
@@ -251,7 +267,7 @@ def activity_text(text: str) -> str:
 
 def ago(ms: int) -> str:
     """Возраст в словах: «сейчас», «3 мин», «1 ч 05 мин», «2 дн»."""
-    mins = max(int(ms // 60_000), 0)
+    mins = max(to_int(ms) // 60_000, 0)
     if mins < 1:
         return "сейчас"
     if mins < 60:
@@ -263,15 +279,20 @@ def ago(ms: int) -> str:
 
 def clock(ts_ms: int) -> str:
     """Местное время «HH:MM» (Екатеринбург, как у владельца)."""
-    if not ts_ms:
+    ts = to_int(ts_ms)
+    if ts <= 0:
         return "--:--"
-    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone(TZ)
+    try:
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).astimezone(TZ)
+    except (OverflowError, OSError, ValueError):
+        return "--:--"
     return dt.strftime("%H:%M")
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
     """«1 запуск», «3 запуска», «5 запусков»."""
-    k = abs(int(n))
+    n = to_int(n)
+    k = abs(n)
     word = (one if k % 10 == 1 and k % 100 != 11
             else few if 2 <= k % 10 <= 4 and not 12 <= k % 100 <= 14 else many)
     return f"{n} {word}"
@@ -284,11 +305,11 @@ def fit(text: str, limit: int) -> str:
 
 
 def money(x: float) -> str:
-    return f"${float(x or 0):.2f}"
+    return f"${to_float(x):.2f}"
 
 
 def tokens(n: int) -> str:
-    n = int(n or 0)
+    n = to_int(n)
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f} млн"
     if n >= 1000:
@@ -305,13 +326,19 @@ class CardInfo:
     goal: str     # первое предложение «Цели»
 
 
-_CARD_CACHE: dict[str, tuple[float, CardInfo]] = {}
+_CARD_CACHE: dict[tuple[str, str], tuple[float, CardInfo]] = {}
+_CARD_CACHE_MAX = 256
 _H1_RE = re.compile(r"^#\s+(.+)$", re.M)
 _GOAL_RE = re.compile(r"\*\*Цель\.?\*\*\s*(.+?)(?:\n\s*\n|\Z)", re.S)
 
 
 def _cap(s: str) -> str:
     return s[:1].upper() + s[1:] if s else s
+
+
+def _plain(text: str) -> str:
+    """Без markdown-разметки карточки: `код`, **жирный**."""
+    return re.sub(r"\*\*(.+?)\*\*", r"\1", str(text or "").replace("`", ""))
 
 
 def short_title(title: str, limit: int = 38) -> str:
@@ -330,11 +357,11 @@ def parse_card(text: str, task_id: str = "") -> CardInfo:
     head = m.group(1).strip() if m else ""
     # «H13 — hub: повтор …» → «hub: повтор …» (id задачи на экране и так есть).
     head = re.sub(r"^[A-Za-zА-Яа-я0-9_.-]+\s+[—–-]\s+", "", head)
-    title = _cap(head) or task_id
+    title = _cap(_plain(head)) or task_id
     g = _GOAL_RE.search(text or "")
     goal = ""
     if g:
-        body = re.sub(r"\s+", " ", g.group(1)).strip()
+        body = _plain(re.sub(r"\s+", " ", g.group(1)).strip())
         # Первое предложение: точка + пробел + заглавная/скобка/кавычка/цифра.
         first = re.split(r"(?<=[.!?])\s+(?=[(«\"A-ZА-ЯЁ0-9])", body, maxsplit=1)[0]
         goal = first if len(first) <= 300 else first[:299].rstrip() + "…"
@@ -351,7 +378,8 @@ def card_info(worktree: str, card_path: str, task_id: str = "") -> CardInfo:
         if not worktree:
             return fallback
         p = Path(worktree) / p
-    key = str(p)
+    # Ключ — путь И задача: worktree с тем же путём у новой задачи не отдаст чужое название.
+    key = (str(p), str(task_id))
     try:
         mtime = p.stat().st_mtime
     except OSError:
@@ -363,13 +391,15 @@ def card_info(worktree: str, card_path: str, task_id: str = "") -> CardInfo:
         info = parse_card(p.read_text(encoding="utf-8", errors="replace"), task_id)
     except OSError:
         return fallback
+    if len(_CARD_CACHE) >= _CARD_CACHE_MAX:
+        _CARD_CACHE.clear()
     _CARD_CACHE[key] = (mtime, info)
     return info
 
 
 # --- события ---
 
-def _payload(ev: dict) -> dict:
+def event_payload(ev: dict) -> dict:
     raw = ev.get("payload_json", ev.get("payload"))
     if isinstance(raw, dict):
         return raw
@@ -383,15 +413,16 @@ def _payload(ev: dict) -> dict:
 def event_text(ev: dict, executor: str = "", reviewers: list[str] | None = None) -> str:
     """Событие хаба одной фразой; executor/reviewers — короткие имена задачи."""
     kind = str(ev.get("kind") or "")
-    p = _payload(ev)
+    p = event_payload(ev)
     who = model_name(executor) if executor else "исполнитель"
     revs = ", ".join(model_name(r) for r in (reviewers or [])) or "проверяющие"
     if kind == "stage":
-        stage = str(p.get("stage") or "")
+        stage = str(p.get("stage") or "").strip()
         reason = str(p.get("reason") or "")
         m = _ROUND_RE.match(stage)
         if m:
-            k, n = m.group(1), int(m.group(2))
+            k = m.group(1)
+            n = to_int(m.group(2)) if m.group(2) else to_int(p.get("round"))
             if k == "exec":
                 return f"{who} пишет код" if n <= 1 else f"{who} исправляет замечания (круг {n})"
             if k == "gate":
@@ -433,3 +464,62 @@ def event_text(ev: dict, executor: str = "", reviewers: list[str] | None = None)
         text = re.sub(r"\s+", " ", str(p.get("text") or "")).strip()
         return f"сообщение владельца: «{text[:70]}{'…' if len(text) > 70 else ''}»"
     return kind or "событие"
+
+
+# --- история задачи (экран top и TG /task) ---
+
+def describe(task, now_ms: int, working_ms: int = 10 * 60_000) -> list[tuple[str, str]]:
+    """Задача словами: [(подпись, текст)], подпись "" — строка без подписи.
+
+    task — TaskSnap (или любой объект с теми же полями). Без I/O.
+    """
+    tid = str(getattr(task, "id", "") or "")
+    code = tid.split("-", 1)[0] or tid
+    view = stage_view(task.stage, task.round, task.max_rounds, task.reason, task.reviewers)
+    out: list[tuple[str, str]] = [
+        ("", f"{code} · {task.title or tid}"),
+        ("", f"({tid}, проект {task.project or '—'})"),
+    ]
+    if task.goal:
+        out.append(("Зачем", task.goal))
+    now = view.now
+    since = to_int(task.stage_since_ms)
+    if since > 0:
+        now += f" · {ago(to_int(now_ms) - since)} в этапе"
+    health = health_text(task.pulse, task.stage)
+    if health:
+        now += f" · {task.pulse} {health}"
+    out.append(("Сейчас", now))
+    path = progress(task.stage)
+    if path:
+        out.append(("Путь", path))
+    if view.next and view.next != "—":
+        out.append(("Дальше", view.next))
+    if task.executor or task.reviewers:
+        out.append(("Команда", team(task.executor, task.reviewers)))
+    fresh = []
+    for x in sorted(task.sessions or [], key=lambda x: -to_int(x.pulse_ms)):
+        age_ms = to_int(now_ms) - to_int(x.pulse_ms)
+        if age_ms > working_ms:
+            continue
+        act = activity_text(x.last_activity)
+        age = ago(age_ms)
+        fresh.append(f"{x.pulse} {model_name(x.model, x.provider)} — {role_name(x.role)}"
+                     + (f": {fit(act, 90)}" if act else "")
+                     + f" ({'только что' if age == 'сейчас' else age + ' назад'})")
+    if fresh:
+        out.append(("Сейчас работают", "\n".join(fresh)))
+    else:
+        out.append(("Сейчас работают", "никто — " + (health or view.now.lower())))
+    spent = money(to_float(task.cost_go) + to_float(task.cost_usd))
+    agg: dict[str, list[float]] = {}
+    for x in task.sessions or []:
+        cur = agg.setdefault(model_name(x.model, x.provider), [0.0, 0])
+        cur[0] += to_float(x.cost)
+        cur[1] += 1
+    if agg:
+        parts = [f"{name} {money(c)} ({plural(int(n), 'запуск', 'запуска', 'запусков')})"
+                 for name, (c, n) in sorted(agg.items(), key=lambda kv: -kv[1][0])]
+        spent += " — " + ", ".join(parts)
+    out.append(("Потрачено", spent))
+    return out

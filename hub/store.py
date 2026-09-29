@@ -237,8 +237,11 @@ class Store:
         finally:
             con.close()
 
-    def stage_marks(self) -> dict[str, tuple[int, str]]:
-        """{task_id: (ts начала текущего этапа, причина)} — последнее событие stage задачи."""
+    def stage_marks(self) -> dict[str, tuple[int, str, str]]:
+        """{task_id: (ts, причина, этап)} — последнее событие stage задачи.
+
+        Этап в ответе — чтобы сверить с task.stage: не совпал — время этапа неизвестно.
+        """
         con = self._connect()
         try:
             rows = con.execute(
@@ -248,17 +251,27 @@ class Store:
             ).fetchall()
         finally:
             con.close()
-        out: dict[str, tuple[int, str]] = {}
+        out: dict[str, tuple[int, str, str]] = {}
         for r in rows:
             try:
-                reason = str((json.loads(r["payload_json"] or "{}") or {}).get("reason") or "")
+                payload = json.loads(r["payload_json"] or "{}") or {}
+                reason = str(payload.get("reason") or "")
+                stage = str(payload.get("stage") or "").strip()
             except (TypeError, ValueError, AttributeError):
-                reason = ""
-            out[str(r["task_id"])] = (int(r["ts"] or 0), reason)
+                reason = stage = ""
+            try:
+                ts = int(r["ts"] or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            out[str(r["task_id"])] = (ts, reason, stage)
         return out
 
     def recent_events(self, limit: int = 12) -> list[dict]:
         """Последние limit событий по возрастанию id (история для ленты top)."""
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit = 12
         con = self._connect()
         try:
             rows = con.execute(

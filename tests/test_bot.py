@@ -293,9 +293,11 @@ def test_task_format_limit(tmp_path):
                   budget_go=0.5, budget_usd=1.0)
     s.link_session("sx", "opencode", "H09", "executor", 1, "muse")
     text = bc.format_task(s, "H09", snapshot=_fake_snapshot_for("H09"))
-    assert "H09" in text and "exec r1" in text and "executor" in text
-    assert "a.py" in text
-    assert "$" in text  # карточка п.6: этап, сессии, $, замечания
+    # Для владельца — словами, как на экране top: этап, кто работает, $, замечания круга.
+    assert "H09" in text and "Сейчас: Пишет код" in text and "Spark Go" in text
+    assert "Замечания проверки (круг 1):" in text and "a.py" in text
+    assert "Потрачено: $" in text and "Бюджет задачи: Go $0.50" in text
+    assert "exec r1" not in text and "executor" not in text
     assert len(text) <= 3500 and text.endswith("</pre>")
     assert bc.format_task(s, "НЕТ") == "нет задачи НЕТ"
 

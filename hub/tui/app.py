@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import subprocess
 import sys
 from dataclasses import replace
@@ -28,19 +27,18 @@ from hub.read import human as hm
 from hub.read import procs
 from hub.read import snapshot
 from hub.store import Store
-from hub.tui.widgets import WORKING_MS, EventFeed, TaskTable, code_of
+from hub.tui.widgets import COMPACT_WIDTH, WORKING_MS, EventFeed, TaskTable, code_of
 
 if TYPE_CHECKING:
     from hub.read.snapshot import Snapshot, TaskSnap
 
 try:  # H04: только импорт, без копирования логики
-    from hub.read.findings import load_findings  # type: ignore
+    from hub.read.findings import latest_round, load_findings  # type: ignore
 except ImportError:  # H04 ещё не применён
-    load_findings = None  # type: ignore
+    latest_round = load_findings = None  # type: ignore
 
 log = logging.getLogger(__name__)
 
-_REVIEW_RE = re.compile(r"^review_r(\d+)(?:_.*)?\.json$")
 
 GO_LIMIT = 60.0
 FEED_HISTORY = 12   # сколько последних событий показать при запуске
@@ -59,12 +57,13 @@ HELP_TEXT = """\
   🟢 работает — агент что-то делал в последние 2 мин
   🟡 давно тихо — думает над большим шагом или ждёт тесты
   🔴 похоже, зависла — давно ни одного действия
-  ⚫ процесса нет — ждёт очереди или упала
+  ⚫ процесса нет — ждёт очереди; если не в очереди — Claude разберётся
   ✅ готово   ⚖️ ждёт решения Claude   ❌ ошибка   ⏹ остановлена
 
 [b]Модели[/b]
   Spark Go — Muse Spark 1.3 по подписке Go ($60/мес), основной исполнитель и проверяющий
-  Spark бесплатный — тот же Spark бесплатно, медленнее; молчит 15 мин → сам переходит на Go
+  Spark бесплатный — тот же Spark бесплатно, медленнее; если долго молчит (обычно 15 мин),
+                     задача сама переходит на Spark Go
   MiMo Flash — второй проверяющий (дёшево)
   DeepSeek — рутина (сводки, наблюдатель)
 
@@ -78,19 +77,6 @@ HELP_TEXT = """\
 Esc или ? — закрыть"""
 
 
-def _spent_by_model(task: TaskSnap) -> list[str]:
-    """«Spark Go $0.16 (5 запусков)», по убыванию денег."""
-    agg: dict[str, list[float]] = {}
-    for s in task.sessions or []:
-        name = hm.model_name(s.model, s.provider)
-        cur = agg.setdefault(name, [0.0, 0])
-        cur[0] += float(s.cost or 0.0)
-        cur[1] += 1
-    rows = sorted(agg.items(), key=lambda kv: -kv[1][0])
-    return [f"{name} {hm.money(cost)} ({hm.plural(int(n), 'запуск', 'запуска', 'запусков')})"
-            for name, (cost, n) in rows]
-
-
 class HelpScreen(ModalScreen[None]):
     """Что значат значки, цвета и как идёт задача."""
 
@@ -98,7 +84,7 @@ class HelpScreen(ModalScreen[None]):
                 ("q", "close", "закрыть")]
     DEFAULT_CSS = """
     HelpScreen { align: center middle; }
-    #help { width: 96; height: auto; max-height: 90%; border: round $accent;
+    #help { width: 96; max-width: 95%; height: auto; max-height: 90%; border: round $accent;
             padding: 1 2; background: $panel; }
     """
 
@@ -115,7 +101,7 @@ class ConfirmAction(ModalScreen[bool]):
     BINDINGS = [("y", "confirm", "да"), ("n", "cancel", "нет"), ("escape", "cancel", "нет")]
     DEFAULT_CSS = """
     ConfirmAction { align: center middle; }
-    #confirm-text { width: 70; height: auto; border: round $warning; padding: 1 2;
+    #confirm-text { width: 70; max-width: 95%; height: auto; border: round $warning; padding: 1 2;
                     background: $panel; }
     """
 
@@ -134,10 +120,10 @@ class ConfirmAction(ModalScreen[bool]):
 
 
 class ConfirmMerge(ConfirmAction):
-    """Совместимость: подтверждение слияния задачи."""
+    """Подтверждение слияния задачи."""
 
-    def __init__(self, task_id: str) -> None:
-        super().__init__(f"Слить задачу {task_id} в рабочую ветку?")
+    def __init__(self, task_id: str, label: str = "") -> None:
+        super().__init__(f"Слить задачу {label or task_id} в рабочую ветку?")
         self._task_id = task_id
 
 
@@ -383,8 +369,8 @@ class HubApp(App):
         head.append("\nДеньги: сегодня задачи ")
         head.append(hm.money((snap.total_go or 0) + (snap.total_usd or 0)), style="bold")
         head.append(f" · все проекты Go {hm.money(snap.all_go)}")
-        head.append(f" · месяц Go {hm.money(month)} из $60 [{bar}]")
         head.append(f" · реальные деньги {hm.money(snap.all_usd)}")
+        head.append(f" · месяц Go {hm.money(month)} из $60 [{bar}] {int(round(frac * 100))}%")
         if snap.agy_runs:  # Gemini выключен владельцем — показываем, только если работал
             head.append(f" · Gemini: {snap.agy_runs} запусков / {snap.agy_steps} шагов за 5 ч")
         head.append("    ? — что значат значки", style="dim")
@@ -400,6 +386,10 @@ class HubApp(App):
             log.exception("нет размера экрана")
             return
         self._narrow = narrow
+        try:
+            self.query_one("#tasks", TaskTable).set_compact(sz.width < COMPACT_WIDTH)
+        except Exception:
+            log.exception("не переключилась компактная таблица")
         for wid_id in ("#details", "#events"):
             try:
                 self.query_one(wid_id).display = not self._narrow
@@ -408,6 +398,13 @@ class HubApp(App):
 
     # --- подробности ---
 
+    def _task_label(self, task_id: str) -> str:
+        """«H13 · Hub: повтор при сбое…» для подтверждений."""
+        snap = self._snap
+        task = next((t for t in (snap.tasks if snap else []) if str(t.id) == task_id), None)
+        name = (task.short or task.title) if task else ""
+        return f"{code_of(task_id)} · {name}" if name else task_id
+
     def _current_task_id(self) -> str | None:
         try:
             return self.query_one("#tasks", TaskTable).selected_task_id()
@@ -415,66 +412,34 @@ class HubApp(App):
             log.exception("нет таблицы")
             return None
 
-    def _task_snap(self, task_id: str) -> TaskSnap | None:
-        snap = self._snap
-        if snap is None:
-            return None
-        return next((t for t in snap.tasks if str(t.id) == task_id), None)
+    def _build_detail(self, task_id: str, snap: Snapshot | None = None) -> Text:
+        """Подробности задачи. Блокирующий I/O (замечания) — звать только из воркера.
 
-    def _build_detail(self, task_id: str) -> Text:
-        """Подробности задачи. Блокирующий I/O (замечания) — звать только из воркера."""
-        task = self._task_snap(task_id)
+        snap — снимок, снятый в UI-потоке: задача и «сейчас» из одного тика.
+        """
+        snap = snap if snap is not None else self._snap
+        task = None
+        if snap is not None:
+            task = next((t for t in snap.tasks if str(t.id) == task_id), None)
         out = Text()
         if task is None:
             out.append(f"Задача {task_id}\n(нет в снимке)")
             return out
-        now = self._snap.now_ms if self._snap else 0
-        view = hm.stage_view(task.stage, task.round, task.max_rounds, task.reason, task.reviewers)
-        out.append(f"{code_of(task.id)} · {task.title or task.id}\n", style="bold")
-        out.append(f"({task.id}, проект {task.project or '—'})\n", style="dim")
-        if task.goal:
-            out.append("Зачем: ", style="bold")
-            out.append(task.goal + "\n")
-        out.append("Сейчас: ", style="bold")
-        out.append(view.now)
-        if task.stage_since_ms:
-            out.append(f" · {hm.ago(now - task.stage_since_ms)} в этапе")
-        health = hm.health_text(task.pulse, task.stage)
-        if health:
-            out.append(f" · {task.pulse} {health}")
-        out.append("\n")
-        path = hm.progress(task.stage)
-        if path:
-            out.append("Путь: ", style="bold")
-            out.append(path + "\n")
-        if view.next and view.next != "—":
-            out.append("Дальше: ", style="bold")
-            out.append(view.next + "\n")
-        if task.executor or task.reviewers:
-            out.append("Команда: ", style="bold")
-            out.append(hm.team(task.executor, task.reviewers) + "\n")
-        out.append("Сейчас работают:\n", style="bold")
-        fresh = [s for s in sorted(task.sessions or [], key=lambda x: -x.pulse_ms)
-                 if now - s.pulse_ms <= WORKING_MS]
-        for s in fresh:
-            act = hm.activity_text(s.last_activity)
-            age = hm.ago(now - s.pulse_ms)
-            out.append(f"  {s.pulse} {hm.model_name(s.model, s.provider)} — {hm.role_name(s.role)}"
-                       + (f": {hm.fit(act, 90)}" if act else "")
-                       + f" ({'только что' if age == 'сейчас' else age + ' назад'})\n")
-        if not fresh:
-            out.append("  никто — " + (hm.health_text(task.pulse, task.stage) or view.now.lower())
-                       + "\n")
-        out.append("Потрачено: ", style="bold")
-        out.append(hm.money(task.cost_go + task.cost_usd))
-        spent = _spent_by_model(task)
-        if spent:
-            out.append(" — " + ", ".join(spent))
-        out.append("\n")
-        rnd, findings = self._finding_lines(task_id)
-        if findings:
-            out.append(f"Замечания проверки (круг {rnd}):\n", style="bold")
-            for ln in findings:
+        for n, (label, text) in enumerate(hm.describe(task, snap.now_ms, WORKING_MS)):
+            if not label:
+                out.append(text + "\n", style="bold" if n == 0 else "dim")
+            elif "\n" in text or label == "Сейчас работают":
+                out.append(f"{label}:\n", style="bold")
+                for line in text.splitlines():
+                    out.append(f"  {line}\n")
+            else:
+                out.append(f"{label}: ", style="bold")
+                out.append(text + "\n")
+        rnd, lines = self._finding_lines(task_id)
+        if rnd:
+            out.append(f"Замечания проверки (круг {rnd}):", style="bold")
+            out.append("\n" if lines else " нет\n")
+            for ln in lines:
                 out.append(ln + "\n")
         return out
 
@@ -482,7 +447,8 @@ class HubApp(App):
         return self._build_detail(task_id).plain
 
     async def _do_show_details(self, task_id: str) -> None:
-        text = await asyncio.to_thread(self._build_detail, task_id)
+        snap = self._snap  # снят в UI-потоке: поток воркера не видит смену тика посередине
+        text = await asyncio.to_thread(self._build_detail, task_id, snap)
         self._details_task = task_id
         try:
             self.query_one("#details-text", Static).update(text)
@@ -492,8 +458,8 @@ class HubApp(App):
             log.exception("не отрисовались подробности")
 
     def _finding_lines(self, task_id: str) -> tuple[int, list[str]]:
-        """Замечания ПОСЛЕДНЕГО круга проверки: (номер круга, строки)."""
-        if load_findings is None:
+        """Замечания ПОСЛЕДНЕГО круга проверки без дублей: (номер круга, строки)."""
+        if load_findings is None or latest_round is None:
             return 0, []
         try:
             store = self._store()
@@ -504,26 +470,18 @@ class HubApp(App):
             return 0, []
         if not wt or not Path(wt).is_dir():
             return 0, []
-        rounds = []
-        for f in (Path(wt) / ".agent").glob("review_r*.json"):
-            m = _REVIEW_RE.match(f.name)
-            if m:
-                rounds.append(int(m.group(1)))
-        if not rounds:
-            return 0, []
-        rnd = max(rounds)
         try:
-            items = load_findings(Path(wt), round=rnd)
+            rnd, items = latest_round(Path(wt))
         except Exception:
             log.exception("не читаются замечания")
-            return rnd, ["  (не читаются)"]
+            return 0, []
         sev = {"high": "важное", "medium": "среднее", "low": "мелочь"}
         out = []
         for f in items[:FINDINGS_MAX]:
             try:
-                where = f"{Path(f.file).name}:{f.line}" if f.file else ""
-                out.append(f"  • [{sev.get(f.severity, f.severity)}] {where} {f.issue[:110]}"
-                           f" ({hm.model_name(f.author)})")
+                where = f"{Path(f.file).name}:{f.line}" if f.file and f.file != "?" else ""
+                who = f" ({hm.model_name(f.author)})" if f.author else ""
+                out.append(f"  • [{sev.get(f.severity, f.severity)}] {where} {hm.fit(f.issue, 110)}{who}")
             except Exception:
                 log.exception("битое замечание")
         if len(items) > FINDINGS_MAX:
@@ -575,7 +533,7 @@ class HubApp(App):
                 self.run_worker(self._run_hub_cmd(["stop", tid]), group="cmd",
                                 exclusive=True, exit_on_error=False)
 
-        self.push_screen(ConfirmAction(f"Остановить задачу {tid}?"), _done)
+        self.push_screen(ConfirmAction(f"Остановить задачу {self._task_label(tid)}?"), _done)
 
     def action_merge_task(self) -> None:
         tid = self._current_task_id()
@@ -588,7 +546,7 @@ class HubApp(App):
                 self.run_worker(self._run_hub_cmd(["merge", tid]), group="cmd",
                                 exclusive=True, exit_on_error=False)
 
-        self.push_screen(ConfirmMerge(tid), _done)
+        self.push_screen(ConfirmMerge(tid, self._task_label(tid)), _done)
 
     def action_show_findings(self) -> None:
         tid = self._current_task_id()

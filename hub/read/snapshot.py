@@ -155,9 +155,10 @@ class Snapshot:
         }, ensure_ascii=False)
 
     def head_text(self) -> str:
+        pct = int(round(100 * self.month_go / 60.0)) if self.month_go else 0
         text = (f"Сегодня: задачи хаба ${self.total_go + self.total_usd:.2f} · все проекты Go "
-                f"${self.all_go:.2f} · за месяц Go ${self.month_go:.2f} из лимита $60/мес"
-                f" · реальные деньги ${self.all_usd:.2f}")
+                f"${self.all_go:.2f} · реальные деньги сегодня ${self.all_usd:.2f}"
+                f" · за месяц Go ${self.month_go:.2f} из лимита $60/мес ({pct}%)")
         if self.agy_runs:
             text += f" · Gemini: {self.agy_runs} запусков / {self.agy_steps} шагов за 5 ч"
         return text
@@ -514,18 +515,23 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
         ctx = max([s.context_tokens for s in ss] + [0])
         last = next((s.last_activity for s in ss if s.last_activity != "-"), "-")
         info = hm.card_info(wt, str(t.get("card_path") or ""), tid)
-        since_ms, since_reason = marks.get(tid, (0, ""))
+        mark = marks.get(tid) or (0, "", "")
+        raw_stage = str(t.get("stage") or "").strip()
+        # Время этапа — только если последнее событие stage про ЭТОТ этап; иначе «—», а не
+        # время любого апдейта задачи.
+        since_ms = mark[0] if mark[2] == raw_stage else 0
+        since_reason = mark[1] if mark[2] == raw_stage else ""
         snaps.append(TaskSnap(
             id=str(t["id"]), project=str(t.get("project") or ""),
-            stage=stage, round=int(t.get("round") or 0),
+            stage=stage, round=hm.to_int(t.get("round")),
             pulse=pulse, cost_go=cost_go, cost_usd=cost_usd,
             context=ctx, last_activity=clean_activity(last), sessions=ss,
             title=info.title, short=info.short, goal=info.goal,
             executor=str(t.get("executor") or ""),
             reviewers=hm.parse_reviewers(t.get("reviewers_json")),
-            max_rounds=int(t.get("rounds") or 2),  # как pipeline.common: нет колонки — 2 круга
+            max_rounds=hm.to_int(t.get("rounds")) or 2,  # как pipeline.common: нет колонки — 2 круга
             reason=str(t.get("stage_reason") or "") or since_reason,
-            stage_since_ms=int(since_ms or t.get("updated_at") or 0),
+            stage_since_ms=hm.to_int(since_ms),
         ))
     return Snapshot(tasks=snaps, total_go=totals_go, total_usd=totals_usd, now_ms=now_ms,
                     all_go=all_go, all_usd=all_usd,

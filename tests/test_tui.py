@@ -564,15 +564,24 @@ async def test_feed_lines_are_plain_words(tmp_path):
              "payload_json": json.dumps({"stage": "exec r1", "round": 1})},
             {"id": 2, "ts": NOW, "task_id": "T01", "kind": "stage",
              "payload_json": json.dumps({"stage": "review r1", "round": 1})},
-            {"id": 3, "ts": NOW, "task_id": "T01", "kind": "ready",
+            {"id": 3, "ts": NOW, "task_id": "T01", "kind": "stage",
              "payload_json": json.dumps({"stage": "ready"})},
         ], {"T01": t})
         await pilot.pause()
         text = "\n".join(line.text for line in feed.lines)
         assert "Spark Go пишет код" in text
         assert "проверка кода: Spark Go, MiMo Flash (круг 1)" in text
-        # Дубль смены этапа для TG-бота в ленте не повторяется.
-        assert len(feed.lines) == 2
+        assert len(feed.lines) == 3
+        # Дубль этапа для TG-бота (отдельным тиком) в ленте не повторяется…
+        feed.push([{"id": 4, "ts": NOW, "task_id": "T01", "kind": "ready",
+                    "payload_json": json.dumps({"stage": "ready"})}], {"T01": t})
+        await pilot.pause()
+        assert len(feed.lines) == 3
+        # …а «ошибка» без события stage — показывается (владелец не пропустит главное).
+        feed.push([{"id": 5, "ts": NOW, "task_id": "T02", "kind": "failed",
+                    "payload_json": json.dumps({"stage": "failed"})}], {})
+        await pilot.pause()
+        assert len(feed.lines) == 4 and "ошибка" in feed.lines[-1].text
 
 
 async def test_run_hub_cmd_reports_error(tmp_path, monkeypatch):
@@ -843,3 +852,39 @@ async def test_run_hub_cmd_error_shows_stderr(tmp_path, monkeypatch):
         await pilot.pause()
     assert notes and notes[-1][0] == "ошибка: нет такой задачи"
     assert notes[-1][1].get("severity") == "error"
+
+
+async def test_compact_table_on_narrow_screen(tmp_path):
+    """Экран уже COMPACT_WIDTH: без колонки «Проект», «Что сейчас» видна без прокрутки."""
+    from hub.tui.widgets import COMPACT_KEYS
+
+    app = _app(tmp_path)
+    async with app.run_test(size=(110, 30)) as pilot:
+        await pilot.pause()
+        app._apply_snapshot(_snap(), bot_alive=False, events=[])
+        await pilot.pause()
+        table = app.query_one("#tasks", TaskTable)
+        assert table.compact is True
+        assert [str(c.key.value) for c in table.ordered_columns] == COMPACT_KEYS
+        await pilot.resize_terminal(150, 40)
+        await pilot.pause()
+        app._apply_snapshot(_snap(), bot_alive=False, events=[])
+        await pilot.pause()
+        assert table.compact is False
+        assert [str(c.key.value) for c in table.ordered_columns] == COL_KEYS
+        assert table.row_count == 1
+
+
+async def test_broken_task_does_not_break_table(tmp_path):
+    app = _app(tmp_path)
+    async with app.run_test(size=(150, 40)) as pilot:
+        await pilot.pause()
+        good = _snap(task_id="TG").tasks[0]
+        bad = replace(_snap(task_id="TB").tasks[0], max_rounds="много", stage_since_ms="вчера",
+                      cost_go="x")
+        table = app.query_one("#tasks", TaskTable)
+        table.update(Snapshot(tasks=[good, bad], total_go=0.0, total_usd=0.0, now_ms=NOW))
+        await pilot.pause()
+        assert table.row_count == 2
+        row = [str(c) for c in table.get_row("TB")]
+        assert "—" in row  # время этапа неизвестно, строка есть

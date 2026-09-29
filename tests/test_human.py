@@ -77,7 +77,7 @@ def test_progress_path():
 def test_health_text():
     assert hm.health_text("🟢") == "работает"
     assert hm.health_text("⚫", "queued") == "ждёт"
-    assert hm.health_text("⚫", "exec r1") == "процесса нет"
+    assert hm.health_text("⚫", "exec r1") == "процесса нет — Claude разберётся"
     assert "зависла" in hm.health_text("🔴")
 
 
@@ -127,6 +127,8 @@ def test_parse_card_title_short_goal():
     assert info.goal.startswith("Три дефекта живого использования")
     assert info.goal.endswith("(1) сбой.")
     assert "Второе" not in info.goal
+    marked = hm.parse_card("# X1 — `код` и **жирный**\n\n**Цель.** Поле `price=0` важно.\n", "X1")
+    assert marked.title == "Код и жирный" and marked.goal == "Поле price=0 важно."
     # Без заголовка и цели — id задачи, пустая цель.
     bare = hm.parse_card("просто текст", "T9")
     assert bare.title == "T9" and bare.goal == ""
@@ -181,7 +183,7 @@ def test_store_stage_marks_and_recent_events():
     last = s.add_event("T1", "stage", {"stage": "arbiter", "reason": "панель молчит"})
     s.add_event("T2", "stage", {"stage": "queued"})
     marks = s.stage_marks()
-    assert marks["T1"][1] == "панель молчит" and set(marks) == {"T1", "T2"}
+    assert marks["T1"][1:] == ("панель молчит", "arbiter") and set(marks) == {"T1", "T2"}
     recent = s.recent_events(2)
     assert [e["id"] for e in recent][0] == last and len(recent) == 2
 
@@ -262,3 +264,79 @@ def test_roster_text_plain_words(tmp_path):
     assert "Проверка кода (круг 2 из 2) · 13 мин в этапе · $0.25" in text
     assert "MiMo Flash проверяет код: думает (1 мин)" in text
     assert "Дальше: замечаний нет — готово; есть — решает Claude" in text
+
+
+# --- ревью Spark: битые данные, голые этапы, время этапа, замечания, бот ---
+
+def test_bad_data_never_raises():
+    assert hm.ago(None) == "сейчас" and hm.ago("abc") == "сейчас"
+    assert hm.money("abc") == "$0.00" and hm.money(None) == "$0.00"
+    assert hm.clock("abc") == "--:--" and hm.clock(None) == "--:--"
+    assert hm.tokens(None) == "0"
+    assert hm.plural("x", "запуск", "запуска", "запусков") == "0 запусков"
+    assert hm.stage_view(None).now == "—"
+
+
+def test_stage_view_bare_and_spaces():
+    assert hm.stage_view("exec r1 ", 1, 2).now == "Пишет код (круг 1 из 2)"
+    assert hm.stage_view("exec").now == "Пишет код"
+    assert hm.stage_view("review", 2, 2).now == "Проверка кода (круг 2 из 2)"
+    assert hm.stage_view("gate").now == "Прогоняет тесты"
+    assert hm.progress(" review r1 ").startswith("✓ очередь → ✓ код → ✓ тесты → ●")
+
+
+def test_describe_story(tmp_path):
+    t = snap.TaskSnap(
+        id="H13-x", project="agent-hub", stage="exec r2", round=2, pulse="🟢",
+        cost_go=0.3, cost_usd=0.0, context=0, last_activity="",
+        sessions=[snap.SessionSnap("s1", "executor", "muse", "opencode-go", NOW - 30_000,
+                                   "🟢", 0.2, True, 0, "read hub/x.py"),
+                  snap.SessionSnap("s0", "reviewer", "mimoflash", "opencode-go", NOW - 3_600_000,
+                                   "🔴", 0.1, True, 0, "думает")],
+        title="Hub: повтор", goal="Чтобы не падало.", executor="muse",
+        reviewers=["muse", "mimoflash"], max_rounds=2, stage_since_ms=NOW - 5 * 60_000)
+    story = dict(hm.describe(t, NOW))
+    assert story["Сейчас"].startswith("Исправляет замечания проверки (круг 2 из 2) · 5 мин в этапе")
+    # Старая (час назад) сессия ревьюера — не «работает сейчас».
+    assert story["Сейчас работают"] == "🟢 Spark Go — пишет код: читает hub/x.py (только что)"
+    assert story["Потрачено"] == "$0.30 — Spark Go $0.20 (1 запуск), MiMo Flash $0.10 (1 запуск)"
+    idle = dict(hm.describe(snap.TaskSnap(
+        id="Q1", project="p", stage="queued", round=0, pulse="⚫", cost_go=0, cost_usd=0,
+        context=0, last_activity=""), NOW))
+    assert idle["Сейчас работают"] == "никто — ждёт" and "Путь" in idle
+
+
+def test_stage_since_only_for_matching_stage(tmp_path):
+    s = Store()
+    s.upsert_task(id="T1", stage="review r1", round=1, worktree="", updated_at=NOW)
+    s.add_event("T1", "stage", {"stage": "exec r1"})  # событие про ПРОШЛЫЙ этап
+    got = {t.id: t for t in snap.build(s, NOW, proc_root=tmp_path / "пусто").tasks}["T1"]
+    assert got.stage_since_ms == 0  # «—», а не время чужого этапа/апдейта
+    s.add_event("T1", "stage", {"stage": "review r1", "reason": "ревью"})
+    got = {t.id: t for t in snap.build(s, NOW, proc_root=tmp_path / "пусто").tasks}["T1"]
+    assert got.stage_since_ms > 0 and got.reason in ("ревью", "")
+
+
+def test_latest_round_findings_dedup(tmp_path):
+    from hub.read.findings import latest_round
+
+    agent = tmp_path / ".agent"
+    agent.mkdir()
+    assert latest_round(tmp_path) == (0, [])
+    one = {"file": "a.py", "line": 1, "issue": "баг", "severity": "high"}
+    (agent / "review_r1_muse.json").write_text(json.dumps({"findings": [one]}), encoding="utf-8")
+    (agent / "review_r2.json").write_text(json.dumps({"findings": [one]}), encoding="utf-8")
+    (agent / "review_r2_mimoflash.json").write_text(json.dumps({"findings": [one]}),
+                                                    encoding="utf-8")
+    rnd, items = latest_round(tmp_path)
+    assert rnd == 2 and len(items) == 1 and items[0].author == "mimoflash"
+    (agent / "review_r3_muse.json").write_text(json.dumps({"findings": []}), encoding="utf-8")
+    assert latest_round(tmp_path) == (3, [])
+
+
+def test_bot_seen_with_interpreter_flags(tmp_path):
+    from hub.read import procs as hub_procs
+
+    assert hub_procs._kind_of(["/x/python3", "-u", ".venv/bin/hub", "bot"]) == "hub_bot"
+    assert hub_procs._kind_of(["/x/python3", ".venv/bin/hub", "status"]) is None
+    assert hub_procs._kind_of(["/x/python3", "-m", "hub.cli", "bot"]) == "hub_bot"

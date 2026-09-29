@@ -981,6 +981,8 @@ def format_task(store: Store, task_id: str, limit: int = TASK_LIMIT,
             if str(getattr(t, "id", "")) == tid:
                 tsnap = t
                 break
+    if tsnap is not None:
+        return _wrap_pre(_task_story(task, tsnap, snapshot, lim_go, lim_usd), int(limit))
     lines = [f"{tid} {stage} r{rnd}"]
     if tsnap is not None:
         lines.append(f"$ go ${float(tsnap.cost_go):.3f}"
@@ -1012,6 +1014,40 @@ def format_task(store: Store, task_id: str, limit: int = TASK_LIMIT,
         lines.append("Замечания:")
         lines.append(notes)
     return _wrap_pre("\n".join(lines), int(limit))
+
+
+def _task_story(task: dict, tsnap, snapshot, lim_go: float, lim_usd: float) -> str:
+    """Для владельца — те же слова, что на экране hub top (hub/read/human.describe)."""
+    from pathlib import Path
+
+    from hub.read import human as hm
+
+    now_ms = int(getattr(snapshot, "now_ms", 0) or 0)
+    lines: list[str] = []
+    for label, text in hm.describe(tsnap, now_ms):
+        if not label:
+            lines.append(text)
+        elif "\n" in text or label == "Сейчас работают":
+            lines.append(f"{label}:")
+            lines.extend(f"  {ln}" for ln in text.splitlines())
+        else:
+            lines.append(f"{label}: {text}")
+    if lim_go or lim_usd:
+        lines.append(f"Бюджет задачи: Go ${lim_go:.2f}, реальные ${lim_usd:.2f}")
+    wt = str(task.get("worktree") or "")
+    if wt:
+        try:
+            from hub.read.findings import format_findings, latest_round
+
+            rnd, items = latest_round(Path(wt))
+            if rnd:
+                lines.append(f"Замечания проверки (круг {rnd}):"
+                             + ("" if items else " нет"))
+                if items:
+                    lines.append(format_findings(items, limit=1500))
+        except (OSError, ValueError):
+            pass
+    return "\n".join(lines)
 
 
 def _task_findings_text(task: dict) -> str:
