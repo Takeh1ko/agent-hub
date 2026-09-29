@@ -281,8 +281,8 @@ def _preflight_continued(store, project, task_id: str,
                 when = ht.fmt_local(holder.started_ms)
             except (OSError, ValueError, AttributeError, TypeError):
                 when = str(holder.started_ms)
-            return PreflightResult(
-                ok=False, reason=f"locked: pid {holder.pid} since {when}")
+            # Как основной preflight: занятый общий замок — не отказ, ворота дождутся.
+            pass
     try:
         digest = _hl.sha256(rp.read_bytes()).hexdigest()
         store.upsert_task(id=task_id, rules_sha=digest)
