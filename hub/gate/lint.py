@@ -14,7 +14,8 @@ from hub.config import ProjectConfig
 
 # Обязательные разделы карточки (§7, словарь §2).
 # «Уровень» — необязательный: выводится из «Исполнитель»
-# (gemini → easy, musefree → medium, muse → hard), см. card_level.
+# (gemini → easy, musefree → medium, muse → hard; background — только явным
+# разделом «Уровень» либо через [levels] проекта), см. card_level.
 REQUIRED_SECTIONS = [
     "Цель",
     "Прочитать",
@@ -35,6 +36,8 @@ OPTIONAL_SECTIONS = [
 _ALL_SECTIONS = REQUIRED_SECTIONS + OPTIONAL_SECTIONS
 
 # Уровень по умолчанию из исполнителя (если нет раздела «Уровень»).
+# background сюда не входит: без [levels] проекта musefree — medium,
+# background — только явным «Уровнем» (решение владельца 2026-09-29).
 DEFAULT_LEVEL_BY_EXECUTOR = {
     "gemini": "easy",
     "musefree": "medium",
@@ -89,14 +92,12 @@ def _bold_header_names(s: str) -> set[str]:
         if idx == 0:
             # Хвост после имени — только закрывающий жирный с `.`/`:`:
             # `**Интерфейс / что сделать.**`, `**Сеть.**`, `**Приёмка:**`.
-            # `**Сеть не нужна**`, `**Интерфейс чик**`, `**Интерфейсчик**` —
-            # проза, не заголовок (иначе утечка эталона и резка секций).
+            # `**Сеть не нужна**`, `**Интерфейс чик**`, `**Интерфейсчик**`,
+            # `**Сеть** — не нужна` — проза, не заголовок (иначе утечка
+            # эталона и резка секций: строка без `.`/`:` перед закрывающим
+            # `**` разделом не считается).
             m = re.match(r"([^*]*)\*\*", after)
-            ok = (
-                after == ""
-                or after.startswith("**")
-                or bool(m and m.group(1) and m.group(1)[-1] in ".:")
-            )
+            ok = bool(m and m.group(1) and m.group(1)[-1] in ".:")
         else:
             gap = s[last_end:idx]
             ok = (
@@ -268,12 +269,12 @@ def _line_of_in_section(
 def card_level(lines: list[str], project: ProjectConfig | None = None) -> str:
     """Уровень карточки: раздел «Уровень», иначе вывод из «Исполнитель».
 
-    Явный `easy|medium|hard` в «Уровне» — побеждает. Иначе исполнитель
-    отображается в уровень через `levels` проекта (по умолчанию
+    Явный `easy|medium|hard|background` в «Уровне» — побеждает. Иначе
+    исполнитель отображается в уровень через `levels` проекта (по умолчанию
     gemini → easy, musefree → medium, muse → hard); неизвестный — medium.
     """
     sec = _section_text(lines, "Уровень").lower()
-    m = re.search(r"(?<![\w])(easy|medium|hard)(?![\w])", sec)
+    m = re.search(r"(?<![\w])(background|easy|medium|hard)(?![\w])", sec)
     if m:
         return m.group(1)
     mapping: dict[str, str] = dict(DEFAULT_LEVEL_BY_EXECUTOR)

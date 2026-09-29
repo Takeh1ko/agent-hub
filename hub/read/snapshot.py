@@ -231,6 +231,83 @@ def _in_wt(path: str, wt: str) -> bool:
     return bool(wt) and (path == wt or path.startswith(wt.rstrip("/") + "/"))
 
 
+def _run_one_pids(proc_root: str | Path, task_id: str) -> list[tuple[int, int]]:
+    """Живые `--run-one <id>`: [(pid, started_ms)] прямым чтением cmdline.
+
+    Дочерний слот очереди запускается как `python -m hub.commands.queue
+    --run-one ID` — в agent_procs у него kind None (не opencode/agy/hub),
+    поэтому через `live` он не виден. Ищем точное значение флага, а не
+    подстроку: `grep T1` с чужим T10 не должен давать ложную живость.
+    """
+    out: list[tuple[int, int]] = []
+    tid = str(task_id or "").strip()
+    if not tid:
+        return out
+    try:
+        entries = list(Path(proc_root).iterdir())
+    except OSError:
+        return out
+    for e in entries:
+        if not e.name.isdigit():
+            continue
+        try:
+            raw = (e / "cmdline").read_bytes().decode("utf-8", "replace")
+        except OSError:
+            continue
+        args = [a for a in raw.split("\x00") if a]
+        if "--run-one" not in args:
+            continue
+        try:
+            idx = args.index("--run-one")
+        except ValueError:
+            continue
+        if idx + 1 >= len(args):
+            continue
+        if str(args[idx + 1]).strip() != tid:
+            continue
+        try:
+            pid = int(e.name)
+        except (TypeError, ValueError):
+            continue
+        try:
+            started = int((e / "stat").stat().st_mtime * 1000)
+        except OSError:
+            started = 0
+        out.append((pid, started))
+    return out
+
+
+def _hub_task_procs(live: list, proc_root: str | Path, task_id: str,
+                     now_ms: int) -> list:
+    """Процессы, ведущие задачу: hub_task по id + прямые --run-one.
+
+    Работает и без worktree (ручной запуск): id задачи в аргументах
+    процесса достаточно. Дубли по pid не возвращаем.
+    """
+    tid = str(task_id or "")
+    found: list = []
+    seen: set[int] = set()
+    for p in live:
+        try:
+            kind = p.kind
+            args = list(p.args or [])
+            pid = int(p.pid)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if kind == "hub_task" and tid and any(tid in a for a in args):
+            if pid not in seen:
+                seen.add(pid)
+                found.append(p)
+    for pid, started in _run_one_pids(proc_root, tid):
+        if pid in seen:
+            continue
+        seen.add(pid)
+        found.append(pr.Proc(pid=pid, kind="hub_task", cwd="",
+                              args=["--run-one", tid],
+                              started_ms=started or now_ms, children=[]))
+    return found
+
+
 def _exec_session_id(wt: str) -> str:
     try:
         return str(json.loads((Path(wt) / ".agent" / "state.json").read_text()).get("executor_session") or "")
@@ -303,9 +380,23 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
                 role = "executor" if (s.id == exec_sid or (in_exec and not exec_sid)) else "reviewer"
                 links.append({"external_id": s.id, "role": role, "model": s.model})
         # Жив: процесс агента работает в worktree или получил его аргументом (--dir/--worktree).
+        # Плюс процессы, ведущие задачу (hub_task с id, ручной --run-one):
+        # они видны и без worktree, иначе ручной запуск даёт ложные ⚫/🔴.
         tid = str(t["id"])
         alive = [p for p in live if wt and (_in_wt(p.cwd, wt) or any(_in_wt(a, wt) for a in p.args)
                                              or (p.kind == "hub_task" and any(tid in a for a in p.args)))]
+        hub_procs = _hub_task_procs(live, proc_root, tid, now_ms)
+        _alive_pids = {int(p.pid) for p in alive
+                       if isinstance(getattr(p, "pid", None), int)}
+        for p in hub_procs:
+            try:
+                pid = int(p.pid)
+            except (TypeError, ValueError):
+                continue
+            if pid not in _alive_pids:
+                _alive_pids.add(pid)
+                alive.append(p)
+        hub_alive = bool(hub_procs)
         pytest_kid = any(p.kind in ("pytest", "flock") for p in alive)
         agy_alive = [p for p in alive if p.kind == "agy"]
         # Пульс задачи — по всем её сессиям (исполнитель + ревьюеры):
@@ -320,6 +411,7 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
             [s.pulse_ms for s in task_oc]
             + [c.pulse_ms for c in task_agy]
             + [p.started_ms for p in agy_alive]
+            + [int(p.started_ms) for p in hub_procs if int(getattr(p, "started_ms", 0) or 0) > 0]
         )
         if pulses:
             pulse_ms = max(pulses)
@@ -327,7 +419,9 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
         else:
             pulse_ms = int(t.get("updated_at") or 0)
             active = None
-        explained = bool(active) or pytest_kid or bool(agy_alive)
+        # Ведущий процесс (hub_task/--run-one) — объяснение живости:
+        # ручной запуск без сессий иначе даёт ложный 🔴 при старом пульсе.
+        explained = bool(active) or pytest_kid or bool(agy_alive) or hub_alive
         pulse = _pulse_mark(str(t.get("stage") or ""), now_ms - pulse_ms,
                             explained, alive, pytest_kid)
         ss: list[SessionSnap] = []
