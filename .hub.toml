@@ -7,7 +7,7 @@ python = "$HOME/Projects/Python/agent-hub/.venv/bin/python"
 test_lock = "/tmp/hub-selftest.lock"
 work_branch = "main"
 push = ""
-allowed_paths = ["hub/**", "tests/**", "docs/**", "pyproject.toml", ".hub.toml"]
+allowed_paths = ["hub/**", "tests/**", "docs/**", "pyproject.toml", ".hub.toml", ".gitignore"]
 
 [hooks]
 task_setup = ""
