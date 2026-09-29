@@ -74,12 +74,14 @@ class HubApp(App):
     ]
 
     def __init__(self, store: Store | None = None,
-                 opencode_db: str | None = None, proc_root: str = "/proc") -> None:
+                 opencode_db: str | None = None, proc_root: str = "/proc",
+                 agy_root: str | None = None) -> None:
         super().__init__()
         self._store_param = store
         self._store_cache: Store | None = store
         self._opencode_db = opencode_db
         self._proc_root = proc_root
+        self._agy_root = agy_root
         self.project_filter: str | None = None
         self._snap: Snapshot | None = None
         self._last_event_id: int = 0
@@ -148,6 +150,21 @@ class HubApp(App):
             log.exception("не проверяется путь БД")
             return None
 
+    def _resolve_agy_root(self) -> str | None:
+        """Каталог чужих conversations для snapshot.build (сам TUI не открывает)."""
+        if self._agy_root is not None:
+            return self._agy_root
+        try:
+            conv = Path.home() / ".gemini" / "antigravity-cli" / "conversations"
+        except Exception:
+            log.exception("не резолвится путь agy")
+            return None
+        try:
+            return str(conv) if conv.is_dir() else None
+        except Exception:
+            log.exception("не проверяется путь agy")
+            return None
+
     def _fetch_snapshot(self) -> Snapshot | None:
         store = self._store()
         if store is None:
@@ -155,7 +172,8 @@ class HubApp(App):
         try:
             # Источник данных только snapshot.build(store, now_ms(), opencode_db, proc_root).
             return snapshot.build(store, ht.now_ms(),
-                                  self._resolve_opencode_db(), self._proc_root)
+                                  self._resolve_opencode_db(), self._proc_root,
+                                  self._resolve_agy_root())
         except Exception:
             # Хранилище/снимок могут отдать ошибку при конкурентной записи —
             # пропускаем тик, экран остаётся на прошлом кадре.
@@ -248,11 +266,14 @@ class HubApp(App):
         bar = "█" * filled + "░" * (10 - filled)
         # Нет процесса hub_bot в agent_procs — честное 'бот ?', не 'бот нет'.
         bot = "бот жив" if bot_alive else "бот ?"
+        runs = getattr(snap, "agy_runs", 0) or 0
+        steps = getattr(snap, "agy_steps", 0) or 0
         return (
             f"активно {active} · в очереди {queued} · "
             f"$ сегодня go {go:.2f} usd {usd:.2f} · "
             # total_go — расход за сегодня, лимит 60 — месячный котёл (spec §5).
-            f"Go-день [{bar}] {go:.2f}/60мес · agy n/a · {bot}"
+            f"Go-день [{bar}] {go:.2f}/60мес · "
+            f"Gemini: {runs} запусков / {steps} шагов за 5 ч · {bot}"
         )
 
     # --- узкий режим ---

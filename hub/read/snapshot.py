@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from hub.read import agy as ag
 from hub.read import opencode as oc
 from hub.read import procs as pr
 
@@ -118,12 +119,16 @@ class Snapshot:
     now_ms: int
     all_go: float = 0.0      # сегодня, все сессии opencode (все проекты) — для лимита подписки
     all_usd: float = 0.0
+    agy_runs: int = 0        # запусков agy за 5 ч (окно квоты, не деньги)
+    agy_steps: int = 0       # шагов agy за 5 ч
 
     def to_json(self) -> str:
         return json.dumps({
             "now_ms": self.now_ms,
             "total_go": round(self.total_go, 4),
             "total_usd": round(self.total_usd, 4),
+            "agy_runs": self.agy_runs,
+            "agy_steps": self.agy_steps,
             "tasks": [{
                 "id": t.id, "project": t.project, "stage": t.stage,
                 "round": t.round, "pulse": t.pulse,
@@ -140,7 +145,8 @@ class Snapshot:
 
     def head_text(self) -> str:
         return (f"Итого сегодня: задачи Go ${self.total_go:.2f} · все проекты Go ${self.all_go:.2f}"
-                f" (лимит Go $60/мес) · реальные ${self.all_usd:.2f}")
+                f" (лимит Go $60/мес) · реальные ${self.all_usd:.2f}"
+                f" · Gemini: {self.agy_runs} запусков / {self.agy_steps} шагов за 5 ч")
 
     def active_tasks(self) -> list["TaskSnap"]:
         return [t for t in self.tasks if t.stage not in DONE_STAGES]
@@ -238,8 +244,17 @@ def _day_start_ms(now_ms: int) -> int:
     return int(midnight.timestamp() * 1000)
 
 
+def _default_agy_root() -> Path:
+    return Path.home() / ".gemini" / "antigravity-cli" / "conversations"
+
+
+def _agy_activity(conv) -> str:
+    return clean_activity(f"{conv.steps} шагов, ошибок {conv.errors}")
+
+
 def build(store, now_ms: int, opencode_db: str | Path | None = None,
-          proc_root: str | Path = "/proc") -> Snapshot:
+          proc_root: str | Path = "/proc",
+          agy_root: str | Path | None = None) -> Snapshot:
     """Собрать картину. store — hub.store.Store."""
     tasks = store.list_tasks(active_only=False)
     oc_by_id: dict[str, oc.OcSession] = {}
@@ -254,6 +269,20 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
                     all_go += s.cost
                 else:
                     all_usd += s.cost
+    # agy: окно 5 ч для шапки + привязка разговоров к задачам.
+    # Метрика окна одна — window_usage (карточка H08 п.1), без дублей.
+    agy_dir: str | Path | None = agy_root if agy_root is not None else _default_agy_root()
+    if isinstance(agy_dir, str) and not agy_dir.strip():
+        agy_dir = None
+    agy_by_id: dict[str, ag.AgyConv] = {}
+    agy_runs = agy_steps = 0
+    try:
+        if agy_dir is not None and Path(agy_dir).is_dir():
+            for c in ag.conversations(agy_dir, 0):
+                agy_by_id[c.id] = c
+            agy_runs, agy_steps = ag.window_usage(agy_dir, now_ms, 5)
+    except OSError:
+        pass
     try:
         live = pr.agent_procs(proc_root)
     except OSError:
@@ -276,30 +305,70 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
         # Жив: процесс агента работает в worktree или получил его аргументом (--dir/--worktree).
         alive = [p for p in live if wt and (_in_wt(p.cwd, wt) or any(_in_wt(a, wt) for a in p.args))]
         pytest_kid = any(p.kind in ("pytest", "flock") for p in alive)
+        agy_alive = [p for p in alive if p.kind == "agy"]
         # Пульс задачи — по всем её сессиям (исполнитель + ревьюеры):
         # свежий пульс — max, объяснение — если хоть одна сессия активна.
+        # Живой процесс в пульс не подмешивается (как в ветке opencode):
+        # mtime файла — пульс (карточка H08), возраст живого, но молчащего
+        # agy честно даёт 🟡, а не вечный 🟢.
         task_oc = [oc_by_id[e["external_id"]] for e in links if e["external_id"] in oc_by_id]
-        if task_oc:
-            pulse_ms = max(s.pulse_ms for s in task_oc)
+        task_agy = [agy_by_id[str(e["external_id"])] for e in links
+                    if str(e["external_id"]) in agy_by_id]
+        pulses = (
+            [s.pulse_ms for s in task_oc]
+            + [c.pulse_ms for c in task_agy]
+            + [p.started_ms for p in agy_alive]
+        )
+        if pulses:
+            pulse_ms = max(pulses)
             active = next((s for s in task_oc if s.active_tool), None)
         else:
             pulse_ms = int(t.get("updated_at") or 0)
             active = None
-        explained = bool(active) or pytest_kid
+        explained = bool(active) or pytest_kid or bool(agy_alive)
         pulse = _pulse_mark(str(t.get("stage") or ""), now_ms - pulse_ms,
                             explained, alive, pytest_kid)
         ss: list[SessionSnap] = []
-        for e, s in zip(links, [oc_by_id.get(e["external_id"]) for e in links]):
-            if s is None:
-                ss.append(SessionSnap(e["external_id"], e["role"], e.get("model") or "?",
-                                      "", pulse_ms, pulse, 0.0, False, 0, "-"))
+        for e in links:
+            cid = str(e["external_id"])
+            s = oc_by_id.get(cid)
+            if s is not None:
+                go = s.provider == "opencode-go"
+                smark = _pulse_mark(str(t.get("stage") or ""), now_ms - s.pulse_ms,
+                                    bool(s.active_tool) or pytest_kid, alive, pytest_kid)
+                ss.append(SessionSnap(s.id, e["role"], s.model, s.provider, s.pulse_ms,
+                                      smark, s.cost, go, s.context_tokens,
+                                      clean_activity(s.last_activity)))
                 continue
-            go = s.provider == "opencode-go"
-            smark = _pulse_mark(str(t.get("stage") or ""), now_ms - s.pulse_ms,
-                                bool(s.active_tool) or pytest_kid, alive, pytest_kid)
-            ss.append(SessionSnap(s.id, e["role"], s.model, s.provider, s.pulse_ms,
-                                  smark, s.cost, go, s.context_tokens,
-                                  clean_activity(s.last_activity)))
+            c = agy_by_id.get(cid)
+            if c is not None:
+                smark = _pulse_mark(str(t.get("stage") or ""), now_ms - c.pulse_ms,
+                                    bool(agy_alive) or pytest_kid, alive, pytest_kid)
+                ss.append(SessionSnap(c.id, e["role"], "Gemini", "gemini", c.pulse_ms,
+                                      smark, 0.0, False, 0, _agy_activity(c)))
+                continue
+            if str(e.get("tool") or "") == "agy":
+                # Линк agy без файла разговора — модель известна, денег 0.
+                smark = _pulse_mark(str(t.get("stage") or ""), now_ms - pulse_ms,
+                                    bool(agy_alive) or pytest_kid, alive, pytest_kid)
+                ss.append(SessionSnap(cid, e["role"], "Gemini", "gemini",
+                                      pulse_ms, smark, 0.0, False, 0, "-"))
+                continue
+            ss.append(SessionSnap(e["external_id"], e["role"], e.get("model") or "?",
+                                  "", pulse_ms, pulse, 0.0, False, 0, "-"))
+        # agy-процесс в worktree без линка — тоже сессия задачи (модель Gemini).
+        # Пульс синтетики — старт процесса из /proc (wall-time, Н6), не now_ms:
+        # иначе живая, но молчащая задача вечно 🟢.
+        have_agy = any(s.model == "Gemini" for s in ss)
+        if agy_alive and not have_agy:
+            for p in agy_alive:
+                smark = _pulse_mark(str(t.get("stage") or ""), now_ms - p.started_ms,
+                                    True, alive, pytest_kid)
+                ss.append(SessionSnap(f"agy-{p.pid}", "executor", "Gemini", "gemini",
+                                      p.started_ms, smark, 0.0, False, 0, "agy работает"))
+            pulse_ms = max([pulse_ms] + [p.started_ms for p in agy_alive])
+            pulse = _pulse_mark(str(t.get("stage") or ""), now_ms - pulse_ms,
+                                explained, alive, pytest_kid)
         stage = str(t.get("stage") or "")
         if stage.startswith("exec") and ss:
             newest = max(ss, key=lambda x: x.pulse_ms)
@@ -323,7 +392,8 @@ def build(store, now_ms: int, opencode_db: str | Path | None = None,
             context=ctx, last_activity=clean_activity(last), sessions=ss,
         ))
     return Snapshot(tasks=snaps, total_go=totals_go, total_usd=totals_usd, now_ms=now_ms,
-                    all_go=all_go, all_usd=all_usd)
+                    all_go=all_go, all_usd=all_usd,
+                    agy_runs=agy_runs, agy_steps=agy_steps)
 
 
 def _pulse_mark(stage: str, age_ms: int, explained: bool, alive: list,
