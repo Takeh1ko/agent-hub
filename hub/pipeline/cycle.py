@@ -11,6 +11,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from hub import time as ht
@@ -591,6 +592,211 @@ def _log_silence_fallback(store, task_id: str, secs: int) -> None:
         pass
 
 
+def _retry_cfg(project) -> tuple[int, float]:
+    """Повторы при сбое сети/сервера: (retry_max, retry_pause_s)."""
+    try:
+        max_r = int(getattr(project, "retry_max", 3))
+    except (TypeError, ValueError, AttributeError):
+        max_r = 3
+    if max_r < 0:
+        max_r = 0
+    if max_r > 10:
+        max_r = 10
+    try:
+        base = float(getattr(project, "retry_pause_s", 120))
+    except (TypeError, ValueError, AttributeError):
+        base = 120.0
+    if base < 0:
+        base = 0.0
+    return max_r, base
+
+
+def _is_transient_exc(exc: BaseException) -> bool:
+    """Ошибка — транзиентный сбой сети/сервера (TransientError)."""
+    try:
+        from hub.pipeline.runners import TransientError as _TE
+
+        if isinstance(exc, _TE):
+            return True
+    except ImportError:
+        pass
+    try:
+        return type(exc).__name__ == "TransientError"
+    except Exception:
+        return False
+
+
+def _fmt_pause(pause: float) -> str:
+    try:
+        f = float(pause)
+    except (TypeError, ValueError):
+        return str(pause)
+    if f.is_integer():
+        return str(int(f))
+    # Доли секунды в тестах — коротко, без хвостов float.
+    s = f"{f:.3f}".rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _log_retry(store, task_id: str, err_text: str,
+               n: int, max_n: int, pause_s: float) -> None:
+    """Событие в журнал на каждый повтор: «сбой opencode (…) → повтор N/M …»."""
+    try:
+        short = " ".join(str(err_text or "").split())[:80]
+    except (ValueError, AttributeError):
+        short = ""
+    txt = (f"сбой opencode ({short}) → повтор {n}/{max_n} "
+           f"через {_fmt_pause(pause_s)} с")
+    try:
+        store.add_event(task_id, "stuck", {"reason": txt})
+    except (OSError, sqlite3.Error, ValueError):
+        pass
+
+
+def _transient_reason(err_text: str) -> str:
+    """Причина arbiter при исчерпанных повторах (не «панель молчит»)."""
+    try:
+        t = " ".join(str(err_text or "").split())
+    except (ValueError, AttributeError):
+        t = ""
+    return f"сбой сети/сервера opencode: {t}"[:500]
+
+
+def _with_transient_retry(store, task_id: str, fn, retry_max: int,
+                          retry_base: float):
+    """Вызвать fn() с повторами при TransientError (до retry_max раз).
+
+    Возвращает результат fn. Исчерпали повторы — пробрасывает TransientError
+    с последним текстом (вызывающая сторона идёт в arbiter).
+    Не транзиентные ошибки пробрасываются сразу.
+    """
+    last_text = ""
+    total = max(0, int(retry_max)) + 1
+    for attempt in range(total):
+        try:
+            return fn()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            if not _is_transient_exc(e):
+                raise
+            try:
+                last_text = str(e) or "сбой opencode"
+            except Exception:
+                last_text = "сбой opencode"
+            if attempt >= max(0, int(retry_max)):
+                try:
+                    from hub.pipeline.runners import TransientError as _TE
+
+                    raise _TE(last_text[:2000]) from e
+                except ImportError:
+                    raise
+            n = attempt + 1
+            try:
+                pause = float(retry_base) * (2 ** (n - 1)) if retry_base else 0.0
+            except (TypeError, ValueError):
+                pause = 0.0
+            _log_retry(store, task_id, last_text, n, max(0, int(retry_max)), pause)
+            try:
+                if pause and pause > 0:
+                    time.sleep(pause)
+            except (OSError, ValueError, OverflowError):
+                pass
+            continue
+    try:
+        from hub.pipeline.runners import TransientError as _TE
+
+        raise _TE((last_text or "сбой opencode")[:2000])
+    except ImportError:
+        raise RuntimeError(last_text or "сбой opencode")
+
+
+def _last_exec_sid(store, task_id: str) -> str | None:
+    """Последняя сессия исполнителя задачи (для продолжения без смены карточки)."""
+    try:
+        sessions = store.list_sessions(task_id)
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+    last: str | None = None
+    try:
+        for s in sessions:
+            try:
+                if str(s.get("role") or "") != "executor":
+                    continue
+            except (AttributeError, TypeError):
+                continue
+            eid = str(s.get("external_id") or "").strip()
+            if eid:
+                last = eid
+    except (TypeError, ValueError):
+        return last
+    return last
+
+
+def _exec_fresh_required(store, task_id: str) -> bool:
+    """Continue просил новую сессию (карточка изменена)."""
+    try:
+        from hub.pipeline.common import meta_get as _mg
+
+        return (_mg(store, f"exec_new_session:{task_id}") or "") == "1"
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+
+
+def _consume_exec_fresh(store, task_id: str) -> None:
+    try:
+        from hub.pipeline.common import meta_del as _md
+
+        _md(store, f"exec_new_session:{task_id}")
+    except (OSError, ValueError, sqlite3.Error):
+        pass
+
+
+def _detect_card_change(store, task_id: str, project) -> bool:
+    """Сверить sha256 карточки с task.card_hash (страховка, если continue без флага).
+
+    Изменилась — обновить card_hash, событие
+    «карточка изменена → новая сессия исполнителя», вернуть True (новая сессия).
+    Нет файла/без изменений — False.
+    """
+    try:
+        task = store.get_task(task_id)
+    except (OSError, sqlite3.Error, ValueError):
+        return False
+    if not task:
+        return False
+    try:
+        card_path = _resolve_card(task, project)
+    except (OSError, ValueError):
+        return False
+    if card_path is None:
+        return False
+    try:
+        import hashlib as _hl
+
+        raw = card_path.read_bytes()
+    except OSError:
+        return False
+    try:
+        new_hash = _hl.sha256(raw).hexdigest()
+    except (ValueError, AttributeError):
+        return False
+    try:
+        old_hash = str(task.get("card_hash") or "")
+    except (AttributeError, TypeError):
+        old_hash = ""
+    if not new_hash or new_hash == old_hash:
+        return False
+    try:
+        store.upsert_task(id=task_id, card_hash=new_hash)
+    except (OSError, sqlite3.Error, ValueError):
+        pass
+    try:
+        store.add_event(task_id, "stage",
+                        {"reason": "карточка изменена → новая сессия исполнителя"})
+    except (OSError, sqlite3.Error, ValueError):
+        pass
+    return True
+
+
 def run_task(store, project, task_id: str, runners, rounds: int = 2,
              blind: bool = False, opencode_db: str | None = None,
              cost_fn=None) -> str:
@@ -626,10 +832,33 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
     except (OSError, ValueError, AttributeError):
         pass
     _silence_fallback_done = False
+    try:
+        retry_max, retry_base = _retry_cfg(project)
+    except (OSError, ValueError, AttributeError):
+        retry_max, retry_base = 3, 120.0
 
     _set_stage(store, task_id, "preflight", 0, "старт")
     _clean_pycache(worktree)
     continued = _continued_flag(store, task_id)
+    # H13 п.3: новая или прежняя сессия исполнителя после continue.
+    exec_fresh = False
+    old_exec_sid: str | None = None
+    if continued:
+        try:
+            exec_fresh = _exec_fresh_required(store, task_id)
+        except (OSError, ValueError, sqlite3.Error):
+            exec_fresh = False
+        if not exec_fresh:
+            try:
+                if _detect_card_change(store, task_id, project):
+                    exec_fresh = True
+            except (OSError, ValueError, sqlite3.Error):
+                pass
+        if not exec_fresh:
+            try:
+                old_exec_sid = _last_exec_sid(store, task_id)
+            except (OSError, ValueError, sqlite3.Error):
+                old_exec_sid = None
     try:
         if continued:
             pf = _preflight_continued(store, project, task_id, worktree, base_sha)
@@ -646,6 +875,8 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         return "failed"
     if continued:
         _consume_continued_flag(store, task_id)
+        if exec_fresh:
+            _consume_exec_fresh(store, task_id)
     _clean_pycache(worktree)
 
     card_path = _resolve_card(store.get_task(task_id) or task, project)
@@ -771,24 +1002,43 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
 
         _set_stage(store, task_id, f"exec r{round_no}", round_no, "исполнитель")
         log_exec = str(Path(worktree) / ".agent" / f"executor_r{round_no}.log")
-        try:
-            if round_no == 1:
-                sid = executor.start(prompts.executor_prompt(rules_text, card_text),
-                                     worktree, log_exec)
-            else:
-                from hub.read.findings import dedup_findings, load_findings
+        # Промпт один на все повторы шага.
+        if round_no == 1:
+            exec_prompt = prompts.executor_prompt(rules_text, card_text)
+        else:
+            from hub.read.findings import dedup_findings, load_findings
 
-                try:
-                    items = load_findings(Path(worktree), round_no - 1)
-                    last_findings = [{"file": f.file, "line": f.line, "issue": f.issue,
-                                      "severity": f.severity, "author": f.author}
-                                     for f in dedup_findings(items)]
-                except (OSError, ValueError):
-                    pass
-                sid = executor.resume(
-                    exec_sid or "",
-                    prompts.fix_prompt(last_findings, last_gate or {}),
-                    worktree, log_exec)
+            try:
+                items = load_findings(Path(worktree), round_no - 1)
+                last_findings = [{"file": f.file, "line": f.line, "issue": f.issue,
+                                  "severity": f.severity, "author": f.author}
+                                 for f in dedup_findings(items)]
+            except (OSError, ValueError):
+                pass
+            exec_prompt = prompts.fix_prompt(last_findings, last_gate or {})
+        # H13 п.3: круг 1 после continue без смены карточки — та же сессия.
+        use_old_session = bool(round_no == 1 and continued
+                               and not exec_fresh and old_exec_sid)
+
+        def _do_exec():
+            if round_no == 1 and use_old_session and old_exec_sid:
+                return executor.resume(old_exec_sid, exec_prompt,
+                                       worktree, log_exec)
+            if round_no == 1:
+                return executor.start(exec_prompt, worktree, log_exec)
+            return executor.resume(exec_sid or "", exec_prompt,
+                                   worktree, log_exec)
+
+        try:
+            try:
+                sid = _with_transient_retry(store, task_id, _do_exec,
+                                            retry_max, retry_base)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+                if _is_transient_exc(e):
+                    _set_stage(store, task_id, "arbiter", round_no,
+                               _transient_reason(str(e)))
+                    return "arbiter"
+                raise
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             secs = _silence_secs(e)
             if (secs is not None and not _silence_fallback_done
@@ -805,26 +1055,37 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                 # (или exec_sid прошлых кругов) — через resume; sid нет
                 # (тишина с первой секунды) — новый start в круге 1.
                 resume_sid = exec_sid or _silence_sid(e)
-                try:
+                # H13: fallback-вызов тоже с повторами при сбое сети/сервера.
+
+                def _do_fallback():
                     if resume_sid:
                         if round_no == 1:
-                            sid = executor.resume(
+                            return executor.resume(
                                 resume_sid,
                                 prompts.executor_prompt(rules_text, card_text),
                                 worktree, log_exec)
-                        else:
-                            sid = executor.resume(
-                                resume_sid,
-                                prompts.fix_prompt(last_findings, last_gate or {}),
-                                worktree, log_exec)
-                    elif round_no == 1:
-                        sid = executor.start(
+                        return executor.resume(
+                            resume_sid,
+                            prompts.fix_prompt(last_findings, last_gate or {}),
+                            worktree, log_exec)
+                    if round_no == 1:
+                        return executor.start(
                             prompts.executor_prompt(rules_text, card_text),
                             worktree, log_exec)
-                    else:
-                        sid = executor.start(
-                            prompts.executor_prompt(rules_text, card_text),
-                            worktree, log_exec)
+                    return executor.start(
+                        prompts.executor_prompt(rules_text, card_text),
+                        worktree, log_exec)
+
+                try:
+                    try:
+                        sid = _with_transient_retry(store, task_id, _do_fallback,
+                                                    retry_max, retry_base)
+                    except (OSError, RuntimeError, subprocess.SubprocessError) as e2:
+                        if _is_transient_exc(e2):
+                            _set_stage(store, task_id, "arbiter", round_no,
+                                       _transient_reason(str(e2)))
+                            return "arbiter"
+                        raise
                 except (OSError, RuntimeError, subprocess.SubprocessError) as e2:
                     _set_stage(store, task_id, "failed", round_no,
                                f"executor-fail: {e2}"[:500])
@@ -908,10 +1169,23 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
             over, _, _ = _over_budget(round_no)
             if over:
                 return _do_budget_stop("бюджет 100 %", exec_sid, round_no)
+            repair_log = str(Path(worktree) / ".agent" / f"repair_r{round_no}.log")
+            repair_text = repair_prompt(repair_reason)
+
+            def _do_repair():
+                return executor.resume(exec_sid or "", repair_text,
+                                       worktree, repair_log)
+
             try:
-                sid2 = executor.resume(exec_sid or "", repair_prompt(repair_reason),
-                                       worktree,
-                                       str(Path(worktree) / ".agent" / f"repair_r{round_no}.log"))
+                try:
+                    sid2 = _with_transient_retry(store, task_id, _do_repair,
+                                                 retry_max, retry_base)
+                except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+                    if _is_transient_exc(e):
+                        _set_stage(store, task_id, "arbiter", round_no,
+                                   _transient_reason(str(e)))
+                        return "arbiter"
+                    raise
                 try:
                     tool, model = _runner_tool_model(executor, store.get_task(task_id) or task)
                     store.link_session(sid2, tool, task_id, "executor", round_no, model)
@@ -930,11 +1204,23 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                                    f"repair-fail: {e}"[:500])
                         return "failed"
                     _log_silence_fallback(store, task_id, secs)
+
+                    def _do_repair_fallback():
+                        return executor.resume(
+                            exec_sid or _silence_sid(e) or "", repair_text,
+                            worktree, repair_log)
+
                     try:
-                        sid2 = executor.resume(
-                            exec_sid or _silence_sid(e) or "", repair_prompt(repair_reason),
-                            worktree,
-                            str(Path(worktree) / ".agent" / f"repair_r{round_no}.log"))
+                        try:
+                            sid2 = _with_transient_retry(
+                                store, task_id, _do_repair_fallback,
+                                retry_max, retry_base)
+                        except (OSError, RuntimeError, subprocess.SubprocessError) as e2:
+                            if _is_transient_exc(e2):
+                                _set_stage(store, task_id, "arbiter", round_no,
+                                           _transient_reason(str(e2)))
+                                return "arbiter"
+                            raise
                         try:
                             tool, model = _runner_tool_model(
                                 executor, store.get_task(task_id) or task)
@@ -1010,6 +1296,11 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         gate_for_prompt = gate if gate is not None else {"commit": True, "scope": [],
                                                          "tests": {"ok": True, "output": ""}}
 
+        import threading as _th
+
+        transient_review_errs: dict[str, str] = {}
+        transient_lock = _th.Lock()
+
         def _run_one(item) -> str | None:
             name, runner = item
             over1, _, _ = _over_budget(round_no)
@@ -1022,8 +1313,21 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
             per_file = f"review_r{round_no}_{name}.json"
             prompt = prompt.replace(f"review_r{round_no}.json", per_file)
             log = str(Path(worktree) / ".agent" / f"reviewer_r{round_no}_{name}.log")
+            # H13: ревьюер — новой сессией, повторы при TransientError.
             try:
-                rsid = runner.start(prompt, worktree, log)
+                try:
+                    rsid = _with_transient_retry(
+                        store, task_id,
+                        lambda: runner.start(prompt, worktree, log),
+                        retry_max, retry_base)
+                except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+                    if _is_transient_exc(e):
+                        try:
+                            with transient_lock:
+                                transient_review_errs[name] = str(e) or "сбой opencode"
+                        except (ValueError, AttributeError):
+                            pass
+                    return None
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 return None
             # Сессия линкуется сразу, как только id известен (до resume).
@@ -1036,10 +1340,23 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
             # Один повтор не записавшему валидный JSON (как PanelReviewer).
             own = Path(worktree) / ".agent" / per_file
             if not _review_file_valid(own):
+                fix_text = REVIEW_FIX_TEXT.replace("review_rN.json", per_file)
+
+                def _do_fix():
+                    return runner.resume(rsid, fix_text, worktree, log)
+
                 try:
-                    rsid2 = runner.resume(rsid, REVIEW_FIX_TEXT.replace(
-                        "review_rN.json", per_file),
-                        worktree, log)
+                    try:
+                        rsid2 = _with_transient_retry(store, task_id, _do_fix,
+                                                      retry_max, retry_base)
+                    except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+                        if _is_transient_exc(e):
+                            try:
+                                with transient_lock:
+                                    transient_review_errs[name] = str(e) or "сбой opencode"
+                            except (ValueError, AttributeError):
+                                pass
+                        return rsid
                     try:
                         rtool, _rm = _runner_tool_model(runner, {"executor": name})
                         store.link_session(rsid2, rtool, task_id, "reviewer", round_no,
@@ -1105,7 +1422,11 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
             _set_stage(store, task_id, "ready", round_no, "панель approve")
             return "ready"
         if decision == "arbiter":
-            reason = ",".join(r.verdict for r in reviews) or "панель молчит"
+            if not reviews and transient_review_errs:
+                first = sorted(transient_review_errs.items())[0][1]
+                reason = _transient_reason(first)
+            else:
+                reason = ",".join(r.verdict for r in reviews) or "панель молчит"
             _set_stage(store, task_id, "arbiter", round_no, reason[:500])
             return "arbiter"
         # next → следующий круг. verdict() на последнем круге сам отдаёт

@@ -43,6 +43,8 @@ class ProjectConfig:
     defaults: Defaults = field(default_factory=Defaults)
     levels: dict[str, str] = field(default_factory=dict)
     idle_s: int = 900  # сторож тишины opencode: нет JSON-событий N c
+    retry_max: int = 3  # повторов шага при сбое сети/сервера (H13)
+    retry_pause_s: float = 120.0  # пауза перед повтором, растёт ×2 (H13)
 
 
 def _idle_of(data: dict) -> int:
@@ -53,6 +55,28 @@ def _idle_of(data: dict) -> int:
     except (TypeError, ValueError):
         return 900
     return v if v >= 0 else 900
+
+
+def _retry_max_of(data: dict) -> int:
+    """Повторов при сбое сети/сервера: топ-level retry_max, иначе 3."""
+    raw = data.get("retry_max", 3)
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return 3
+    if v < 0:
+        return 0
+    return min(v, 10)
+
+
+def _retry_pause_of(data: dict) -> float:
+    """Пауза перед повтором: топ-level retry_pause_s, иначе 120."""
+    raw = data.get("retry_pause_s", data.get("retry_pause", 120))
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 120.0
+    return v if v >= 0 else 120.0
 
 
 def _from_dict(data: dict) -> ProjectConfig:
@@ -84,6 +108,8 @@ def _from_dict(data: dict) -> ProjectConfig:
         ),
         levels={str(k): str(v) for k, v in (data.get("levels", {}) or {}).items()},
         idle_s=_idle_of(data),
+        retry_max=_retry_max_of(data),
+        retry_pause_s=_retry_pause_of(data),
     )
 
 

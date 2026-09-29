@@ -268,6 +268,43 @@ def _partition(todo: list[dict], lock_of) -> tuple[list[dict], list[list[dict]]]
     return free, serial
 
 
+def _mark_taken(store: Store, task_id: str) -> None:
+    """Честный этап взятой очередью задачи: queued → exec rN до исполнителя (H13 п.4).
+
+    N — текущий круг (round+1, минимум 1). Только из queued, чужие этапы
+    не трогаем. Best effort: ошибки store глотаются.
+    """
+    try:
+        task = store.get_task(task_id)
+    except (OSError, sqlite3.Error, ValueError):
+        return
+    if task is None:
+        return
+    try:
+        if str(task.get("stage") or "") != "queued":
+            return
+    except (AttributeError, TypeError):
+        return
+    try:
+        cur = int(task.get("round") or 0)
+    except (TypeError, ValueError):
+        cur = 0
+    n = cur + 1 if cur and cur > 0 else 1
+    if n < 1:
+        n = 1
+    stage = f"exec r{n}"
+    try:
+        store.upsert_task(id=task_id, stage=stage, round=n,
+                          stage_reason="очередь взяла задачу")
+    except (OSError, sqlite3.Error, ValueError):
+        return
+    try:
+        store.add_event(task_id, "stage", {"stage": stage, "round": n,
+                                           "why": "queue-taken"})
+    except (OSError, sqlite3.Error, ValueError):
+        pass
+
+
 def _run_one(task_id: str, project_src: str | None) -> str:
     from hub.pipeline import cycle
     from hub.pipeline.runners import make_runner
@@ -276,6 +313,12 @@ def _run_one(task_id: str, project_src: str | None) -> str:
     task = store.get_task(task_id)
     if task is None:
         return "failed"
+    # Этап сразу честный, до запуска исполнителя (гонка старта).
+    _mark_taken(store, task_id)
+    try:
+        task = store.get_task(task_id) or task
+    except (OSError, sqlite3.Error, ValueError):
+        pass
     try:
         project = _resolve_project(task, project_src)
     except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
@@ -533,6 +576,11 @@ def _pump(store: Store, project, proj_src: str | None, max_par: int,
                     continue
                 running[tid] = proc
                 info[tid] = (is_pok, lock_key)
+                # Честный этап сразу, не дожидаясь старта дочернего процесса.
+                try:
+                    _mark_taken(store, tid)
+                except (OSError, ValueError):
+                    pass
                 try:
                     pid = getattr(proc, "pid", "?")
                 except (AttributeError, ValueError):
