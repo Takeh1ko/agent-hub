@@ -276,3 +276,56 @@ def test_continue_moves_base_and_agent(tmp_path, capsys):
     assert task["stage"] == "queued"
     leftovers = list((wt_dir / "T50").glob(".agent.prev_*"))
     assert leftovers and not (wt_dir / "T50" / ".agent" / "review_r1.json").exists()
+
+
+def test_merge_force_only_from_arbiter(tmp_path, capsys):
+    """Карточка: merge только из ready, --force — из arbiter и не шире."""
+    root, wt_dir = _proj_root(tmp_path)
+    _ready_task(root, wt_dir, "T61")
+    Store().upsert_task(id="T61", stage="arbiter", stage_reason="круги кончились")
+    assert main(["merge", "T61", "--project", str(root)]) == 1
+    assert "not-ready" in capsys.readouterr().out
+    assert Store().get_task("T61")["stage"] == "arbiter"
+    assert main(["merge", "T61", "--project", str(root), "--force"]) == 0
+    assert Store().get_task("T61")["stage"] == "merged"
+    # --force не открывает прочие этапы (не arbiter).
+    _ready_task(root, wt_dir, "T62", text="3\n")
+    Store().upsert_task(id="T62", stage="failed", stage_reason="упала")
+    assert main(["merge", "T62", "--project", str(root), "--force"]) == 1
+    assert "not-ready" in capsys.readouterr().out
+    assert Store().get_task("T62")["stage"] == "failed"
+
+
+def test_queue_playerok_serial(tmp_path, monkeypatch):
+    """Карточка: задача с «Сеть: playerok» не выполняется параллельно с такой же."""
+    import time as _time
+
+    root, _wt_dir = _proj_root(tmp_path)
+    for i in (1, 2):
+        card = tmp_path / f"T7{i}.md"
+        card.write_text(CARD_TMPL.format(net="playerok") + f"\n<!-- {i} -->",
+                        encoding="utf-8")
+        assert main(["start", str(card), "--project", str(root)]) == 0
+
+    windows: list[list] = []
+
+    class Slow:
+        tool = "opencode"
+        model = "muse"
+
+        def start(self, prompt, cwd, log=None):
+            t0 = _time.monotonic()
+            _time.sleep(0.3)
+            windows.append([Path(cwd).name, t0, _time.monotonic()])
+            return "exec-slow"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            return sid
+
+    import hub.pipeline.runners as _rn
+
+    monkeypatch.setattr(_rn, "make_runner", lambda name: Slow())
+    assert main(["queue", "run", "--once", "--project", str(root)]) == 0
+    assert sorted(w[0] for w in windows) == ["T71", "T72"], windows
+    (_n1, s1, e1), (_n2, s2, e2) = windows
+    assert e1 <= s2, f"playerok-задачи пересеклись: {windows}"

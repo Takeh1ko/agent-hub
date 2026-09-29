@@ -531,6 +531,62 @@ def test_review_links_agy_tool(tmp_path, monkeypatch):
     assert sess["agy-1"]["tool"] == "agy"
 
 
+def test_review_panel_per_reviewer_file(tmp_path, monkeypatch):
+    """HIGH: `hub review` подменяет имя файла каждому ревьюеру (как PanelReviewer).
+
+    Честный фейк пишет файл, названный в промпте, и считает вызовы: без подмены
+    оба ревьюера пишут в общий review_r1.json (гонка) и каждый получает
+    обязательный resume.
+    """
+    card = tmp_path / "TP.md"
+    card.write_text(CARD, encoding="utf-8")
+    root, wt, base, _ = _review_wt(tmp_path, "TP", ["sub/a.txt"])
+    Store().upsert_task(id="TP", project="T", card_path=str(card), card_hash="h",
+                        level="hard", branch="agent/TP", worktree=str(wt),
+                        base_sha=base, stage="review r1", round=1, executor="muse",
+                        reviewers_json='["muse", "mimoflash"]', stage_reason="")
+
+    class HonestRev:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.tool = "opencode"
+            self.model = name
+            self.starts = 0
+            self.resumes = 0
+            self.prompts: list[str] = []
+
+        def start(self, prompt, cwd, log=None):
+            self.starts += 1
+            self.prompts.append(prompt)
+            m = re.search(r"\.agent/(review_r\d+_[A-Za-z0-9_-]+\.json)", prompt or "")
+            assert m, f"в промпте нет per-reviewer файла: {(prompt or '')[-200:]}"
+            (Path(cwd) / ".agent" / m.group(1)).write_text(
+                json.dumps({"verdict": "approve", "findings": []}), encoding="utf-8")
+            return f"rev-{self.name}"
+
+        def resume(self, sid, prompt, cwd, log=None):
+            self.resumes += 1
+            return sid
+
+    made: dict[str, HonestRev] = {}
+
+    def _mk(name: str) -> HonestRev:
+        made[name] = HonestRev(name)
+        return made[name]
+
+    import hub.pipeline.runners as _rn
+
+    monkeypatch.setattr(_rn, "make_runner", _mk)
+    assert main(["review", "TP", "--project", str(root)]) == 0
+    assert set(made) == {"muse", "mimoflash"}, made
+    for name, rev in made.items():
+        assert rev.starts == 1, (name, rev.starts)
+        assert rev.resumes == 0, (name, rev.resumes)
+        assert f"review_r1_{name}.json" in rev.prompts[0]
+    assert not (wt / ".agent" / "review_r1.json").exists()
+    assert Store().get_task("TP")["stage"] == "ready"
+
+
 def test_review_unknown_file(tmp_path, capsys):
     card = tmp_path / "TU2.md"
     card.write_text(CARD, encoding="utf-8")
