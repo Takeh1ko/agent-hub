@@ -6,7 +6,8 @@
 - Задача из очереди запускается, когда: очередь не на паузе, все «после X» приняты, есть место в проекте
   (max_parallel), свободны её ресурсы (capacity + внешний flock не занят). Иначе — причина ожидания в задаче.
 - Сервис состояние задач не меняет (кроме причины ожидания в очереди): задачу берёт её процесс (аренда).
-- Сироты (активная задача без живого процесса) — V20.
+- Сироты (V20): активная задача без живого процесса и с истёкшей арендой → обратно в очередь с событием и
+  продолжение с места (та же сессия); повторное сиротство → «Нужно решение»; прерванное принятие → «Нужно решение».
 """
 
 from __future__ import annotations
@@ -25,12 +26,15 @@ from pathlib import Path
 
 from ahub import config, paths, procs
 from ahub import log as hublog
-from ahub.model import ACTIVE, State
+from ahub import transitions
+from ahub.model import ACTIVE, Ev, State
 from ahub.store import Store, Task
 from ahub.time import now_ms
 from ahub.worker import CMD_MARK
 
-SPAWN_GRACE_S = 30.0  # после запуска процесс ещё может не быть виден / не взять задачу — не запускать повторно
+SPAWN_GRACE_S = 30.0
+ORPHAN_GRACE_MS = 60_000  # после истечения аренды — ещё минута на «вдруг процесс просто медленный»
+MAX_ORPHANS = 1  # автоматический подхват — один раз  # после запуска процесс ещё может не быть виден / не взять задачу — не запускать повторно
 HEARTBEAT_KEY = "service_heartbeat"
 PAUSE_KEY = "queue_paused"
 _TASK_ARG = re.compile(r"^[Tt]?(\d+)$")
@@ -158,6 +162,7 @@ class Service:
         paused = self.paused()
         spawned: list[int] = []
         load: dict[str, ProjectLoad] = {}
+        self._orphans(live, busy)
         all_tasks = self.store.list_tasks(states=ACTIVE | {State.QUEUED})
         by_project: dict[str, list[Task]] = {}
         for t in all_tasks:
@@ -214,6 +219,41 @@ class Service:
                 self.log.info("запущен процесс T%d (pid %s)", t.id, pid, extra={"task": t.id})
         self.store.meta_set(HEARTBEAT_KEY, str(now_ms()))
         return TickReport(live=live, spawned=spawned, load=load, paused=paused)
+
+    def _orphans(self, live: dict[int, int], busy: set[int]) -> list[int]:
+        """Активные задачи без процесса: в очередь (продолжение с места) или «Нужно решение»."""
+        now = now_ms()
+        handled = []
+        for t in self.store.list_tasks(states=ACTIVE):
+            if t.id in busy or t.id in live:
+                continue
+            if t.owner and t.lease_until and t.lease_until + ORPHAN_GRACE_MS > now:
+                continue  # аренда (или её грейс) ещё жива — владелец мог быть вне процесса задачи (CLI)
+            if not t.owner and now - t.updated_at < ORPHAN_GRACE_MS:
+                continue  # только что перешла — процесс ещё может появиться
+            token = f"service:{os.getpid()}"
+            if not transitions.acquire(self.store, t.id, token, pid=os.getpid(), lease_ms=30_000):
+                continue
+            count = int(t.limits.get("orphans") or 0) + 1
+            lim = dict(t.limits)
+            lim["orphans"] = count
+            self.store.update_task(t.id, limits=lim)
+            try:
+                if t.state is State.ACCEPTING:
+                    to, reason = State.NEEDS_DECISION, "принятие прервано (процесс исчез) — проверьте корень проекта"
+                elif count > MAX_ORPHANS:
+                    to, reason = State.NEEDS_DECISION, f"процесс задачи исчез повторно ({count} раз)"
+                else:
+                    to, reason = State.QUEUED, "процесс задачи исчез — продолжение с места"
+                self.store.add_event(Ev.ORPHAN, task_id=t.id, project=t.project,
+                                     payload={"from": t.state.value, "to": to.value, "count": count,
+                                              "text": f"{t.label}: {reason}"})
+                transitions.move(self.store, t.id, to, reason=reason, by="service", owner=token)
+                self.log.warning("сирота T%d (%s) → %s", t.id, t.state.value, to.value, extra={"task": t.id})
+                handled.append(t.id)
+            finally:
+                transitions.release(self.store, t.id, token)
+        return handled
 
     def stop(self) -> None:
         self._stop.set()

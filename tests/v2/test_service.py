@@ -174,3 +174,53 @@ def test_end_to_end_real_worker(store, tmp_path, monkeypatch):
     log = (paths.state_dir() / "workers" / f"T{t.id}.log")
     assert final.state is State.DONE, (final.state_reason, log.read_text() if log.exists() else "")
     assert store.list_sessions(t.id)[0].external_id == "ses_e2e"
+
+
+def _orphan_task(store, project, state=State.WORKING, lease_age_ms=10 * 60_000):
+    from ahub.time import now_ms
+    t = scout(store, project)
+    for st in (State.PREPARING, State.WORKING):
+        transitions.move(store, t.id, st)
+    if state is State.ACCEPTING:
+        transitions.move(store, t.id, State.DONE)
+        transitions.move(store, t.id, State.ACCEPTING)
+    old = now_ms() - lease_age_ms
+    with store.tx() as c:
+        c.execute("UPDATE task SET owner='dead', owner_pid=999999, lease_until=?, updated_at=? WHERE id=?",
+                  (old, old, t.id))
+    return t.id
+
+
+def test_orphan_requeued_once_then_decision(store, tmp_path):
+    project = make_project(tmp_path)
+    install_fake(store, [])
+    tid = _orphan_task(store, project)
+    s, rec = svc(store, project, tmp_path)
+    s.tick()
+    t = store.get_task(tid)
+    assert rec.spawned == [tid] and t.limits["orphans"] == 1  # вернули в очередь и сразу запустили
+    assert "orphan" in [e.kind for e in store.events(task_id=tid)]
+    # процесс снова пропал, задача опять активна без аренды
+    s.recent.clear()
+    with store.tx() as c:
+        c.execute("UPDATE task SET state='working', owner='', lease_until=NULL, updated_at=0 WHERE id=?", (tid,))
+    s.tick()
+    assert store.get_task(tid).state is State.NEEDS_DECISION and "повторно" in store.get_task(tid).state_reason
+
+
+def test_orphan_live_lease_untouched(store, tmp_path):
+    project = make_project(tmp_path)
+    install_fake(store, [])
+    tid = _orphan_task(store, project, lease_age_ms=-60_000)  # аренда ещё жива (CLI-владелец)
+    s, rec = svc(store, project, tmp_path)
+    s.tick()
+    assert store.get_task(tid).state is State.WORKING and rec.spawned == []
+
+
+def test_orphan_accepting_is_decision(store, tmp_path):
+    project = make_project(tmp_path)
+    install_fake(store, [])
+    tid = _orphan_task(store, project, state=State.ACCEPTING)
+    s, rec = svc(store, project, tmp_path)
+    s.tick()
+    assert store.get_task(tid).state is State.NEEDS_DECISION and "принятие прервано" in store.get_task(tid).state_reason
