@@ -13,6 +13,31 @@ from hub.read.git import is_dirty
 from hub.store import Store
 
 WIP_MSG = "wip: наработка до continue"
+CARD_CHANGED_MSG = "карточка изменена → новая сессия исполнителя"
+
+
+def _current_card_hash(task: dict, project) -> str | None:
+    """sha256 текущего файла карточки через общий поиск и хеш.
+
+    Переиспользует `_resolve_card` (тот же, что review/merge/cycle) и
+    `card_hash_of`: набор кандидатов пути и sha256 в одном месте.
+    Нет файла — None.
+    """
+    try:
+        from hub.pipeline.common import card_hash_of
+        from hub.pipeline.cycle import _resolve_card as _resolve
+    except ImportError:
+        return None
+    try:
+        path = _resolve(task, project)
+    except (OSError, ValueError, AttributeError):
+        return None
+    if path is None:
+        return None
+    try:
+        return card_hash_of(path)
+    except (OSError, ValueError):
+        return None
 
 
 def _wip_commit(worktree: str) -> int:
@@ -109,21 +134,50 @@ def cmd_continue(args) -> int:
             print(f"agent-rename-fail: {e}")
             return 1
     Path(worktree, ".agent").mkdir(parents=True, exist_ok=True)
+    # H13 п.3: смена карточки → новая сессия исполнителя, иначе — прежняя.
     try:
-        store.upsert_task(id=task_id, base_sha=base, stage="queued",
-                          round=0, stage_reason="continue: новые решения арбитра")
+        old_hash = str(task.get("card_hash") or "")
+    except (AttributeError, TypeError):
+        old_hash = ""
+    try:
+        new_hash = _current_card_hash(task, project)
+    except (OSError, ValueError):
+        new_hash = None
+    card_changed = bool(new_hash and new_hash != old_hash)
+    try:
+        if card_changed and new_hash:
+            store.upsert_task(id=task_id, base_sha=base, stage="queued",
+                              round=0, stage_reason="continue: новые решения арбитра",
+                              card_hash=new_hash)
+        else:
+            store.upsert_task(id=task_id, base_sha=base, stage="queued",
+                              round=0, stage_reason="continue: новые решения арбитра")
         store.add_event(task_id, "stage", {"stage": "queued", "why": "continue",
                                            "base": base})
     except (OSError, ValueError) as e:
         print(f"store-fail: {e}")
         return 1
+    if card_changed:
+        try:
+            store.add_event(task_id, "stage", {"stage": "queued",
+                                               "reason": CARD_CHANGED_MSG})
+        except (OSError, ValueError):
+            pass
     # Флаг продолжения: HEAD ветки уже впереди базы (работа прошлого
     # исполнителя), штатный preflight (HEAD == base) к ней неприменим —
     # конвейер проверит merge-base вместо HEAD.
     try:
-        from hub.pipeline.common import meta_set
+        from hub.pipeline.common import meta_del, meta_set
 
         meta_set(store, f"continued:{task_id}", "1")
+        if card_changed:
+            meta_set(store, f"exec_new_session:{task_id}", "1")
+        else:
+            # Прежняя сессия (--session старой): флаг новой сессии снять.
+            try:
+                meta_del(store, f"exec_new_session:{task_id}")
+            except (OSError, ValueError):
+                pass
     except (OSError, ValueError):
         pass
     print(f"OK {task_id} base={base[:8]}")

@@ -47,6 +47,117 @@ AGENT_DIR = ".agent"
 HUBHOME_DIR = "hubhome"
 
 
+class TransientError(RuntimeError):
+    """Сбой сети/сервера opencode: повтор, а не ответ модели.
+
+    `session_id` — sid, уже увиденный в stdout до сбоя (если есть):
+    исполнитель повторяет ту же сессию (`--session`), ревьюер — новой.
+    """
+
+    def __init__(self, msg: str = "", session_id: str | None = None) -> None:
+        super().__init__(msg)
+        try:
+            sid = str(session_id).strip() if session_id else None
+        except (AttributeError, ValueError, TypeError):
+            sid = None
+        self.session_id: str | None = sid or None
+
+
+# Подстроки транзиентного сбоя (п.1 H13, регистронезависимо).
+TRANSIENT_MARKERS = (
+    "unexpected server error",
+    "cannot connect to api",
+    "unable to connect",
+    "econnrefused",
+    "etimedout",
+    "socket hang up",
+    "status 5",
+    "429",
+)
+
+
+def is_transient_text(text: str) -> bool:
+    """Текст похож на сбой сети/сервера opencode (п.1 H13)."""
+    try:
+        low = str(text or "").lower()
+    except Exception:
+        return False
+    return any(m in low for m in TRANSIENT_MARKERS)
+
+
+def _error_field_texts(data: dict) -> list[str]:
+    """Строковые тексты ошибки из JSON-события (только поля ошибки).
+
+    Проверяем только текст ошибки, а не всю JSON-строку: постороннее
+    «429» в других полях (например, `took 429ms`) — не транзиент.
+    """
+    out: list[str] = []
+    try:
+        keys = ("error", "message", "text", "details")
+    except Exception:
+        return out
+    for key in keys:
+        try:
+            val = data.get(key)
+        except (AttributeError, ValueError):
+            continue
+        if isinstance(val, str) and val.strip():
+            out.append(val.strip())
+        elif isinstance(val, dict):
+            try:
+                for sub in val.values():
+                    if isinstance(sub, str) and sub.strip():
+                        out.append(sub.strip())
+            except (AttributeError, ValueError):
+                continue
+        elif isinstance(val, list):
+            try:
+                for sub in val:
+                    if isinstance(sub, str) and sub.strip():
+                        out.append(sub.strip())
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def transient_error_of_line(line: str) -> str | None:
+    """Текст транзиентной ошибки из JSON-события stdout, иначе None.
+
+    Только событие {"type": "error"}, чей текст ошибки (поля
+    error/message/text/details) содержит маркеры п.1, — любая другая
+    ошибка ведёт себя как раньше.
+    """
+    try:
+        s = str(line or "")
+    except Exception:
+        return None
+    stripped = s.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        if str(data.get("type") or "") != "error":
+            return None
+    except (AttributeError, ValueError):
+        return None
+    try:
+        candidates = _error_field_texts(data)
+    except (ValueError, AttributeError):
+        return None
+    for cand in candidates:
+        try:
+            if is_transient_text(cand):
+                return cand[:2000]
+        except (ValueError, AttributeError):
+            continue
+    return None
+
+
 class Runner(Protocol):
     """Общий интерфейс: старт сессии и продолжение.
 
@@ -207,6 +318,10 @@ class OpencodeRunner:
     сторона линкует его в store во время шага, не дожидаясь конца.
     Сторож тишины: нет JSON-событий `idle_s` c и нет дочерних процессов —
     процесс прерывается, `RuntimeError("opencode: тишина N c")`.
+    Сбой сети/сервера ({"type": "error"} с текстом п.1 H13) —
+    `TransientError`; исключение — rc=0 с полученным sessionID (шаг
+    успешен, событие было промежуточным): возвращается sid.
+    Другая ошибка — как раньше.
     Каждая сессия получает env `AGENT_HUB_HOME=<worktree>/.agent/hubhome`.
     """
 
@@ -248,6 +363,12 @@ class OpencodeRunner:
         Сторож тишины: нет JSON-событий `idle_s` c и нет дочерних процессов —
         процесс прерывается, `RuntimeError("opencode: тишина N c [sid=...]")`
         (sid — если успел появиться в stdout до тишины).
+        Сбой сети/сервера (событие {"type": "error"} с текстом п.1 H13) —
+        `TransientError` с этим текстом, даже если sid уже виден.
+        Исключение: процесс завершился rc=0 и sessionID получен — шаг
+        сделал работу (событие было промежуточным), возвращается sid,
+        как для других error-событий.
+        Любая другая ошибка — как раньше.
         """
         notify = on_session
         log_path = log or _default_log(cwd, "opencode.log")
@@ -268,6 +389,7 @@ class OpencodeRunner:
         stderr_box: list[str] = [""]
         sid_box: list[str | None] = [None]
         notified_box: list[bool] = [False]
+        transient_box: list[str | None] = [None]
         last_event: list[float] = [time.monotonic()]
 
         def _maybe_notify(cand: str | None) -> None:
@@ -292,6 +414,19 @@ class OpencodeRunner:
                 return str(sid)
             return _extract_session_id(line)
 
+        def _first_transient_in(text: str) -> str | None:
+            try:
+                for _ln in str(text or "").splitlines():
+                    try:
+                        cand = transient_error_of_line(_ln)
+                    except (ValueError, AttributeError):
+                        continue
+                    if cand:
+                        return cand
+            except (ValueError, AttributeError):
+                return None
+            return None
+
         def _read_stdout() -> None:
             try:
                 stream = proc.stdout
@@ -304,6 +439,13 @@ class OpencodeRunner:
                             last_event[0] = time.monotonic()
                     except Exception:
                         pass
+                    if transient_box[0] is None:
+                        try:
+                            cand = transient_error_of_line(line)
+                        except (ValueError, AttributeError):
+                            cand = None
+                        if cand:
+                            transient_box[0] = cand
                     if sid_box[0] is None:
                         _maybe_notify(_sid_of_line(line))
             except Exception:
@@ -363,6 +505,14 @@ class OpencodeRunner:
                             f.write(combined)
                     except OSError:
                         pass
+                    # Error-событие уже в частичном stdout (потом завис) —
+                    # это TransientError, а не таймаут (sid — для повтора
+                    # той же сессией исполнителя).
+                    transient_seen = transient_box[0] or _first_transient_in(partial)
+                    if transient_seen is not None:
+                        _sid = sid_box[0] or _extract_session_id(partial)
+                        raise TransientError(transient_seen[:2000],
+                                             session_id=_sid)
                     raise RuntimeError(
                         f"opencode: таймаут {timeout_s} c (лог {log_path})")
                 if idle_s and idle_s > 0 and (now - last_event[0] >= idle_s):
@@ -392,6 +542,14 @@ class OpencodeRunner:
                             pass
                         _close_quietly(proc.stdout)
                         _close_quietly(proc.stderr)
+                        # Error-событие уже в частичном stdout (потом тишина) —
+                        # это TransientError, а не тишина (sid — для повтора
+                        # той же сессией исполнителя).
+                        transient_seen = transient_box[0] or _first_transient_in(partial)
+                        if transient_seen is not None:
+                            _sid = sid_box[0] or _extract_session_id(partial)
+                            raise TransientError(transient_seen[:2000],
+                                                 session_id=_sid)
                         # Sid из stdout до тишины — в текст ошибки: fallback
                         # в cycle продолжает ту же сессию на muse через resume.
                         known_sid = sid_box[0] or _extract_session_id(partial)
@@ -417,11 +575,32 @@ class OpencodeRunner:
                 f.write(combined)
         except OSError:
             pass
+        # Транзиентный сбой сервера/сети: событие {"type": "error"} в stdout
+        # с текстом п.1 — TransientError, даже если sid уже виден.
+        # Но rc=0 + полученный sid — шаг сделал работу (событие было
+        # промежуточным): возвращаем sid, а не отбраковываем успех
+        # с повторами 120/240/480 (симметрично не-транзиентному пути ниже).
+        transient_text: str | None = None
+        try:
+            for _line in stdout_text.splitlines():
+                cand = transient_error_of_line(_line)
+                if cand:
+                    transient_text = cand
+                    break
+        except (ValueError, AttributeError):
+            transient_text = None
+        if transient_text is not None:
+            _sid = sid_box[0] or _extract_session_id(stdout_text)
+            if rc == 0 and _sid:
+                return _sid
+            raise TransientError(transient_text[:2000], session_id=_sid)
         sid = sid_box[0] or _extract_session_id(stdout_text)
         if sid:
             return sid
         if session_id:
             return session_id
+        # Строго по контракту п.1: только событие {"type": "error"} в stdout —
+        # остальное (включая голые «429»/«status 5» в хвосте) как раньше.
         raise RuntimeError(
             f"opencode: нет sessionID в выводе (exit {rc}, лог {log_path}): "
             + combined[-2000:])
