@@ -28,7 +28,11 @@ def clip_bytes(text: str, limit: int) -> str:
 
 def _age(ms: int, now: int) -> str:
     m = max(0, (now - ms) // 60000)
-    return f"{m} мин" if m < 60 else f"{m // 60} ч {m % 60} мин"
+    if m < 60:
+        return f"{m} мин"
+    if m < 24 * 60:
+        return f"{m // 60} ч {m % 60} мин"
+    return f"{m // 1440} д {(m % 1440) // 60} ч"
 
 
 def _short(s: str, n: int) -> str:
