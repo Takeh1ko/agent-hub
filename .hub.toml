@@ -1,27 +1,16 @@
-schema_version = 1
+schema_version = 2
 name = "agent-hub"
-root = "$HOME/Projects/Python/agent-hub"
 worktrees = "$HOME/Projects/Python/agent-hub-wt"
-rules = "docs/agents/rules.md"
+work_branch = "v2"  # стройка v2 (после переключения — main)
 python = "$HOME/Projects/Python/agent-hub/.venv/bin/python"
-test_lock = "/tmp/hub-selftest.lock"
-work_branch = "main"
-push = ""
-allowed_paths = ["hub/**", "tests/**", "docs/**", "tools/**", "pyproject.toml", ".hub.toml", ".gitignore"]
+rules = "docs/agents/ahub_rules.md"
+allowed_paths = ["ahub/**", "hub/**", "tests/**", "docs/**", "tools/**", "pyproject.toml", ".hub.toml", ".gitignore"]
+max_parallel = 2
+test_resource = "selftest"
 
-[hooks]
-task_setup = ""
-task_cleanup = ""
+[resources]
+selftest = { lock = "/tmp/hub-selftest.lock" }
 
-[defaults]
-executor = "muse"
-reviewers = ["muse"]  # решение владельца 2026-09-29: критический путь — Spark код + Spark ревью
-budget_go = 1.5  # 2026-09-30: $0.5 останавливал hard-задачи посреди работы (H13 $0.66)
-budget_usd = 0.0
-
-[levels]  # easy — рутина, Spark Go (DeepSeek через opencode не используем — дороже, решение владельца 2026-09-30); medium/hard — критический путь, Spark Go; background — не тормозит, бесплатный Spark
-easy = "muse"
-medium = "muse"
-hard = "muse"
-background = "musefree"
-
+[budget]
+go = 1.5
+usd = 0.0
