@@ -56,9 +56,11 @@ def _snap(args) -> snap.Snapshot:
     # Авто-импорт legacy при каждом status: без ручного import-legacy.
     auto_import(store)
     db = Path(args.opencode_db) if getattr(args, "opencode_db", None) else default_opencode_db()
+    # --all: слитые/брошенные с деньгами и сессиями (include_done), иначе они дешёвые (0).
     s = snap.build(store, ht.now_ms(),
                    opencode_db=str(db) if db.exists() else None,
-                   proc_root=getattr(args, "proc_root", "/proc"))
+                   proc_root=getattr(args, "proc_root", "/proc"),
+                   include_done=bool(getattr(args, "all", False)))
     if not getattr(args, "all", False):
         s.tasks = [t for t in s.tasks if t.stage not in FINAL_STAGES]
     return s

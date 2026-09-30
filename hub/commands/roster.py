@@ -6,7 +6,7 @@ from hub.commands.status import _snap
 
 
 def cmd_roster(args) -> int:
-    print(_snap(args).roster_text())
+    print(_snap(args).roster_text(include_done=bool(getattr(args, "all", False))))
     return 0
 
 

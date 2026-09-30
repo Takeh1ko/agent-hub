@@ -1259,7 +1259,9 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
         if not repair_reason:
             try:
                 gate = check_gate(Path(worktree), base_sha, head, allowed,
-                                  test_cmd, lock_path)
+                                  test_cmd, lock_path,
+                                  work_branch=(getattr(project, "work_branch", "")
+                                               or "").strip() or None)
             except (OSError, subprocess.SubprocessError) as e:
                 _set_stage(store, task_id, "failed", round_no, f"gate-fail: {e}"[:500])
                 return "failed"
@@ -1382,7 +1384,9 @@ def run_task(store, project, task_id: str, runners, rounds: int = 2,
                 return "failed"
             try:
                 gate2 = check_gate(Path(worktree), base_sha, head, allowed,
-                                   test_cmd, lock_path)
+                                   test_cmd, lock_path,
+                                   work_branch=(getattr(project, "work_branch", "")
+                                                or "").strip() or None)
             except (OSError, subprocess.SubprocessError) as e:
                 _set_stage(store, task_id, "failed", round_no, f"gate-fail: {e}"[:500])
                 return "failed"
