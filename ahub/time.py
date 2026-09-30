@@ -96,10 +96,10 @@ def parse_duration(text: str) -> float:
     if not m:
         raise ValueError(f"непонятная длительность: {text!r}")
     n, unit = float(m.group(1)), m.group(2).lower()
-    if unit in ("", "s", "с"):
+    if unit in ("", "s", "с", "sec", "сек"):
         return n
-    if unit in ("m", "м"):
+    if unit in ("m", "м", "min", "мин"):
         return n * 60
-    if unit in ("h", "ч"):
+    if unit in ("h", "ч", "hr", "час"):
         return n * 3600
     raise ValueError(f"непонятная длительность: {text!r}")
