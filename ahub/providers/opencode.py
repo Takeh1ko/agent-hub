@@ -82,7 +82,7 @@ def classify_error(ev: dict) -> tuple[str, dict]:
     flags = {"transient": False, "quota": False, "no_access": False, "status": status}
     if status in (401, 403) or "unauthorized" in low or "forbidden" in low:
         flags["no_access"] = True
-    elif any(m in low for m in QUOTA_MARKERS) and status in (None, 402, 429):
+    elif any(m in low for m in QUOTA_MARKERS):
         flags["quota"] = True
     elif retryable or (isinstance(status, int) and (status >= 500 or status == 429)) \
             or any(m in low for m in TRANSIENT_MARKERS):

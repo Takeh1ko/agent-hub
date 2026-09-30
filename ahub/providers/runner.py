@@ -24,11 +24,12 @@ from pathlib import Path
 
 from ahub import log as hublog
 from ahub import procs
-from ahub.providers.base import Act, Activity, Cap, Outcome, Provider, RunResult, RunSpec, clip
+from ahub.providers.base import Act, Activity, Cap, Outcome, Provider, RunResult, RunSpec, Usage, clip
 from ahub.time import now_ms
 
 POLL_S = 0.2
 TAIL_POLL_S = 0.05
+MAX_LINE = 1_000_000  # байт на строку вывода; длиннее — обрезается
 KILL_GRACE_S = 5.0
 _log = hublog.get("runner")
 
@@ -51,6 +52,19 @@ def _kill_group(proc: subprocess.Popen) -> None:
             return
         except subprocess.TimeoutExpired:
             continue
+
+
+def merge_usage(a: Usage | None, b: Usage | None) -> Usage | None:
+    """Учёт из данных поставщика и из потока: по каждому полю — большее (данные поставщика могут запаздывать)."""
+    if a is None or b is None:
+        return a if b is None else b
+
+    def mx(x, y):
+        return y if x is None else x if y is None else max(x, y)
+
+    return Usage(*(mx(getattr(a, f), getattr(b, f)) for f in ("tokens_in", "tokens_out", "tokens_reasoning",
+                                                             "cache_read", "cache_write", "cost_go", "cost_usd",
+                                                             "quota")), context=a.context or b.context)
 
 
 def run(provider: Provider, spec: RunSpec, *,
@@ -112,13 +126,14 @@ def run(provider: Provider, spec: RunSpec, *,
                 _log.exception("on_activity упал", extra=ctx)
 
     def _handle(raw: bytes) -> None:
-        last_line[0] = time.monotonic()
-        line = raw.decode("utf-8", "replace")
+        line = raw[:MAX_LINE].decode("utf-8", "replace")
         try:
             acts = provider.parse_line(line, now_ms())
         except Exception:
             _log.exception("parse_line упал", extra=ctx)
             acts = []
+        if acts:  # сторож тишины сбрасывается только распознанной активностью, не любым мусором
+            last_line[0] = time.monotonic()
         for a in acts:
             _emit(a)
 
@@ -131,6 +146,8 @@ def run(provider: Provider, spec: RunSpec, *,
                 chunk = f.read(65536)
                 if chunk:
                     buf += chunk
+                    if len(buf) > MAX_LINE * 4 and b"\n" not in buf:
+                        buf = buf[:MAX_LINE]  # строка без конца — не копить без предела
                     *lines, buf = buf.split(b"\n")
                     for ln in lines:
                         _handle(ln)
@@ -229,9 +246,8 @@ def run(provider: Provider, spec: RunSpec, *,
             _log.exception("structured упал", extra=ctx)
     usage = None
     try:
-        usage = provider.usage(sid) if sid and (provider.has(Cap.COST_MONEY) or provider.has(Cap.TOKENS)) else None
-        if usage is None:
-            usage = provider.stream_usage(acts)
+        db_usage = provider.usage(sid) if sid and (provider.has(Cap.COST_MONEY) or provider.has(Cap.TOKENS)) else None
+        usage = merge_usage(db_usage, provider.stream_usage(acts))
     except Exception:
         _log.exception("usage упал", extra=ctx)
     level = "info" if outcome is Outcome.OK else "warning"

@@ -72,7 +72,7 @@ def move(store: Store, task_id: int, to: State | str, *, reason: str = "", by: s
             args.append(ts)
         if releasing:
             sets += ["owner=''", "owner_pid=NULL", "lease_until=NULL", "request=''"]
-        if dst not in ACTIVE and dst is not State.QUEUED:
+        if dst not in ACTIVE:
             sets.append("phase=''")
         args.append(int(task_id))
         c.execute(f"UPDATE task SET {', '.join(sets)} WHERE id=?", args)
@@ -111,13 +111,18 @@ def _cascade(store: Store, c: sqlite3.Connection, task: Task, dst: State, ts: in
 
 def acquire(store: Store, task_id: int, owner: str, *, pid: int | None, lease_ms: int = DEFAULT_LEASE_MS,
             now: int | None = None) -> bool:
-    """Взять задачу: свободна, аренда истекла или уже наша. False — занята живым владельцем."""
+    """Взять задачу в очереди или в работе: свободна, аренда истекла или уже наша.
+
+    False — занята живым владельцем или задача не в очереди/работе (решённую не берут).
+    """
     ts = now if now is not None else now_ms()
     with store.tx() as c:
+        states = [s.value for s in ACTIVE | {State.QUEUED}]
         cur = c.execute(
             "UPDATE task SET owner=?, owner_pid=?, lease_until=?, version=version+1"
-            " WHERE id=? AND (owner='' OR owner=? OR lease_until IS NULL OR lease_until<=?)",
-            (owner, pid, ts + lease_ms, int(task_id), owner, ts))
+            " WHERE id=? AND (owner='' OR owner=? OR lease_until IS NULL OR lease_until<=?)"
+            f" AND state IN ({','.join('?' * len(states))})",
+            (owner, pid, ts + lease_ms, int(task_id), owner, ts, *states))
         return cur.rowcount == 1
 
 

@@ -67,9 +67,26 @@ def test_structured(fake, tmp_path):
 
 
 def test_resume_keeps_session(fake, tmp_path):
-    r = run(fake, spec(tmp_path, {"session": "new", "steps": [{"event": {"type": "text", "text": "x"}}]},
+    # id в потоке не виден (hide_session) — запасной путь: продолжали ses_old, значит это она
+    r = run(fake, spec(tmp_path, {"hide_session": True, "steps": [{"event": {"type": "text", "text": "x"}}]},
                        session_id="ses_old"))
-    assert r.session_id == "ses_old"
+    assert r.ok and r.session_id == "ses_old"
+
+
+def test_merge_usage_takes_larger():
+    from ahub.providers.base import Usage
+    from ahub.providers.runner import merge_usage
+    db = Usage(tokens_in=100, cost_go=0.01)
+    stream = Usage(tokens_in=150, cost_go=0.005, tokens_out=7)
+    m = merge_usage(db, stream)
+    assert m.tokens_in == 150 and m.cost_go == 0.01 and m.tokens_out == 7
+    assert merge_usage(None, stream) is stream and merge_usage(db, None) is db
+
+
+def test_garbage_output_does_not_reset_silence(fake, tmp_path):
+    steps = [{"sleep": 0.3}, {"event": {"type": "noise"}}] * 10
+    r = run(fake, spec(tmp_path, {"hide_session": True, "steps": steps}, idle_s=1))
+    assert r.outcome is Outcome.SILENCE  # строки идут каждые 0.3 с, но нераспознанные — не жизнь
 
 
 def test_silence_without_children(fake, tmp_path):

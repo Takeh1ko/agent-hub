@@ -86,6 +86,15 @@ def test_owner_protects_active_task(store):
     assert t.owner == "" and t.state is State.QUEUED
 
 
+def test_acquire_only_queued_or_active(store):
+    tid = _task(store)
+    tr.move(store, tid, State.REJECTED)
+    assert not tr.acquire(store, tid, "A", pid=1)
+    t2 = _task(store)
+    tr.move(store, t2, State.STOPPED)
+    assert not tr.acquire(store, t2, "A", pid=1)
+
+
 def test_is_orphan(store):
     tid = _task(store)
     t = tr.move(store, tid, State.PREPARING)
