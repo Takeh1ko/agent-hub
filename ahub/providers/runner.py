@@ -10,6 +10,9 @@
   Есть дети (тесты, ожидание замка) — молчание объяснено, ждём дальше.
 - should_stop() — ядро просит остановиться (бюджет, команда): прервать, Outcome.KILLED.
 - Если до тишины/таймаута/остановки в потоке был сбой сети — итог TRANSIENT (повтор уместнее).
+- После любого завершения хода (и штатного) остатки агента добиваются: вся его группа процессов и потомки,
+  замеченные во время хода и ушедшие из группы (setsid). Иначе брошенные фоновые процессы живут вечно
+  (случай 30.09: 12 × `yes` от агента задачи T28 сутки грузили все ядра).
 """
 
 from __future__ import annotations
@@ -65,6 +68,41 @@ def merge_usage(a: Usage | None, b: Usage | None) -> Usage | None:
     return Usage(*(mx(getattr(a, f), getattr(b, f)) for f in ("tokens_in", "tokens_out", "tokens_reasoning",
                                                              "cache_read", "cache_write", "cost_go", "cost_usd",
                                                              "quota")), context=a.context or b.context)
+
+
+def reap(pgid: int | None, tracked: dict[int, int | None]) -> list[int]:
+    """Добить группу процессов агента и замеченных потомков (сверка времени старта). Возвращает добитые pid."""
+    killed: list[int] = []
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    for pid, st in tracked.items():
+        if st is not None and procs.start_time(pid) == st and procs.alive(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed.append(pid)
+            except (ProcessLookupError, PermissionError):
+                pass
+    if pgid is None and not killed:
+        return killed
+    time.sleep(0.5)
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    for pid in killed:
+        if procs.alive(pid) and procs.start_time(pid) == tracked.get(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    return killed
+
+
+TRACK_S = 2.0  # как часто запоминать потомков агента
 
 
 def run(provider: Provider, spec: RunSpec, *,
@@ -173,6 +211,8 @@ def run(provider: Provider, spec: RunSpec, *,
     forced: Outcome | None = None
     silence_s = 0
     deadline = time.monotonic() + max(1, int(spec.timeout_s))
+    tracked: dict[int, int | None] = {}  # потомки агента (pid → время старта) — добить после хода
+    last_track = 0.0
     try:
         while True:
             try:
@@ -181,6 +221,11 @@ def run(provider: Provider, spec: RunSpec, *,
             except subprocess.TimeoutExpired:
                 pass
             now = time.monotonic()
+            if now - last_track >= TRACK_S:
+                last_track = now
+                for d in procs.descendants(proc.pid):
+                    if d not in tracked:
+                        tracked[d] = procs.start_time(d)
             if should_stop is not None:
                 try:
                     stop = bool(should_stop())
@@ -205,6 +250,12 @@ def run(provider: Provider, spec: RunSpec, *,
     finally:
         exited.set()
         t_out.join(timeout=30)
+        try:
+            left = reap(proc.pid, tracked)  # pgid = pid лидера (start_new_session)
+            if left:
+                _log.warning("добиты брошенные процессы агента: %s", left[:10], extra=ctx)
+        except Exception:
+            _log.exception("добивание остатков агента упало", extra=ctx)
 
     ended = now_ms()
     with acts_lock:

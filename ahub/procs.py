@@ -62,3 +62,12 @@ def cmdline(pid: int, proc_root: str | Path = "/proc") -> list[str]:
     except OSError:
         return []
     return [p.decode("utf-8", "replace") for p in raw.split(b"\0") if p]
+
+
+def start_time(pid: int, proc_root: str | Path = "/proc") -> int | None:
+    """Время старта процесса (такты с загрузки) — отличает процесс от нового с тем же pid."""
+    try:
+        stat = (Path(proc_root) / str(int(pid)) / "stat").read_text(encoding="utf-8", errors="replace")
+        return int(stat.rsplit(")", 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None

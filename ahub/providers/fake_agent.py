@@ -7,6 +7,7 @@
   {"event": {...}}                   — напечатать JSON-строку события (type: text|tool_start|tool_end|step|error|usage)
   {"sleep": 0.3}                     — пауза
   {"child": 1.5}                     — запустить дочерний процесс на N секунд и ждать его (молчание с ребёнком)
+  {"bg": 30, "detach": false}        — бросить фоновый процесс и выйти (detach — ещё и setsid)
   {"write": {"path": "a.txt", "text": "..."}}  — записать файл в cwd
   {"git_commit": "сообщение"}        — git add -A && git commit в cwd
   {"result": {...}}                  — .ahub/result.json с commit = текущий HEAD
@@ -38,6 +39,11 @@ def main(argv: list[str]) -> int:
             print(json.dumps(ev, ensure_ascii=False), flush=True)
         elif "sleep" in step:
             time.sleep(float(step["sleep"]))
+        elif "bg" in step:
+            # Брошенный фоновый процесс (как `yes > /dev/null &` агента); detach — ещё и уйти из группы (setsid).
+            subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({float(step['bg'])})"],
+                             start_new_session=bool(step.get("detach")), stdout=subprocess.DEVNULL)
+            time.sleep(float(step.get("settle", 2.5)))  # чтобы сторож успел заметить потомка
         elif "child" in step:
             subprocess.run([sys.executable, "-c", f"import time; time.sleep({float(step['child'])})"])
         elif "write" in step:

@@ -194,3 +194,22 @@ def test_registry():
     assert providers.get("fake").name == "fake"
     with pytest.raises(KeyError):
         providers.get("nope")
+
+
+def _sleepers(marker: str) -> list[int]:
+    from ahub import procs
+    out = []
+    for d in __import__("pathlib").Path("/proc").iterdir():
+        if d.name.isdigit() and any(marker in a for a in procs.cmdline(int(d.name))) and procs.alive(int(d.name)):
+            out.append(int(d.name))
+    return out
+
+
+@pytest.mark.parametrize("detach", [False, True])
+def test_leftover_processes_reaped_after_normal_exit(fake, tmp_path, detach):
+    secs = 97.123 if detach else 96.321  # метка в cmdline брошенного процесса
+    r = run(fake, spec(tmp_path, {"session": "s", "steps": [
+        {"bg": secs, "detach": detach}, {"event": {"type": "text", "text": "готово"}}]}, idle_s=0))
+    assert r.ok
+    time.sleep(1.0)
+    assert _sleepers(f"time.sleep({secs})") == [], "брошенный агентом процесс пережил ход"
