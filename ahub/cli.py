@@ -12,6 +12,7 @@ import pkgutil
 import sys
 
 import ahub.commands as _cmds
+from ahub import log
 from ahub.config import ConfigError
 from ahub.cliutil import CliError
 
@@ -50,6 +51,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except KeyboardInterrupt:
         return 130
+    except Exception:
+        log.get("cli").exception("команда %s упала", args.cmd)
+        raise
 
 
 if __name__ == "__main__":
