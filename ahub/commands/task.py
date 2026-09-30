@@ -200,7 +200,7 @@ def cmd_history(args) -> int:
         go, usd = archive.task_cost(store, t.id)
         dur = ""
         if t.finished_at:
-            dur = f" · {(t.finished_at - t.created_at) // 60000} мин"
+            dur = f" · {views._age(t.created_at, t.finished_at)}"
         lines.append(f"{t.label} {t.kind.value} «{views._short(t.title, 45)}» · "
                      f"{archive.STATE_WORDS.get(t.state.value, t.state.value)} · круг {t.round} · ${go + usd:.3f}{dur}")
     emit(args, {"tasks": [asdict(t) for t in done]}, "\n".join(lines) or "истории нет")
