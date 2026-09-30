@@ -37,18 +37,21 @@ def _short(s: str, n: int) -> str:
 
 
 def status_text(store: Store, *, project: str | None = None, live: dict[int, int] | None = None,
-                now: int | None = None) -> str:
-    """L1: активные, ждущие решения, очередь, вопросы, непрочитанное. ≤ 1500 байт."""
+                now: int | None = None, pulses: dict | None = None) -> str:
+    """L1: активные (с пульсом), ждущие решения, очередь, вопросы, непрочитанное. ≤ 1500 байт."""
     ts = now if now is not None else now_ms()
     live = live or {}
     lines: list[str] = []
     active = store.list_tasks(states=ACTIVE, project=project)
     for t in active:
         go, usd = archive.task_cost(store, t.id)
-        proc = "" if t.id in live else " · нет процесса!"
+        pl = (pulses or {}).get(t.id)
+        mark = f"{pl.mark} " if pl else ""
+        why = f" · {_short(pl.reason, 50)}" if pl and pl.state != "working" and pl.reason else (
+            "" if pl or t.id in live else " · нет процесса!")
         phase = PHASE_WORDS.get(t.phase, t.state.value)
-        lines.append(f"{t.label} {t.kind.value} «{_short(t.title, 40)}» · {phase} · {t.executor}"
-                     f"{f' · круг {t.round}' if t.round > 1 else ''} · {_age(t.updated_at, ts)} · ${go + usd:.2f}{proc}")
+        lines.append(f"{mark}{t.label} {t.kind.value} «{_short(t.title, 40)}» · {phase} · {t.executor}"
+                     f"{f' · круг {t.round}' if t.round > 1 else ''} · {_age(t.updated_at, ts)} · ${go + usd:.2f}{why}")
     waiting = [t for t in store.list_tasks(states=WAITING_DECISION, project=project)]
     for t in waiting:
         lines.append(f"{DECISION_WORDS[t.state]} {t.label} «{_short(t.title, 40)}» — {_short(t.state_reason, 70)}")

@@ -73,7 +73,11 @@ def cmd_status(args) -> int:
     project = None
     if args.project:
         project = resolve_project(args).name
-    text = views.status_text(store, project=project, live=live)
+    from ahub import config, pulse
+
+    projects, _errs = config.load_projects()
+    pulses = pulse.all_pulses(store, live=live, projects=projects)
+    text = views.status_text(store, project=project, live=live, pulses=pulses)
     data = {"active": [asdict(t) for t in store.list_tasks(states=ACTIVE, project=project)],
             "waiting": [asdict(t) for t in store.list_tasks(states=WAITING_DECISION, project=project)],
             "live": live}
