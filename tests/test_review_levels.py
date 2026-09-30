@@ -29,14 +29,18 @@ def test_levels_1_to_4():
 def test_custom_models_and_rounds():
     p, err = plan("свой: muse, mimoflash; круги 3")
     assert err == "" and p == rl.ReviewPlan(("muse", "mimoflash"), 3, "свой")
-    p, err = plan("свой: mimoflash")  # без кругов — 1 круг
-    assert err == "" and p.rounds == 1 and p.reviewers == ("mimoflash",)
+    p, err = plan("свой: `Muse`, MiMoFlash: круги 2")  # регистр/бэктики/двоеточие
+    assert err == "" and p == rl.ReviewPlan(("muse", "mimoflash"), 2, "свой")
+    assert plan("уровень 2")[0].rounds == 2
 
 
 def test_bad_values():
     assert plan("7")[1].startswith("Ревью: уровень 7 неизвестен")
     assert "неизвестные модели" in plan("свой: gpt9; круги 2")[1]
     assert "кругов 9" in plan("свой: muse; круги 9")[1]
+    assert "укажи круги" in plan("свой: mimoflash")[1]  # забытые круги — не молча 1
+    assert "нужно число" in plan("свой: muse; круги много")[1]
+    assert "ожидается" in plan("2abc")[1]  # опечатка с цифрой — ошибка, не умолчания
     # Свободный текст старых карточек — не уровень: раздел игнорируется, не ошибка.
     assert plan("mimo (деньги)") == (None, "")
 
@@ -48,6 +52,13 @@ def test_no_section_means_project_defaults():
 def test_section_on_own_line():
     text = "# T\n\n**Ревью.** 2\n\n**Коммит.** `x`\n"
     assert rl.plan_for_card(text, MODELS)[0].rounds == 2
+    # Значение на следующей строке.
+    assert rl.plan_for_card("# T\n\n**Ревью.**\n3\n\n**Коммит.** x\n", MODELS)[0].label == "уровень 3"
+
+
+def test_prose_mention_is_not_section():
+    text = "# T\n\n**Цель.** см. **Ревью.** 9 в тексте\n\n**Коммит.** x\n"
+    assert rl.plan_for_card(text, MODELS) == (None, "")
 
 
 # --- hub start и lint ---
@@ -97,6 +108,7 @@ def test_start_takes_reviewers_and_rounds_from_card(tmp_path, capsys):
     card = _card(root, " **Ревью.** 1")
     assert main(["start", card, "--project", str(root)]) == 0
     out = capsys.readouterr().out
+    assert out.splitlines()[0] == "OK T1-x"  # первая строка машиночитаемая, как раньше
     assert "ревью: уровень 1 — muse, кругов 1" in out
     t = _task()
     assert json.loads(t["reviewers_json"]) == ["muse"] and int(t["rounds"]) == 1
@@ -134,3 +146,13 @@ def test_lint_rejects_bad_review(tmp_path):
     assert not res.ok and any("уровень 9" in e for e in res.errors)
     ok = lint_card(_card(root, " **Ревью.** 3"), load_project(str(root)))
     assert ok.ok, ok.errors
+
+
+def test_start_rejects_bad_rounds_flag(tmp_path, capsys):
+    from hub.cli import main
+
+    root = _project(tmp_path)
+    card = _card(root, " **Ревью.** 2")
+    for bad in ("0", "-1", "9"):
+        assert main(["start", card, "--project", str(root), "--rounds", bad]) == 1
+    assert "можно 1–5" in capsys.readouterr().out

@@ -207,9 +207,17 @@ def cmd_start(args) -> int:
         for m in bad:
             print(f"неизвестная модель: {m}")
         return 1
+    from hub.pipeline.review_levels import MAX_ROUNDS
+
     explicit_rounds = getattr(args, "rounds", None)
-    if explicit_rounds:
-        rounds = int(explicit_rounds)
+    if explicit_rounds is not None:
+        try:
+            rounds = int(explicit_rounds)
+        except (TypeError, ValueError):
+            rounds = 0
+        if not 1 <= rounds <= MAX_ROUNDS:
+            print(f"--rounds {explicit_rounds}: можно 1–{MAX_ROUNDS}")
+            return 1
     elif plan is not None:
         rounds = plan.rounds
     else:
@@ -255,10 +263,11 @@ def cmd_start(args) -> int:
     except (OSError, ValueError) as e:
         print(f"store-fail: {e}")
         return 1
-    review = plan.label if plan is not None and not reviewers and not explicit_rounds else "вручную"
-    if plan is None and not reviewers and not explicit_rounds:
-        review = "по умолчанию проекта"
-    print(f"OK {task_id} · ревью: {review} — {', '.join(rev_list) or 'нет'}, кругов {rounds}")
+    manual = bool(reviewers) or explicit_rounds is not None
+    review = "вручную" if manual else (plan.label if plan is not None else "по умолчанию проекта")
+    # Первая строка — машиночитаемая «OK <id>», как раньше; ревью — второй строкой.
+    print(f"OK {task_id}")
+    print(f"ревью: {review} — {', '.join(rev_list) or 'нет'}, кругов {rounds}")
     return 0
 
 
