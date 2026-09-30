@@ -14,6 +14,14 @@ log = logging.getLogger(__name__)
 REQUIRED_TABLES = ("session", "message", "part", "todo")
 # Минимум колонок session: живая БД меняется быстрее тестов.
 REQUIRED_SESSION_COLS = ("time_updated", "time_created", "directory", "cost", "model")
+# Кусок списка id для одного IN (...): ниже SQLITE_LIMIT_VARIABLE_NUMBER
+# самых старых сборок (999). 300 сессий из приёмки — один кусок,
+# число execute не растёт.
+_ID_CHUNK = 500
+
+
+def _chunks(items: list, size: int) -> list[list]:
+    return [items[i:i + size] for i in range(0, len(items), size)] if items else []
 
 
 @dataclass
@@ -107,13 +115,24 @@ def sessions(
                 want = [str(x) for x in session_ids if str(x)]
                 if not want:
                     return []
-                conds.append(f"id IN ({','.join('?' for _ in want)})")
-                args.extend(want)
-            where = " AND ".join(conds)
-            rows = con.execute(
-                f"SELECT * FROM session WHERE {where} ORDER BY time_updated",
-                tuple(args),
-            ).fetchall()
+                # Большой need режем на куски: один IN (...) на все id
+                # упадёт при need больше SQLITE_LIMIT_VARIABLE_NUMBER,
+                # и sessions вернёт [] (потеря всех сессий).
+                rows = []
+                for part_ids in _chunks(want, _ID_CHUNK):
+                    conds_p = list(conds) + [f"id IN ({','.join('?' for _ in part_ids)})"]
+                    where_p = " AND ".join(conds_p)
+                    rows.extend(con.execute(
+                        f"SELECT * FROM session WHERE {where_p} ORDER BY time_updated",
+                        tuple(args + part_ids),
+                    ).fetchall())
+                rows.sort(key=lambda r: int(r["time_updated"] or 0))
+            else:
+                where = " AND ".join(conds)
+                rows = con.execute(
+                    f"SELECT * FROM session WHERE {where} ORDER BY time_updated",
+                    tuple(args),
+                ).fetchall()
         except sqlite3.Error as e:
             log.warning("opencode.db %s: незнакомая схема: %s", path, e)
             return []
@@ -148,8 +167,6 @@ def _batch(con: sqlite3.Connection, srows: list[dict], now_ms: int) -> list[OcSe
     ids = [str(s.get("id")) for s in srows if str(s.get("id") or "")]
     if not ids:
         return []
-    ph = ",".join("?" for _ in ids)
-    tup = tuple(ids)
     # Пульс: MAX(time_updated) по трём таблицам (дешёвые GROUP BY).
     pulse: dict[str, int] = {}
     for s in srows:
@@ -158,52 +175,64 @@ def _batch(con: sqlite3.Connection, srows: list[dict], now_ms: int) -> list[OcSe
             pulse[sid] = int(s.get("time_updated") or s.get("time_created") or 0)
         except (TypeError, ValueError):
             pulse[sid] = 0
-    for table in ("message", "part", "todo"):
-        for sid2, mx in con.execute(
-            f"SELECT session_id, MAX(time_updated) FROM {table}"
-            f" WHERE session_id IN ({ph}) GROUP BY session_id",
+    # Куски id: один IN (...) на все id упадёт при need больше
+    # SQLITE_LIMIT_VARIABLE_NUMBER (потеря всех сессий), поэтому
+    # детали читаем кусками по _ID_CHUNK (300 сессий — один кусок).
+    raw_msgs: dict[str, list[tuple[str, int]]] = {sid: [] for sid in pulse}
+    for part_ids in _chunks(ids, _ID_CHUNK):
+        ph = ",".join("?" for _ in part_ids)
+        tup = tuple(part_ids)
+        for table in ("message", "part", "todo"):
+            for sid2, mx in con.execute(
+                f"SELECT session_id, MAX(time_updated) FROM {table}"
+                f" WHERE session_id IN ({ph}) GROUP BY session_id",
+                tup,
+            ).fetchall():
+                try:
+                    mx_i = int(mx) if mx else 0
+                except (TypeError, ValueError):
+                    continue
+                if mx_i > pulse.get(str(sid2), 0):
+                    pulse[str(sid2)] = mx_i
+    # Сообщения и части — плоскими выборками, группировка в памяти.
+    for part_ids in _chunks(ids, _ID_CHUNK):
+        ph = ",".join("?" for _ in part_ids)
+        tup = tuple(part_ids)
+        for sid2, raw, t_upd in con.execute(
+            f"SELECT session_id, data, time_updated FROM message"
+            f" WHERE session_id IN ({ph})",
             tup,
         ).fetchall():
-            try:
-                mx_i = int(mx) if mx else 0
-            except (TypeError, ValueError):
+            k = str(sid2)
+            if k not in raw_msgs:
                 continue
-            if mx_i > pulse.get(str(sid2), 0):
-                pulse[str(sid2)] = mx_i
-    # Сообщения и части — плоскими выборками, группировка в памяти.
-    raw_msgs: dict[str, list[tuple[str, int]]] = {sid: [] for sid in pulse}
-    for sid2, raw, t_upd in con.execute(
-        f"SELECT session_id, data, time_updated FROM message"
-        f" WHERE session_id IN ({ph})",
-        tup,
-    ).fetchall():
-        k = str(sid2)
-        if k not in raw_msgs:
-            continue
-        try:
-            t_i = int(t_upd or 0)
-        except (TypeError, ValueError):
-            t_i = 0
-        raw_msgs[k].append((str(raw or ""), t_i))
+            try:
+                t_i = int(t_upd or 0)
+            except (TypeError, ValueError):
+                t_i = 0
+            raw_msgs[k].append((str(raw or ""), t_i))
     msg_map: dict[str, list[tuple[str, int]]] = {}
     for k, lst in raw_msgs.items():
         lst.sort(key=lambda x: x[1], reverse=True)
         msg_map[k] = lst[:20]
     # Части: один проход, дальше шаги/tool/хвост из тех же списков.
     raw_parts: dict[str, list[tuple[str, int]]] = {sid: [] for sid in pulse}
-    for sid2, raw, t_upd in con.execute(
-        f"SELECT session_id, data, time_updated FROM part"
-        f" WHERE session_id IN ({ph})",
-        tup,
-    ).fetchall():
-        k = str(sid2)
-        if k not in raw_parts:
-            continue
-        try:
-            t_i = int(t_upd or 0)
-        except (TypeError, ValueError):
-            t_i = 0
-        raw_parts[k].append((str(raw or ""), t_i))
+    for part_ids in _chunks(ids, _ID_CHUNK):
+        ph = ",".join("?" for _ in part_ids)
+        tup = tuple(part_ids)
+        for sid2, raw, t_upd in con.execute(
+            f"SELECT session_id, data, time_updated FROM part"
+            f" WHERE session_id IN ({ph})",
+            tup,
+        ).fetchall():
+            k = str(sid2)
+            if k not in raw_parts:
+                continue
+            try:
+                t_i = int(t_upd or 0)
+            except (TypeError, ValueError):
+                t_i = 0
+            raw_parts[k].append((str(raw or ""), t_i))
     steps: dict[str, int] = {}
     tool_map: dict[str, list[tuple[str, int]]] = {}
     tail_map: dict[str, list[str]] = {}

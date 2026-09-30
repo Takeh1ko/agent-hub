@@ -136,6 +136,74 @@ def test_merged_no_session_reads(tmp_path, monkeypatch):
     assert len(got2.tasks[0].sessions) == 1
 
 
+def test_merged_linked_no_session_reads(tmp_path, monkeypatch):
+    """Merged с линкованной сессией без --all: oc.sessions не вызывается, денег 0.
+
+    Ловит сломанный фильтр tasks (merged в сборе сессий): cost всё равно 0
+    (минимальный снимок), поэтому без проверки hits тест слепой.
+    """
+    from hub.read import opencode as oc
+
+    s = Store()
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    s.upsert_task(id="TM", stage="merged", worktree=str(wt), updated_at=NOW)
+    db = _mkdb(tmp_path / "oc3.db", 3)
+    s.link_session("s001", "opencode", "TM", "executor", 1, "muse")
+    hits: list = []
+    orig = oc.sessions
+
+    def fake(*a, **k):
+        hits.append(1)
+        return orig(*a, **k)
+
+    monkeypatch.setattr("hub.read.snapshot.oc.sessions", fake)
+    got = snap.build(s, NOW, opencode_db=db, proc_root=tmp_path / "пустой",
+                     agy_root=str(tmp_path / "noagy"))
+    assert hits == []
+    assert [t.id for t in got.tasks] == ["TM"]
+    assert got.tasks[0].cost_go == 0.0
+    assert got.tasks[0].sessions == []
+
+
+def test_merged_only_no_proc_reads(tmp_path, monkeypatch):
+    """Только merged без --all: /proc вообще не читается (scan_all не вызывается)."""
+    from hub.read import procs as pr
+
+    s = Store()
+    s.upsert_task(id="TM", stage="merged", worktree=str(tmp_path / "wt"), updated_at=NOW)
+    empty = tmp_path / "пустой"
+    empty.mkdir()
+    hits: list = []
+    orig = pr.scan_all
+
+    def fake(root="/proc"):
+        hits.append(1)
+        return orig(root)
+
+    monkeypatch.setattr("hub.read.snapshot.pr.scan_all", fake)
+    snap.build(s, NOW, opencode_db=None, proc_root=empty,
+               agy_root=str(tmp_path / "noagy"))
+    assert hits == []
+    # С --all процессы читаются (один проход).
+    snap.build(s, NOW, opencode_db=None, proc_root=empty,
+               agy_root=str(tmp_path / "noagy"), include_done=True)
+    assert hits != []
+
+
+def test_sessions_chunked_ids(tmp_path):
+    """need больше чанка: все сессии возвращаются, без потери."""
+    from hub.read import opencode as oc
+
+    n = 600
+    db = _mkdb(tmp_path / "oc-big.db", n)
+    got = oc.sessions(db, 0, session_ids=[f"s{i:03d}" for i in range(n)])
+    assert len(got) == n
+    one = {x.id: x for x in got}["s599"]
+    assert one.context_tokens == 300
+    assert one.provider == "opencode-go"
+
+
 def _git(cwd: Path, *args: str) -> str:
     r = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
                        text=True, timeout=60)
