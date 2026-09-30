@@ -78,6 +78,7 @@ HELP_TEXT = """\
   f — обновить замечания проверки    ? — эта справка    q — выход
   Окно меньше 80×24 — подробности и лента скрыты: растяните окно
   s — остановить задачу, m — слить готовую (обе с подтверждением; обычно это делает Claude)
+  n — новая задача от владельца (текст → карточку пишет модель → запуск по y)
 
 Esc или ? — закрыть"""
 
@@ -132,6 +133,87 @@ class ConfirmMerge(ConfirmAction):
         self._task_id = task_id
 
 
+class NewDraftScreen(ModalScreen[tuple[str, str] | None]):
+    """Новая задача от владельца: выбор проекта (стрелки) и поле текста.
+
+    Enter в поле текста — создать черновик, Esc — отмена.
+    """
+
+    BINDINGS = [("escape", "cancel", "отмена")]
+    DEFAULT_CSS = """
+    NewDraftScreen { align: center middle; }
+    #new-box { width: 80; max-width: 95%; height: auto; border: round $primary;
+               padding: 1 2; background: $panel; }
+    #new-text { margin-top: 1; }
+    """
+
+    def __init__(self, projects: list[str]) -> None:
+        super().__init__()
+        self._projects = list(projects)
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import Input, Label, Select
+
+        yield VerticalScroll(
+            Label("Новая задача: проект (стрелки) + текст, Enter — создать"),
+            Select([(p, p) for p in self._projects],
+                   value=self._projects[0] if self._projects else None,
+                   id="new-project"),
+            Input(placeholder="Опишите задачу одним сообщением",
+                  id="new-text"),
+            id="new-box",
+        )
+
+    def on_input_submitted(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Enter в поле текста — создать черновик (тесты жмут Enter здесь)."""
+        try:
+            from textual.widgets import Select
+
+            sel = self.query_one("#new-project", Select)
+            project = str(sel.value or "")
+        except Exception:
+            project = self._projects[0] if self._projects else ""
+        try:
+            text = str(event.value or "").strip()
+        except Exception:
+            text = ""
+        if not text:
+            return
+        self.dismiss((project, text))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class DraftPreviewScreen(ModalScreen[bool]):
+    """Предпросмотр черновика: y — запустить, n — отменить."""
+
+    BINDINGS = [("y", "confirm", "запустить"), ("n", "cancel", "отменить"),
+                ("escape", "cancel", "отменить")]
+    DEFAULT_CSS = """
+    DraftPreviewScreen { align: center middle; }
+    #preview-text { width: 80; max-width: 95%; height: auto; max-height: 80%;
+                    border: round $warning; padding: 1 2; background: $panel; }
+    """
+
+    def __init__(self, preview: str, draft_id: int) -> None:
+        super().__init__()
+        self._preview = preview
+        self._draft_id = int(draft_id)
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static(f"Черновик {self._draft_id}\n\n{self._preview}"
+                   f"\n\ny — запустить, n — отменить",
+                   id="preview-text"))
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class HubApp(App):
     """Экран top. Источник данных — только snapshot.build, опрос в потоке."""
 
@@ -149,6 +231,7 @@ class HubApp(App):
         Binding("s", "stop_task", "остановить", show=False),
         Binding("m", "merge_task", "слить", show=False),
         Binding("f", "show_findings", "замечания", show=False),
+        Binding("n", "new_draft", "новая задача"),
         Binding("enter", "show_details", "подробнее", show=False),
     ]
 
@@ -600,6 +683,109 @@ class HubApp(App):
             return
         self.run_worker(self._run_hub_cmd(["findings", tid]), group="cmd",
                         exclusive=True, exit_on_error=False)
+
+    # --- H15: новая задача от владельца (n) ---
+
+    def _draft_projects(self) -> list:
+        """Проекты для окна черновика (тесты подменяют)."""
+        try:
+            from hub.config import load_projects
+
+            return load_projects()
+        except (OSError, ValueError):
+            return []
+
+    def _draft_runner(self, project):
+        """Раннер модели для черновика (тесты подменяют на фейк)."""
+        from hub.pipeline.draft import make_runner_for_project
+
+        return make_runner_for_project(project)
+
+    def action_new_draft(self) -> None:
+        projects = self._draft_projects()
+        names = [str(getattr(p, "name", "") or "") for p in projects]
+        names = [n for n in names if n]
+        if not names:
+            self.notify("Нет проектов для новой задачи", severity="warning")
+            return
+
+        def _done(result: tuple[str, str] | None) -> None:
+            if result:
+                project_name, text = result
+                self.run_worker(self._do_make_draft(project_name, text),
+                                group="cmd", exclusive=True,
+                                exit_on_error=False)
+
+        self.push_screen(NewDraftScreen(names), _done)
+
+    async def _do_make_draft(self, project_name: str, text: str) -> None:
+        """Черновик в фоне → по готовности модальный предпросмотр (y/n)."""
+        from hub.pipeline.draft import draft_preview, make_draft
+
+        store = self._store()
+        if store is None:
+            self.notify("Нет хранилища", severity="error")
+            return
+        project = None
+        for p in self._draft_projects():
+            if str(getattr(p, "name", "") or "") == project_name:
+                project = p
+                break
+        if project is None:
+            self.notify(f"Нет проекта {project_name}", severity="error")
+            return
+        try:
+            runner = self._draft_runner(project)
+        except Exception as e:
+            log.exception("нет раннера черновика")
+            self.notify(f"нет раннера: {e}"[:80], severity="error")
+            return
+        try:
+            draft_id = await asyncio.to_thread(
+                make_draft, store, project, text, "top", runner)
+        except Exception as e:
+            log.exception("черновик не создался")
+            self.notify(f"не создался: {e}"[:80], severity="error")
+            return
+        row = store.get_draft(int(draft_id))
+        if row is None or str(row.get("status") or "") != "ready":
+            errs = str((row or {}).get("lint_errors") or "")[:200]
+            self.notify(f"черновик {draft_id} не готов" +
+                        (f": {errs}" if errs else ""), severity="error")
+            return
+        preview = draft_preview(str(row.get("card_text") or ""))
+
+        def _done(ok: bool | None) -> None:
+            if ok:
+                self.run_worker(self._do_start_draft(int(draft_id)),
+                                group="cmd", exclusive=True,
+                                exit_on_error=False)
+            else:
+                try:
+                    from hub.pipeline.draft import cancel_draft
+
+                    cancel_draft(store, int(draft_id))
+                except (OSError, ValueError):
+                    pass
+
+        self.push_screen(DraftPreviewScreen(preview, int(draft_id)), _done)
+
+    async def _do_start_draft(self, draft_id: int) -> None:
+        from hub.pipeline.draft import start_draft
+
+        store = self._store()
+        if store is None:
+            self.notify("Нет хранилища", severity="error")
+            return
+        try:
+            task_id = await asyncio.to_thread(
+                start_draft, store, int(draft_id))
+        except Exception as e:
+            log.exception("черновик не запустился")
+            self.notify(f"не запустился: {e}"[:80], severity="error")
+            return
+        self.notify(f"OK {task_id}: задача в очереди")
+        self._schedule_refresh()
 
     async def _run_hub_cmd(self, argv: list[str]) -> None:
         # Тот же интерпретатор, что крутит TUI: 'hub' из PATH может не найтись.

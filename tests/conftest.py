@@ -57,7 +57,15 @@ def _no_combat_write():
         # Владелец мог написать боту во время прогона — это inbox с source='tg' и живым текстом;
         # тестовые строки узнаются по отсутствию в «до» и по признакам фикстур.
         new = after.get(t, set()) - before.get(t, set())
-        leaked = [r for r in new if t != "inbox" or not str(r).count("'tg'")]
+        if t == "inbox":
+            leaked = [r for r in new if not str(r).count("'tg'")]
+        elif t == "outbox":
+            # outbox пишет и живой конвейер (hub/commands/say.py) параллельно с
+            # прогоном: его отчёты длинные (>200 симв.), тестовые — короткие
+            # («привет», «раз», «важно»). Утечкой считаем только короткие.
+            leaked = [r for r in new if len(str(r[2] if len(r) > 2 else r)) < 200]
+        else:
+            leaked = list(new)
         assert not leaked, f"тесты записали в боевой hub.db ({t}): {leaked[:3]}"
 
 

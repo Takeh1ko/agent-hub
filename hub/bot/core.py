@@ -37,6 +37,7 @@ HELP_TEXT = (
     "/stop ID, /merge ID — с подтверждением\n"
     "/budget — лимиты\n"
     "/pause, /resume — очередь\n"
+    "/new — задача текстом (карточку пишет модель, запуск кнопкой)\n"
     "Свободный текст — сообщение Claude."
 )
 
@@ -1157,3 +1158,77 @@ def split_command(text: str) -> tuple[str, str]:
     head, _, rest = s[1:].partition(" ")
     cmd = head.split("@")[0].strip().lower()
     return cmd, rest.strip()
+
+
+# --- H15: задача от владельца текстом (/new) ---
+
+NEW_ASK_PROJECT = "Какой проект? Выберите кнопкой."
+NEW_ASK_TEXT = "Опишите задачу одним сообщением."
+NEW_WRITING = "Пишу карточку…"
+NEW_NO_PROJECTS = "Нет проектов: добавьте их в ~/.config/agent-hub/config.toml."
+NEW_UNKNOWN_PROJECT = "Не знаю проекта. Выберите кнопкой."
+DRAFT_PREVIEW_LIMIT = 1500
+
+
+def parse_new_args(arg: str, projects: list) -> tuple[str | None, str]:
+    """Разобрать текст после /new: «проект текст» или «текст» или «».
+
+    Возвращает (project|None, текст). Первый токен — имя проекта
+    (точное совпадение), остальное — текст задачи.
+    """
+    s = str(arg or "").strip()
+    if not s:
+        return None, ""
+    names = {str(getattr(p, "name", "") or "") for p in (projects or [])}
+    names.discard("")
+    head, _, rest = s.partition(" ")
+    if head in names:
+        return head, rest.strip()
+    return None, s
+
+
+def project_buttons(projects: list) -> list[Button]:
+    """Кнопки выбора проекта для /new."""
+    out: list[Button] = []
+    for p in (projects or []):
+        name = str(getattr(p, "name", "") or "").strip()
+        if name:
+            out.append(Button(label=name, data=f"draft:project:{name}"))
+    return out
+
+
+def draft_buttons(draft_id: int) -> list[Button]:
+    """Кнопки предпросмотра черновика: [Запустить] [Отменить]."""
+    did = int(draft_id)
+    return [
+        Button(label="🚀 Запустить", data=f"draft:start:{did}"),
+        Button(label="❌ Отменить", data=f"draft:cancel:{did}"),
+    ]
+
+
+def parse_draft_callback(data: str) -> tuple[str, str] | None:
+    """Разобрать «draft:<action>:<id|имя>»: project/start/cancel."""
+    parts = str(data or "").split(":", 2)
+    if len(parts) != 3 or parts[0] != "draft":
+        return None
+    _, action, target = parts
+    if action not in ("project", "start", "cancel") or not target.strip():
+        return None
+    return action, target.strip()
+
+
+def format_draft_preview(draft_row: dict, card_text: str,
+                         limit: int = DRAFT_PREVIEW_LIMIT) -> str:
+    """Предпросмотр черновика ≤ limit: название, цель, файлы, проверка, исполнитель.
+
+    «Изменить» — ответом на это сообщение: текст правки → новый черновик.
+    """
+    try:
+        from hub.pipeline.draft import draft_preview as _preview
+
+        body = _preview(str(card_text or ""), limit=max(200, int(limit) - 120))
+    except (ImportError, ValueError):
+        body = str(card_text or "")[: max(200, int(limit) - 120)]
+    foot = "Изменить — ответом на это сообщение."
+    text = f"{body}\n{foot}".strip()
+    return clip(text, int(limit))
