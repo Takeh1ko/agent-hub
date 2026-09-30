@@ -1,0 +1,404 @@
+"""Конфиг хаба (~/.config/ahub/config.toml) и проектов (.hub.toml, schema_version = 2).
+
+Чтение — чистые функции. Ошибки не глотаются: разбор копит все проблемы и бросает ConfigError со списком,
+проверка файловой системы — отдельно (`check_project`), чтобы конфиг можно было разобрать без диска.
+Файлы v1 (schema_version = 1) читаются с переводом полей — нужно для переключения (V31a).
+
+Пример .hub.toml v2:
+
+    schema_version = 2
+    name = "PlayerUP"
+    root = "$HOME/Projects/Python/PlayerUP"        # по умолчанию — каталог файла
+    worktrees = "$HOME/Projects/Python/PlayerUP-wt"
+    work_branch = "market"
+    python = "$HOME/Projects/Python/PlayerUP/venv/bin/python"
+    rules = "docs/agents/rules.md"
+    allowed_paths = ["core/**", "tests/**"]
+    max_parallel = 2
+    test_resource = "test_db"                      # приёмка идёт под этим ресурсом
+
+    [resources]                                    # общие ресурсы: не больше capacity задач одновременно
+    test_db = { lock = "/tmp/playerup_test_db.lock" }   # lock — внешний flock-файл, общий с другими инструментами
+    playerok = { capacity = 1 }
+
+    [hooks]                                        # shell; env: AHUB_TASK_ID, AHUB_WORKTREE, AHUB_PROJECT_ROOT
+    task_setup = "venv/bin/python -m tools.agents.task_db create"
+    task_cleanup = "venv/bin/python -m tools.agents.task_db drop"
+
+    [models]
+    deny = ["deepseek"]                            # снимает только человек
+
+    [budget]
+    go = 1.5
+    usd = 0.0
+
+    [secrets]
+    exclude = [".env", "*.pem"]                    # не попадают в копию проекта для работника
+
+    [timeouts]
+    idle_s = 900
+    retry_max = 3
+    retry_pause_s = 120
+"""
+
+from __future__ import annotations
+
+import os
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from ahub import paths
+
+PROJECT_FILE = ".hub.toml"
+SCHEMA_VERSION = 2
+DEFAULT_SECRET_EXCLUDES = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*")
+
+
+class ConfigError(ValueError):
+    """Конфиг не разобран; `errors` — все найденные проблемы."""
+
+    def __init__(self, source: str, errors: list[str]) -> None:
+        self.source = source
+        self.errors = list(errors)
+        super().__init__(f"{source}: " + "; ".join(self.errors))
+
+
+def expand(value: str) -> str:
+    """Развернуть $VAR и ~ в пути."""
+    return os.path.expandvars(os.path.expanduser(value))
+
+
+@dataclass(frozen=True)
+class Resource:
+    name: str
+    capacity: int = 1
+    lock: str = ""  # внешний flock-файл (общий с инструментами вне хаба); пусто — только счётчик хаба
+
+
+@dataclass(frozen=True)
+class Hooks:
+    task_setup: str = ""
+    task_cleanup: str = ""
+
+
+@dataclass(frozen=True)
+class Timeouts:
+    idle_s: int = 900  # тишина работника: нет событий N c
+    retry_max: int = 3  # повторов шага при сбое сети/сервера
+    retry_pause_s: float = 120.0  # пауза перед повтором, растёт ×2
+
+
+@dataclass(frozen=True)
+class ProjectConfig:
+    name: str
+    root: str
+    source: str = ""  # путь к .hub.toml
+    schema_version: int = SCHEMA_VERSION
+    worktrees: str = ""
+    work_branch: str = "main"
+    branch_prefix: str = "ahub/"
+    push: str = ""
+    python: str = ""
+    rules: str = ""
+    allowed_paths: tuple[str, ...] = ()
+    max_parallel: int = 2
+    resources: dict[str, Resource] = field(default_factory=dict)
+    test_resource: str = ""
+    hooks: Hooks = field(default_factory=Hooks)
+    models_deny: tuple[str, ...] = ()
+    budget_go: float = 1.5
+    budget_usd: float = 0.0
+    secret_excludes: tuple[str, ...] = DEFAULT_SECRET_EXCLUDES
+    timeouts: Timeouts = field(default_factory=Timeouts)
+
+    def rules_path(self) -> Path | None:
+        if not self.rules:
+            return None
+        p = Path(self.rules)
+        return p if p.is_absolute() else Path(self.root) / p
+
+
+@dataclass(frozen=True)
+class HubConfig:
+    projects: tuple[str, ...] = ()  # пути к корням проектов (или к их .hub.toml)
+    source: str = ""
+
+
+class _Reader:
+    """Типизированное чтение полей с накоплением ошибок."""
+
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+
+    def str_(self, data: dict, key: str, default: str = "", where: str = "") -> str:
+        v = data.get(key, default)
+        if v is None:
+            return default
+        if not isinstance(v, str):
+            self.errors.append(f"{where}{key}: ожидается строка, получено {type(v).__name__}")
+            return default
+        return v
+
+    def int_(self, data: dict, key: str, default: int, where: str = "", minimum: int | None = None) -> int:
+        v = data.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, int):
+            self.errors.append(f"{where}{key}: ожидается целое, получено {v!r}")
+            return default
+        if minimum is not None and v < minimum:
+            self.errors.append(f"{where}{key}: не меньше {minimum}, получено {v}")
+            return default
+        return v
+
+    def float_(self, data: dict, key: str, default: float, where: str = "") -> float:
+        v = data.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            self.errors.append(f"{where}{key}: ожидается число, получено {v!r}")
+            return default
+        if v < 0:
+            self.errors.append(f"{where}{key}: не может быть отрицательным ({v})")
+            return default
+        return float(v)
+
+    def strs(self, data: dict, key: str, default: tuple[str, ...] = (), where: str = "") -> tuple[str, ...]:
+        v = data.get(key)
+        if v is None:
+            return default
+        if isinstance(v, str):
+            return tuple(s.strip() for s in v.split(",") if s.strip())
+        if not isinstance(v, list) or not all(isinstance(s, str) for s in v):
+            self.errors.append(f"{where}{key}: ожидается список строк")
+            return default
+        return tuple(v)
+
+    def table(self, data: dict, key: str) -> dict:
+        v = data.get(key)
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            self.errors.append(f"[{key}]: ожидается таблица")
+            return {}
+        return v
+
+
+def _resources(r: _Reader, raw: dict) -> dict[str, Resource]:
+    out: dict[str, Resource] = {}
+    for name, spec in raw.items():
+        where = f"resources.{name}."
+        if isinstance(spec, str):  # короткая форма: name = "/путь/к/lock"
+            spec = {"lock": spec}
+        if not isinstance(spec, dict):
+            r.errors.append(f"resources.{name}: ожидается таблица или строка")
+            continue
+        out[name] = Resource(
+            name=name,
+            capacity=r.int_(spec, "capacity", 1, where, minimum=1),
+            lock=expand(r.str_(spec, "lock", "", where)),
+        )
+    return out
+
+
+def _from_v1(data: dict) -> dict:
+    """Поля .hub.toml v1 → форма v2 (без потерь того, что v2 понимает)."""
+    out = {k: data[k] for k in ("name", "root", "worktrees", "work_branch", "push", "python", "rules",
+                                 "allowed_paths", "hooks")
+           if k in data}
+    lock = data.get("test_lock")
+    if isinstance(lock, str) and lock.strip():
+        out["resources"] = {"test_lock": {"lock": lock}}
+        out["test_resource"] = "test_lock"
+    defaults = data.get("defaults") if isinstance(data.get("defaults"), dict) else {}
+    budget = {}
+    if "budget_go" in defaults:
+        budget["go"] = defaults["budget_go"]
+    if "budget_usd" in defaults:
+        budget["usd"] = defaults["budget_usd"]
+    if budget:
+        out["budget"] = budget
+    timeouts = {k: data[k] for k in ("idle_s", "retry_max", "retry_pause_s") if k in data}
+    if timeouts:
+        out["timeouts"] = timeouts
+    return out
+
+
+def parse_project(data: dict, base_dir: str | Path, source: str = "") -> ProjectConfig:
+    """dict из TOML → ProjectConfig. Все проблемы разом — в ConfigError."""
+    r = _Reader()
+    version = data.get("schema_version", 1)
+    if version == 1:
+        data = _from_v1(data)
+    elif version != SCHEMA_VERSION:
+        raise ConfigError(source or "<dict>", [f"schema_version: неизвестная версия {version!r}"])
+
+    name = r.str_(data, "name").strip()
+    if not name:
+        r.errors.append("name: обязательное поле")
+    root = expand(r.str_(data, "root").strip()) or str(Path(base_dir))
+    resources = _resources(r, r.table(data, "resources"))
+    test_resource = r.str_(data, "test_resource").strip()
+    if test_resource and test_resource not in resources:
+        r.errors.append(f"test_resource: нет ресурса {test_resource!r} в [resources]")
+    hooks = r.table(data, "hooks")
+    models = r.table(data, "models")
+    budget = r.table(data, "budget")
+    secrets = r.table(data, "secrets")
+    timeouts = r.table(data, "timeouts")
+    retry_max = r.int_(timeouts, "retry_max", 3, "timeouts.", minimum=0)
+    extra_excl = r.strs(secrets, "exclude", (), "secrets.")
+    branch_prefix = r.str_(data, "branch_prefix", "ahub/")
+    if branch_prefix and not branch_prefix.endswith("/"):
+        branch_prefix += "/"
+
+    cfg = ProjectConfig(
+        name=name,
+        root=root,
+        source=source,
+        worktrees=expand(r.str_(data, "worktrees").strip()),
+        work_branch=r.str_(data, "work_branch", "main").strip() or "main",
+        branch_prefix=branch_prefix,
+        push=r.str_(data, "push").strip(),
+        python=expand(r.str_(data, "python").strip()),
+        rules=expand(r.str_(data, "rules").strip()),
+        allowed_paths=r.strs(data, "allowed_paths"),
+        max_parallel=r.int_(data, "max_parallel", 2, minimum=1),
+        resources=resources,
+        test_resource=test_resource,
+        hooks=Hooks(
+            task_setup=r.str_(hooks, "task_setup", "", "hooks."),
+            task_cleanup=r.str_(hooks, "task_cleanup", "", "hooks."),
+        ),
+        models_deny=r.strs(models, "deny", (), "models."),
+        budget_go=r.float_(budget, "go", 1.5, "budget."),
+        budget_usd=r.float_(budget, "usd", 0.0, "budget."),
+        secret_excludes=tuple(dict.fromkeys(DEFAULT_SECRET_EXCLUDES + extra_excl)),
+        timeouts=Timeouts(
+            idle_s=r.int_(timeouts, "idle_s", 900, "timeouts.", minimum=0),
+            retry_max=min(retry_max, 10),
+            retry_pause_s=r.float_(timeouts, "retry_pause_s", 120.0, "timeouts."),
+        ),
+    )
+    if r.errors:
+        raise ConfigError(source or "<dict>", r.errors)
+    return cfg
+
+
+def find_project_file(start: str | Path) -> Path | None:
+    """Ближайший .hub.toml от start вверх."""
+    cur = Path(start).resolve()
+    if cur.is_file():
+        cur = cur.parent
+    for cand in (cur, *cur.parents):
+        f = cand / PROJECT_FILE
+        if f.is_file():
+            return f
+    return None
+
+
+def load_project_file(path: str | Path) -> ProjectConfig:
+    p = Path(path)
+    try:
+        data = tomllib.loads(p.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(str(p), [f"TOML: {e}"]) from e
+    return parse_project(data, p.parent, str(p))
+
+
+def load_project(start: str | Path) -> ProjectConfig:
+    """Проект по каталогу (ищет .hub.toml вверх). Нет файла — FileNotFoundError."""
+    f = find_project_file(start)
+    if f is None:
+        raise FileNotFoundError(f"нет {PROJECT_FILE} выше {start}")
+    return load_project_file(f)
+
+
+def check_project(cfg: ProjectConfig) -> list[str]:
+    """Проблемы, видимые только на диске: нет корня, python, rules, каталога копий."""
+    out: list[str] = []
+    root = Path(cfg.root)
+    if not root.is_dir():
+        out.append(f"root: нет каталога {cfg.root}")
+    if cfg.python and not os.access(cfg.python, os.X_OK):
+        out.append(f"python: не исполняемый файл {cfg.python}")
+    rp = cfg.rules_path()
+    if rp is not None and not rp.is_file():
+        out.append(f"rules: нет файла {rp}")
+    if cfg.worktrees:
+        wt = Path(cfg.worktrees)
+        if not wt.is_dir() and not wt.parent.is_dir():
+            out.append(f"worktrees: нет ни каталога, ни родителя {cfg.worktrees}")
+    return out
+
+
+def _legacy_global_path() -> Path:
+    raw = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(raw) if raw else Path.home() / ".config"
+    return base / "agent-hub" / "config.toml"
+
+
+def load_hub(path: str | Path | None = None) -> HubConfig:
+    """Глобальный конфиг. Нет своего — список проектов из конфига v1. Нет ничего — пустой."""
+    cands = [Path(path)] if path is not None else [paths.global_config_path(), _legacy_global_path()]
+    for p in cands:
+        if not p.is_file():
+            continue
+        try:
+            data = tomllib.loads(p.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError as e:
+            raise ConfigError(str(p), [f"TOML: {e}"]) from e
+        r = _Reader()
+        projects = r.strs(data, "projects")
+        if r.errors:
+            raise ConfigError(str(p), r.errors)
+        return HubConfig(projects=tuple(expand(x) for x in projects), source=str(p))
+    return HubConfig()
+
+
+def load_projects(hub: HubConfig | None = None) -> tuple[list[ProjectConfig], list[str]]:
+    """Все проекты хаба и проблемы загрузки (не глотаются — их покажет вызывающий)."""
+    hub = hub if hub is not None else load_hub()
+    out: list[ProjectConfig] = []
+    errors: list[str] = []
+    for entry in hub.projects:
+        try:
+            p = Path(entry)
+            cfg = load_project_file(p) if p.is_file() else load_project_file(p / PROJECT_FILE)
+        except FileNotFoundError:
+            errors.append(f"{entry}: нет {PROJECT_FILE}")
+            continue
+        except ConfigError as e:
+            errors.append(str(e))
+            continue
+        except OSError as e:
+            errors.append(f"{entry}: {e}")
+            continue
+        if any(c.name == cfg.name for c in out):
+            errors.append(f"{entry}: имя проекта {cfg.name!r} уже занято")
+            continue
+        out.append(cfg)
+    return out, errors
+
+
+def _inside(path: Path, base: str) -> bool:
+    if not base:
+        return False
+    try:
+        path.relative_to(Path(base).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def project_for(path: str | Path, projects: list[ProjectConfig]) -> ProjectConfig | None:
+    """Проект, к которому относится каталог: внутри корня или внутри каталога копий задач.
+
+    Самый глубокий корень выигрывает (проект внутри проекта).
+    """
+    p = Path(path).resolve()
+    best: tuple[int, ProjectConfig] | None = None
+    for cfg in projects:
+        for base in (cfg.root, cfg.worktrees):
+            if _inside(p, base):
+                depth = len(Path(base).resolve().parts)
+                if best is None or depth > best[0]:
+                    best = (depth, cfg)
+    return best[1] if best else None
