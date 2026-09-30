@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ahub import log as hublog
-from ahub import prompts, providers, registry, transitions, workspace
+from ahub import gates, prepare, prompts, providers, registry, review, transitions, workspace
 from ahub.config import ProjectConfig
 from ahub.model import ACTIVE, Kind, Phase, Role, State
 from ahub.providers.base import Act, Activity, Outcome, RunResult, RunSpec
@@ -34,6 +34,7 @@ from ahub.time import now_ms
 
 LEASE_MS = 90_000
 STOP_POLL_S = 3.0
+BUDGET_POLL_S = 30.0
 REPORT_MAX_BYTES = 18_000  # 12 КБ по контракту + запас; больше — не отказ, а пометка
 
 _WRITE_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch"}
@@ -69,6 +70,10 @@ class Engine:
         self._stop_cache: tuple[float, bool] = (0.0, False)
         self._phase: str = ""
         self._deadline_ms: int | None = None
+        self.budget_hit = False
+        self._budget_at = 0.0
+        self._soft_sent = False
+        self._cur = None  # (поставщик, id сессии) идущего хода — для живого учёта бюджета
         self.log = hublog.get("engine", task=self.task_id, project=project.name)
 
     # --- аренда ---
@@ -150,7 +155,7 @@ class Engine:
         return Settled(to, reason)
 
     def stop_requested(self) -> bool:
-        if self.lost.is_set():
+        if self.lost.is_set() or self.budget_hit:
             return True
         now = time.monotonic()
         at, val = self._stop_cache
@@ -160,7 +165,34 @@ class Engine:
             except (sqlite3.Error, RuntimeError):
                 val = False
             self._stop_cache = (now, val)
+            if not val and now - self._budget_at >= BUDGET_POLL_S:
+                self._budget_at = now
+                if self.over_budget(live=True):
+                    self.budget_hit = True
+                    return True
         return val
+
+    def over_budget(self, *, live: bool = False) -> bool:
+        """Бюджет задачи (вся задача, вкл. ревью): 80 % — событие в журнал; 100 % — True."""
+        t = self.task()
+        go, usd = self.task_cost()
+        if live and self._cur is not None:
+            prov, sid = self._cur
+            try:
+                u = prov.usage(sid)
+            except Exception:
+                u = None
+            if u is not None:
+                row = next((s for s in self.store.list_sessions(self.task_id)
+                            if s.external_id == sid and s.provider == prov.name), None)
+                go += max(0.0, (u.cost_go or 0.0) - (row.cost_go if row else 0.0))
+                usd += max(0.0, (u.cost_usd or 0.0) - (row.cost_usd if row else 0.0))
+        over = (t.budget_go > 0 and go >= t.budget_go) or (usd > t.budget_usd)
+        if not over and not self._soft_sent and t.budget_go > 0 and go >= 0.8 * t.budget_go:
+            self._soft_sent = True
+            self.store.add_event("budget_soft", task_id=self.task_id, project=self.project.name,
+                                 payload={"go": round(go, 4), "budget_go": t.budget_go})
+        return over
 
     def _pause(self, secs: float) -> bool:
         """Прерываемая пауза. False — пока ждали, попросили остановиться."""
@@ -228,7 +260,8 @@ class Engine:
             log_path = str(Path(cwd) / workspace.AHUB_DIR / "logs" / f"{log_name or role.value}.log")
             row = self._session_row(prov.name, role, alias, t.round, session_id, log_path)
 
-            def on_session(sid: str, _row=row) -> None:
+            def on_session(sid: str, _row=row, _prov=prov) -> None:
+                self._cur = (_prov, sid)
                 try:
                     self.store.update_session(_row, external_id=sid)
                 except sqlite3.IntegrityError:
@@ -237,9 +270,12 @@ class Engine:
             spec = RunSpec(prompt=prompt, cwd=cwd, model_id=entry.model_id, variant=entry.variant,
                            session_id=session_id, log_path=log_path, timeout_s=self._remaining_s(),
                            idle_s=tmo.idle_s, schema=schema)
+            if session_id:
+                self._cur = (prov, session_id)
             r = run_session(prov, spec, on_activity=self._on_activity, on_session=on_session,
                             on_start=lambda pid, _row=row: self.store.update_session(_row, pid=pid),
                             should_stop=self.stop_requested)
+            self._cur = None
             u = r.usage
             fields: dict = {"status": "ok" if r.ok else ("killed" if r.outcome is Outcome.KILLED else "failed"),
                             "outcome": r.outcome.value, "ended_at": r.ended_ms}
@@ -280,9 +316,13 @@ class Engine:
             return Settled(t.state, "не в работе")
         limit_min = int(t.limits.get("time_limit_min") or 60)
         self._deadline_ms = now_ms() + limit_min * 60_000
+        if self.over_budget():
+            return self._settle(State.NEEDS_DECISION, "бюджет исчерпан до начала хода")
         if t.kind is Kind.SCOUT:
             return self._scout(t)
-        return self._settle(State.NEEDS_DECISION, f"тип {t.kind.value} ещё не поддержан движком (M3)")
+        if t.kind in (Kind.CODE, Kind.ROUTINE):
+            return self._code(t)
+        return self._settle(State.NEEDS_DECISION, f"тип {t.kind.value} ещё не поддержан движком")
 
     def _prepare(self, t: Task) -> Task:
         if t.state is State.PREPARING:
@@ -298,6 +338,8 @@ class Engine:
         if r.outcome is Outcome.KILLED:
             if self.lost.is_set():
                 raise LeaseLost()
+            if self.budget_hit:
+                return State.NEEDS_DECISION, "бюджет исчерпан"
             return State.STOPPED, "остановлена по просьбе"
         if r.outcome is Outcome.TIMEOUT:
             return State.NEEDS_DECISION, f"лимит времени задачи ({r.error})"
@@ -387,3 +429,157 @@ class Engine:
             if self._result(t).get("status") != "blocked":
                 problems.append("нет .ahub/report.md")
         return "; ".join(problems)
+
+    # --- код и рутина ---
+
+    def _budget_stop(self, role: Role, alias: str, sid: str | None) -> Settled:
+        """Бюджет исчерпан: работник сохраняет сделанное коротким ходом, задача — «Нужно решение»."""
+        self.budget_hit = False  # разрешить один короткий ход «сохрани и остановись»
+        if sid:
+            self.session(role, alias, prompts.STOP_PROMPT, session_id=sid, log_name=role.value)
+        go, usd = self.task_cost()
+        self.store.add_event("budget_hard", task_id=self.task_id, project=self.project.name,
+                             payload={"go": round(go, 4), "usd": round(usd, 4)})
+        t = self.task()
+        return self._settle(State.NEEDS_DECISION, f"бюджет исчерпан (${go:.2f} из ${t.budget_go:g})")
+
+    def _prepare_code(self, t: Task) -> Task:
+        if t.state is State.PREPARING:
+            try:
+                p = prepare.prepare(self.project, t)
+            except prepare.PrepareError as e:
+                raise _Settle(State.ERROR, f"подготовка: {e}")
+            fields = {"worktree": p.workspace.path, "branch": p.workspace.branch, "round": max(1, t.round)}
+            if not t.base_sha:
+                fields["base_sha"] = p.workspace.base_sha
+            to = State.FIXING if t.round > 1 else State.WORKING
+            t = self.move(to, "работник начал", fields=fields)
+        return t
+
+    def _code(self, t: Task) -> Settled:
+        try:
+            t = self._prepare_code(t)
+        except _Settle as s:
+            return self._settle(s.state, s.reason)
+        role = Role.EXECUTOR if t.kind is Kind.CODE else Role.ROUTINE
+        models = list(t.review.get("models") or [])
+        max_rounds = max(1, int(t.review.get("rounds") or 1))
+        prev = [s for s in self.store.list_sessions(t.id) if s.role == role.value and s.external_id]
+        sid = prev[-1].external_id if prev else None
+        notes = str(t.limits.get("rework_notes") or "")
+        if notes:
+            prompt = review.fix_prompt([], notes=notes)
+            lim = dict(t.limits)
+            lim.pop("rework_notes", None)
+            self.store.update_task(t.id, limits=lim)
+        elif sid and not t.limits.get("fresh_session"):
+            prompt = prompts.CONTINUE_PROMPT
+        else:
+            prompt, sid = prompts.code_prompt(self.project, t), None
+        round_no = t.round
+        while True:
+            self.set_phase(Phase.WRITING)
+            r, final = self._step_with_continue(role, t.executor, prompt, session_id=sid, log_name=role.value)
+            sid = r.session_id or sid
+            if final is not None:
+                if self.budget_hit:
+                    return self._budget_stop(role, t.executor, sid)
+                return self._settle(*final)
+            blocked = self._blocked(t)
+            if blocked:
+                return self._settle(State.NEEDS_DECISION, f"работник заблокирован: {blocked}"[:500])
+            t = self.move(State.CHECKING, "ворота")
+            g = self._gate(t)
+            fixed_once = False
+            while True:
+                if g.fatal:
+                    return self._settle(State.NEEDS_DECISION, "; ".join(g.fatal)[:500],
+                                        payload={"diffstat": g.diffstat})
+                problem = "; ".join(g.repairable) if g.repairable else ""
+                if not problem and g.tests_ok is False:
+                    problem = "приёмка красная"
+                if not problem:
+                    break
+                if fixed_once:
+                    return self._settle(State.NEEDS_DECISION, f"ворота не пройдены после исправления: {problem}"[:500],
+                                        payload={"tests_tail": g.tests_tail[-800:]})
+                fixed_once = True
+                fix = (review.fix_prompt([], gate=g) if g.tests_ok is False and not g.repairable
+                       else prompts.repair_prompt(problem))
+                r, final = self._step_with_continue(role, t.executor, fix, session_id=sid, log_name=role.value)
+                sid = r.session_id or sid
+                if final is not None:
+                    if self.budget_hit:
+                        return self._budget_stop(role, t.executor, sid)
+                    return self._settle(*final)
+                g = self._gate(self.task())
+            summary = self._result(t).get("summary", "")
+            payload = {"summary": str(summary)[:500], "diffstat": g.diffstat,
+                       "tests": "зелёная" if g.tests_ok else ("нет" if g.tests_ok is None else "красная")}
+            if not models:
+                return self._settle(State.DONE, "ворота пройдены" + ("" if t.kind is Kind.ROUTINE else
+                                                                     ", приёмка зелёная"), payload=payload)
+            if self.over_budget():
+                return self._budget_stop(role, t.executor, sid)
+            t = self.move(State.REVIEWING, f"ревью, круг {round_no}")
+            decision, reason, findings = self._review_round(t, g, models, round_no, max_rounds)
+            if decision == "done":
+                return self._settle(State.DONE, reason, payload=payload)
+            if decision == "decision":
+                return self._settle(State.NEEDS_DECISION, reason,
+                                    payload={**payload, "findings": len(findings)})
+            round_no += 1
+            t = self.move(State.FIXING, reason, fields={"round": round_no})
+            prompt = review.fix_prompt(findings)
+
+    def _blocked(self, t: Task) -> str:
+        res = self._result(t)
+        return str(res.get("summary", "")) if res.get("status") == "blocked" else ""
+
+    def _gate(self, t: Task) -> gates.GateResult:
+        self.set_phase(Phase.TESTING)
+
+        def on_wait():
+            self.set_phase(Phase.WAITING)
+
+        orch = bool(t.limits.get("orch_edit"))
+        return gates.check(self.project, t, orch_edit=orch, on_wait=on_wait, should_stop=self.stop_requested)
+
+    def _review_round(self, t: Task, g: gates.GateResult, models: list[str], round_no: int,
+                      max_rounds: int) -> tuple[str, str, list]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        diff = gates.diff_text(t.worktree, g.base)
+        for m in models:
+            review.review_path(t.worktree, round_no, m).unlink(missing_ok=True)
+
+        def one(m: str):
+            prompt = review.review_prompt(self.project, t, diff, g, round_no, m)
+            return self.session(Role.REVIEWER, m, prompt, keep_session_on_retry=False,
+                                log_name=f"reviewer_r{round_no}_{m}")
+
+        with ThreadPoolExecutor(max_workers=len(models)) as ex:
+            results = list(ex.map(one, models))
+        if any(r.outcome is Outcome.KILLED for r in results):
+            if self.lost.is_set():
+                raise LeaseLost()
+            if self.budget_hit:
+                return "decision", "бюджет исчерпан во время ревью", []
+            return "decision", "остановлено во время ревью", []
+        changed = workspace.changed_files(t.worktree)
+        if changed:  # ревьюер не должен менять файлы — откатываем
+            self.log.warning("ревьюер изменил файлы, откат: %s", changed[:5])
+            workspace.git(t.worktree, "checkout", "--", ".", check=False)
+            workspace.git(t.worktree, "clean", "-fd", "-e", workspace.AHUB_DIR, check=False)
+        reviews = [rv for m in models if (rv := review.parse(review.review_path(t.worktree, round_no, m), m))]
+        decision, reason = review.panel(reviews, models, round_no, max_rounds)
+        blocking = review.dedup([f for rv in reviews if rv.effective != "approve" for f in rv.findings
+                                 if f.severity != "low"])
+        return decision, reason, blocking
+
+
+class _Settle(Exception):
+    def __init__(self, state: State, reason: str) -> None:
+        super().__init__(reason)
+        self.state = state
+        self.reason = reason

@@ -36,7 +36,7 @@ def make_project(tmp_path: Path, **extra) -> config.ProjectConfig:
     make_repo(root)
     data = {"schema_version": 2, "name": "P", "worktrees": str(tmp_path / "wt"), "python": sys.executable,
             "allowed_paths": ["core/**", "tests/**", "docs/**"],
-            "timeouts": {"idle_s": 2, "retry_max": 2, "retry_pause_s": 0}}
+            "timeouts": {"idle_s": 5, "retry_max": 2, "retry_pause_s": 0}}
     data.update(extra)
     return config.parse_project(data, root)
 

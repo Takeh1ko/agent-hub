@@ -65,3 +65,28 @@ CONTINUE_PROMPT = ("Сессия прервалась (тишина или сб�
 
 STOP_PROMPT = ("Хаб просит остановиться (бюджет или команда). Ничего нового не начинай: сохрани сделанное "
                "(для кода — закоммить поимённо), запиши `.ahub/result.json` со статусом того, что готово, и ответь «готово».")
+
+
+def code_delivery(task: Task) -> str:
+    paths = ", ".join(f"`{p}`" for p in task.limits.get("paths") or [])
+    accept = task.limits.get("accept") or []
+    tests = ("\n".join(f"   - `{a}`" for a in accept)) if accept else "   (приёмки нет — рутина)"
+    return f"""## Разрешённые файлы
+{paths}
+Нужно больше — не меняй, напиши в notes итога.
+
+## Приёмка (должна быть зелёной)
+{tests}
+
+## Как сдать (обязательно)
+1. Коммить по ходу: `git add <пути>` поимённо (никогда `-A`/`.`), сообщение по-русски. В конце незакоммиченного нет.
+2. Итог — `.ahub/result.json`:
+   {{"summary": "1–3 предложения", "status": "done", "commit": "<sha HEAD>", "files": ["изменённые файлы"],
+    "tests": {{"cmd": "…", "ok": true, "tail": "последние строки вывода"}}, "notes": "что не сделано / под вопросом"}}
+   Если продолжать нельзя (противоречие в задаче, нет доступа) — "status": "blocked" и причина в summary.
+3. Последнее сообщение — «готово» или «заблокировано: причина».
+"""
+
+
+def code_prompt(project: ProjectConfig, task: Task) -> str:
+    return "\n\n".join([rules_text(project).strip(), _header(task), code_delivery(task)])

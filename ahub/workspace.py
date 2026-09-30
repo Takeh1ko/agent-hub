@@ -12,6 +12,7 @@ from pathlib import Path
 from ahub.config import ProjectConfig
 
 AHUB_DIR = ".ahub"
+EXCLUDES = (f"{AHUB_DIR}/", "__pycache__/", ".pytest_cache/")  # служебное — мимо git копии
 
 
 class WorkspaceError(RuntimeError):
@@ -42,16 +43,17 @@ def branch_name(project: ProjectConfig, task_id: int) -> str:
 
 
 def _exclude_ahub(path: Path) -> None:
-    """`.ahub/` не видна git'у копии (info/exclude общий для репозитория — это и нужно)."""
+    """`.ahub/` и кэши Python не видны git'у копии (info/exclude общий для репозитория — это и нужно)."""
     r = git(path, "rev-parse", "--git-path", "info/exclude")
     excl = Path(r.stdout.strip())
     if not excl.is_absolute():
         excl = path / excl
     excl.parent.mkdir(parents=True, exist_ok=True)
     lines = excl.read_text(encoding="utf-8").splitlines() if excl.exists() else []
-    if f"{AHUB_DIR}/" not in lines:
+    missing = [x for x in EXCLUDES if x not in lines]
+    if missing:
         with excl.open("a", encoding="utf-8") as f:
-            f.write(f"\n{AHUB_DIR}/\n")
+            f.write("\n" + "\n".join(missing) + "\n")
 
 
 def ensure(project: ProjectConfig, task_id: int, *, base_ref: str | None = None) -> Workspace:

@@ -9,6 +9,7 @@
   {"child": 1.5}                     — запустить дочерний процесс на N секунд и ждать его (молчание с ребёнком)
   {"write": {"path": "a.txt", "text": "..."}}  — записать файл в cwd
   {"git_commit": "сообщение"}        — git add -A && git commit в cwd
+  {"result": {...}}                  — .ahub/result.json с commit = текущий HEAD
   {"stderr": "текст"}                — строка в stderr
   {"crash": true}                    — завершиться сразу без результата (код 137)
 Если передан --session, id сессии = он (продолжение), иначе session из сценария.
@@ -46,6 +47,15 @@ def main(argv: list[str]) -> int:
         elif "git_commit" in step:
             subprocess.run(["git", "add", "-A"], check=True, capture_output=True)
             subprocess.run(["git", "commit", "-q", "-m", step["git_commit"]], check=True, capture_output=True)
+        elif "result" in step:
+            # Итог работника с настоящим HEAD (как сделал бы работник): commit подставляется сам.
+            res = dict(step["result"])
+            head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            res.setdefault("commit", head)
+            res.setdefault("status", "done")
+            p = Path.cwd() / ".ahub" / "result.json"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
         elif "stderr" in step:
             print(step["stderr"], file=sys.stderr, flush=True)
         elif step.get("crash"):

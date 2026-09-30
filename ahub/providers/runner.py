@@ -76,7 +76,9 @@ def run(provider: Provider, spec: RunSpec, *,
     log_path = spec.log_path or str(Path(spec.cwd) / ".ahub" / f"{provider.name}_{started}.log")
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
     cmd = provider.build_command(spec)
-    env = dict(os.environ)
+    from ahub.prepare import scrub_env
+
+    env = scrub_env(dict(os.environ))  # работнику — без токенов/паролей хаба (ключи моделей остаются)
     env.update(provider.env(spec))
     ctx = {"provider": provider.name, "model": spec.model_id, "cwd": spec.cwd}
 
