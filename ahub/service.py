@@ -259,10 +259,32 @@ class Service:
     def stop(self) -> None:
         self._stop.set()
 
-    def run_forever(self, poll_s: float = 2.0, *, self_update: bool = True) -> None:
+    def _observe(self) -> None:
+        """Наблюдатель — в своём потоке: разбор моделью не должен тормозить очередь."""
+        from ahub import observer
+
+        if self._obs is not None and self._obs.is_alive():
+            return
+        last = int(self.store.meta_get(observer.LAST_QUICK) or 0)
+        if now_ms() - last < observer.QUICK_MS:
+            return
+
+        def _run():
+            try:
+                observer.cycle(self.store, projects=self.projects())
+            except Exception:
+                self.log.exception("наблюдатель упал")
+
+        self._obs = threading.Thread(target=_run, name="observer", daemon=True)
+        self._obs.start()
+
+    def run_forever(self, poll_s: float = 2.0, *, self_update: bool = True, observe: bool = True) -> None:
+        from ahub import observer
+
         self.log.info("сервис запущен (pid %d)", os.getpid())
         code0 = code_fingerprint()
         last_check = time.monotonic()
+        self._obs = None
 
         def _sig(signum, frame):
             self.log.info("сигнал %d — останавливаюсь (процессы задач продолжают работу)", signum)
@@ -276,6 +298,9 @@ class Service:
         while not self._stop.is_set():
             try:
                 self.tick()
+                if observe:
+                    self._observe()
+                    observer.watchdog(self.store)
             except Exception:
                 self.log.exception("тик сервиса упал")
             if self_update and time.monotonic() - last_check >= CODE_CHECK_S:

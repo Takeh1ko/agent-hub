@@ -102,3 +102,26 @@ def raise_alarm(store: Store, text: str, *, critical: bool = False, project: str
 
 def alarms(store: Store, *, unacked_only: bool = True) -> list:
     return [e for e in store.events(needs_reaction=True, unacked=unacked_only) if e.kind == Ev.ALARM.value]
+
+
+ESCALATE_MS = 15 * 60_000
+
+
+def alarms_for_tg(store: Store, *, now: int | None = None, escalate_ms: int = ESCALATE_MS) -> list:
+    """Тревоги, которые пора отправить человеку: критичные — сразу; обычные — без подтверждения дольше escalate_ms."""
+    ts = now if now is not None else now_ms()
+    out = []
+    for e in store.events(needs_reaction=True):
+        if e.kind != Ev.ALARM.value or e.tg_sent_at is not None:
+            continue
+        if e.critical or (e.acked_at is None and ts - e.ts >= escalate_ms):
+            out.append(e)
+    return out
+
+
+def mark_tg_sent(store: Store, event_ids: list[int], *, now: int | None = None) -> None:
+    if not event_ids:
+        return
+    with store.tx() as c:
+        c.execute(f"UPDATE event SET tg_sent_at=? WHERE id IN ({','.join('?' * len(event_ids))})",
+                  (now if now is not None else now_ms(), *event_ids))
