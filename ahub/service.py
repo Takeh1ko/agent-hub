@@ -36,6 +36,7 @@ SPAWN_GRACE_S = 30.0
 ORPHAN_GRACE_MS = 60_000  # после истечения аренды — ещё минута на «вдруг процесс просто медленный»
 MAX_ORPHANS = 1  # автоматический подхват — один раз  # после запуска процесс ещё может не быть виден / не взять задачу — не запускать повторно
 HEARTBEAT_KEY = "service_heartbeat"
+CODE_CHECK_S = 10.0  # как часто сверять код (самообновление)
 PAUSE_KEY = "queue_paused"
 _TASK_ARG = re.compile(r"^[Tt]?(\d+)$")
 
@@ -258,8 +259,10 @@ class Service:
     def stop(self) -> None:
         self._stop.set()
 
-    def run_forever(self, poll_s: float = 2.0) -> None:
+    def run_forever(self, poll_s: float = 2.0, *, self_update: bool = True) -> None:
         self.log.info("сервис запущен (pid %d)", os.getpid())
+        code0 = code_fingerprint()
+        last_check = time.monotonic()
 
         def _sig(signum, frame):
             self.log.info("сигнал %d — останавливаюсь (процессы задач продолжают работу)", signum)
@@ -275,5 +278,50 @@ class Service:
                 self.tick()
             except Exception:
                 self.log.exception("тик сервиса упал")
+            if self_update and time.monotonic() - last_check >= CODE_CHECK_S:
+                last_check = time.monotonic()
+                code = code_fingerprint()
+                if code != code0:
+                    ok, why = new_code_healthy()
+                    if ok:
+                        self.log.info("код хаба изменился — перезапуск сервиса на новый код (задачи не трогаются)")
+                        restart_self()
+                    else:
+                        self.log.error("код хаба изменился, но не проходит проверку — остаюсь на старом: %s", why)
+                        code0 = code  # не долбить проверкой каждые 10 с; следующее изменение проверим снова
             self._stop.wait(poll_s)
         self.log.info("сервис остановлен")
+
+
+def code_fingerprint() -> str:
+    """Отпечаток кода пакета ahub (время и размер .py-файлов): изменился — пора перезапуститься."""
+    import hashlib
+
+    root = Path(__file__).resolve().parent
+    h = hashlib.sha256()
+    for f in sorted(root.rglob("*.py")):
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        h.update(f"{f.relative_to(root)}:{st.st_mtime_ns}:{st.st_size};".encode())
+    return h.hexdigest()
+
+
+def new_code_healthy() -> tuple[bool, str]:
+    """Новый код импортируется и отвечает — иначе не переключаемся (без цикла падений)."""
+    try:
+        r = subprocess.run([sys.executable, "-c", "import ahub.service, ahub.engine, ahub.worker, ahub.cli;"
+                            "from ahub.store import Store; Store()"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout).strip()[-300:]
+    return True, ""
+
+
+def restart_self() -> None:
+    """Заменить процесс сервиса новым с тем же командным вызовом (pid сохраняется — systemd не заметит)."""
+    os.execv(sys.executable, [sys.executable, "-m", "ahub", *sys.argv[1:]] if sys.argv[0].endswith("ahub")
+             else [sys.executable, *sys.argv])

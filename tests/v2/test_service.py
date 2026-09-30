@@ -224,3 +224,43 @@ def test_orphan_accepting_is_decision(store, tmp_path):
     s, rec = svc(store, project, tmp_path)
     s.tick()
     assert store.get_task(tid).state is State.NEEDS_DECISION and "принятие прервано" in store.get_task(tid).state_reason
+
+
+def test_code_fingerprint_and_health(tmp_path):
+    a = service.code_fingerprint()
+    assert a == service.code_fingerprint()
+    ok, why = service.new_code_healthy()
+    assert ok, why
+
+
+def test_self_update_triggers_restart(store, tmp_path, monkeypatch):
+    project = make_project(tmp_path)
+    s, rec = svc(store, project, tmp_path)
+    prints = iter(["v1", "v2", "v2"])
+    monkeypatch.setattr(service, "code_fingerprint", lambda: next(prints))
+    monkeypatch.setattr(service, "new_code_healthy", lambda: (True, ""))
+    monkeypatch.setattr(service, "CODE_CHECK_S", 0.0)
+    called = []
+    monkeypatch.setattr(service, "restart_self", lambda: (called.append(1), s.stop()))
+    s.run_forever(poll_s=0.01)
+    assert called == [1]
+
+
+def test_self_update_skips_broken_code(store, tmp_path, monkeypatch):
+    project = make_project(tmp_path)
+    s, rec = svc(store, project, tmp_path)
+    prints = iter(["v1"] + ["v2"] * 50)
+    monkeypatch.setattr(service, "code_fingerprint", lambda: next(prints, "v2"))
+    monkeypatch.setattr(service, "new_code_healthy", lambda: (False, "SyntaxError"))
+    monkeypatch.setattr(service, "CODE_CHECK_S", 0.0)
+    monkeypatch.setattr(service, "restart_self", lambda: pytest.fail("перезапуск на сломанный код"))
+    import threading
+    threading.Timer(0.3, s.stop).start()
+    s.run_forever(poll_s=0.01)
+
+
+def test_install_unit_print(capsys):
+    from ahub import cli
+    assert cli.main(["service", "install", "--print"]) == 0
+    out = capsys.readouterr().out
+    assert "Restart=always" in out and "StartLimitBurst" in out and "KillMode=process" in out

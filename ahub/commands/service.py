@@ -48,12 +48,51 @@ def cmd_pause(args, on: bool) -> int:
     return 0
 
 
+UNIT = """[Unit]
+Description=agent-hub v2 (ahub service)
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart={python} -m ahub service run
+Restart=always
+RestartSec=10
+KillMode=process
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def cmd_install(args) -> int:
+    """Юнит systemd --user: автоперезапуск, лимит перезапусков; процессы задач не убиваются (KillMode=process)."""
+    import sys
+    from pathlib import Path
+
+    unit = Path.home() / ".config" / "systemd" / "user" / "ahub.service"
+    text = UNIT.format(python=sys.executable)
+    if args.print:
+        emit(args, {"unit": text}, text)
+        return 0
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(text, encoding="utf-8")
+    emit(args, {"path": str(unit)}, f"записан {unit}\nвключить: systemctl --user daemon-reload && "
+                                     f"systemctl --user enable --now ahub && loginctl enable-linger $USER")
+    return 0
+
+
 def register(subparsers) -> None:
     p = subparsers.add_parser("service", help="хаб-сервис: очередь и процессы задач")
     sub = p.add_subparsers(dest="service_cmd", required=True)
     r = sub.add_parser("run", help="запустить сервис (передний план; systemd)")
     r.add_argument("--poll", type=float, default=2.0)
     r.set_defaults(func=cmd_run)
+    i = sub.add_parser("install", help="юнит systemd --user")
+    i.add_argument("--print", action="store_true", help="только показать")
+    i.set_defaults(func=cmd_install)
     s = sub.add_parser("status", help="жив ли сервис, процессы задач, очередь")
     s.set_defaults(func=cmd_status)
     for name, on in (("pause", True), ("resume", False)):
