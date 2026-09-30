@@ -14,3 +14,6 @@ selftest = { lock = "/tmp/hub-selftest.lock" }
 [budget]
 go = 1.5
 usd = 0.0
+
+[secrets]
+exclude = ["ahub/secrets.py", "hub/secrets.py"]  # токен бота — не для работников
