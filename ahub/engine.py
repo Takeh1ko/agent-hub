@@ -144,6 +144,9 @@ class Engine:
         body.update(payload or {})
         self.move(to, reason[:500], payload=body)
         self.log.info("итог: %s%s", to.value, f" ({reason[:200]})" if reason else "")
+        from ahub import archive
+
+        archive.write_task(self.store, self.project, self.task_id)
         return Settled(to, reason)
 
     def stop_requested(self) -> bool:

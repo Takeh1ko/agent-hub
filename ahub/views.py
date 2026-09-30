@@ -1,0 +1,153 @@
+"""Что видит оркестратор: уровни L1 (сводка) и L2/L3 (задача, результат) с жёсткими лимитами (contracts §5)."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from ahub import archive, events, workspace
+from ahub.model import ACTIVE, State, WAITING_DECISION
+from ahub.store import Store, Task
+from ahub.time import now_ms
+
+L1_LIMIT = 1500
+L2_LIMIT = 4000
+L3_DEFAULT = 20000
+PHASE_WORDS = {"studying": "изучает", "writing": "пишет", "testing": "тесты", "waiting": "ждёт"}
+DECISION_WORDS = {State.DONE: "ГОТОВО", State.NEEDS_DECISION: "РЕШЕНИЕ", State.ERROR: "ОШИБКА",
+                  State.STOPPED: "СТОП"}
+
+
+def clip_bytes(text: str, limit: int) -> str:
+    b = text.encode("utf-8")
+    if len(b) <= limit:
+        return text
+    cut = b[: limit - 4].decode("utf-8", "ignore")
+    return cut.rsplit("\n", 1)[0] + "\n…" if "\n" in cut else cut + "…"
+
+
+def _age(ms: int, now: int) -> str:
+    m = max(0, (now - ms) // 60000)
+    return f"{m} мин" if m < 60 else f"{m // 60} ч {m % 60} мин"
+
+
+def _short(s: str, n: int) -> str:
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def status_text(store: Store, *, project: str | None = None, live: dict[int, int] | None = None,
+                now: int | None = None) -> str:
+    """L1: активные, ждущие решения, очередь, вопросы, непрочитанное. ≤ 1500 байт."""
+    ts = now if now is not None else now_ms()
+    live = live or {}
+    lines: list[str] = []
+    active = store.list_tasks(states=ACTIVE, project=project)
+    for t in active:
+        go, usd = archive.task_cost(store, t.id)
+        proc = "" if t.id in live else " · нет процесса!"
+        phase = PHASE_WORDS.get(t.phase, t.state.value)
+        lines.append(f"{t.label} {t.kind.value} «{_short(t.title, 40)}» · {phase} · {t.executor}"
+                     f"{f' · круг {t.round}' if t.round > 1 else ''} · {_age(t.updated_at, ts)} · ${go + usd:.2f}{proc}")
+    waiting = [t for t in store.list_tasks(states=WAITING_DECISION, project=project)]
+    for t in waiting:
+        lines.append(f"{DECISION_WORDS[t.state]} {t.label} «{_short(t.title, 40)}» — {_short(t.state_reason, 70)}")
+    queued = store.list_tasks(states={State.QUEUED}, project=project)
+    if queued:
+        reasons = "; ".join(f"{t.label}: {_short(t.state_reason, 30)}" for t in queued[:3] if t.state_reason)
+        lines.append(f"в очереди {len(queued)}" + (f" ({reasons})" if reasons else ""))
+    with store.read() as c:
+        q_open = c.execute("SELECT COUNT(*) FROM question WHERE status='open'").fetchone()[0]
+        msgs = c.execute("SELECT COUNT(*) FROM message WHERE direction='in' AND delivered_at IS NULL").fetchone()[0]
+    unacked = len(events.unacked(store, project))
+    tail = []
+    if q_open:
+        tail.append(f"вопросов владельцу открыто {q_open}")
+    if msgs:
+        tail.append(f"сообщений владельца {msgs} (ahub inbox)")
+    if unacked:
+        tail.append(f"непрочитано событий {unacked}")
+    if tail:
+        lines.append("; ".join(tail))
+    if not lines:
+        return "тихо: активных и ждущих решения задач нет"
+    out, used = [], 0
+    for i, ln in enumerate(lines):
+        size = len(ln.encode("utf-8")) + 1
+        if used + size > L1_LIMIT - 40:
+            out.append(f"… ещё {len(lines) - i} строк (ahub status --json)")
+            break
+        out.append(ln)
+        used += size
+    return "\n".join(out)
+
+
+_SUT = re.compile(r"^##\s*Суть\s*$(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
+
+
+def report_essence(report: str, max_lines: int = 12) -> str:
+    m = _SUT.search(report)
+    body = (m.group(1) if m else report).strip()
+    return "\n".join(body.splitlines()[:max_lines])
+
+
+def _result_paths(t: Task) -> tuple[Path | None, Path | None]:
+    if not t.worktree:
+        return None, None
+    base = Path(t.worktree) / workspace.AHUB_DIR
+    return base / "result.json", base / "report.md"
+
+
+def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now: int | None = None) -> str:
+    """L2: задача целиком, но кратко. ≤ 4000 байт."""
+    ts = now if now is not None else now_ms()
+    go, usd = archive.task_cost(store, t.id)
+    st = archive.STATE_WORDS.get(t.state.value, t.state.value)
+    lines = [f"{t.label} {t.kind.value} «{t.title}»",
+             f"состояние: {st}" + (f" — {t.state_reason}" if t.state_reason else "")
+             + (f" · {PHASE_WORDS.get(t.phase, t.phase)}" if t.phase else "")
+             + (" · процесс жив" if live and t.id in live else ""),
+             f"модель {t.executor}; ревью {', '.join(t.review.get('models', [])) or 'нет'}"
+             + (f"×{t.review.get('rounds')}" if t.review else "") + f"; круг {t.round}; {_age(t.created_at, ts)} от создания",
+             f"стоимость: ${go:.3f} Go" + (f", ${usd:.3f} реальных" if usd else "") + f" (бюджет ${t.budget_go:g})"]
+    if t.after:
+        lines.append("после: " + ", ".join(f"T{a}" for a in t.after))
+    rj, rp = _result_paths(t)
+    if rj is not None and rj.exists():
+        res = archive.read_json(rj)
+        if res.get("summary"):
+            lines.append(f"итог работника: {_short(str(res['summary']), 400)}")
+        for q in (res.get("questions") or [])[:3]:
+            lines.append(f"  вопрос: {_short(str(q), 200)}")
+        if res.get("notes"):
+            lines.append(f"  не сделано/под вопросом: {_short(str(res['notes']), 300)}")
+    if rp is not None and rp.exists():
+        rep = rp.read_text(encoding="utf-8", errors="replace")
+        lines.append(f"отчёт {len(rep.encode()) / 1024:.1f} КБ — суть:")
+        lines.append(report_essence(rep))
+    return clip_bytes("\n".join(lines), L2_LIMIT)
+
+
+def result_text(store: Store, t: Task, *, full: bool = False, max_bytes: int = L3_DEFAULT) -> str:
+    """L2 (по умолчанию) или L3 (--full): отчёт целиком, постранично по лимиту."""
+    if not full:
+        return task_text(store, t)
+    rj, rp = _result_paths(t)
+    parts = []
+    if rj is not None and rj.exists():
+        parts.append(rj.read_text(encoding="utf-8", errors="replace").strip())
+    if rp is not None and rp.exists():
+        parts.append(rp.read_text(encoding="utf-8", errors="replace"))
+    if not parts:
+        return f"{t.label}: итога ещё нет ({t.state.value})"
+    return clip_bytes("\n\n".join(parts), max_bytes)
+
+
+def log_text(store: Store, t: Task, *, max_bytes: int = L3_DEFAULT) -> str:
+    """L3: хвост сырых логов последних сессий."""
+    out = []
+    for s in store.list_sessions(t.id)[-3:]:
+        if s.log_path and Path(s.log_path).exists():
+            data = Path(s.log_path).read_bytes()[-max_bytes:].decode("utf-8", "replace")
+            out.append(f"=== {s.role} {s.model} {s.external_id} ({s.status}/{s.outcome})\n{data}")
+    return clip_bytes("\n".join(out) or f"{t.label}: логов нет", max_bytes)
