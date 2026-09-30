@@ -1401,8 +1401,9 @@ def test_observer_double_transient_network_problem(tmp_path):
                        for r in rows2), rows2
 
 
-def test_observer_default_label_deepseek(tmp_path):
-    """Без OBSERVER_MODEL подпись — «Наблюдатель (DeepSeek)», не Gemini."""
+def test_observer_default_label_spark(tmp_path):
+    """Без OBSERVER_MODEL подпись — «Наблюдатель (Spark)»: DeepSeek через opencode
+    не используем (решение владельца 2026-09-30)."""
     stubs = _observer_stubs(tmp_path / "d", "transient-always")
     env = _observer_env(tmp_path / "d", stubs, "transient-always")
     env.pop("OBSERVER_MODEL", None)
@@ -1412,8 +1413,8 @@ def test_observer_default_label_deepseek(tmp_path):
         hub_log = (stubs["fake_d"] / "hub.log").read_text(encoding="utf-8")
     except OSError:
         hub_log = ""
-    assert "Наблюдатель (DeepSeek)" in hub_log, hub_log
-    assert "Gemini" not in hub_log, hub_log
+    assert "Наблюдатель (Spark)" in hub_log, hub_log
+    assert "DeepSeek" not in hub_log and "Gemini" not in hub_log, hub_log
 
 
 def test_observer_no_transient_no_retry(tmp_path):

@@ -19,8 +19,8 @@ reviewers = ["muse"]  # решение владельца 2026-09-29: крити
 budget_go = 1.5  # 2026-09-30: $0.5 останавливал hard-задачи посреди работы (H13 $0.66)
 budget_usd = 0.0
 
-[levels]  # easy — рутина Gemini; medium/hard — критический путь, Spark Go; background — не тормозит, бесплатный Spark
-easy = "deepseek"
+[levels]  # easy — рутина, Spark Go (DeepSeek через opencode не используем — дороже, решение владельца 2026-09-30); medium/hard — критический путь, Spark Go; background — не тормозит, бесплатный Spark
+easy = "muse"
 medium = "muse"
 hard = "muse"
 background = "musefree"

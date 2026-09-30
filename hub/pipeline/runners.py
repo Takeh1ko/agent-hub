@@ -30,6 +30,7 @@ MODELS: dict[str, tuple[str, str | None]] = {
     "mimoflash": ("opencode-go/mimo-v2.6-flash", "high"),
     "mimo": ("opencode-go/mimo-v2.6-pro", "high"),
     "mimofree": ("opencode/mimo-v2.6-flash-free", "high"),
+    # Не использовать: в opencode дороже Spark ($0.15/$0.60 против $0.10/$0.20), решение владельца 2026-09-30.
     "deepseek": ("opencode-go/deepseek-v4.1-flash", "high"),
     "glm": ("opencode-go/glm-5.3-flash", "high"),
     "gemini": (GEMINI_MODEL, None),
