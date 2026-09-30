@@ -371,3 +371,41 @@ def test_dispatcher_has_new_command():
 
     dp = build_dispatcher()
     assert dp is not None
+
+
+def test_draft_prompt_has_review_levels():
+    """Промпт модели требует раздел **Ревью.** 1–4 (арбитр, круг 3, п.1)."""
+    from hub.pipeline import draft as _d
+
+    template = _d._load_prompt_template()
+    assert "**Ревью.**" in template
+    for needle in ("1 — документы/рутина", "2 — обычные функции",
+                   "3 —", "деньг", "4 —", "цены/бампы/бюджеты"):
+        assert needle in template, needle
+    # Подстановка не вырезает раздел.
+    from pathlib import Path as _P
+
+    import sys as _sys
+
+    from hub.config import Defaults as _Def
+    from hub.config import ProjectConfig as _PC
+
+    _proj = _PC(name="T", root="/tmp/x", worktrees="", rules="",
+                python=_sys.executable, test_lock="", work_branch="",
+                push="", allowed_paths=[], defaults=_Def())
+    prompt = _d.build_draft_prompt(template, "сделать икс", _proj,
+                                   "O1", _P("/tmp/x/docs/tasks/_drafts/O1-x.md"))
+    assert "**Ревью.**" in prompt and "O1" in prompt
+
+
+def test_good_card_with_review_lints_ok(tmp_path):
+    """Карточка с **Ревью.** 2 проходит lint (формат из промпта — рабочий)."""
+    from hub.gate.lint import lint_card
+
+    _, proj = _mk_repo(tmp_path)
+    card = GOOD_CARD.replace("**Коммит.**",
+                             "**Ревью.** 2 — обычные функции.\n\n**Коммит.**")
+    path = tmp_path / "proj" / "docs" / "tasks" / "_drafts" / "O9-x.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(card, encoding="utf-8")
+    assert lint_card(path, proj).ok
