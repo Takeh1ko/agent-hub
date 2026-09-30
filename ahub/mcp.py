@@ -1,0 +1,173 @@
+"""MCP-сервер ahub (M7, architecture §9): те же ручки, что у CLI, как инструменты — для Codex и других агентов.
+
+Транспорт — stdio, JSON-RPC 2.0 построчно (протокол MCP 2025-06-18: initialize, tools/list, tools/call, ping).
+Без внешних зависимостей. Каждый инструмент вызывает CLI-ручку в этом же процессе и возвращает её текст
+(те же лимиты L0–L3, та же экономия). Подключение: `ahub mcp` как stdio-сервер в настройках агента.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import sys
+from typing import Any
+
+from ahub import __version__
+
+PROTOCOL = "2025-06-18"
+
+# имя → (описание, схема параметров, как собрать argv для CLI)
+TOOLS: dict[str, tuple[str, dict, Any]] = {}
+
+
+def tool(name: str, description: str, props: dict, required: list[str] | None = None):
+    def deco(fn):
+        TOOLS[name] = (description, {"type": "object", "properties": props, "required": required or []}, fn)
+        return fn
+    return deco
+
+
+S = {"type": "string"}
+I = {"type": "integer"}  # noqa: E741
+
+
+@tool("task_new", "Поставить задачу работнику (scout|code|routine|review). Ответ — одна строка с номером.",
+      {"kind": {"type": "string", "enum": ["scout", "code", "routine", "review"]}, "title": S, "spec": S,
+       "project": S, "paths": S, "accept": S, "level": I, "after": S, "budget": {"type": "number"}, "input": S,
+       "model": S}, ["kind", "title"])
+def _task_new(a: dict) -> list[str]:
+    argv = ["task", "new", "--kind", a["kind"], "--title", a["title"]]
+    for k in ("spec", "paths", "accept", "after", "input", "model"):
+        if a.get(k):
+            argv += [f"--{k}", str(a[k])]
+    if a.get("project"):
+        argv += ["--project", a["project"]]
+    if a.get("level") is not None:
+        argv += ["--level", str(a["level"])]
+    if a.get("budget") is not None:
+        argv += ["--budget", str(a["budget"])]
+    return argv
+
+
+@tool("status", "Сводка хаба (≤1.5 КБ) или задача (≤4 КБ), если указан task (T12).", {"task": S, "project": S})
+def _status(a: dict) -> list[str]:
+    argv = ["status"] + ([a["task"]] if a.get("task") else [])
+    return argv + (["--project", a["project"]] if a.get("project") else [])
+
+
+@tool("result", "Результат задачи: кратко или full=true — полностью.", {"task": S, "full": {"type": "boolean"}},
+      ["task"])
+def _result(a: dict) -> list[str]:
+    return ["result", a["task"]] + (["--full"] if a.get("full") else [])
+
+
+@tool("decide", "Решение по задаче: accept | reject | rework (notes) | continue | stop.",
+      {"task": S, "action": {"type": "string", "enum": ["accept", "reject", "rework", "continue", "stop"]},
+       "notes": S, "reason": S}, ["task", "action"])
+def _decide(a: dict) -> list[str]:
+    act = a["action"]
+    argv = [act, a["task"]]
+    if act == "rework":
+        argv += ["--notes", a.get("notes") or "доработать"]
+    elif a.get("reason") and act in ("accept", "reject", "continue", "stop"):
+        argv += ["--reason", a["reason"]]
+    return argv + ["--by", "mcp"]
+
+
+@tool("wait", "Ждать событий для оркестратора (строки ГОТОВО/РЕШЕНИЕ/ОШИБКА/ВЛАДЕЛЕЦ/ТРЕВОГА).",
+      {"timeout": S, "project": S})
+def _wait(a: dict) -> list[str]:
+    return ["wait", "--timeout", a.get("timeout") or "10m", "--who", "mcp"] + (
+        ["--project", a["project"]] if a.get("project") else [])
+
+
+@tool("inbox", "Сообщения владельца (помечаются прочитанными).", {})
+def _inbox(a: dict) -> list[str]:
+    return ["inbox"]
+
+
+@tool("say", "Написать владельцу в Telegram.", {"text": S}, ["text"])
+def _say(a: dict) -> list[str]:
+    return ["say", a["text"]]
+
+
+@tool("ask", "Вопрос владельцу с вариантами; ответ придёт событием ОТВЕТ.", {"text": S, "options": S, "task": S},
+      ["text"])
+def _ask(a: dict) -> list[str]:
+    argv = ["ask", a["text"]]
+    if a.get("options"):
+        argv += ["--options", a["options"]]
+    if a.get("task"):
+        argv += ["--task", a["task"]]
+    return argv
+
+
+@tool("budget", "Продлить бюджет задачи (стоявшая из-за бюджета продолжится).", {"task": S, "add": {"type": "number"}},
+      ["task", "add"])
+def _budget(a: dict) -> list[str]:
+    return ["budget", a["task"], "--add", str(a["add"]), "--by", "mcp"]
+
+
+def call_cli(argv: list[str]) -> tuple[int, str]:
+    from ahub import cli
+
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            rc = cli.main(argv)
+        except SystemExit as e:  # argparse
+            rc = int(e.code or 2)
+    text = out.getvalue().strip()
+    if err.getvalue().strip():
+        text = (text + "\n" if text else "") + err.getvalue().strip()
+    return rc, text
+
+
+def handle(req: dict) -> dict | None:
+    rid = req.get("id")
+    method = req.get("method", "")
+    if rid is None:  # уведомление (notifications/initialized и т.п.)
+        return None
+
+    def ok(result: dict) -> dict:
+        return {"jsonrpc": "2.0", "id": rid, "result": result}
+
+    if method == "initialize":
+        return ok({"protocolVersion": PROTOCOL, "capabilities": {"tools": {}},
+                   "serverInfo": {"name": "ahub", "version": __version__}})
+    if method == "ping":
+        return ok({})
+    if method == "tools/list":
+        return ok({"tools": [{"name": n, "description": d, "inputSchema": s} for n, (d, s, _) in TOOLS.items()]})
+    if method == "tools/call":
+        params = req.get("params") or {}
+        name = params.get("name")
+        if name not in TOOLS:
+            return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": f"нет инструмента {name}"}}
+        args = params.get("arguments") or {}
+        missing = [k for k in TOOLS[name][1]["required"] if k not in args]
+        if missing:
+            return ok({"content": [{"type": "text", "text": f"нет параметров: {', '.join(missing)}"}], "isError": True})
+        rc, text = call_cli(TOOLS[name][2](args))
+        return ok({"content": [{"type": "text", "text": text or ("ok" if rc == 0 else f"код {rc}")}],
+                   "isError": rc not in (0, 3)})
+    return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"неизвестный метод {method}"}}
+
+
+def serve(stdin=None, stdout=None) -> None:
+    stdin = stdin or sys.stdin
+    stdout = stdout or sys.stdout
+    for line in stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            resp = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}
+        else:
+            resp = handle(req)
+        if resp is not None:
+            stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+            stdout.flush()
