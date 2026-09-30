@@ -17,6 +17,9 @@ def _isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
     for var in ("XDG_DATA_HOME", "XDG_STATE_HOME", "AHUB_FAKE_QUEUE"):
         monkeypatch.delenv(var, raising=False)
+    from ahub import log
+
+    log.setup()  # логгеры модулей созданы при импорте с настоящим HOME — перенаправить лог во временный каталог
     yield
 
 
