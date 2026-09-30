@@ -99,13 +99,13 @@ def test_launcher_flow(store, tmp_path):
     cmd, cwd = sp.calls[0]
     assert cwd == project.root and "--dangerously-skip-permissions" in cmd and "--resume" not in cmd
     assert "привет" in cmd[cmd.index("-p") + 1] and "ahub say" in cmd[cmd.index("-p") + 1]
-    assert comms.inbox(store, mark=False) == []  # переданы запущенному
     core.on_text(store, 1, "ещё вопрос", projects=["P"])
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "running"  # второй не поднимаем
     sp.procs[0].kill()
     sp.procs[0].wait()
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "finished"
     assert json.loads(store.meta_get(launcher.SESSION_KEY))["id"] == "sess-1"
+    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["ещё вопрос"]  # первое передано (сессия была)
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "launched"  # накопленное
     assert sp.calls[1][0][sp.calls[1][0].index("--resume") + 1] == "sess-1"  # та же TG-сессия
     for p in sp.procs:
@@ -188,3 +188,23 @@ async def test_background_one_pass(store, monkeypatch):
 def test_dispatcher_builds(store):
     from ahub.tg import run as tgrun
     assert tgrun.build_dispatcher(store) is not None
+
+
+def test_launcher_fast_death_keeps_messages(store, tmp_path):
+    project = make_project(tmp_path)
+
+    class Dead(Spawner):
+        def __call__(self, cmd, cwd, log):
+            open(log, "w").close()  # ни сессии, ни вывода
+            p = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+            p.wait()
+            self.procs.append(p)
+            return p.pid
+
+    core.on_text(store, 1, "срочно", projects=[])
+    sp = Dead()
+    t0 = now_ms()
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0) == "launched"
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0 + 1000) == "finished"
+    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["срочно"]  # не потерялось
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0 + 2000) == "launched"

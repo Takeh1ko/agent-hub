@@ -73,7 +73,6 @@ class Engine:
         self.budget_hit = False
         self._budget_at = 0.0
         self._soft_sent = False
-        self._cur = None  # (поставщик, id сессии) идущего хода — для живого учёта бюджета
         self.log = hublog.get("engine", task=self.task_id, project=project.name)
 
     # --- аренда ---
@@ -149,6 +148,11 @@ class Engine:
         body.update(payload or {})
         self.move(to, reason[:500], payload=body)
         self.log.info("итог: %s%s", to.value, f" ({reason[:200]})" if reason else "")
+        lim = self.task().limits
+        if lim.get("orphans"):  # эпизод завершён — счётчик сиротства с нуля
+            lim = dict(lim)
+            lim.pop("orphans", None)
+            self.store.update_task(self.task_id, limits=lim)
         from ahub import archive
 
         archive.write_task(self.store, self.project, self.task_id)
@@ -176,17 +180,17 @@ class Engine:
         """Бюджет задачи (вся задача, вкл. ревью): 80 % — событие в журнал; 100 % — True."""
         t = self.task()
         go, usd = self.task_cost()
-        if live and self._cur is not None:
-            prov, sid = self._cur
-            try:
-                u = prov.usage(sid)
-            except Exception:
-                u = None
-            if u is not None:
-                row = next((s for s in self.store.list_sessions(self.task_id)
-                            if s.external_id == sid and s.provider == prov.name), None)
-                go += max(0.0, (u.cost_go or 0.0) - (row.cost_go if row else 0.0))
-                usd += max(0.0, (u.cost_usd or 0.0) - (row.cost_usd if row else 0.0))
+        if live:  # все идущие сессии задачи (ревьюеры идут параллельно): учёт поставщика минус записанное
+            for s in self.store.list_sessions(self.task_id, status="running"):
+                if not s.external_id:
+                    continue
+                try:
+                    u = providers.get(s.provider).usage(s.external_id)
+                except Exception:
+                    u = None
+                if u is not None:
+                    go += max(0.0, (u.cost_go or 0.0) - (s.cost_go or 0.0))
+                    usd += max(0.0, (u.cost_usd or 0.0) - (s.cost_usd or 0.0))
         over = (t.budget_go > 0 and go >= t.budget_go) or (usd > t.budget_usd)
         if not over and not self._soft_sent and t.budget_go > 0 and go >= 0.8 * t.budget_go:
             self._soft_sent = True
@@ -260,8 +264,7 @@ class Engine:
             log_path = str(Path(cwd) / workspace.AHUB_DIR / "logs" / f"{log_name or role.value}.log")
             row = self._session_row(prov.name, role, alias, t.round, session_id, log_path)
 
-            def on_session(sid: str, _row=row, _prov=prov) -> None:
-                self._cur = (_prov, sid)
+            def on_session(sid: str, _row=row) -> None:
                 try:
                     self.store.update_session(_row, external_id=sid)
                 except sqlite3.IntegrityError:
@@ -270,12 +273,9 @@ class Engine:
             spec = RunSpec(prompt=prompt, cwd=cwd, model_id=entry.model_id, variant=entry.variant,
                            session_id=session_id, log_path=log_path, timeout_s=self._remaining_s(),
                            idle_s=tmo.idle_s, schema=schema)
-            if session_id:
-                self._cur = (prov, session_id)
             r = run_session(prov, spec, on_activity=self._on_activity, on_session=on_session,
                             on_start=lambda pid, _row=row: self.store.update_session(_row, pid=pid),
                             should_stop=self.stop_requested)
-            self._cur = None
             u = r.usage
             fields: dict = {"status": "ok" if r.ok else ("killed" if r.outcome is Outcome.KILLED else "failed"),
                             "outcome": r.outcome.value, "ended_at": r.ended_ms}

@@ -68,9 +68,13 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
     if projects is None:
         projects, _ = config.load_projects()
     sus: list[Suspicion] = []
+    from ahub.service import ORPHAN_GRACE_MS
+
     for tid, pl in pulse.all_pulses(store, projects=projects, now=ts).items():
         if pl.state in ("silent", "dead"):
             t = store.get_task(tid)
+            if pl.state == "dead" and ((t.lease_until or 0) + ORPHAN_GRACE_MS > ts or ts - t.updated_at < ORPHAN_GRACE_MS):
+                continue  # сервис ещё может подхватить (грейс сиротства) — не тревога
             sus.append(Suspicion(f"pulse:{tid}:{pl.state}", f"T{tid} {pl.mark} {pl.reason} (этап {t.state.value})",
                                  data={"task": tid, "state": pl.state}))
     last = int(store.meta_get(LAST_QUICK) or 0)
@@ -108,8 +112,8 @@ def _fresh(store: Store, sus: list[Suspicion], now: int) -> list[Suspicion]:
     for s in sus:
         key = SEEN_PREFIX + s.sig
         seen = store.meta_get(key)
-        if seen and now - int(seen.split("|", 1)[0]) < REPEAT_MS and seen.split("|", 1)[1:] == [s.text[:80]]:
-            continue
+        if seen and now - int(seen.split("|", 1)[0]) < REPEAT_MS:
+            continue  # та же проблема (подпись) — не чаще раза в REPEAT_MS, счётчики в тексте не в счёт
         out.append(s)
     return out
 

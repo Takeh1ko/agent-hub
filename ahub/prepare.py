@@ -58,7 +58,7 @@ def run_hook(project: ProjectConfig, name: str, task: Task, worktree: str) -> No
     cmd = getattr(project.hooks, name, "") or ""
     if not cmd.strip():
         return
-    env = dict(os.environ)
+    env = scrub_env(dict(os.environ))
     env.update(AHUB_TASK_ID=task.label, AHUB_WORKTREE=worktree, AHUB_PROJECT_ROOT=project.root)
     try:
         r = subprocess.run(cmd, shell=True, cwd=worktree, env=env, capture_output=True, text=True,

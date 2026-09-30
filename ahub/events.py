@@ -19,6 +19,7 @@ from ahub.time import now_ms
 
 GROUP_WINDOW_MS = 120_000
 REDELIVER_MS = 30 * 60_000
+MAX_DELIVERIES = 3  # первая доставка + 2 напоминания; дальше — только в status («непрочитано»)
 PRESENT_MS = 180_000
 PRESENCE_TOUCH_S = 60
 LINE_LIMIT = 200
@@ -29,8 +30,8 @@ DEFAULT_WHO = "claude"
 
 def _deliverable(store: Store, now: int, project: str | None) -> list[Event]:
     sql = ("SELECT * FROM event WHERE needs_reaction=1 AND acked_at IS NULL"
-           " AND (delivered_at IS NULL OR delivered_at<?)")
-    args: list = [now - REDELIVER_MS]
+           " AND (delivered_at IS NULL OR (delivered_at<? AND deliveries<?))")
+    args: list = [now - REDELIVER_MS, MAX_DELIVERIES]
     if project is not None:
         sql += " AND (project=? OR project='')"
         args.append(project)
@@ -59,7 +60,7 @@ def mark_delivered(store: Store, ids: list[int], *, now: int | None = None) -> N
     if not ids:
         return
     with store.tx() as c:
-        c.execute(f"UPDATE event SET delivered_at=? WHERE id IN ({','.join('?' * len(ids))})",
+        c.execute(f"UPDATE event SET delivered_at=?, deliveries=deliveries+1 WHERE id IN ({','.join('?' * len(ids))})",
                   (now if now is not None else now_ms(), *ids))
 
 

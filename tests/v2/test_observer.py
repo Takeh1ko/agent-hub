@@ -29,6 +29,8 @@ def test_clean(store):
 def test_dead_task_and_logs(store):
     tid = store.create_task(project="P", kind="scout", title="x")
     transitions.move(store, tid, State.PREPARING)
+    with store.tx() as c:  # давно без процесса — грейс сиротства прошёл
+        c.execute("UPDATE task SET updated_at=0 WHERE id=?", (tid,))
     log.setup()
     log.get("engine").error("сбой шага T%d: 500", tid)
     sus = qc(store, since=0)
@@ -122,3 +124,18 @@ def test_alarms_for_tg(store):
     assert [e.id for e in comms.alarms_for_tg(store, now=t0 + comms.ESCALATE_MS)] == [crit, norm]
     comms.mark_tg_sent(store, [crit, norm])
     assert comms.alarms_for_tg(store, now=t0 + 10 ** 8) == []
+
+
+def test_pause_by_signature_ignores_counters(store):
+    s1 = observer.Suspicion("pulse:1:silent", "T1 молчит 21 мин")
+    s2 = observer.Suspicion("pulse:1:silent", "T1 молчит 26 мин")
+    t0 = now_ms()
+    observer._mark_seen(store, [s1], t0)
+    assert observer._fresh(store, [s2], t0 + 5 * 60_000) == []
+    assert observer._fresh(store, [s2], t0 + observer.REPEAT_MS + 1) == [s2]
+
+
+def test_dead_within_orphan_grace_not_suspicious(store):
+    tid = store.create_task(project="P", kind="scout", title="x")
+    transitions.move(store, tid, State.PREPARING)  # только что — сервис ещё подхватит
+    assert not any(f"T{tid}" in s.text for s in qc(store))

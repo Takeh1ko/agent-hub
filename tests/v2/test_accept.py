@@ -157,3 +157,36 @@ def test_edit_spec_new_session(store, project):
     assert "новая сессия" in msg
     Engine(store, project, t.id, sleep=lambda s: None).run()
     assert fake.calls[1]["session_id"] is None and "совсем другое" in fake.calls[1]["prompt"]
+
+
+def test_usd_budget_extend(store, project):
+    t, _, _ = done_code(store, project)
+    from ahub import transitions
+    transitions.move(store, t.id, State.QUEUED)
+    for st in (State.PREPARING, State.WORKING):
+        transitions.move(store, t.id, st)
+    transitions.move(store, t.id, State.NEEDS_DECISION, reason="бюджет исчерпан ($0.000 из $1.5)")
+    msg = accept.extend_budget(store, t.id, add_usd=0.5)
+    assert "реальные $0 → $0.5" in msg and "продолжена" in msg
+    assert store.get_task(t.id).budget_usd == 0.5
+    with pytest.raises(accept.DecisionError):
+        accept.extend_budget(store, t.id)
+
+
+def test_red_after_merge_root_moved_not_reset(store, project, monkeypatch):
+    t, _, _ = done_code(store, project)
+    (Path(project.root) / "core" / "a.py").write_text("X = 5\n")
+    git(project.root, "add", "-A")
+    git(project.root, "commit", "-q", "-m", "сломали X")
+    from ahub import gates as g
+
+    def red_and_foreign_commit(project_, cwd, nodes, **kw):
+        (Path(cwd) / "foreign.txt").write_text("чужое\n")
+        git(cwd, "add", "foreign.txt")
+        git(cwd, "commit", "-q", "-m", "чужой коммит во время приёмки")
+        return False, "FAILED", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", red_and_foreign_commit)
+    with pytest.raises(accept.DecisionError, match="корень уехал"):
+        accept.accept(store, project, t.id)
+    assert (Path(project.root) / "foreign.txt").exists()  # чужое не тронуто

@@ -49,7 +49,7 @@ def cmd_new(args) -> int:
         review_models=review_models, review_rounds=args.rounds, paths=_csv(args.paths),
         accept=_csv(args.accept), read=_csv(args.read), review_input=args.input or "",
         resources=_csv(args.resources), after=[parse_task_id(a) for a in _csv(args.after)],
-        budget_go=args.budget, time_limit_min=args.time_limit, created_by=args.by)
+        budget_go=args.budget, budget_usd=args.budget_usd, time_limit_min=args.time_limit, created_by=args.by)
     store = Store()
     try:
         t = tasks.create(store, spec, project, key=args.key, draft=args.draft, collect=not args.no_collect)
@@ -170,7 +170,8 @@ def cmd_extend(args) -> int:
 
 def cmd_budget(args) -> int:
     from ahub import accept
-    return _decide(args, lambda s, t: accept.extend_budget(s, t.id, add=args.add, set_to=args.set, by=args.by))
+    return _decide(args, lambda s, t: accept.extend_budget(s, t.id, add=args.add, set_to=args.set,
+                                                           add_usd=args.add_usd, by=args.by))
 
 
 def cmd_model(args) -> int:
@@ -230,6 +231,7 @@ def register(subparsers) -> None:
     n.add_argument("--resources")
     n.add_argument("--after", help="T3,T4")
     n.add_argument("--budget", type=float, help="бюджет Go, $")
+    n.add_argument("--budget-usd", type=float, help="бюджет реальных денег, $ (по умолчанию 0 — тратить нельзя)")
     n.add_argument("--time-limit", type=int, help="минут")
     n.add_argument("--key", help="ключ идемпотентности")
     n.add_argument("--draft", action="store_true")
@@ -279,9 +281,10 @@ def register(subparsers) -> None:
     ex.set_defaults(func=cmd_extend)
     bu = subparsers.add_parser("budget", help="продлить бюджет задачи (стоявшая из-за бюджета — продолжится)")
     bu.add_argument("task")
-    gb = bu.add_mutually_exclusive_group(required=True)
-    gb.add_argument("--add", type=float)
-    gb.add_argument("--set", type=float)
+    gb = bu.add_mutually_exclusive_group()
+    gb.add_argument("--add", type=float, help="к бюджету Go, $")
+    gb.add_argument("--set", type=float, help="бюджет Go, $")
+    bu.add_argument("--add-usd", type=float, help="к бюджету реальных денег, $")
     bu.add_argument("--by", default="orchestrator")
     bu.set_defaults(func=cmd_budget)
     mo = subparsers.add_parser("model", help="сменить модель задачи")

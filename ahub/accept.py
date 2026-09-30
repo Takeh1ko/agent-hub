@@ -105,7 +105,11 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str) -
     if t.kind is Kind.CODE and nodes:
         ok, tail, cmd = gates.run_acceptance(project, project.root, nodes, task_label=t.label)
         if not ok:
-            workspace.git(project.root, "reset", "--hard", "HEAD~1", check=False)
+            head_now = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
+            if head_now != merged:  # в рабочую ветку успели закоммитить — чужое не трогаем
+                raise DecisionError(f"после слияния приёмка красная, а корень уехал ({head_now[:10]} ≠ {merged[:10]})"
+                                    " — откатите слияние вручную")
+            workspace.git(project.root, "reset", "--keep", "HEAD~1", check=False)  # --keep не давит чужую грязь
             raise DecisionError(f"после слияния приёмка красная — слияние откачено ({cmd}):\n{tail[-600:]}")
     note = ""
     if project.push.strip():
@@ -203,16 +207,21 @@ def extend_paths(store: Store, project: ProjectConfig, task_id: int, paths: list
 
 
 def extend_budget(store: Store, task_id: int, *, add: float | None = None, set_to: float | None = None,
-                  by: str = "orchestrator") -> str:
-    """Продлить бюджет одним действием: увеличен + (если задача стояла из-за бюджета) продолжена."""
+                  add_usd: float | None = None, by: str = "orchestrator") -> str:
+    """Продлить бюджет одним действием: увеличен + (если задача стояла из-за бюджета) продолжена.
+
+    add/set_to — счётчик Go (подписка); add_usd — реальные деньги (по умолчанию 0 = тратить нельзя).
+    """
     t = _get(store, task_id)
     new = set_to if set_to is not None else t.budget_go + (add or 0.0)
-    if new <= t.budget_go and set_to is None:
-        raise DecisionError("нужно --add > 0 или --set")
-    store.update_task(t.id, budget_go=float(new))
+    new_usd = t.budget_usd + (add_usd or 0.0)
+    if new <= t.budget_go and set_to is None and new_usd <= t.budget_usd:
+        raise DecisionError("нужно --add > 0, --set или --add-usd > 0")
+    store.update_task(t.id, budget_go=float(new), budget_usd=float(new_usd))
     store.add_event(Ev.BUDGET_EXTENDED, task_id=t.id, project=t.project,
-                    payload={"from": t.budget_go, "to": new, "by": by})
-    msg = f"{t.label}: бюджет ${t.budget_go:g} → ${new:g}"
+                    payload={"from": t.budget_go, "to": new, "usd_from": t.budget_usd, "usd_to": new_usd, "by": by})
+    msg = f"{t.label}: бюджет ${t.budget_go:g} → ${new:g}" + (
+        f", реальные ${t.budget_usd:g} → ${new_usd:g}" if new_usd != t.budget_usd else "")
     if t.state is State.NEEDS_DECISION and t.state_reason.startswith("бюджет"):
         transitions.move(store, t.id, State.QUEUED, reason="бюджет продлён", by=by)
         events.ack_task(store, t.id)

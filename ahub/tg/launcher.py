@@ -27,6 +27,7 @@ SESSION_KEY = "tg_claude_session"
 TIMEOUT_MS = 30 * 60_000
 MAX_TURNS = 30
 MAX_PER_HOUR = 6
+MIN_ALIVE_MS = 20_000  # прожил меньше и без сессии — сообщения не считаются переданными (перезапуск их заберёт)
 _log = hublog.get("launcher")
 
 PROMPT = """Ты — Claude, ведущий разработку через agent-hub (команда `ahub`). Владелец сейчас не за компьютером и
@@ -107,6 +108,16 @@ def _launches_last_hour(store: Store, now: int) -> int:
         return c.execute("SELECT COUNT(*) FROM claude_launch WHERE ts>?", (now - 3_600_000,)).fetchone()[0]
 
 
+def _deliver(store: Store, message_ids: list[int], now: int) -> None:
+    """Сообщения переданы Claude: прочитаны + их события подтверждены."""
+    with store.tx() as c:
+        c.execute(f"UPDATE message SET delivered_at=? WHERE delivered_at IS NULL AND id IN "
+                  f"({','.join('?' * len(message_ids))})", (now, *message_ids))
+    for e in events.unacked(store):
+        if e.kind == "owner_message" and e.payload.get("message_id") in message_ids:
+            events.ack(store, [e.id], now=now)
+
+
 def build_command(binary: str, prompt: str, resume: str | None) -> list[str]:
     cmd = [binary, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"]
     if resume:
@@ -149,6 +160,10 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
         with store.tx() as c:
             c.execute("UPDATE claude_launch SET status=?, ended_at=?, session_id=? WHERE id=?",
                       (status, ts, sid, cur.id))
+        ids = json.loads(store.meta_get(f"launch_msgs:{cur.id}") or "[]")
+        if ids and (sid or ts - cur.ts >= MIN_ALIVE_MS):
+            _deliver(store, ids, ts)
+        store.meta_del(f"launch_msgs:{cur.id}")
         if sid:
             prev = {}
             try:
@@ -190,6 +205,7 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
         pid = spawn(cmd, project.root, str(log_path))
     with store.tx() as c:
         c.execute("UPDATE claude_launch SET pid=? WHERE id=?", (pid, lid))
-    comms.inbox(store, mark=True)  # сообщения переданы запущенному Claude
+    # сообщения помечаются переданными, когда запущенный Claude поживёт (см. MIN_ALIVE_MS) — не сразу
+    store.meta_set(f"launch_msgs:{lid}", json.dumps([m["id"] for m in msgs]))
     _log.info("поднял Claude в %s (pid %s, %s)", project.name, pid, "продолжение" if resume else "новая сессия")
     return "launched"

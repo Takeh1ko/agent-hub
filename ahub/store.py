@@ -107,6 +107,7 @@ class Event:
     delivered_at: int | None
     acked_at: int | None
     tg_sent_at: int | None
+    deliveries: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Event":

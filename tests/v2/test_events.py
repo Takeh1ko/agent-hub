@@ -97,3 +97,15 @@ def test_wait_returns_batch_and_marks(store):
     assert events.present(store)
     assert events.wait(store, timeout_s=3, sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
                        clock=lambda: clock["t"]) == []  # уже доставлено — ждём до таймаута
+
+
+def test_redelivery_capped(store):
+    done_task(store, now=0)
+    t = events.GROUP_WINDOW_MS
+    for i in range(events.MAX_DELIVERIES):
+        batch = events.ready_batch(store, now=t)
+        assert len(batch) == 1, i
+        events.mark_delivered(store, [batch[0].id], now=t)
+        t += events.REDELIVER_MS + 1
+    assert events.ready_batch(store, now=t) == []  # дальше — только «непрочитано» в status
+    assert len(events.unacked(store)) == 1

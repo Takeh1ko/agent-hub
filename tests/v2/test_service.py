@@ -264,3 +264,16 @@ def test_install_unit_print(capsys):
     assert cli.main(["service", "install", "--print"]) == 0
     out = capsys.readouterr().out
     assert "Restart=always" in out and "StartLimitBurst" in out and "KillMode=process" in out
+
+
+def test_orphan_counter_resets_after_episode(store, tmp_path):
+    from ahub.engine import Engine
+    from tests.v2.enginekit import scout_ok
+    project = make_project(tmp_path)
+    install_fake(store, [scout_ok()])
+    tid = _orphan_task(store, project)
+    s, rec = svc(store, project, tmp_path)
+    s.tick()  # сирота → в очередь (orphans=1)
+    assert store.get_task(tid).limits["orphans"] == 1
+    assert Engine(store, project, tid, sleep=lambda x: None).run().state is State.DONE
+    assert "orphans" not in store.get_task(tid).limits

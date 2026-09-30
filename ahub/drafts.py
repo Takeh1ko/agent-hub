@@ -126,6 +126,9 @@ def _draft_copy(project: ProjectConfig, draft_id: int) -> str:
     if not base.exists():
         base.parent.mkdir(parents=True, exist_ok=True)
         workspace.git(project.root, "worktree", "add", "--detach", str(base), project.work_branch)
+        from ahub.prepare import hide_secrets
+
+        hide_secrets(project, str(base))
     (base / ".ahub").mkdir(exist_ok=True)
     return str(base)
 
