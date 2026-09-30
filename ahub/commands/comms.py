@@ -2,29 +2,20 @@
 
 from __future__ import annotations
 
-import re
 import time
 
 from ahub import comms, events
 from ahub.cliutil import CliError, emit
 from ahub.store import Store
-
-_DUR = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhд чсм]*)\s*$", re.IGNORECASE)
+from ahub.time import parse_duration as _parse_duration
 
 
 def parse_duration(text: str) -> float:
-    """«90», «30s», «30m», «4h», «2ч», «15м» → секунды."""
-    m = _DUR.match(str(text))
-    if not m:
-        raise CliError(f"непонятная длительность: {text!r}")
-    n, unit = float(m.group(1)), m.group(2).strip().lower()
-    if unit in ("", "s", "с"):
-        return n
-    if unit in ("m", "м"):
-        return n * 60
-    if unit in ("h", "ч"):
-        return n * 3600
-    raise CliError(f"непонятная единица: {unit!r}")
+    """Обёртка: ValueError из ahub.time → CliError (одна строка «ошибка: …»)."""
+    try:
+        return _parse_duration(text)
+    except ValueError as e:
+        raise CliError(str(e)) from e
 
 
 def cmd_wait(args) -> int:
