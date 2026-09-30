@@ -384,7 +384,7 @@ def test_opencode_runner_transient_rc0_with_sid_returns_sid(tmp_path, monkeypatc
 
 
 def test_log_retry_payload_has_text(tmp_path):
-    """Событие повтора несёт text: сводка владельцу — не голая «stuck ID»."""
+    """Событие повтора (kind retry, не stuck — не тревога владельцу) несёт text с причиной."""
     from hub.bot.core import format_event_line
 
     cyc._log_retry(Store(), "LR", "socket hang up", 1, 3, 120.0)

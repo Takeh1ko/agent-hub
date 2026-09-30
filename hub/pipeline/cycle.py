@@ -648,10 +648,10 @@ def _log_retry(store, task_id: str, err_text: str,
     txt = (f"сбой opencode ({short}) → повтор {n}/{max_n} "
            f"через {_fmt_pause(pause_s)} с")
     try:
-        # Ключ text — для сводки владельцу: format_event_line читает
-        # только stage/text/answer/action, без него в TG уходила голая
-        # строка «stuck ID» без причины. kind оставляем stuck.
-        store.add_event(task_id, "stuck", {"reason": txt, "text": txt})
+        # kind «retry», не «stuck»: stuck — канал настоящего «задача зависла» (NOTIFY_KINDS бота),
+        # повтор при сбое сети — штатная работа, владельцу не шлём (правка Claude по ревью H13).
+        # Ключ text — для сводки: format_event_line читает stage/text/answer/action.
+        store.add_event(task_id, "retry", {"reason": txt, "text": txt})
     except (OSError, sqlite3.Error, ValueError):
         pass
 
