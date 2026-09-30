@@ -139,3 +139,24 @@ def test_dead_within_orphan_grace_not_suspicious(store):
     tid = store.create_task(project="P", kind="scout", title="x")
     transitions.move(store, tid, State.PREPARING)  # только что — сервис ещё подхватит
     assert not any(f"T{tid}" in s.text for s in qc(store))
+
+
+def test_proxy_problem():
+    import socket
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        assert observer.proxy_problem({"HTTPS_PROXY": f"http://127.0.0.1:{port}"}) == ""
+    finally:
+        srv.close()
+    assert "не отвечает" in observer.proxy_problem({"HTTPS_PROXY": f"http://127.0.0.1:{port}"})
+    assert observer.proxy_problem({}) == ""
+
+
+def test_unit_carries_proxy(monkeypatch, capsys):
+    from ahub import cli
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+    assert cli.main(["service", "install", "--print"]) == 0
+    assert "Environment=HTTPS_PROXY=http://127.0.0.1:7897" in capsys.readouterr().out

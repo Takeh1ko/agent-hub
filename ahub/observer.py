@@ -93,6 +93,9 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
             sus.append(Suspicion("delivery:unacked", f"{len(old)} событий ждут оркестратора > {UNACKED_MS // 60000} мин,"
                                                      " Claude не слушает", data={"events": [e.id for e in old[:5]]}))
     if health:
+        bad = proxy_problem()
+        if bad:
+            sus.append(Suspicion("proxy", bad, critical=True))
         for name in providers.names():
             try:
                 h = providers.get(name).health()
@@ -104,6 +107,25 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
                                      critical=True))
     store.meta_set(LAST_QUICK, str(ts))
     return sus
+
+
+def proxy_problem(env: dict | None = None, timeout: float = 3.0) -> str:
+    """Системный прокси (Koala) принимает соединения? Пусто — да или прокси не задан."""
+    import os
+    import socket
+    from urllib.parse import urlparse
+
+    env = env if env is not None else dict(os.environ)
+    url = env.get("HTTPS_PROXY") or env.get("https_proxy") or env.get("ALL_PROXY") or env.get("all_proxy")
+    if not url:
+        return ""
+    u = urlparse(url if "://" in url else f"http://{url}")
+    host, port = u.hostname or "127.0.0.1", u.port or 80
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return ""
+    except OSError as e:
+        return f"прокси {host}:{port} не отвечает ({e.__class__.__name__}) — модели и Telegram без сети; проверь Koala"
 
 
 def _fresh(store: Store, sus: list[Suspicion], now: int) -> list[Suspicion]:

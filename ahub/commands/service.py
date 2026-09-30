@@ -72,8 +72,15 @@ def cmd_install(args) -> int:
     import sys
     from pathlib import Path
 
+    import os
+
     unit = Path.home() / ".config" / "systemd" / "user" / "ahub.service"
     text = UNIT.format(python=sys.executable)
+    # systemd не видит окружения сессии: прокси (Koala) — явно, иначе модели и Telegram без сети
+    proxy = [f"Environment={k}={v}" for k, v in sorted(os.environ.items())
+             if k.upper() in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY")]
+    if proxy:
+        text = text.replace("Environment=PYTHONUNBUFFERED=1", "\n".join(["Environment=PYTHONUNBUFFERED=1", *proxy]))
     if args.print:
         emit(args, {"unit": text}, text)
         return 0
