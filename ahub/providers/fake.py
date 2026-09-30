@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -25,6 +26,15 @@ class FakeProvider(Provider):
 
     def build_command(self, spec: RunSpec) -> list[str]:
         src = spec.prompt.strip()
+        queue = os.environ.get("AHUB_FAKE_QUEUE")
+        if not src.startswith("{") and queue:
+            # Сквозные тесты между процессами: следующий сценарий из каталога-очереди (имя по порядку).
+            files = sorted(Path(queue).glob("*.json"))
+            if files:
+                src = files[0].read_text(encoding="utf-8")
+                files[0].rename(files[0].with_suffix(".used"))
+            else:
+                src = '{"session": "ses_empty", "steps": []}'
         if src.startswith("{"):
             p = Path(spec.cwd) / ".ahub" / f"scenario_{abs(hash(src))}.json"
             p.parent.mkdir(parents=True, exist_ok=True)
