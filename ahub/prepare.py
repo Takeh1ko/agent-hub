@@ -78,7 +78,8 @@ def collect(project: ProjectConfig, worktree: str, nodes: list[str]) -> None:
     py = project.python or "python3"
     try:
         r = subprocess.run([py, "-m", "pytest", "--collect-only", "-q", *existing], cwd=worktree,
-                           capture_output=True, text=True, timeout=300, env=scrub_env(dict(os.environ)))
+                           capture_output=True, text=True, timeout=300,
+                           env={**scrub_env(dict(os.environ)), "PYTHONDONTWRITEBYTECODE": "1"})
     except (OSError, subprocess.TimeoutExpired) as e:
         raise PrepareError(f"приёмка не собирается: {e}") from e
     if r.returncode != 0:

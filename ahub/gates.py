@@ -78,6 +78,15 @@ def allowed(file: str, globs: list[str]) -> bool:
     return any(fnmatch.fnmatch(f, g.removeprefix("./")) for g in globs)
 
 
+def clear_pycache(root: str) -> None:
+    import shutil
+
+    for d in Path(root).rglob("__pycache__"):
+        if ".git" in d.parts:
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+
+
 class LockTimeout(RuntimeError):
     pass
 
@@ -120,7 +129,9 @@ def run_acceptance(project: ProjectConfig, cwd: str, nodes: list[str], *, task_l
     py = project.python or "python3"
     cmd = [py, "-m", "pytest", "-q", *nodes]
     env = scrub_env(dict(os.environ))
-    env.update(AHUB_TASK_ID=task_label, AHUB_WORKTREE=cwd, AHUB_PROJECT_ROOT=project.root)
+    env.update(AHUB_TASK_ID=task_label, AHUB_WORKTREE=cwd, AHUB_PROJECT_ROOT=project.root,
+               PYTHONDONTWRITEBYTECODE="1")
+    clear_pycache(cwd)  # устаревший .pyc (правка того же размера в ту же секунду) дал бы ложную зелёную
     lock = ""
     if project.test_resource and project.test_resource in project.resources:
         lock = project.resources[project.test_resource].lock

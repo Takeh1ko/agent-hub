@@ -195,7 +195,9 @@ def run(provider: Provider, spec: RunSpec, *,
                 forced = Outcome.TIMEOUT
                 _kill_group(proc)
                 break
-            if spec.idle_s and now - last_line[0] >= spec.idle_s and not procs.has_children(proc.pid):
+            if spec.idle_s and procs.has_children(proc.pid):
+                last_line[0] = now  # дети (тесты, замок) — молчание объяснено; отсчёт тишины — с их ухода
+            elif spec.idle_s and now - last_line[0] >= spec.idle_s:
                 silence_s = int(now - last_line[0])
                 forced = Outcome.SILENCE
                 _kill_group(proc)
