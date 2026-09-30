@@ -16,7 +16,7 @@ task_cleanup = ""
 [defaults]
 executor = "muse"
 reviewers = ["muse"]  # решение владельца 2026-09-29: критический путь — Spark код + Spark ревью
-budget_go = 0.5
+budget_go = 1.5  # 2026-09-30: $0.5 останавливал hard-задачи посреди работы (H13 $0.66)
 budget_usd = 0.0
 
 [levels]  # easy — рутина Gemini; medium/hard — критический путь, Spark Go; background — не тормозит, бесплатный Spark
