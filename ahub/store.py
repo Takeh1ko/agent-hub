@@ -68,6 +68,7 @@ class Task:
     owner_pid: int | None = None
     lease_until: int | None = None
     version: int = 0
+    request: str = ""  # просьба владельцу: '' | stop
     after: list[int] = field(default_factory=list)
 
     @property
