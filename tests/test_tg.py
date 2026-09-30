@@ -1,0 +1,210 @@
+"""TG v2: логика бота (без сети) и запуск Claude при отсутствии живой сессии."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import time
+
+import pytest
+
+from ahub import comms, events, transitions
+from ahub.model import State
+from ahub.store import Store
+from ahub.tg import core, launcher
+from ahub.time import now_ms
+from tests.enginekit import make_project
+
+
+@pytest.fixture
+def store() -> Store:
+    return Store()
+
+
+def test_text_goes_to_claude(store):
+    rep = core.on_text(store, 42, "как там оплата?", projects=["PlayerUP", "agent-hub"])
+    assert "поднимаю" in rep.text
+    assert events.lines(store, events.unacked(store)) == ["ВЛАДЕЛЕЦ «как там оплата?»"]
+    assert core.chats(store) == [42]
+    events.touch(store)
+    assert "на связи" in core.on_text(store, 42, "ещё", projects=[]).text
+
+
+def test_project_prefix(store):
+    assert core.split_project("по agent-hub: почини бота", ["agent-hub", "PlayerUP"]) == ("agent-hub", "почини бота")
+    assert core.split_project("PlayerUP: статус", ["agent-hub", "PlayerUP"]) == ("PlayerUP", "статус")
+    assert core.split_project("просто текст", ["agent-hub"]) == (None, "просто текст")
+    core.on_text(store, 1, "по agent-hub: x", projects=["agent-hub"])
+    with store.read() as c:
+        assert c.execute("SELECT project FROM message").fetchone()[0] == "agent-hub"
+
+
+def test_tasks_view(store):
+    a = store.create_task(project="P", kind="scout", title="разведка")
+    b = store.create_task(project="P", kind="code", title="кнопка оплаты")
+    for st in (State.PREPARING, State.WORKING, State.DONE):
+        transitions.move(store, b, st)
+    rep = core.tasks_reply(store)
+    labels = [row[0].label for row in rep.buttons]
+    assert any(l.startswith(f"T{b} · готово") for l in labels)
+    d = core.task_detail(store, b)
+    assert "кнопка оплаты" in d.text and d.buttons[0][0].data == "tasks"
+    assert "нет задачи" in core.task_detail(store, 999).text
+    assert a
+
+
+def test_question_buttons_and_reply(store):
+    qid = comms.ask(store, "сливать T12?", ["да", "нет"])
+    q = core.pending_questions(store)[0]
+    rep = core.question_reply(q)
+    assert [b.data for row in rep.buttons for b in row] == [f"ans:{qid}:0", f"ans:{qid}:1"]
+    assert "→ да" in core.on_answer_button(store, f"ans:{qid}:0")
+    assert "уже отвечено" in core.on_answer_button(store, f"ans:{qid}:1")
+    q2 = comms.ask(store, "почему?")
+    assert "передал" in core.on_reply_to_question(store, q2, "потому")
+    assert [e.payload["answer"] for e in events.unacked(store)] == ["да", "потому"]
+
+
+def test_alarm_text():
+    class E:
+        critical = True
+        payload = {"text": "opencode лёг"}
+    assert core.alarm_text(E()).startswith("🚨 Хаб: opencode лёг")
+
+
+# --- запуск Claude ---
+
+class Spawner:
+    def __init__(self, session="sess-1"):
+        self.calls = []
+        self.session = session
+        self.procs = []
+
+    def __call__(self, cmd, cwd, log):
+        self.calls.append((cmd, cwd))
+        with open(log, "w") as f:
+            f.write(json.dumps({"type": "system", "subtype": "init", "session_id": self.session}) + "\n")
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.procs.append(p)
+        return p.pid
+
+
+def test_launcher_flow(store, tmp_path):
+    project = make_project(tmp_path)
+    sp = Spawner()
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "idle"
+    core.on_text(store, 1, "привет", projects=["P"])
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "launched"
+    cmd, cwd = sp.calls[0]
+    assert cwd == project.root and "--dangerously-skip-permissions" in cmd and "--resume" not in cmd
+    assert "привет" in cmd[cmd.index("-p") + 1] and "ahub say" in cmd[cmd.index("-p") + 1]
+    core.on_text(store, 1, "ещё вопрос", projects=["P"])
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "running"  # второй не поднимаем
+    sp.procs[0].kill()
+    sp.procs[0].wait()
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "finished"
+    assert json.loads(store.meta_get(launcher.SESSION_KEY))["id"] == "sess-1"
+    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["ещё вопрос"]  # первое передано (сессия была)
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "launched"  # накопленное
+    assert sp.calls[1][0][sp.calls[1][0].index("--resume") + 1] == "sess-1"  # та же TG-сессия
+    for p in sp.procs:
+        p.kill()
+
+
+def test_launcher_respects_presence_and_limit(store, tmp_path):
+    project = make_project(tmp_path)
+    sp = Spawner()
+    core.on_text(store, 1, "x", projects=[])
+    events.touch(store)
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "idle"  # живой Claude есть
+    with store.tx() as c:
+        c.execute("DELETE FROM presence")
+        for _ in range(launcher.MAX_PER_HOUR):
+            c.execute("INSERT INTO claude_launch(ts, project, status) VALUES(?,?, 'ok')", (now_ms(), "P"))
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "limit"
+
+
+def test_launcher_timeout_kills(store, tmp_path):
+    project = make_project(tmp_path)
+    sp = Spawner()
+    core.on_text(store, 1, "x", projects=[])
+    t0 = now_ms()
+    launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0)
+    assert launcher.tick(store, projects=[project], now=t0 + launcher.TIMEOUT_MS + 1) == "killed"
+    time.sleep(0.5)
+    assert sp.procs[0].poll() is not None
+
+
+def test_project_choice(store, tmp_path):
+    a = make_project(tmp_path / "a")
+    import dataclasses
+    b = dataclasses.replace(make_project(tmp_path / "b"), name="B")
+    events.touch(store, project="B")
+    with store.tx() as c:
+        c.execute("UPDATE presence SET last_seen=0")  # был, но давно — не «присутствует»
+    core.on_text(store, 1, "x", projects=["P", "B"])
+    sp = Spawner()
+    launcher.tick(store, projects=[a, b], spawn=sp, binary="claude")
+    assert sp.calls[0][1] == b.root  # последний проект Claude
+    sp.procs[0].kill()
+
+
+class FakeBot:
+    def __init__(self):
+        self.sent = []
+
+    async def send_message(self, chat, text, reply_markup=None):
+        self.sent.append((chat, text, reply_markup))
+
+        class M:
+            message_id = len(self.sent)
+        return M()
+
+
+async def test_background_one_pass(store, monkeypatch):
+    import asyncio
+
+    from ahub.tg import run as tgrun
+    core.remember_chat(store, 7)
+    comms.say(store, "T12 готова")
+    comms.ask(store, "сливать?", ["да", "нет"])
+    comms.raise_alarm(store, "opencode лёг", critical=True)
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda s: "idle")
+
+    async def stop(_):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", stop)
+    bot = FakeBot()
+    with pytest.raises(asyncio.CancelledError):
+        await tgrun.background(bot, store)
+    texts = [t for _, t, _ in bot.sent]
+    assert texts[0] == "T12 готова" and "сливать?" in texts[1] and texts[2].startswith("🚨")
+    assert bot.sent[1][2] is not None  # кнопки вариантов
+    assert comms.outbox(store) == [] and core.pending_questions(store) == [] and comms.alarms_for_tg(store) == []
+
+
+def test_dispatcher_builds(store):
+    from ahub.tg import run as tgrun
+    assert tgrun.build_dispatcher(store) is not None
+
+
+def test_launcher_fast_death_keeps_messages(store, tmp_path):
+    project = make_project(tmp_path)
+
+    class Dead(Spawner):
+        def __call__(self, cmd, cwd, log):
+            open(log, "w").close()  # ни сессии, ни вывода
+            p = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+            p.wait()
+            self.procs.append(p)
+            return p.pid
+
+    core.on_text(store, 1, "срочно", projects=[])
+    sp = Dead()
+    t0 = now_ms()
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0) == "launched"
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0 + 1000) == "finished"
+    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["срочно"]  # не потерялось
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0 + 2000) == "launched"

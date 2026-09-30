@@ -1,10 +1,10 @@
 schema_version = 2
 name = "agent-hub"
 worktrees = "$HOME/Projects/Python/agent-hub-wt"
-work_branch = "v2"  # стройка v2 (после переключения — main)
+work_branch = "main"
 python = "$HOME/Projects/Python/agent-hub/.venv/bin/python"
 rules = "docs/agents/ahub_rules.md"
-allowed_paths = ["ahub/**", "hub/**", "tests/**", "docs/**", "tools/**", "pyproject.toml", ".hub.toml", ".gitignore"]
+allowed_paths = ["ahub/**", "tests/**", "docs/**", "tools/**", "pyproject.toml", ".hub.toml", ".gitignore"]
 max_parallel = 2
 test_resource = "selftest"
 
@@ -16,4 +16,4 @@ go = 1.5
 usd = 0.0
 
 [secrets]
-exclude = ["ahub/secrets.py", "hub/secrets.py"]  # токен бота — не для работников
+exclude = ["ahub/secrets.py"]  # токен бота — не для работников

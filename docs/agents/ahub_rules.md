@@ -1,7 +1,7 @@
 # Правила работника agent-hub v2 (проект agent-hub)
 
 - Ты в отдельной копии репозитория (git worktree) на своей ветке. Выходить за её пределы нельзя.
-- Новый код — пакет `ahub/`, тесты — `tests/v2/`. Старый `hub/` не трогать, если задача прямо не просит.
+- Код — пакет `ahub/`, тесты — `tests/`. Карта кода — `docs/ARCHITECTURE.md`.
 - Python: `/home/takehiko/Projects/Python/agent-hub/.venv/bin/python`; тесты:
   `/home/takehiko/Projects/Python/agent-hub/.venv/bin/python -m pytest -q <пути>` (сети нет, всё — во временных
   каталогах; `tests/conftest.py` подменяет HOME).

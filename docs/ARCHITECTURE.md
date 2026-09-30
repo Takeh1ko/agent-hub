@@ -1,92 +1,55 @@
-# agent-hub — архитектура (шпаргалка для Claude)
+# agent-hub v2 — карта кода (шпаргалка для Claude)
 
-Сжатая карта кода, чтобы не изучать проект заново. Подробная спецификация — `docs/spec.md`,
-открытые проблемы — `docs/field_issues_2026-09-30.md`, бэклог — `docs/tasks/_backlog.md`,
-заметки о моделях — `docs/model_log.md`. Сверено с кодом 2026-09-30 (commit 8dc9d32).
+Сжатая карта, чтобы не изучать проект заново. Согласованная архитектура — `docs/v2/architecture.md`,
+интерфейсы между частями — `docs/v2/contracts.md`, история стройки — `docs/v2/progress.md`, v1 — `docs/v1/`.
 
 ## Что это
-Терминальный оркестратор ИИ-агентов-кодеров. Claude (архитектор) пишет **карточку** задачи →
-hub сам создаёт git worktree, запускает дешёвую модель-исполнителя (opencode: Spark/MiMo; agy: Gemini),
-проверяет результат **воротами** (коммит, дифф ⊆ разрешённых файлов, приёмочные тесты, `done.json`),
-гоняет **ревьюеров** в чистых сессиях, крутит круги доработки и доводит до `ready` → `hub merge`.
-Владелец (не программист) видит всё в TG-боте и в `hub top` (TUI), может ставить задачи текстом.
-Проекты: сам agent-hub и PlayerUP (`~/.config/agent-hub/config.toml` → список путей к репо с `.hub.toml`).
+Сервис, через который оркестратор (Claude Code; любой CLI-агент — через CLI или MCP) и человек (терминал `hub top`,
+Telegram) раздают работу дешёвым моделям-работникам (opencode: Spark 1.3 и др.), следят за ней и принимают
+результат. Команды `hub` и `ahub` — одно и то же (`ahub/cli.py`).
 
-## Жизненный цикл задачи
+## Как течёт задача
 ```
-карточка docs/tasks/<ID>-*.md
-  └ hub lint (gate/lint.py)            — разделы, globs ⊆ allowed_paths, пути, pytest --collect-only
-  └ hub start (commands/start.py)      — task в hub.db, ветка agent/<ID>, worktree в <worktrees>/<ID>, stage=queued
-  └ hub queue run (commands/queue.py)  — воркер: берёт queued, уважает --after/паузу/лимит/«Сеть: playerok»,
-                                         каждую задачу — отдельный процесс `python -m hub.commands.queue --run-one ID`
-      └ pipeline/cycle.py: run_task()  — ЕДИНСТВЕННЫЙ писатель этапа
-          preflight (gate/preflight.py: чистый worktree, rules, хук task_setup, collect, замок)
-          for round 1..N:
-            exec rN   — executor.start/resume (runners.py) с prompts.executor_prompt / fix_prompt
-            gate rN   — done.json (gate/donefile.py) + check_gate (gate/gate.py); провал → 1 repair-промпт
-                        в ту же сессию (gate/repair.py), второй провал → failed
-            review rN — ревьюеры в новых сессиях (prompts.review_prompt, «Решения арбитра» вырезаны)
-                        → .agent/review_rN_<model>.json → gate/verdict.py
-            все approve → ready; changes → следующий круг; круги кончились → arbiter
-          бюджет превышен → stopped + вопрос владельцу «продлить?»
-  └ hub merge (pipeline/merge.py)      — только ready (--force из arbiter): --no-ff в work_branch,
-                                         приёмка под замком, откат при красном, push по конфигу, cleanup
+hub task new (tasks.py: проверка полей, умолчания по типу)  → task: queued
+hub service (service.py, systemd ahub.service): очередь, места, ресурсы, «после X» → spawn `python -m ahub.worker T12`
+worker.py → engine.py (владелец задачи, аренда):
+  разведка:  prepare(копия) → working → итог по форме (.ahub/result.json + report.md) → done
+  код/рутина: prepare.py (копия без секретов, хук, сбор приёмки) → working → checking (gates.py: коммит, дифф ⊆ paths,
+             result.json, приёмка под замком) → reviewing (review.py: панель в новых сессиях) → fixing → … → done
+  итоги хода (providers/runner.py → Outcome): сбой сети → повтор; тишина → одно продолжение; квота/таймаут/бюджет →
+  needs_decision; ошибка → error; стоп → stopped
+events.py: done/needs_decision/error/owner_message/answer/alarm → Claude будит `hub watch` (Monitor) / `hub wait`
+accept.py: hub accept (разведка — принять; код — merge --no-ff в рабочую ветку, приёмка, откат при красной, push,
+  уборка копии, архив), rework / reject / continue / task edit / extend / budget / model
 ```
-Этапы: `queued → preflight → exec rN → gate rN → review rN → … → ready | arbiter | failed | stopped → merged | dropped`.
+Состояния и переходы — `ahub/model.py` (единственный источник имён); переходы и аренда — `ahub/transitions.py`.
 
-Устойчивость в cycle.py: `TransientError` (сбой сети/сервера opencode) → повтор до `retry_max` с паузой;
-сторож тишины (`idle_s`, 900 с) → musefree переключается на muse один раз; `hub continue` — wip-коммит +
-продолжение той же сессии (новая, если sha карточки изменился); `hub stop` — файл `.agent/stop_requested`.
-
-## Карта модулей (`hub/`, ~15 тыс. строк)
+## Модули `ahub/`
 | Модуль | Роль |
 |---|---|
-| `cli.py` | argparse; автообнаружение `hub/commands/*.py` с `register(subparsers)` |
-| `commands/` | по файлу на подкоманду: start, queue, continue_, review, merge, stop, clean, status, wait, findings, ask, say, inbox, cost, roster, lint, preflight, gate, new, top, bot, import_legacy |
-| `config.py` | `ProjectConfig` из `.hub.toml` (+ idle/retry), `load_projects()` из глобального конфига |
-| `store.py` | `Store` — `~/.local/share/agent-hub/hub.db` (или `$AGENT_HUB_HOME/hub.db`), SQLite WAL, миграции `hub/migrations/*.sql` |
-| `time.py` | UTC ms в БД, Asia/Yekaterinburg на экране, парсинг «сегодня 20:00», «2ч» |
-| `secrets.py`, `tg_send.py` | токен бота; простая отправка в TG из скриптов |
-| `read/` | **единый слой чтения** (CLI, TUI, бот): `opencode.py` (opencode.db mode=ro: сессии, $, пульс, активный tool), `agy.py`, `procs.py` (/proc), `git.py`, `events.py`, `findings.py`, `human.py` (словарь «по-человечески» для top/TG), `snapshot.py` (`build()` → `Snapshot`, `to_text` ≤ 1,5 КБ) |
-| `gate/` | чистые функции: `lint.py` (+`strip_arbiter`), `preflight.py`, `gate.py` (`check_gate`, `effective_base`), `donefile.py`, `acceptance.py` (pytest-ноды из «Приёмки»), `repair.py`, `verdict.py` |
-| `pipeline/` | `runners.py` (OpencodeRunner/AgyRunner, `MODELS`, TransientError, сторож тишины), `cycle.py` (`run_task`), `prompts.py`, `review_levels.py` (раздел «Ревью» 1–4), `merge.py` (+`list_orphans`), `draft.py` (задачи владельца → карточка моделью), `common.py` (meta, card globs, base) |
-| `bot/` | `core.py` — чистая логика (форматирование, группировка событий 5 мин, вопросы, подтверждения, snapshot→события); `run.py` — aiogram 3, long polling через HTTPS_PROXY, циклы outbox/poll, sync-обёртки через `to_thread` |
-| `tui/` | `app.py`, `widgets.py` — `hub top` на textual, опрос 2 с |
+| `cli.py`, `cliutil.py`, `commands/*.py` | CLI: автообнаружение `register()`; `--json`; ошибки — одна строка, код 2 |
+| `config.py`, `paths.py` | `.hub.toml` v2 (v1 читается с переводом), `~/.config/ahub/config.toml`; данные `~/.local/share/ahub/ahub.db`, логи `~/.local/state/ahub/logs` (`AHUB_HOME` — всё в одном каталоге) |
+| `store.py` + `migrations/` | SQLite WAL: task, task_dep, session, event (доставка/подтверждение), question, message, draft, model/role_model, presence, claude_launch, observer_report, op |
+| `model.py`, `transitions.py` | типы, состояния, переходы, события; move/acquire/renew/release/request_stop/once |
+| `tasks.py`, `drafts.py` | создание задачи с проверкой; черновик словами → модель → предпросмотр → запуск |
+| `registry.py` | модели (alias → поставщик/модель/вариант), меню ролей, запреты проекта |
+| `providers/` | `base.py` контракт; `runner.py` общий запуск (вывод в файл — opencode теряет хвост в пайп; тишина с учётом детей; стоп группой); `opencode.py`, `opencode_db.py`; `fake.py` для тестов |
+| `workspace.py`, `prepare.py`, `gates.py`, `review.py`, `prompts.py` | копия/ветка, подготовка, ворота, панель ревью, промпты |
+| `engine.py`, `worker.py` | ход задачи, процесс задачи |
+| `service.py` | очередь, сироты, самообновление на новый код, сердцебиение, поток наблюдателя |
+| `events.py`, `comms.py`, `views.py`, `archive.py` | доставка/присутствие; сообщения/вопросы/тревоги; L1–L3 с лимитами; архив `<проект>/.agent-hub/` |
+| `pulse.py`, `observer.py` | пульс 🟢🟡🔴⚫⚪; наблюдатель (5 мин код, 30 мин модель, прокси Koala, эскалация) |
+| `tg/` | бот (`core.py` логика, `run.py` aiogram, `launcher.py` запуск Claude без живой сессии, `proxy.py`) |
+| `tui/` | `hub top` (`data.py` данные, `app.py` textual) |
+| `mcp.py` | MCP-сервер (stdio) поверх тех же ручек |
+| `claude/SKILL.md` | навык для Claude Code (ставит `hub setup --claude`) |
 
-`tools/` — скрипты вне пакета: `claude_watch.py` (поток событий для Monitor Claude: ГОТОВО/АРБИТР/ОШИБКА…),
-`observer.sh` (наблюдатель-модель раз в N мин), `routine.sh` (разовый вызов Spark), `market_digest.sh`,
-`night.py` (устаревший ночной диспетчер до H06), `pulse.py`, `roster_loop.sh`, `after*.sh`, `continue.sh`.
+## Процессы
+- `systemctl --user … ahub.service` — `hub service run` (очередь + наблюдатель); `ahub-bot.service` — `hub bot run`.
+- Процессы задач — отдельные (`python -m ahub.worker T<id>`), переживают перезапуск сервиса.
+- Claude: Monitor на `hub watch`; `hub status`; решения — `hub accept|rework|reject`.
 
-## Данные
-**Источники истины — чужие:** `opencode.db` (токены/$/пульс), git (коммиты/дифф), `/proc` (жив ли процесс).
-Чужие SQLite — только `file:…?mode=ro`, короткие соединения.
-
-`hub.db` (связи и очередь): `task` (id, project, card_path, card_hash, level, branch, worktree, base_sha, stage, round,
-executor, reviewers_json, stage_reason, budget_go/usd, merged_sha, blind…), `session` (external_id ↔ task, role, round,
-model), `event` (kind: stage/stuck/crashed/budget_*/owner_message/answer/question; флаги seen_claude/sent_tg),
-`question`, `inbox`, `outbox` (сообщения владельцу от `hub say`), `budget`, `meta` (queue_paused, queue_stop,
-claude_listen_ts, tg_*), `tg_chat`, `draft`.
-
-Почтовый ящик агента в worktree `.agent/`: `done.json` (`{commit, files, tests{cmd,ok,tail}, notes}`),
-`review_rN_<model>.json`, логи `executor_rN.log` / `reviewer_rN_<model>.log` / `repair_rN.log`, `stop_requested`,
-`hubhome/` (изолированная hub.db агента: `AGENT_HUB_HOME`).
-
-## Модели и конфиг
-`runners.MODELS`: `muse` = opencode-go Spark 1.3 xhigh (основной), `musefree` (бесплатный Spark),
-`mimoflash`, `mimo`, `mimofree`, `glm`, `deepseek` (не использовать — дороже), `gemini` (agy, выключен).
-`.hub.toml`: root, worktrees, rules, python, test_lock, work_branch, push, allowed_paths, `[hooks]`,
-`[defaults]` executor/reviewers/budget_go (1.5)/budget_usd (0), `[levels]` easy/medium/hard/background → модель,
-`[draft] model`. Раздел карточки «Ревью: 1–4» задаёт состав панели и число кругов.
-
-## Процессы в работе
-- `hub queue run --project P` (nohup) — воркер очереди на проект, дети `--run-one`.
-- `hub bot` — единственный долгоживущий демон: TG + раз в 15 с Snapshot → события/уведомления, сводка раз в 60 мин.
-- Claude: `hub status`, `hub wait` (фоном), Monitor на `tools/claude_watch.py`; отвечает владельцу `hub say`.
-- Владелец: TG (`/status /roster /task /stop /merge /budget /pause /new`, кнопки на вопросах), `hub top`.
-
-## Правила работы с кодом
-- Тесты: `.venv/bin/python -m pytest -q` (conftest подменяет HOME; фейковые opencode.db/proc/git/aiogram, без сети).
-- Стиль: py3.12, `from __future__ import annotations`, dataclasses, stdlib sqlite3, время параметром (`now`/`clock`),
-  комментарии/тексты UI по-русски; чтение — чистые функции. Правила для агентов — `docs/agents/rules.md`.
-- Карточки `docs/tasks/*` — формат: Цель, Прочитать, Можно менять, Интерфейс, Приёмка, Нельзя, Сеть, Исполнитель,
-  Уровень, Ревью, Коммит (пример — любой `docs/tasks/H1*.md`).
+## Работа с кодом
+- Тесты: `.venv/bin/python -m pytest -q` (~2.5 мин; HOME подменяется, сети нет); живые: `AHUB_LIVE=1 … -m live`.
+- Стиль: py3.12, `from __future__ import annotations`, dataclasses, stdlib sqlite3, время параметром, по-русски.
+- Задачи для самого agent-hub тоже можно гонять через хаб (`.hub.toml`: рабочая ветка `main`).

@@ -1,176 +1,145 @@
-"""Store: миграции, WAL, задачи, сессии, события, import_legacy."""
-
 from __future__ import annotations
 
-import json
 import sqlite3
 
-from hub.store import Store
+import pytest
+
+from ahub import paths
+from ahub.model import TRANSITIONS, Ev, Kind, State, can_move, parse_task_id
+from ahub.store import Store
 
 
-def _tables(store: Store) -> set[str]:
-    con = sqlite3.connect(str(store.path))
-    try:
-        return {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    finally:
-        con.close()
+@pytest.fixture
+def store() -> Store:
+    return Store()
 
 
-def test_migrations_and_wal(tmp_path):
-    s = Store(tmp_path / "hub.db")
-    assert {"task", "session", "event", "question", "inbox", "budget", "migration"} <= _tables(s)
-    con = sqlite3.connect(str(s.path))
-    try:
-        assert con.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
-        assert con.execute("SELECT COUNT(*) FROM migration").fetchone()[0] >= 1
-    finally:
-        con.close()
-    # Повторное открытие не дублирует миграции.
-    Store(tmp_path / "hub.db")
-    con = sqlite3.connect(str(s.path))
-    try:
-        assert con.execute("SELECT COUNT(*) FROM migration").fetchone()[0] >= 1
-    finally:
-        con.close()
+def test_default_path_and_migration(store):
+    assert store.path == paths.db_path()
+    assert store.schema_version() >= 1
+    Store()  # повторное открытие не падает и ничего не применяет заново
+    with store.read() as c:
+        assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"task", "task_dep", "session", "event", "question", "message", "draft", "model",
+            "role_model", "presence", "claude_launch", "observer_report", "tg_chat", "op", "meta"} <= tables
 
 
-def test_task_crud(tmp_path):
-    s = Store(tmp_path / "hub.db")
-    s.upsert_task(id="T01", project="P", stage="exec r1", round=1)
-    got = s.get_task("T01")
-    assert got and got["stage"] == "exec r1" and got["round"] == 1
-    s.upsert_task(id="T01", stage="review r1", round=1)
-    assert s.get_task("T01")["stage"] == "review r1"
-    assert s.get_task("нет") is None
-    s.upsert_task(id="T02", stage="merged")
-    active = [t["id"] for t in s.list_tasks()]
-    assert "T01" in active and "T02" not in active
-    assert {t["id"] for t in s.list_tasks(active_only=False)} == {"T01", "T02"}
+def test_meta(store):
+    assert store.meta_get("x") is None
+    store.meta_set("x", "1")
+    store.meta_set("x", "2")
+    assert store.meta_get("x") == "2"
+    store.meta_del("x")
+    assert store.meta_get("x", "d") == "d"
 
 
-def test_sessions_and_events(tmp_path):
-    s = Store(tmp_path / "hub.db")
-    s.upsert_task(id="T01", stage="exec r1")
-    s.link_session("ses_1", "opencode", "T01", "executor", 1, "muse")
-    s.link_session("ses_2", "opencode", "T01", "reviewer", 1, "mimo")
-    roles = {r["external_id"]: r["role"] for r in s.list_sessions("T01")}
-    assert roles == {"ses_1": "executor", "ses_2": "reviewer"}
-    e1 = s.add_event("T01", "stage", {"stage": "exec r1"})
-    e2 = s.add_event("T01", "stuck", {})
-    assert e2 > e1
-    assert [e["kind"] for e in s.events_since(e1)] == ["stuck"]
-    assert s.events_since(e2) == []
+def test_create_and_get_task(store):
+    a = store.create_task(project="P", kind=Kind.CODE, title="сделать", spec="подробно",
+                          executor="spark", review={"models": ["spark"], "rounds": 2},
+                          limits={"allowed_paths": ["core/**"]}, budget_go=1.5, created_by="orchestrator",
+                          now=1000)
+    b = store.create_task(project="P", kind="scout", title="узнать", after=[a], now=2000)
+    ta = store.get_task(a)
+    assert ta.label == f"T{a}"
+    assert ta.kind is Kind.CODE and ta.state is State.QUEUED
+    assert ta.review == {"models": ["spark"], "rounds": 2}
+    assert ta.limits == {"allowed_paths": ["core/**"]}
+    assert ta.created_at == ta.updated_at == 1000
+    assert store.get_task(b).after == [a]
+    assert store.dependents_of(a) == [b]
+    evs = store.events()
+    assert [e.kind for e in evs] == ["created", "created"]
+    assert evs[0].task_id == a and evs[0].payload["by"] == "orchestrator"
+    assert store.get_task(999) is None
 
 
-def test_import_legacy_stage_and_roles(tmp_path):
-    wt = tmp_path / "worktrees"
-    t1 = wt / "T05-что-то"
-    (t1 / ".agent").mkdir(parents=True)
-    (t1 / ".agent" / "state.json").write_text(json.dumps({
-        "task": "T05-что-то", "base": "abc123", "worktree": str(t1),
-        "executor_session": "ses_exec", "reviewer_sessions": ["ses_rev1", "ses_rev2"],
-        "round": 1, "verdicts": ["changes"], "status": "failed",
-    }), encoding="utf-8")
-    (t1 / ".agent" / "review_r1.json").write_text(json.dumps({
-        "verdict": "changes", "findings": []}), encoding="utf-8")
-    t2 = wt / "T06-готово"
-    (t2 / ".agent").mkdir(parents=True)
-    (t2 / ".agent" / "state.json").write_text(json.dumps({
-        "task": "T06-готово", "base": "abc123", "worktree": str(t2),
-        "executor_session": "ses_e2", "reviewer_sessions": [],
-        "round": 2, "verdicts": ["approve"], "status": "ready",
-    }), encoding="utf-8")
-    s = Store(tmp_path / "hub.db")
-    ids = s.import_legacy(wt)
-    assert ids == ["T05-что-то", "T06-готово"]
-    # failed + changes в review → этап review r1.
-    assert s.get_task("T05-что-то")["stage"] == "review r1"
-    assert s.get_task("T06-готово")["stage"] == "ready"
-    roles = {r["external_id"]: r["role"] for r in s.list_sessions("T05-что-то")}
-    assert roles == {"ses_exec": "executor", "ses_rev1": "reviewer", "ses_rev2": "reviewer"}
+def test_create_only_queued_or_draft(store):
+    with pytest.raises(ValueError):
+        store.create_task(project="P", kind="scout", title="x", state=State.WORKING)
+    tid = store.create_task(project="P", kind="scout", title="x", state=State.DRAFT)
+    assert store.get_task(tid).state is State.DRAFT
 
 
-def test_import_legacy_skips_broken(tmp_path):
-    wt = tmp_path / "wt"
-    (wt / "пусто").mkdir(parents=True)
-    bad = wt / "битый"
-    (bad / ".agent").mkdir(parents=True)
-    (bad / ".agent" / "state.json").write_text("{не json", encoding="utf-8")
-    s = Store(tmp_path / "hub.db")
-    assert s.import_legacy(wt) == []
-    assert s.import_legacy(tmp_path / "нет-каталога") == []
+def test_create_rolls_back_on_bad_dependency(store):
+    with pytest.raises(sqlite3.IntegrityError):
+        store.create_task(project="P", kind="scout", title="x", after=[12345])
+    assert store.list_tasks() == []
+    assert store.events() == []
 
 
-def _legacy_wt(tmp_path, name, state, reviews=None):
-    t = tmp_path / "worktrees" / name
-    (t / ".agent").mkdir(parents=True)
-    (t / ".agent" / "state.json").write_text(
-        json.dumps(state, ensure_ascii=False), encoding="utf-8")
-    for fname, verdict in (reviews or {}).items():
-        (t / ".agent" / fname).write_text(
-            json.dumps({"verdict": verdict, "findings": []}), encoding="utf-8")
-    return t
+def test_list_tasks_filters(store):
+    ids = [store.create_task(project=p, kind="scout", title=p) for p in ("A", "B", "A")]
+    assert [t.id for t in store.list_tasks(project="A")] == [ids[0], ids[2]]
+    assert [t.id for t in store.list_tasks(newest_first=True, limit=2)] == [ids[2], ids[1]]
+    assert store.list_tasks(states=set()) == []
+    assert len(store.list_tasks(states={State.QUEUED})) == 3
 
 
-def test_import_legacy_verdicts_without_review_file(tmp_path):
-    """failed + changes в state.json без review-файла → всё равно review r1."""
-    _legacy_wt(tmp_path, "T10", {
-        "task": "T10", "base": "b", "worktree": "x",
-        "executor_session": "s", "reviewer_sessions": [],
-        "round": 1, "verdicts": ["changes"], "status": "failed",
-    })
-    _legacy_wt(tmp_path, "T11", {
-        "task": "T11", "base": "b", "worktree": "x",
-        "executor_session": "s", "reviewer_sessions": [],
-        "round": 2, "verdicts": ["dispute"], "status": "failed",
-    })
-    s = Store(tmp_path / "hub.db")
-    assert s.import_legacy(tmp_path / "worktrees") == ["T10", "T11"]
-    assert s.get_task("T10")["stage"] == "review r1"
-    assert s.get_task("T11")["stage"] == "arbiter"
+def test_update_task_plain_only(store):
+    tid = store.create_task(project="P", kind="code", title="x")
+    store.update_task(tid, branch="ahub/T1", limits={"allowed_paths": ["a"]}, now=5)
+    t = store.get_task(tid)
+    assert t.branch == "ahub/T1" and t.limits == {"allowed_paths": ["a"]} and t.updated_at == 5
+    for bad in ("state", "owner", "version", "lease_until"):
+        with pytest.raises(ValueError):
+            store.update_task(tid, **{bad: "x"})
 
 
-def test_import_legacy_personal_review_file(tmp_path):
-    """Только review_r1_<имя>.json (без сводного) → этап review r1.
-
-    verdicts в state.json заведомо без 'changes', чтобы тест ловил
-    именно чтение персонального файла, а не фолбэк по verdicts.
-    """
-    _legacy_wt(tmp_path, "T18", {
-        "task": "T18", "base": "b", "worktree": "x",
-        "executor_session": "s", "reviewer_sessions": [],
-        "round": 1, "verdicts": [], "status": "failed",
-    }, reviews={"review_r1_muse.json": "changes"})
-    _legacy_wt(tmp_path, "T19", {
-        "task": "T19", "base": "b", "worktree": "x",
-        "executor_session": "s", "reviewer_sessions": [],
-        "round": 1, "verdicts": ["approve"], "status": "failed",
-    }, reviews={"review_r1_a.json": "approve", "review_r1_b.json": "changes"})
-    s = Store(tmp_path / "hub.db")
-    assert s.import_legacy(tmp_path / "worktrees") == ["T18", "T19"]
-    assert s.get_task("T18")["stage"] == "review r1"
-    assert s.get_task("T19")["stage"] == "review r1"
+def test_events_reaction_and_filters(store):
+    tid = store.create_task(project="P", kind="scout", title="x")
+    e1 = store.add_event(Ev.PHASE, task_id=tid, payload={"phase": "studying"})
+    e2 = store.add_event(Ev.DONE, task_id=tid, project="P")
+    e3 = store.add_event(Ev.ALARM, critical=True, payload={"text": "поставщик лёг"})
+    got = store.events(needs_reaction=True)
+    assert [e.id for e in got] == [e2, e3]
+    assert got[1].critical and got[1].task_id is None
+    assert [e.id for e in store.events(after_id=e1, task_id=tid)] == [e2]
+    assert store.last_event_id() == e3
+    with pytest.raises(ValueError):
+        store.add_event("нет-такого")
 
 
-def test_import_legacy_skips_panel_sentinel(tmp_path):
-    """reviewer_sessions=['panel'] — не сессия, в БД её быть не должно."""
-    _legacy_wt(tmp_path, "T20", {
-        "task": "T20", "base": "b", "worktree": "x",
-        "executor_session": "s", "reviewer_sessions": ["panel", "noop", ""],
-        "round": 1, "verdicts": [], "status": "failed",
-    })
-    s = Store(tmp_path / "hub.db")
-    assert s.import_legacy(tmp_path / "worktrees") == ["T20"]
-    ext = [r["external_id"] for r in s.list_sessions("T20")]
-    assert "panel" not in ext and "noop" not in ext
-    assert ext == ["s"]
+def test_sessions(store):
+    tid = store.create_task(project="P", kind="scout", title="x")
+    sid = store.add_session(task_id=tid, provider="opencode", role="scout", model="spark", now=7)
+    store.update_session(sid, external_id="ses_1", status="ok", cost_go=0.12, tokens={"input": 10})
+    s = store.get_session(sid)
+    assert s.external_id == "ses_1" and s.cost_go == 0.12 and s.tokens == {"input": 10} and s.started_at == 7
+    assert [x.id for x in store.list_sessions(tid, status="ok")] == [sid]
+    other = store.add_session(task_id=tid, provider="opencode", role="reviewer")
+    with pytest.raises(sqlite3.IntegrityError):  # один external_id у поставщика — одна сессия
+        store.update_session(other, external_id="ses_1")
+    with pytest.raises(ValueError):
+        store.update_session(sid, task_id=5)
 
 
-def test_upsert_task_keeps_created_at(tmp_path):
-    s = Store(tmp_path / "hub.db")
-    s.upsert_task(id="T", stage="exec r1", created_at=1000)
-    assert s.get_task("T")["created_at"] == 1000
-    s.upsert_task(id="T", stage="exec r2")
-    got = s.get_task("T")
-    assert got["stage"] == "exec r2"
-    assert got["created_at"] == 1000
+def test_tx_rolls_back(store):
+    with pytest.raises(RuntimeError):
+        with store.tx() as c:
+            store.create_task(project="P", kind="scout", title="x", con=c)
+            raise RuntimeError("стоп")
+    assert store.list_tasks() == []
+
+
+def test_transition_table_consistent():
+    for src, dsts in TRANSITIONS.items():
+        assert src not in dsts, f"петля {src}"
+    assert not TRANSITIONS[State.ACCEPTED] and not TRANSITIONS[State.REJECTED]
+    assert can_move("done", "accepting") and not can_move("queued", "done")
+    # Из любого состояния, кроме финальных и черновика, есть путь к финалу.
+    for s in State:
+        seen, stack = set(), [s]
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            stack.extend(TRANSITIONS[cur])
+        assert State.ACCEPTED in seen or State.REJECTED in seen or s in (State.ACCEPTED,)
+
+
+def test_parse_task_id():
+    assert parse_task_id("T12") == parse_task_id("t12") == parse_task_id("12") == parse_task_id(12) == 12
+    with pytest.raises(ValueError):
+        parse_task_id("X1")

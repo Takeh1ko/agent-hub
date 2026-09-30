@@ -1,10 +1,15 @@
 # agent-hub
 
-Идёт переписывание на v2 (пакет `ahub/`, ветка `v2`). В начале сессии читать:
-- `docs/v2/progress.md` — где остановились, траты Spark, открытые вопросы;
-- `docs/v2/plan.md` — этапы и карточки; `docs/v2/architecture.md` — согласованная архитектура;
-- `docs/v2/contracts.md` — интерфейсы между частями (когда появится).
+Карта кода — читать первой, вместо изучения кода с нуля:
+@docs/ARCHITECTURE.md
 
-Старый хаб v1 (пакет `hub/`) — справочно: @docs/ARCHITECTURE.md. v1 не развивается и не чинится.
+Согласованная архитектура — `docs/v2/architecture.md`, контракты — `docs/v2/contracts.md`, ход стройки и траты
+Spark — `docs/v2/progress.md`. Старый хаб v1 — только история: `docs/v1/`.
 
-После каждой карточки — обновить `docs/v2/progress.md`.
+После заметных изменений структуры (модуль, состояние, таблица, процесс) — обновить `docs/ARCHITECTURE.md`.
+
+<!-- ahub:begin -->
+## agent-hub
+Задачи для моделей-работников — через `ahub` (навык `ahub`). В начале сессии — Monitor на `ahub watch`;
+по строкам событий: `ahub status T<id>` → `ahub accept|rework|reject`. Сводка — `ahub status`.
+<!-- ahub:end -->

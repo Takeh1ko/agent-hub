@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from hub.time import TZ, fmt_local, now_ms, parse_since, to_local
+import pytest
+
+from ahub.time import TZ, fmt_local, now_ms, parse_duration, parse_since, to_local
 
 
 def _ms(y, mo, d, hh=0, mm=0) -> int:
@@ -63,3 +65,32 @@ def test_parse_local_not_utc():
     got = parse_since("2026-09-28 20:00", now)
     assert got == int(datetime(2026, 9, 28, 20, 0, tzinfo=TZ).timestamp() * 1000)
     assert got != int(datetime(2026, 9, 28, 20, 0, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def test_parse_duration_units():
+    assert parse_duration("90") == 90
+    assert parse_duration("30s") == 30
+    assert parse_duration("30m") == 30 * 60
+    assert parse_duration("4h") == 4 * 3600
+    assert parse_duration("2ч") == 2 * 3600
+    assert parse_duration("15м") == 15 * 60
+    assert parse_duration("30с") == 30
+
+
+def test_parse_duration_fractional():
+    assert parse_duration("1.5h") == pytest.approx(5400.0)
+    assert parse_duration("0.5m") == pytest.approx(30.0)
+    assert parse_duration("2.5s") == pytest.approx(2.5)
+
+
+def test_parse_duration_spaces():
+    assert parse_duration(" 90 ") == 90
+    assert parse_duration(" 30 m ") == 30 * 60
+    assert parse_duration("4 h") == 4 * 3600
+    assert parse_duration(" 2 ч ") == 2 * 3600
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "10x", "m", "--5", "10 sm", "1.2.3h"])
+def test_parse_duration_errors(bad):
+    with pytest.raises(ValueError, match="непонятная длительность"):
+        parse_duration(bad)

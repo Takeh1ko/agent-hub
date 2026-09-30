@@ -32,6 +32,12 @@ class PrepareError(RuntimeError):
     pass
 
 
+def task_env(label: str, worktree: str, root: str) -> dict[str, str]:
+    """Переменные задачи для хуков и приёмки; HUB_* — совместимость с хуками проектов, писанными под v1."""
+    return {"AHUB_TASK_ID": label, "AHUB_WORKTREE": worktree, "AHUB_PROJECT_ROOT": root,
+            "HUB_TASK_ID": label, "HUB_WORKTREE": worktree, "HUB_PROJECT_ROOT": root}
+
+
 def scrub_env(env: dict[str, str]) -> dict[str, str]:
     """Окружение без секретов хаба; ключи моделей и прокси остаются."""
     out = {}
@@ -59,7 +65,7 @@ def run_hook(project: ProjectConfig, name: str, task: Task, worktree: str) -> No
     if not cmd.strip():
         return
     env = scrub_env(dict(os.environ))
-    env.update(AHUB_TASK_ID=task.label, AHUB_WORKTREE=worktree, AHUB_PROJECT_ROOT=project.root)
+    env.update(task_env(task.label, worktree, project.root))
     try:
         r = subprocess.run(cmd, shell=True, cwd=worktree, env=env, capture_output=True, text=True,
                            timeout=HOOK_TIMEOUT_S)

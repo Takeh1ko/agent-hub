@@ -1,5 +1,7 @@
-"""Общие фикстуры. Тесты не трогают настоящие ~/.local/share/opencode и ~/.local/share/agent-hub:
-HOME подменяется на временный каталог."""
+"""Общие фикстуры: всё состояние — во временном каталоге. Настоящие ~/.local/share/opencode, ~/.local/share/ahub
+и ~/.config не трогаются (HOME подменяется); живые тесты (настоящие поставщики, деньги) — только при AHUB_LIVE=1."""
+
+from __future__ import annotations
 
 import os
 import pwd
@@ -9,81 +11,64 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolated_home(tmp_path, monkeypatch):
+def _isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("AGENT_HUB_HOME", str(tmp_path / ".local/share/agent-hub"))
+    monkeypatch.setenv("AHUB_HOME", str(tmp_path / "ahub-home"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
-    yield tmp_path
+    for var in ("XDG_DATA_HOME", "XDG_STATE_HOME", "AHUB_FAKE_QUEUE"):
+        monkeypatch.delenv(var, raising=False)
+    yield
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _no_combat_write():
-    """Страж набора: боевой hub.db не создан/не изменён за весь прогон."""
+def _real_db_untouched():
+    """Страж набора: боевая база хаба не изменена тестами (задачи и сообщения)."""
     try:
-        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        real = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local/share/ahub/ahub.db"
     except (KeyError, OSError):
         yield
         return
-    combat = real_home / ".local/share/agent-hub/hub.db"
-    # Боевую базу параллельно пишет живой бот (события, meta, автоимпорт) — mtime не показатель.
-    # Утечка тестов = новые строки в таблицах, куда пишут только владелец/тесты.
-    guarded = ("tg_chat", "inbox", "question", "outbox")
 
-    def rows() -> dict:
-        if not combat.exists():
-            return {}
+    def counts():
+        if not real.exists():
+            return None
         import sqlite3
 
-        con = sqlite3.connect(f"file:{combat}?mode=ro", uri=True, timeout=5)
+        con = sqlite3.connect(f"file:{real}?mode=ro", uri=True, timeout=5)
         try:
-            out = {}
-            for t in guarded:
-                try:
-                    if t == "outbox":
-                        # Явный порядок колонок: sent_ts — живая/неживая строка.
-                        out[t] = {tuple(r) for r in con.execute(
-                            "SELECT id, ts, text, task_id, sent_ts FROM outbox")}
-                    else:
-                        out[t] = {tuple(r) for r in con.execute(f"SELECT * FROM {t}")}
-                except sqlite3.Error:
-                    out[t] = set()
-            return out
+            return tuple(con.execute(f"SELECT COALESCE(MAX(id), 0) FROM {t}").fetchone()[0]
+                         for t in ("task", "message", "question", "draft"))
+        except sqlite3.Error:
+            return None
         finally:
             con.close()
 
-    before_present = combat.exists()
-    before = rows()
+    before = counts()
     yield
-    if not before_present:
-        assert not combat.exists(), "тесты создали боевой hub.db"
+    after = counts()
+    if before is not None and after is not None:
+        # живой хаб мог добавить свои строки во время прогона — тесты пишут только в tmp; сверяем, что
+        # тестовые заголовки не просочились (фиктивный проект «P»)
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{real}?mode=ro", uri=True, timeout=5)
+        try:
+            leaked = con.execute("SELECT COUNT(*) FROM task WHERE project='P'").fetchone()[0]
+        finally:
+            con.close()
+        assert leaked == 0, "тесты записали задачи в боевую базу хаба"
+
+
+def write(path, text: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def pytest_collection_modifyitems(config, items):
+    if os.environ.get("AHUB_LIVE") == "1":
         return
-    after = rows()
-    for t in guarded:
-        # Владелец мог написать боту во время прогона — это inbox с source='tg' и живым текстом;
-        # тестовые строки узнаются по отсутствию в «до» и по признакам фикстур.
-        new = after.get(t, set()) - before.get(t, set())
-        if t == "inbox":
-            # Живые входящие: владелец из TG ('tg') и наблюдатель ('observer') пишут во время прогона.
-            leaked = [r for r in new if not (str(r).count("'tg'") or str(r).count("'observer'"))]
-        elif t == "outbox":
-            # Живые писатели (say/бот/конвейер) работают параллельно с прогоном: их строки
-            # либо длинные (отчёты > 200 симв.), либо уже помечены отправленными (sent_ts)
-            # к teardown. Утечка теста — короткая И неотправленная строка.
-            leaked = [r for r in new
-                      if (len(r) < 5 or r[4] is None)
-                      and len(str(r[2] if len(r) > 2 else r)) < 200]
-        else:
-            leaked = list(new)
-        assert not leaked, f"тесты записали в боевой hub.db ({t}): {leaked[:3]}"
-
-
-@pytest.fixture(autouse=True)
-def _reset_pulse_cooldown():
-    """Кулдаун пульс-событий бота — состояние модуля; между тестами не переносим."""
-    try:
-        from hub.bot import core as _core
-
-        _core._LAST_PULSE.clear()
-    except Exception:
-        pass
-    yield
+    skip = pytest.mark.skip(reason="живой тест: AHUB_LIVE=1")
+    for item in items:
+        if "live" in item.keywords:
+            item.add_marker(skip)

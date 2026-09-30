@@ -24,7 +24,7 @@ from pathlib import Path
 from ahub import archive, workspace
 from ahub.config import ProjectConfig
 from ahub.model import Kind
-from ahub.prepare import scrub_env
+from ahub.prepare import scrub_env, task_env
 from ahub.store import Task
 
 TEST_TIMEOUT_S = 30 * 60
@@ -129,8 +129,7 @@ def run_acceptance(project: ProjectConfig, cwd: str, nodes: list[str], *, task_l
     py = project.python or "python3"
     cmd = [py, "-m", "pytest", "-q", *nodes]
     env = scrub_env(dict(os.environ))
-    env.update(AHUB_TASK_ID=task_label, AHUB_WORKTREE=cwd, AHUB_PROJECT_ROOT=project.root,
-               PYTHONDONTWRITEBYTECODE="1")
+    env.update(task_env(task_label, cwd, project.root), PYTHONDONTWRITEBYTECODE="1")
     clear_pycache(cwd)  # устаревший .pyc (правка того же размера в ту же секунду) дал бы ложную зелёную
     lock = ""
     if project.test_resource and project.test_resource in project.resources:

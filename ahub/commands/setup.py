@@ -83,10 +83,14 @@ def ensure_project_file(root: Path, *, name: str | None = None, deny: list[str] 
         if deny:
             import dataclasses
             cfg = dataclasses.replace(cfg, models_deny=tuple(dict.fromkeys(list(cfg.models_deny) + deny)))
-        backup = f.with_suffix(".toml.v1")
+        from ahub import archive
+
+        backup = archive.root(cfg) / "hub.toml.v1"  # архив хаба — вне git проекта
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        archive._exclude(cfg)
         backup.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
         f.write_text(render_v2(cfg, raw_root=str(data.get("root", ""))), encoding="utf-8")
-        return f"переведён v1 → v2 (старый — {backup.name})", f
+        return f"переведён v1 → v2 (старый — {archive.DIR}/{backup.name})", f
     cfg = config.parse_project({"schema_version": 2, "name": name or root.name,
                                 "worktrees": str(root.parent / f"{root.name}-wt"), "work_branch": _branch(root),
                                 "allowed_paths": ["**"], "models": {"deny": deny or []}}, root)

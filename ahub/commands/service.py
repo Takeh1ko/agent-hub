@@ -49,45 +49,56 @@ def cmd_pause(args, on: bool) -> int:
 
 
 UNIT = """[Unit]
-Description=agent-hub v2 (ahub service)
+Description={description}
 After=network-online.target
 StartLimitIntervalSec=600
 StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart={python} -m ahub service run
+ExecStart={python} -m ahub {command}
 Restart=always
 RestartSec=10
 KillMode=process
-Environment=PYTHONUNBUFFERED=1
+{env}
 
 [Install]
 WantedBy=default.target
 """
+UNITS = {"ahub.service": ("agent-hub: сервис (очередь, процессы задач, наблюдатель)", "service run"),
+         "ahub-bot.service": ("agent-hub: Telegram-бот (связь с Claude)", "bot run")}
+_ENV_KEYS = ("PATH", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "LANG")
+
+
+def unit_text(name: str) -> str:
+    """Юнит: окружение сессии, которого systemd не видит, — явно (PATH: claude/ahub; прокси Koala)."""
+    import os
+    import sys
+
+    desc, command = UNITS[name]
+    env = ["Environment=PYTHONUNBUFFERED=1"]
+    for k, v in sorted(os.environ.items()):
+        if k.upper() in _ENV_KEYS:
+            env.append(f'Environment="{k}={v}"')
+    return UNIT.format(description=desc, python=sys.executable, command=command, env="\n".join(env))
 
 
 def cmd_install(args) -> int:
-    """Юнит systemd --user: автоперезапуск, лимит перезапусков; процессы задач не убиваются (KillMode=process)."""
-    import sys
+    """Юниты systemd --user для сервиса и бота: автоперезапуск, лимит перезапусков, KillMode=process
+    (процессы задач переживают перезапуск сервиса)."""
     from pathlib import Path
 
-    import os
-
-    unit = Path.home() / ".config" / "systemd" / "user" / "ahub.service"
-    text = UNIT.format(python=sys.executable)
-    # systemd не видит окружения сессии: прокси (Koala) — явно, иначе модели и Telegram без сети
-    proxy = [f"Environment={k}={v}" for k, v in sorted(os.environ.items())
-             if k.upper() in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY")]
-    if proxy:
-        text = text.replace("Environment=PYTHONUNBUFFERED=1", "\n".join(["Environment=PYTHONUNBUFFERED=1", *proxy]))
+    d = Path.home() / ".config" / "systemd" / "user"
     if args.print:
-        emit(args, {"unit": text}, text)
+        text = "\n".join(f"# {n}\n{unit_text(n)}" for n in UNITS)
+        emit(args, {"units": list(UNITS)}, text)
         return 0
-    unit.parent.mkdir(parents=True, exist_ok=True)
-    unit.write_text(text, encoding="utf-8")
-    emit(args, {"path": str(unit)}, f"записан {unit}\nвключить: systemctl --user daemon-reload && "
-                                     f"systemctl --user enable --now ahub && loginctl enable-linger $USER")
+    d.mkdir(parents=True, exist_ok=True)
+    for n in UNITS:
+        (d / n).write_text(unit_text(n), encoding="utf-8")
+    emit(args, {"dir": str(d), "units": list(UNITS)},
+         f"записаны {', '.join(UNITS)} в {d}\nвключить: systemctl --user daemon-reload && "
+         f"systemctl --user enable --now {' '.join(UNITS)}")
     return 0
 
 
@@ -97,7 +108,7 @@ def register(subparsers) -> None:
     r = sub.add_parser("run", help="запустить сервис (передний план; systemd)")
     r.add_argument("--poll", type=float, default=2.0)
     r.set_defaults(func=cmd_run)
-    i = sub.add_parser("install", help="юнит systemd --user")
+    i = sub.add_parser("install", help="юниты systemd --user: сервис и бот")
     i.add_argument("--print", action="store_true", help="только показать")
     i.set_defaults(func=cmd_install)
     s = sub.add_parser("status", help="жив ли сервис, процессы задач, очередь")

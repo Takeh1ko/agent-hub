@@ -1,7 +1,7 @@
 [project]
 name = "midas-ai-hub"
-version = "0.1.0"
-description = "agent-hub: терминальный оркестратор ИИ-агентов (opencode, agy) с TG-пультом"
+version = "2.0.0"
+description = "agent-hub v2: сервис, через который оркестратор (Claude Code) и человек раздают работу моделям-работникам"
 requires-python = ">=3.12"
 dependencies = ["textual>=0.80", "aiogram>=3.13", "aiohttp-socks>=0.9"]
 
@@ -9,7 +9,7 @@ dependencies = ["textual>=0.80", "aiogram>=3.13", "aiohttp-socks>=0.9"]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
 
 [project.scripts]
-hub = "hub.cli:main"
+hub = "ahub.cli:main"
 ahub = "ahub.cli:main"
 
 [build-system]
@@ -17,7 +17,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["hub*", "ahub*"]
+include = ["ahub*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
