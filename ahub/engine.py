@@ -442,7 +442,7 @@ class Engine:
         self.store.add_event("budget_hard", task_id=self.task_id, project=self.project.name,
                              payload={"go": round(go, 4), "usd": round(usd, 4)})
         t = self.task()
-        return self._settle(State.NEEDS_DECISION, f"бюджет исчерпан (${go:.2f} из ${t.budget_go:g})")
+        return self._settle(State.NEEDS_DECISION, f"бюджет исчерпан (${go:.3f} из ${t.budget_go:g})")
 
     def _prepare_code(self, t: Task) -> Task:
         if t.state is State.PREPARING:

@@ -1,0 +1,55 @@
+"""ahub draft "текст" | draft start N | draft cancel N | draft list — задача словами, поля дописывает модель."""
+
+from __future__ import annotations
+
+from ahub import drafts
+from ahub.cliutil import CliError, add_project_arg, emit, resolve_project
+from ahub.store import Store
+
+
+def cmd_new(args) -> int:
+    project = resolve_project(args)
+    store = Store()
+    did = drafts.create(store, project, args.text, source="cli")
+    emit(args, {"id": did}, drafts.preview(store, did) + f"\n\nзапустить: ahub draft start {did}")
+    return 0
+
+
+def cmd_start(args) -> int:
+    project = resolve_project(args)
+    try:
+        tid = drafts.start(Store(), project, args.id)
+    except ValueError as e:
+        raise CliError(str(e)) from e
+    emit(args, {"task": tid}, f"T{tid} в очереди")
+    return 0
+
+
+def cmd_cancel(args) -> int:
+    ok = drafts.cancel(Store(), args.id)
+    emit(args, {"ok": ok}, "отменён" if ok else "нельзя отменить")
+    return 0 if ok else 2
+
+
+def cmd_list(args) -> int:
+    rows = drafts.list_drafts(Store())
+    emit(args, {"drafts": rows}, "\n".join(f"#{r['id']} {r['status']} {r['text'][:70]}" for r in rows) or "черновиков нет")
+    return 0
+
+
+def register(subparsers) -> None:
+    p = subparsers.add_parser("draft", help="задача словами: модель дописывает поля, запуск — явно")
+    sub = p.add_subparsers(dest="draft_cmd", required=True)
+    n = sub.add_parser("new")
+    n.add_argument("text")
+    add_project_arg(n)
+    n.set_defaults(func=cmd_new)
+    s = sub.add_parser("start")
+    s.add_argument("id", type=int)
+    add_project_arg(s)
+    s.set_defaults(func=cmd_start)
+    c = sub.add_parser("cancel")
+    c.add_argument("id", type=int)
+    c.set_defaults(func=cmd_cancel)
+    ls = sub.add_parser("list")
+    ls.set_defaults(func=cmd_list)
