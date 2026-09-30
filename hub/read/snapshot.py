@@ -194,9 +194,14 @@ class Snapshot:
             tasks.pop()
         return head.encode("utf-8")[:limit].decode("utf-8", "ignore")
 
-    def roster_text(self, recent_ms: int = 10 * 60_000) -> str:
-        """Для владельца: задача словами, что сейчас, кто работает, что дальше (hm.describe)."""
-        blocks = ["\n".join(hm.roster_lines(t, self.now_ms)) for t in self.active_tasks()]
+    def roster_text(self, recent_ms: int = 10 * 60_000, include_done: bool = False) -> str:
+        """Для владельца: задача словами, что сейчас, кто работает, что дальше (hm.describe).
+
+        Без include_done — только активные (как раньше); с include_done —
+        и слитые/брошенные (для `roster --all` с деньгами/сессиями).
+        """
+        shown = list(self.tasks) if include_done else self.active_tasks()
+        blocks = ["\n".join(hm.roster_lines(t, self.now_ms)) for t in shown]
         return "\n\n".join(blocks) if blocks else "Активных задач нет."
 
 

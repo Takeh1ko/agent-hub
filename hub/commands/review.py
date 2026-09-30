@@ -103,8 +103,11 @@ def cmd_review(args) -> int:
     lock = (getattr(project, "test_lock", "") or "").strip() or None
     from hub.gate.acceptance import acceptance_cmd
 
+    # Та же база, что в конвейере: merge-base с рабочей веткой после её слияния.
+    work_branch = (getattr(project, "work_branch", "") or "").strip() or None
     gate = check_gate(Path(worktree), base_sha, head, allowed,
-                      acceptance_cmd(card_text, py), lock)
+                      acceptance_cmd(card_text, py), lock,
+                      work_branch=work_branch)
     if not gate.ok:
         for e in gate.errors:
             print(e)

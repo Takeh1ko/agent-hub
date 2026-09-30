@@ -137,13 +137,20 @@ def sessions(
 
 
 def _batch(con: sqlite3.Connection, srows: list[dict], now_ms: int) -> list[OcSession]:
-    """Собрать OcSession одним запросом на таблицу (≤10 execute всего)."""
+    """Собрать OcSession фиксированным числом запросов (≤10 execute всего).
+
+    Оконные функции (ROW_NUMBER) на живой базе дают ~0.8 с на 33 сессии:
+    три прохода с сортировкой по разделам. Вместо них — два плоских
+    SELECT без ORDER BY (сообщения + части одним куском) и разбор
+    по сессиям в памяти: новейшие 20/5 берутся сортировкой маленьких
+    групп в Python. Шаги step-finish считаются там же, без запроса.
+    """
     ids = [str(s.get("id")) for s in srows if str(s.get("id") or "")]
     if not ids:
         return []
     ph = ",".join("?" for _ in ids)
     tup = tuple(ids)
-    # Пульс: MAX(time_updated) по трём таблицам.
+    # Пульс: MAX(time_updated) по трём таблицам (дешёвые GROUP BY).
     pulse: dict[str, int] = {}
     for s in srows:
         sid = str(s.get("id"))
@@ -163,60 +170,64 @@ def _batch(con: sqlite3.Connection, srows: list[dict], now_ms: int) -> list[OcSe
                 continue
             if mx_i > pulse.get(str(sid2), 0):
                 pulse[str(sid2)] = mx_i
-    steps: dict[str, int] = {}
-    for sid2, cnt in con.execute(
-        f"SELECT session_id, COUNT(*) FROM part WHERE session_id IN ({ph})"
-        f" AND json_extract(data, '$.type')='step-finish' GROUP BY session_id",
+    # Сообщения и части — плоскими выборками, группировка в памяти.
+    raw_msgs: dict[str, list[tuple[str, int]]] = {sid: [] for sid in pulse}
+    for sid2, raw, t_upd in con.execute(
+        f"SELECT session_id, data, time_updated FROM message"
+        f" WHERE session_id IN ({ph})",
         tup,
     ).fetchall():
+        k = str(sid2)
+        if k not in raw_msgs:
+            continue
         try:
-            steps[str(sid2)] = int(cnt or 0)
+            t_i = int(t_upd or 0)
         except (TypeError, ValueError):
-            steps[str(sid2)] = 0
-    # Контекст: до 20 последних сообщений на сессию.
-    msg_map: dict[str, list[tuple[str, int]]] = {sid: [] for sid in pulse}
+            t_i = 0
+        raw_msgs[k].append((str(raw or ""), t_i))
+    msg_map: dict[str, list[tuple[str, int]]] = {}
+    for k, lst in raw_msgs.items():
+        lst.sort(key=lambda x: x[1], reverse=True)
+        msg_map[k] = lst[:20]
+    # Части: один проход, дальше шаги/tool/хвост из тех же списков.
+    raw_parts: dict[str, list[tuple[str, int]]] = {sid: [] for sid in pulse}
     for sid2, raw, t_upd in con.execute(
-        f"SELECT session_id, data, time_updated FROM (SELECT session_id, data,"
-        f" time_updated, ROW_NUMBER() OVER (PARTITION BY session_id"
-        f" ORDER BY time_updated DESC) AS rn FROM message"
-        f" WHERE session_id IN ({ph})) WHERE rn <= 20 ORDER BY time_updated DESC",
+        f"SELECT session_id, data, time_updated FROM part"
+        f" WHERE session_id IN ({ph})",
         tup,
     ).fetchall():
         k = str(sid2)
-        if k in msg_map:
+        if k not in raw_parts:
+            continue
+        try:
+            t_i = int(t_upd or 0)
+        except (TypeError, ValueError):
+            t_i = 0
+        raw_parts[k].append((str(raw or ""), t_i))
+    steps: dict[str, int] = {}
+    tool_map: dict[str, list[tuple[str, int]]] = {}
+    tail_map: dict[str, list[str]] = {}
+    for k, lst in raw_parts.items():
+        lst.sort(key=lambda x: x[1], reverse=True)
+        tail_map[k] = [raw for raw, _ in lst[:5]]
+        # Список уже отсортирован от новых к старым: первые 20 tool —
+        # те же, что давало окно ROW_NUMBER; шаги — точный COUNT.
+        tools: list[tuple[str, int]] = []
+        n_steps = 0
+        for raw, t_i in lst:
             try:
-                msg_map[k].append((str(raw or ""), int(t_upd or 0)))
-            except (TypeError, ValueError):
-                msg_map[k].append((str(raw or ""), 0))
-    # Активный tool: до 20 последних tool-частей на сессию.
-    tool_map: dict[str, list[tuple[str, int]]] = {sid: [] for sid in pulse}
-    for sid2, raw, t_upd in con.execute(
-        f"SELECT session_id, data, time_updated FROM (SELECT session_id, data,"
-        f" time_updated, ROW_NUMBER() OVER (PARTITION BY session_id"
-        f" ORDER BY time_updated DESC) AS rn FROM part"
-        f" WHERE session_id IN ({ph})"
-        f" AND json_extract(data, '$.type')='tool')"
-        f" WHERE rn <= 20 ORDER BY time_updated DESC",
-        tup,
-    ).fetchall():
-        k = str(sid2)
-        if k in tool_map:
-            try:
-                tool_map[k].append((str(raw or ""), int(t_upd or 0)))
-            except (TypeError, ValueError):
-                tool_map[k].append((str(raw or ""), 0))
-    # Хвост для activity без активного tool: 5 последних частей.
-    tail_map: dict[str, list[str]] = {sid: [] for sid in pulse}
-    for sid2, raw in con.execute(
-        f"SELECT session_id, data FROM (SELECT session_id, data,"
-        f" time_updated, ROW_NUMBER() OVER (PARTITION BY session_id"
-        f" ORDER BY time_updated DESC) AS rn FROM part"
-        f" WHERE session_id IN ({ph})) WHERE rn <= 5 ORDER BY time_updated DESC",
-        tup,
-    ).fetchall():
-        k = str(sid2)
-        if k in tail_map:
-            tail_map[k].append(str(raw or ""))
+                p = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(p, dict):
+                continue
+            ptype = p.get("type")
+            if ptype == "step-finish":
+                n_steps += 1
+            elif ptype == "tool" and len(tools) < 20:
+                tools.append((raw, t_i))
+        steps[k] = n_steps
+        tool_map[k] = tools
     out: list[OcSession] = []
     for s in srows:
         sid = str(s.get("id"))

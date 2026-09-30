@@ -182,3 +182,113 @@ def test_gate_merge_base(tmp_path):
     r3 = check_gate(repo, base, head, ["own.txt", "bad.txt"], passing,
                     work_branch="market")
     assert r3.ok, r3.errors
+
+
+def test_status_all_keeps_money(tmp_path):
+    """--all: слитая задача с деньгами и сессиями, как до ускорения (сейчас было 0)."""
+    import types
+
+    import hub.commands.status as status_cmd
+
+    s = Store()
+    wt_a = tmp_path / "wtA"
+    wt_m = tmp_path / "wtM"
+    wt_a.mkdir()
+    wt_m.mkdir()
+    s.upsert_task(id="TA", stage="exec r1", worktree=str(wt_a), updated_at=NOW)
+    s.upsert_task(id="TM", stage="merged", worktree=str(wt_m), updated_at=NOW)
+    db = _mkdb(tmp_path / "oc2.db", 3)
+    s.link_session("s000", "opencode", "TA", "executor", 1, "muse")
+    s.link_session("s001", "opencode", "TM", "executor", 1, "muse")
+    empty_proc = tmp_path / "пустой"
+    empty_proc.mkdir()
+    noagy = str(tmp_path / "noagy")
+    plain = snap.build(s, NOW, opencode_db=db, proc_root=empty_proc, agy_root=noagy)
+    by_id = {t.id: t for t in plain.tasks}
+    assert by_id["TM"].cost_go == 0.0 and by_id["TM"].sessions == []
+    full = snap.build(s, NOW, opencode_db=db, proc_root=empty_proc,
+                      agy_root=noagy, include_done=True)
+    by_full = {t.id: t for t in full.tasks}
+    assert len(by_full["TM"].sessions) == 1
+    assert by_full["TM"].cost_go > 0.0
+    # roster: без флага слитых нет, с флагом — есть с деньгами.
+    assert "TM" not in full.roster_text()
+    assert "TM" in full.roster_text(include_done=True)
+    # Команды пробрасывают --all в build (иначе деньги слитых 0).
+    for flag, want_money in ((False, 0.0), (True, 0.1)):
+        args = types.SimpleNamespace(all=flag, opencode_db=str(db),
+                                     proc_root=str(empty_proc))
+        got = status_cmd._snap(args)
+        m = {t.id: t for t in got.tasks}.get("TM")
+        if not flag:
+            assert m is None  # без --all слитые отфильтрованы
+        else:
+            assert m is not None and m.cost_go == want_money
+            assert len(m.sessions) == 1
+    # to_text --all показывает слитую с деньгами.
+    assert "TM" in full.to_text(include_done=True)
+
+
+def test_review_passes_work_branch(tmp_path, monkeypatch):
+    """hub review зовёт ворота с той же базой, что конвейер (work_branch)."""
+    import types
+
+    import hub.commands.review as review_cmd
+    from hub.gate import gate as gate_mod
+
+    repo = tmp_path / "repo2"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "a.txt").write_text("1\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-m", "init")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-b", "market")
+    (repo / "work.txt").write_text("w\n", encoding="utf-8")
+    _git(repo, "add", "work.txt")
+    _git(repo, "commit", "-m", "work")
+    _git(repo, "checkout", "-b", "agent/T9", base)
+    (repo / "own.txt").write_text("o\n", encoding="utf-8")
+    _git(repo, "add", "own.txt")
+    _git(repo, "commit", "-m", "own")
+    _git(repo, "merge", "market", "-m", "merge market")
+    head = _git(repo, "rev-parse", "HEAD")
+    (repo / ".hub.toml").write_text(
+        'schema_version = 1\nname = "T"\nwork_branch = "market"\n'
+        'allowed_paths = ["own.txt"]\n', encoding="utf-8")
+    card = tmp_path / "T9.md"
+    card.write_text(
+        "# T9\n**Цель.** ц\n**Можно менять.** `own.txt`\n"
+        "**Приёмка.** `pytest -q`\n", encoding="utf-8")
+    (repo / ".agent").mkdir(exist_ok=True)
+    (repo / ".agent" / "done.json").write_text(
+        json.dumps({"commit": head, "files": ["own.txt"],
+                    "tests": {"cmd": sys.executable + " -m pytest -q",
+                              "ok": True, "tail": "ok"},
+                    "notes": ""}), encoding="utf-8")
+    store = Store()
+    store.upsert_task(id="T9", project="T", card_path=str(card),
+                      branch="agent/T9", worktree=str(repo),
+                      base_sha=base, stage="exec r1", round=1,
+                      executor="muse", reviewers_json='["muse"]',
+                      updated_at=NOW)
+    seen: dict = {}
+    orig = gate_mod.check_gate
+
+    def fake(repo_p, base_sha, head_p, allowed, cmd, lock, **kw):
+        seen.update(kw)
+        seen["allowed"] = list(allowed or [])
+        # Настоящие ворота с этой базой: work.txt не forbidden.
+        real = orig(repo_p, base_sha, head_p, allowed, cmd, lock, **kw)
+        assert not any("work.txt" in e for e in real.errors), real.errors
+        from hub.gate.gate import GateResult
+
+        return GateResult(ok=False, errors=["stop-before-review"],
+                          diff_stat="", tests_tail="")
+    monkeypatch.setattr(gate_mod, "check_gate", fake)
+    args = types.SimpleNamespace(task_id="T9", project=str(repo), blind=False)
+    rc = review_cmd.cmd_review(args)
+    assert rc == 1  # ворота остановлены заглушкой до панели
+    assert seen.get("work_branch") == "market"
