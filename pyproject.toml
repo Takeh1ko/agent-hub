@@ -22,3 +22,4 @@ include = ["hub*", "ahub*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["live: настоящие поставщики (деньги), только при AHUB_LIVE=1"]

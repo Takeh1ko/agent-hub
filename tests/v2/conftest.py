@@ -18,3 +18,15 @@ def write(path, text: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def pytest_collection_modifyitems(config, items):
+    """Живые тесты (настоящие поставщики, деньги) — только при AHUB_LIVE=1."""
+    import os
+
+    if os.environ.get("AHUB_LIVE") == "1":
+        return
+    skip = pytest.mark.skip(reason="живой тест: AHUB_LIVE=1")
+    for item in items:
+        if "live" in item.keywords:
+            item.add_marker(skip)
