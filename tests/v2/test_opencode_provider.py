@@ -146,15 +146,19 @@ def test_capabilities_and_missing_binary(oc):
 @pytest.mark.live
 def test_live_contract(tmp_path):
     """Живая сессия Spark (≈ $0.001): AHUB_LIVE=1 pytest -m live tests/v2/test_opencode_provider.py"""
+    import pwd
+
     from tests.v2 import provider_contract as contract
 
-    real = OpencodeProvider()
+    home = pwd.getpwuid(os.getuid()).pw_dir  # conftest подменил HOME — opencode нужен настоящий (авторизация)
+    real_env = {"HOME": home, "XDG_CONFIG_HOME": f"{home}/.config", "XDG_DATA_HOME": f"{home}/.local/share"}
+    real = OpencodeProvider(db_path=f"{home}/.local/share/opencode/opencode.db", env=real_env)
 
     def make(kind: str, cwd: str) -> RunSpec:
         word = "PONG" if kind == "hello" else "PONG2"
         return RunSpec(prompt=f"Ответь одним словом: {word}. Ничего не делай, инструменты не вызывай.",
                        cwd=cwd, model_id="opencode-go/muse-spark-1.3-contributor", variant="low",
-                       log_path=str(tmp_path / f"{kind}.log"), timeout_s=300, idle_s=180)
+                       log_path=str(tmp_path / f"{kind}.log"), timeout_s=300, idle_s=180, env=real_env)
 
     contract.check_catalog_and_health(real)
     contract.check_session_cycle(real, make, str(tmp_path))

@@ -3,8 +3,9 @@
 Одинаково для всех поставщиков — модуль поставщика только собирает команду и разбирает строки.
 
 - Процесс стартует в своей группе (start_new_session): остановка убивает и его детей (тесты, замки).
-- Каждая строка stdout сразу пишется в лог (сырой вывод переживает падение хаба) и разбирается
-  поставщиком в Activity → on_activity; первый id сессии → on_session (вызывающий линкует его в базу сразу).
+- stdout процесса пишется прямо в файл лога (не в пайп: opencode теряет хвост вывода в пайп при выходе —
+  проверено 2026-09-30), поток читает файл следом; каждая строка разбирается поставщиком в Activity →
+  on_activity; первый id сессии → on_session (вызывающий линкует его в базу сразу). stderr — в `<лог>.stderr`.
 - Сторож тишины: нет строк вывода idle_s секунд и нет дочерних процессов → прервать, Outcome.SILENCE.
   Есть дети (тесты, ожидание замка) — молчание объяснено, ждём дальше.
 - should_stop() — ядро просит остановиться (бюджет, команда): прервать, Outcome.KILLED.
@@ -27,6 +28,7 @@ from ahub.providers.base import Act, Activity, Cap, Outcome, Provider, RunResult
 from ahub.time import now_ms
 
 POLL_S = 0.2
+TAIL_POLL_S = 0.05
 KILL_GRACE_S = 5.0
 _log = hublog.get("runner")
 
@@ -64,26 +66,21 @@ def run(provider: Provider, spec: RunSpec, *,
     env.update(provider.env(spec))
     ctx = {"provider": provider.name, "model": spec.model_id, "cwd": spec.cwd}
 
-    log_lock = threading.Lock()
-    logf = open(log_path, "a", encoding="utf-8")
-
-    def _write(line: str) -> None:
-        with log_lock:
-            try:
-                logf.write(line if line.endswith("\n") else line + "\n")
-                logf.flush()
-            except (OSError, ValueError):
-                pass
-
+    err_path = log_path + ".stderr"
+    out_f = open(log_path, "ab")
+    err_f = open(err_path, "ab")
+    start_off = out_f.tell()
     try:
-        proc = subprocess.Popen(cmd, cwd=spec.cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                stdin=subprocess.DEVNULL, text=True, bufsize=1, env=env,
-                                start_new_session=True, errors="replace")
+        proc = subprocess.Popen(cmd, cwd=spec.cwd, stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL,
+                                env=env, start_new_session=True)
     except OSError as e:
-        logf.close()
+        out_f.close()
+        err_f.close()
         _log.error("не запустился: %s", e, extra=ctx)
         return RunResult(Outcome.NOT_STARTED, spec.session_id, error=clip(f"{cmd[0]}: {e}"),
                          started_ms=started, ended_ms=now_ms(), log_path=log_path)
+    out_f.close()  # дескрипторы унаследовал процесс
+    err_f.close()
     if on_start is not None:
         try:
             on_start(proc.pid)
@@ -95,7 +92,7 @@ def run(provider: Provider, spec: RunSpec, *,
     sid_box: list[str | None] = [None]
     last_line = [time.monotonic()]
     last_act_ms = [started]
-    stderr_tail: list[str] = []
+    exited = threading.Event()
 
     def _emit(act: Activity) -> None:
         with acts_lock:
@@ -114,31 +111,45 @@ def run(provider: Provider, spec: RunSpec, *,
             except Exception:
                 _log.exception("on_activity упал", extra=ctx)
 
-    def _read_stdout() -> None:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            last_line[0] = time.monotonic()
-            _write(line)
-            try:
-                acts = provider.parse_line(line, now_ms())
-            except Exception:
-                _log.exception("parse_line упал", extra=ctx)
-                acts = []
-            for a in acts:
-                _emit(a)
+    def _handle(raw: bytes) -> None:
+        last_line[0] = time.monotonic()
+        line = raw.decode("utf-8", "replace")
+        try:
+            acts = provider.parse_line(line, now_ms())
+        except Exception:
+            _log.exception("parse_line упал", extra=ctx)
+            acts = []
+        for a in acts:
+            _emit(a)
 
-    def _read_stderr() -> None:
-        assert proc.stderr is not None
-        for line in proc.stderr:
-            _write("[stderr] " + line)
-            stderr_tail.append(line)
-            if len(stderr_tail) > 200:
-                del stderr_tail[:100]
+    def _tail() -> None:
+        """Читать лог следом за процессом; после выхода — дочитать остаток."""
+        buf = b""
+        with open(log_path, "rb") as f:
+            f.seek(start_off)
+            while True:
+                chunk = f.read(65536)
+                if chunk:
+                    buf += chunk
+                    *lines, buf = buf.split(b"\n")
+                    for ln in lines:
+                        _handle(ln)
+                    continue
+                if exited.is_set():
+                    rest = f.read()
+                    if rest:
+                        buf += rest
+                        *lines, buf = buf.split(b"\n")
+                        for ln in lines:
+                            _handle(ln)
+                        continue
+                    if buf.strip():
+                        _handle(buf)
+                    return
+                time.sleep(TAIL_POLL_S)
 
-    t_out = threading.Thread(target=_read_stdout, daemon=True)
-    t_err = threading.Thread(target=_read_stderr, daemon=True)
+    t_out = threading.Thread(target=_tail, daemon=True)
     t_out.start()
-    t_err.start()
 
     forced: Outcome | None = None
     silence_s = 0
@@ -171,14 +182,8 @@ def run(provider: Provider, spec: RunSpec, *,
                 _kill_group(proc)
                 break
     finally:
-        t_out.join(timeout=10)
-        t_err.join(timeout=10)
-        for stream in (proc.stdout, proc.stderr):
-            try:
-                if stream is not None:
-                    stream.close()
-            except OSError:
-                pass
+        exited.set()
+        t_out.join(timeout=30)
 
     ended = now_ms()
     with acts_lock:
@@ -191,7 +196,13 @@ def run(provider: Provider, spec: RunSpec, *,
             _log.exception("find_session упал", extra=ctx)
     if sid is None and spec.session_id:
         sid = spec.session_id
-    tail = "".join(stderr_tail)[-2000:]
+    try:
+        with open(err_path, "rb") as ef:
+            ef.seek(0, 2)
+            ef.seek(max(0, ef.tell() - 4000))
+            tail = ef.read().decode("utf-8", "replace")[-2000:]
+    except OSError:
+        tail = ""
 
     if forced is not None:
         outcome = forced
@@ -223,8 +234,6 @@ def run(provider: Provider, spec: RunSpec, *,
             usage = provider.stream_usage(acts)
     except Exception:
         _log.exception("usage упал", extra=ctx)
-    logf.close()
-
     level = "info" if outcome is Outcome.OK else "warning"
     getattr(_log, level)("сессия: %s%s", outcome.value, f" ({error[:200]})" if error else "",
                          extra={**ctx, "session": sid, "exit": proc.returncode,

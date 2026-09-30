@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -34,6 +35,15 @@ _STATUS = re.compile(r"\bstatus(?:code)?\D{0,3}(\d{3})\b", re.IGNORECASE)
 
 def opencode_bin() -> str:
     return shutil.which("opencode") or str(Path.home() / ".opencode" / "bin" / "opencode")
+
+
+def run_capture(cmd: list[str], timeout: int = 120, env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    """Запустить и забрать вывод через файл: в пайп opencode теряет хвост вывода при выходе."""
+    full_env = {**os.environ, **env} if env else None
+    with tempfile.TemporaryFile("w+", encoding="utf-8") as out:
+        r = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, text=True, timeout=timeout, env=full_env)
+        out.seek(0)
+        return r.returncode, out.read(), r.stderr or ""
 
 
 def _error_texts(err) -> list[str]:
@@ -107,9 +117,11 @@ class OpencodeProvider(Provider):
     capabilities = frozenset({Cap.RESUME, Cap.STREAM, Cap.TOKENS, Cap.COST_MONEY, Cap.ACTIVE_TOOL, Cap.EXPORT,
                               Cap.CATALOG, Cap.HEALTH, Cap.FIND_SESSION})
 
-    def __init__(self, db_path: str | None = None, binary: str | None = None) -> None:
+    def __init__(self, db_path: str | None = None, binary: str | None = None,
+                 env: dict[str, str] | None = None) -> None:
         self.db_path = db_path  # None — opencode_db.default_db() при каждом вызове
         self.binary = binary
+        self.extra_env = dict(env or {})  # окружение служебных команд (export/models/--version)
 
     def _bin(self) -> str:
         return self.binary or opencode_bin()
@@ -196,14 +208,13 @@ class OpencodeProvider(Provider):
 
     def export(self, session_id: str) -> dict | None:
         try:
-            r = subprocess.run([self._bin(), "export", session_id], capture_output=True, text=True, timeout=120)
+            rc, out, err = run_capture([self._bin(), "export", session_id], env=self.extra_env)
         except (OSError, subprocess.SubprocessError) as e:
             _log.warning("export %s: %s", session_id, e)
             return None
-        if r.returncode != 0:
-            _log.warning("export %s: код %s: %s", session_id, r.returncode, r.stderr[-300:])
+        if rc != 0:
+            _log.warning("export %s: код %s: %s", session_id, rc, err[-300:])
             return None
-        out = r.stdout
         start = out.find("{")
         try:
             data = json.loads(out[start:]) if start >= 0 else None
@@ -214,14 +225,14 @@ class OpencodeProvider(Provider):
 
     def catalog(self) -> list[ModelInfo]:
         try:
-            r = subprocess.run([self._bin(), "models", "--verbose"], capture_output=True, text=True, timeout=120)
+            rc, out, _err = run_capture([self._bin(), "models", "--verbose"], env=self.extra_env)
         except (OSError, subprocess.SubprocessError) as e:
             _log.warning("models: %s", e)
             return []
-        if r.returncode != 0:
-            _log.warning("models: код %s", r.returncode)
+        if rc != 0:
+            _log.warning("models: код %s", rc)
             return []
-        return parse_models_verbose(r.stdout)
+        return parse_models_verbose(out)
 
     def health(self) -> Health:
         problems: list[str] = []
@@ -230,10 +241,10 @@ class OpencodeProvider(Provider):
         if not os.access(binary, os.X_OK):
             return Health(False, (f"нет исполняемого opencode ({binary})",))
         try:
-            r = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
-            details["version"] = r.stdout.strip()[:40]
-            if r.returncode != 0:
-                problems.append(f"opencode --version: код {r.returncode}")
+            rc, out, _err = run_capture([binary, "--version"], timeout=30, env=self.extra_env)
+            details["version"] = out.strip()[:40]
+            if rc != 0:
+                problems.append(f"opencode --version: код {rc}")
         except (OSError, subprocess.SubprocessError) as e:
             problems.append(f"opencode не отвечает: {e}")
         from ahub.providers import opencode_db
