@@ -960,7 +960,6 @@ def build_dispatcher() -> Dispatcher:
         want, rest = bc.parse_new_args(arg, projects)
         if want is not None and rest:
             # /new проект текст — сразу без вопросов, черновик в фоне.
-            await msg.answer(bc.NEW_WRITING)
             asyncio.create_task(_draft_bg(msg.bot, chat, want, rest, now))
             return
         if want is not None:
@@ -969,7 +968,6 @@ def build_dispatcher() -> Dispatcher:
             return
         if rest and len(projects) == 1:
             only = str(getattr(projects[0], "name", "") or "")
-            await msg.answer(bc.NEW_WRITING)
             asyncio.create_task(_draft_bg(msg.bot, chat, only, rest, now))
             return
         if rest:
@@ -1033,10 +1031,6 @@ def build_dispatcher() -> Dispatcher:
             if saved:
                 _NEW_PENDING.pop(chat, None)
                 await call.answer("Пишу карточку…")
-                try:
-                    await call.message.answer(bc.NEW_WRITING)
-                except Exception:  # noqa: BLE001 — best-effort
-                    pass
                 asyncio.create_task(_draft_bg(call.bot, chat, target, saved, now))
                 return
             text = await handle_draft_callback(call.bot, chat,
@@ -1089,7 +1083,6 @@ def build_dispatcher() -> Dispatcher:
                     base_text = str(row.get("text") or "")
                     proj = str(row.get("project") or "")
                     merged = f"{base_text}\nПравка владельца: {body.strip()}"
-                    await msg.answer(bc.NEW_WRITING)
                     asyncio.create_task(
                         _draft_bg(msg.bot, chat, proj, merged, now))
                     return
@@ -1097,7 +1090,6 @@ def build_dispatcher() -> Dispatcher:
         pend = _NEW_PENDING.get(chat)
         if pend is not None and pend.get("stage") == "text" and pend.get("project"):
             _NEW_PENDING.pop(chat, None)
-            await msg.answer(bc.NEW_WRITING)
             asyncio.create_task(
                 _draft_bg(msg.bot, chat, str(pend["project"]), body.strip(), now))
             return
