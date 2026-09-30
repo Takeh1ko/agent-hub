@@ -39,7 +39,12 @@ def _no_combat_write():
             out = {}
             for t in guarded:
                 try:
-                    out[t] = {tuple(r) for r in con.execute(f"SELECT * FROM {t}")}
+                    if t == "outbox":
+                        # Явный порядок колонок: sent_ts — живая/неживая строка.
+                        out[t] = {tuple(r) for r in con.execute(
+                            "SELECT id, ts, text, task_id, sent_ts FROM outbox")}
+                    else:
+                        out[t] = {tuple(r) for r in con.execute(f"SELECT * FROM {t}")}
                 except sqlite3.Error:
                     out[t] = set()
             return out
@@ -57,7 +62,16 @@ def _no_combat_write():
         # Владелец мог написать боту во время прогона — это inbox с source='tg' и живым текстом;
         # тестовые строки узнаются по отсутствию в «до» и по признакам фикстур.
         new = after.get(t, set()) - before.get(t, set())
-        leaked = [r for r in new if t != "inbox" or not str(r).count("'tg'")]
+        if t == "inbox":
+            leaked = [r for r in new if not str(r).count("'tg'")]
+        elif t == "outbox":
+            # Живой say/бот вставляет строки и метит sent_ts через ~100 мс:
+            # помеченные к teardown — живой писатель, не утечка (тесты пишут
+            # в изолированный HOME и пометок в боевой не ставят). Без фильтра
+            # полный прогон (~4 мин) падает в каждом третьем прогоне.
+            leaked = [r for r in new if len(r) < 5 or r[4] is None]
+        else:
+            leaked = list(new)
         assert not leaked, f"тесты записали в боевой hub.db ({t}): {leaked[:3]}"
 
 

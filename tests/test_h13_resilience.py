@@ -301,6 +301,101 @@ def test_opencode_runner_other_error_not_transient(tmp_path, monkeypatch):
     assert got == "s-10"
 
 
+def test_opencode_cmd_session_flag(tmp_path):
+    """argv: start — без --session, resume — с --session sid (п.3 приёмки)."""
+    from hub.pipeline.runners import OpencodeRunner
+
+    r = OpencodeRunner(idle_s=0, timeout_s=30)
+    assert "--session" not in r._cmd("короткий промпт", str(tmp_path), None)
+    cmd = r._cmd("короткий промпт", str(tmp_path), "s-1")
+    assert "--session" in cmd
+    assert cmd[cmd.index("--session") + 1] == "s-1"
+
+
+def test_opencode_start_resume_session_argv(tmp_path, monkeypatch):
+    """start зовёт Popen без --session, resume — с sid старой сессии."""
+    import subprocess as _sp
+
+    from hub.pipeline.runners import OpencodeRunner
+
+    seen: list = []
+
+    class _FakeErr:
+        def read(self):
+            return ""
+
+    class _Proc:
+        def __init__(self, cmd, **kw):
+            seen.append(list(cmd))
+            self.stdout = iter([json.dumps({"sessionID": "s-cmd"}) + "\n"])
+            self.stderr = _FakeErr()
+            self.returncode = 0
+            self.pid = 2_000_000_041
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(_sp, "Popen", _Proc)
+    r = OpencodeRunner(idle_s=0, timeout_s=30)
+    assert r.start("промпт", str(tmp_path),
+                   log=str(tmp_path / "c1.log")) == "s-cmd"
+    assert r.resume("s-old", "промпт", str(tmp_path),
+                    log=str(tmp_path / "c2.log")) == "s-cmd"
+    assert len(seen) == 2
+    assert "--session" not in seen[0], seen[0]
+    assert "--session" in seen[1], seen[1]
+    assert seen[1][seen[1].index("--session") + 1] == "s-old"
+
+
+def test_opencode_runner_transient_rc0_with_sid_returns_sid(tmp_path, monkeypatch):
+    """rc=0 + sessionID: промежуточное error-событие п.1 — не брак шага."""
+    import subprocess as _sp
+
+    from hub.pipeline.runners import OpencodeRunner
+
+    class _FakeErr:
+        def read(self):
+            return ""
+
+    class _Proc:
+        def __init__(self):
+            self.stdout = iter([
+                json.dumps({"sessionID": "s-ok"}) + "\n",
+                json.dumps({"type": "error",
+                            "error": "UnknownError: Unexpected server error"}) + "\n",
+            ])
+            self.stderr = _FakeErr()
+            self.returncode = 0
+            self.pid = 2_000_000_042
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(_sp, "Popen", lambda *a, **k: _Proc())
+    got = OpencodeRunner(idle_s=0, timeout_s=30).start(
+        "промпт", str(tmp_path), log=str(tmp_path / "rc0.log"))
+    assert got == "s-ok"
+
+
+def test_log_retry_payload_has_text(tmp_path):
+    """Событие повтора несёт text: сводка владельцу — не голая «stuck ID»."""
+    from hub.bot.core import format_event_line
+
+    cyc._log_retry(Store(), "LR", "socket hang up", 1, 3, 120.0)
+    events = [e for e in Store().events_since(0) if e["task_id"] == "LR"]
+    assert events, "нет события повтора"
+    payload = json.loads(events[-1].get("payload_json") or "{}")
+    assert "сбой opencode" in str(payload.get("text") or ""), payload
+    line = format_event_line({**events[-1], "payload": payload})
+    assert "сбой opencode" in line, line
+
+
 # --- п.2: повторы ревьюера ---
 
 class ExecOk:

@@ -319,7 +319,9 @@ class OpencodeRunner:
     Сторож тишины: нет JSON-событий `idle_s` c и нет дочерних процессов —
     процесс прерывается, `RuntimeError("opencode: тишина N c")`.
     Сбой сети/сервера ({"type": "error"} с текстом п.1 H13) —
-    `TransientError`; другая ошибка — как раньше.
+    `TransientError`; исключение — rc=0 с полученным sessionID (шаг
+    успешен, событие было промежуточным): возвращается sid.
+    Другая ошибка — как раньше.
     Каждая сессия получает env `AGENT_HUB_HOME=<worktree>/.agent/hubhome`.
     """
 
@@ -363,6 +365,9 @@ class OpencodeRunner:
         (sid — если успел появиться в stdout до тишины).
         Сбой сети/сервера (событие {"type": "error"} с текстом п.1 H13) —
         `TransientError` с этим текстом, даже если sid уже виден.
+        Исключение: процесс завершился rc=0 и sessionID получен — шаг
+        сделал работу (событие было промежуточным), возвращается sid,
+        как для других error-событий.
         Любая другая ошибка — как раньше.
         """
         notify = on_session
@@ -572,6 +577,9 @@ class OpencodeRunner:
             pass
         # Транзиентный сбой сервера/сети: событие {"type": "error"} в stdout
         # с текстом п.1 — TransientError, даже если sid уже виден.
+        # Но rc=0 + полученный sid — шаг сделал работу (событие было
+        # промежуточным): возвращаем sid, а не отбраковываем успех
+        # с повторами 120/240/480 (симметрично не-транзиентному пути ниже).
         transient_text: str | None = None
         try:
             for _line in stdout_text.splitlines():
@@ -583,6 +591,8 @@ class OpencodeRunner:
             transient_text = None
         if transient_text is not None:
             _sid = sid_box[0] or _extract_session_id(stdout_text)
+            if rc == 0 and _sid:
+                return _sid
             raise TransientError(transient_text[:2000], session_id=_sid)
         sid = sid_box[0] or _extract_session_id(stdout_text)
         if sid:

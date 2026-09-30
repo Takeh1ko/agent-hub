@@ -648,7 +648,10 @@ def _log_retry(store, task_id: str, err_text: str,
     txt = (f"сбой opencode ({short}) → повтор {n}/{max_n} "
            f"через {_fmt_pause(pause_s)} с")
     try:
-        store.add_event(task_id, "stuck", {"reason": txt})
+        # Ключ text — для сводки владельцу: format_event_line читает
+        # только stage/text/answer/action, без него в TG уходила голая
+        # строка «stuck ID» без причины. kind оставляем stuck.
+        store.add_event(task_id, "stuck", {"reason": txt, "text": txt})
     except (OSError, sqlite3.Error, ValueError):
         pass
 
