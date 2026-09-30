@@ -85,3 +85,21 @@ def parse_since(text: str, now: int) -> int:
         if unit_ms is not None:
             return now - int(m.group(1)) * unit_ms
     raise ValueError(f"непонятное время: {text!r}")
+
+
+_DUR = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-zа-яё]*)\s*$", re.IGNORECASE)
+
+
+def parse_duration(text: str) -> float:
+    """«90», «30s», «30m», «4h», «2ч», «15м» → секунды."""
+    m = _DUR.match(str(text))
+    if not m:
+        raise ValueError(f"непонятная длительность: {text!r}")
+    n, unit = float(m.group(1)), m.group(2).lower()
+    if unit in ("", "s", "с", "sec", "сек"):
+        return n
+    if unit in ("m", "м", "min", "мин"):
+        return n * 60
+    if unit in ("h", "ч", "hr", "час"):
+        return n * 3600
+    raise ValueError(f"непонятная длительность: {text!r}")
