@@ -1,0 +1,211 @@
+"""Доставка событий оркестратору и его присутствие (contracts §4, §6).
+
+- Будят только события с needs_reaction. Сразу — owner_message, answer и критичные; остальные — пачкой
+  по окну группировки (от самого старого недоставленного).
+- «Доставлено» ставит отдача в wait/watch; «подтверждено» — ack (явный или неявный при чтении задачи/входящих).
+- Доставленное, но не подтверждённое, отдаётся повторно один раз через REDELIVER_MS — чтобы не потерялось,
+  если оркестратор его не взял, и чтобы не будить его одним и тем же в цикле.
+- Присутствие: wait/watch отмечают `presence` не реже раза в PRESENCE_TOUCH_S; «есть» — моложе PRESENT_MS.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable
+
+from ahub.model import Ev
+from ahub.store import Event, Store, Task
+from ahub.time import now_ms
+
+GROUP_WINDOW_MS = 120_000
+REDELIVER_MS = 30 * 60_000
+PRESENT_MS = 180_000
+PRESENCE_TOUCH_S = 60
+LINE_LIMIT = 200
+IMMEDIATE = frozenset({Ev.OWNER_MESSAGE, Ev.ANSWER})
+TASK_REACTIONS = (Ev.DONE.value, Ev.NEEDS_DECISION.value, Ev.ERROR.value)
+DEFAULT_WHO = "claude"
+
+
+def _deliverable(store: Store, now: int, project: str | None) -> list[Event]:
+    sql = ("SELECT * FROM event WHERE needs_reaction=1 AND acked_at IS NULL"
+           " AND (delivered_at IS NULL OR delivered_at<?)")
+    args: list = [now - REDELIVER_MS]
+    if project is not None:
+        sql += " AND (project=? OR project='')"
+        args.append(project)
+    sql += " ORDER BY id"
+    with store.read() as c:
+        return [Event.from_row(r) for r in c.execute(sql, args)]
+
+
+def is_immediate(ev: Event) -> bool:
+    return ev.critical or ev.kind in IMMEDIATE
+
+
+def ready_batch(store: Store, *, now: int | None = None, project: str | None = None,
+                window_ms: int = GROUP_WINDOW_MS) -> list[Event]:
+    """Что отдать сейчас: всё доступное, если есть срочное или окно самого старого истекло; иначе пусто."""
+    ts = now if now is not None else now_ms()
+    evs = _deliverable(store, ts, project)
+    if not evs:
+        return []
+    if any(is_immediate(e) for e in evs) or ts - min(e.ts for e in evs) >= window_ms:
+        return evs
+    return []
+
+
+def mark_delivered(store: Store, ids: list[int], *, now: int | None = None) -> None:
+    if not ids:
+        return
+    with store.tx() as c:
+        c.execute(f"UPDATE event SET delivered_at=? WHERE id IN ({','.join('?' * len(ids))})",
+                  (now if now is not None else now_ms(), *ids))
+
+
+def ack(store: Store, ids: list[int] | None = None, *, kinds: tuple[str, ...] | None = None,
+        task_id: int | None = None, project: str | None = None, now: int | None = None) -> int:
+    """Подтвердить: по id, по видам и/или задаче. Без фильтров — все неподтверждённые. Возвращает сколько."""
+    sql = "UPDATE event SET acked_at=?, delivered_at=COALESCE(delivered_at, ?) WHERE needs_reaction=1 AND acked_at IS NULL"
+    ts = now if now is not None else now_ms()
+    args: list = [ts, ts]
+    if ids is not None:
+        if not ids:
+            return 0
+        sql += f" AND id IN ({','.join('?' * len(ids))})"
+        args.extend(ids)
+    if kinds is not None:
+        sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+        args.extend(kinds)
+    if task_id is not None:
+        sql += " AND task_id=?"
+        args.append(int(task_id))
+    if project is not None:
+        sql += " AND (project=? OR project='')"
+        args.append(project)
+    with store.tx() as c:
+        return c.execute(sql, args).rowcount
+
+
+def ack_task(store: Store, task_id: int) -> int:
+    """Неявное подтверждение: оркестратор прочитал задачу."""
+    return ack(store, kinds=TASK_REACTIONS, task_id=task_id)
+
+
+def unacked(store: Store, project: str | None = None) -> list[Event]:
+    sql = "SELECT * FROM event WHERE needs_reaction=1 AND acked_at IS NULL"
+    args: list = []
+    if project is not None:
+        sql += " AND (project=? OR project='')"
+        args.append(project)
+    with store.read() as c:
+        return [Event.from_row(r) for r in c.execute(sql + " ORDER BY id", args)]
+
+
+# --- строки пробуждения (L0) ---
+
+def _clip(text: str, n: int) -> str:
+    s = " ".join(str(text or "").split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _money(p: dict) -> str:
+    go, usd = p.get("cost_go") or 0, p.get("cost_usd") or 0
+    parts = []
+    if go:
+        parts.append(f"${go:.2f}")
+    if usd:
+        parts.append(f"${usd:.2f} реальных")
+    return ", ".join(parts)
+
+
+def format_line(ev: Event, task: Task | None) -> str:
+    p = ev.payload or {}
+    k = Ev(ev.kind)
+    if task is not None:
+        head = f"{task.label} {task.kind.value} «{_clip(task.title, 50)}»"
+    else:
+        head = f"T{ev.task_id}" if ev.task_id else ""
+    if k is Ev.DONE:
+        extra = []
+        if p.get("report_bytes"):
+            extra.append(f"отчёт {p['report_bytes'] / 1024:.1f} КБ")
+        if p.get("summary"):
+            extra.append(_clip(p["summary"], 70))
+        m = _money(p)
+        if m:
+            extra.append(m)
+        line = f"ГОТОВО {head}" + (" — " + "; ".join(extra) if extra else "")
+    elif k is Ev.NEEDS_DECISION:
+        line = f"РЕШЕНИЕ {head} — {_clip(p.get('reason', ''), 100)}"
+    elif k is Ev.ERROR:
+        line = f"ОШИБКА {head} — {_clip(p.get('reason', ''), 100)}"
+    elif k is Ev.OWNER_MESSAGE:
+        line = f"ВЛАДЕЛЕЦ «{_clip(p.get('text', ''), 160)}»"
+    elif k is Ev.ANSWER:
+        line = f"ОТВЕТ #{p.get('question_id', '?')} «{_clip(p.get('question', ''), 60)}» → {_clip(p.get('answer', ''), 60)}"
+    elif k is Ev.ALARM:
+        line = ("ТРЕВОГА! " if ev.critical else "ТРЕВОГА ") + _clip(p.get("text", ""), 150)
+    else:
+        line = f"{k.value.upper()} {head}"
+    return line[:LINE_LIMIT]
+
+
+def lines(store: Store, evs: list[Event]) -> list[str]:
+    cache: dict[int, Task | None] = {}
+    out = []
+    for e in evs:
+        t = None
+        if e.task_id:
+            if e.task_id not in cache:
+                cache[e.task_id] = store.get_task(e.task_id)
+            t = cache[e.task_id]
+        out.append(format_line(e, t))
+    return out
+
+
+# --- присутствие ---
+
+def touch(store: Store, who: str = DEFAULT_WHO, *, project: str = "", via: str = "", session_id: str = "",
+          now: int | None = None) -> None:
+    ts = now if now is not None else now_ms()
+    with store.tx() as c:
+        c.execute("INSERT INTO presence(who, project, last_seen, session_id, via) VALUES(?,?,?,?,?)"
+                  " ON CONFLICT(who) DO UPDATE SET project=CASE WHEN excluded.project!='' THEN excluded.project"
+                  " ELSE presence.project END, last_seen=excluded.last_seen, via=excluded.via,"
+                  " session_id=CASE WHEN excluded.session_id!='' THEN excluded.session_id ELSE presence.session_id END",
+                  (who, project, ts, session_id, via))
+
+
+def presence(store: Store, who: str = DEFAULT_WHO) -> dict | None:
+    with store.read() as c:
+        row = c.execute("SELECT * FROM presence WHERE who=?", (who,)).fetchone()
+    return dict(row) if row else None
+
+
+def present(store: Store, who: str = DEFAULT_WHO, *, now: int | None = None, fresh_ms: int = PRESENT_MS) -> bool:
+    p = presence(store, who)
+    ts = now if now is not None else now_ms()
+    return bool(p) and ts - int(p["last_seen"]) < fresh_ms
+
+
+# --- ожидание ---
+
+def wait(store: Store, *, timeout_s: float, project: str | None = None, who: str = DEFAULT_WHO,
+         poll_s: float = 1.0, sleep: Callable[[float], None] = time.sleep,
+         clock: Callable[[], float] = time.monotonic) -> list[str]:
+    """Блокироваться до пачки событий или таймаута. Отданное помечается доставленным."""
+    deadline = clock() + timeout_s
+    last_touch = -1e9
+    while True:
+        now_c = clock()
+        if now_c - last_touch >= PRESENCE_TOUCH_S:
+            touch(store, who, project=project or "", via="wait")
+            last_touch = now_c
+        batch = ready_batch(store, project=project)
+        if batch:
+            mark_delivered(store, [e.id for e in batch])
+            return lines(store, batch)
+        if now_c >= deadline:
+            return []
+        sleep(min(poll_s, max(0.0, deadline - now_c)))
