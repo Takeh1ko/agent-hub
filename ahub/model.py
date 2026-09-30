@@ -48,7 +48,8 @@ _ORPHAN = State.QUEUED  # возврат сироты в очередь (из л
 TRANSITIONS: dict[State, frozenset[State]] = {
     State.DRAFT: frozenset({State.QUEUED, State.REJECTED}),
     State.QUEUED: frozenset({State.PREPARING, State.STOPPED, State.REJECTED, State.NEEDS_DECISION}),
-    State.PREPARING: frozenset({State.WORKING, State.ERROR, State.STOPPED, State.NEEDS_DECISION, _ORPHAN}),
+    State.PREPARING: frozenset({State.WORKING, State.FIXING, State.ERROR, State.STOPPED, State.NEEDS_DECISION,
+                                _ORPHAN}),
     State.WORKING: frozenset({State.CHECKING, State.DONE, State.NEEDS_DECISION, State.ERROR,
                               State.STOPPED, _ORPHAN}),
     State.CHECKING: frozenset({State.WORKING, State.FIXING, State.REVIEWING, State.DONE,

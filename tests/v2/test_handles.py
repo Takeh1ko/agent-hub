@@ -84,16 +84,6 @@ def test_stop_continue_reject(env, capsys):
     assert rc == 2 and "нет задачи" in err
 
 
-def test_code_accept_not_yet(env, capsys):
-    store, _ = env
-    install_fake(store, [])
-    tid = store.create_task(project="P", kind="code", title="x")
-    for st in (State.PREPARING, State.WORKING, State.DONE):
-        transitions.move(store, tid, st)
-    rc, _, err = ahub(capsys, "accept", f"T{tid}")
-    assert rc == 2 and "V15" in err
-
-
 def test_wait_and_ack(env, capsys):
     store, _ = env
     comms.owner_message(store, "как там оплата?", project="P")

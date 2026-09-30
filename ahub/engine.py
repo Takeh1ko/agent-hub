@@ -371,7 +371,8 @@ class Engine:
         t = self._prepare(t)
         self.set_phase(Phase.STUDYING)
         prev = [s for s in self.store.list_sessions(t.id) if s.role == Role.SCOUT.value and s.external_id]
-        resume_sid = prev[-1].external_id if prev else None  # подхват после сбоя процесса — та же сессия
+        resume_sid = prev[-1].external_id if prev and not t.limits.get("fresh_session") else None  # подхват
+        self._clear_fresh(t)
         prompt = prompts.CONTINUE_PROMPT if resume_sid else prompts.scout_prompt(self.project, t)
         r, final = self._step_with_continue(Role.SCOUT, t.executor, prompt, session_id=resume_sid,
                                             log_name="scout")
@@ -467,15 +468,20 @@ class Engine:
         prev = [s for s in self.store.list_sessions(t.id) if s.role == role.value and s.external_id]
         sid = prev[-1].external_id if prev else None
         notes = str(t.limits.get("rework_notes") or "")
+        fresh = bool(t.limits.get("fresh_session")) or not sid
         if notes:
-            prompt = review.fix_prompt([], notes=notes)
             lim = dict(t.limits)
             lim.pop("rework_notes", None)
             self.store.update_task(t.id, limits=lim)
-        elif sid and not t.limits.get("fresh_session"):
-            prompt = prompts.CONTINUE_PROMPT
-        else:
+        if fresh:  # новая сессия (другая модель/постановка или первой не было): полная постановка + указания
             prompt, sid = prompts.code_prompt(self.project, t), None
+            if notes:
+                prompt += "\n\n## Указания оркестратора (доработка)\n" + notes
+        elif notes:
+            prompt = review.fix_prompt([], notes=notes)
+        else:
+            prompt = prompts.CONTINUE_PROMPT
+        self._clear_fresh(t)
         round_no = t.round
         while True:
             self.set_phase(Phase.WRITING)
@@ -531,6 +537,12 @@ class Engine:
             round_no += 1
             t = self.move(State.FIXING, reason, fields={"round": round_no})
             prompt = review.fix_prompt(findings)
+
+    def _clear_fresh(self, t: Task) -> None:
+        if t.limits.get("fresh_session"):
+            lim = dict(self.task().limits)
+            lim.pop("fresh_session", None)
+            self.store.update_task(t.id, limits=lim)
 
     def _blocked(self, t: Task) -> str:
         res = self._result(t)

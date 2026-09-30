@@ -109,17 +109,6 @@ def cmd_stop(args) -> int:
     return 0
 
 
-def cmd_continue(args) -> int:
-    store = Store()
-    t = _task(store, args.task)
-    if t.state not in (State.STOPPED, State.ERROR, State.NEEDS_DECISION):
-        raise CliError(f"{t.label}: продолжить можно из «остановлена/ошибка/нужно решение», сейчас {t.state.value}")
-    transitions.move(store, t.id, State.QUEUED, reason="продолжить", by=args.by)
-    events.ack_task(store, t.id)
-    emit(args, {"id": t.id}, f"{t.label} снова в очереди")
-    return 0
-
-
 def _project_of(store: Store, t: Task):
     from ahub.worker import find_project
 
@@ -129,35 +118,88 @@ def _project_of(store: Store, t: Task):
     return p
 
 
-def cmd_accept(args) -> int:
-    store = Store()
-    t = _task(store, args.task)
-    if t.kind in CHANGES_FILES:
-        raise CliError(f"{t.label}: принятие с слиянием — в V15 (пока: git merge {t.branch} вручную)")
-    if t.state not in (State.DONE, State.NEEDS_DECISION):
-        raise CliError(f"{t.label}: принять можно «готово/нужно решение», сейчас {t.state.value}")
-    transitions.move(store, t.id, State.ACCEPTED, reason=args.reason or "принята", by=args.by)
-    events.ack_task(store, t.id)
-    project = _project_of(store, t)
-    archive.write_task(store, project, t.id)
-    workspace.remove(project, t.id, delete_branch=True)  # отчёт — в архиве проекта
-    emit(args, {"id": t.id}, f"{t.label} принята")
-    return 0
+def _decide(args, fn) -> int:
+    from ahub.accept import DecisionError
 
-
-def cmd_reject(args) -> int:
     store = Store()
     t = _task(store, args.task)
     try:
-        transitions.move(store, t.id, State.REJECTED, reason=args.reason or "отклонена", by=args.by)
-    except (transitions.TransitionError, transitions.ConflictError) as e:
-        raise CliError(f"{e} (активную задачу сначала: ahub stop {t.label})") from e
-    events.ack_task(store, t.id)
-    project = _project_of(store, t)
-    archive.write_task(store, project, t.id)
-    if not args.keep:
-        workspace.remove(project, t.id, delete_branch=True)
-    emit(args, {"id": t.id}, f"{t.label} отклонена")
+        msg = fn(store, t)
+    except DecisionError as e:
+        raise CliError(str(e)) from e
+    emit(args, {"id": t.id, "result": msg}, msg)
+    return 0
+
+
+def cmd_continue(args) -> int:
+    from ahub import accept
+    return _decide(args, lambda s, t: accept.continue_task(s, t.id, by=args.by))
+
+
+def cmd_accept(args) -> int:
+    from ahub import accept
+    return _decide(args, lambda s, t: accept.accept(s, _project_of(s, t), t.id, by=args.by))
+
+
+def cmd_reject(args) -> int:
+    from ahub import accept
+    return _decide(args, lambda s, t: accept.reject(s, _project_of(s, t), t.id, reason=args.reason or "",
+                                                    by=args.by, keep=args.keep))
+
+
+def cmd_rework(args) -> int:
+    from ahub import accept
+    return _decide(args, lambda s, t: accept.rework(s, t.id, args.notes, by=args.by))
+
+
+def cmd_edit(args) -> int:
+    from ahub import accept
+    spec = Path(args.spec_file).read_text(encoding="utf-8") if args.spec_file else args.spec
+    return _decide(args, lambda s, t: accept.edit(s, _project_of(s, t), t.id, spec=spec, title=args.title,
+                                                  by=args.by))
+
+
+def cmd_extend(args) -> int:
+    from ahub import accept
+    return _decide(args, lambda s, t: accept.extend_paths(s, _project_of(s, t), t.id, _csv(args.paths), by=args.by))
+
+
+def cmd_budget(args) -> int:
+    from ahub import accept
+    return _decide(args, lambda s, t: accept.extend_budget(s, t.id, add=args.add, set_to=args.set, by=args.by))
+
+
+def cmd_model(args) -> int:
+    from ahub import accept
+    return _decide(args, lambda s, t: accept.change_model(s, _project_of(s, t), t.id, args.alias, by=args.by))
+
+
+def cmd_diff(args) -> int:
+    from ahub import gates
+    store = Store()
+    t = _task(store, args.task)
+    if not t.worktree or not Path(t.worktree).is_dir():
+        raise CliError(f"{t.label}: копии нет (дифф принятой задачи — в архиве проекта)")
+    base = gates.effective_base(_project_of(store, t), t)
+    text = gates.diff_text(t.worktree, base, limit=args.max_bytes)
+    emit(args, {"base": base, "diff": text}, text or "дифф пуст")
+    return 0
+
+
+def cmd_history(args) -> int:
+    store = Store()
+    project = resolve_project(args).name if args.project else None
+    done = [t for t in store.list_tasks(project=project, newest_first=True) if t.state.value in
+            ("accepted", "rejected", "done", "needs_decision", "error", "stopped")][: args.n]
+    lines = []
+    for t in done:
+        go, usd = archive.task_cost(store, t.id)
+        dur = ""
+        if t.finished_at:
+            dur = f" · {(t.finished_at - t.created_at) // 60000} мин"
+        lines.append(f"{t.label} {t.kind.value} «{views._short(t.title, 45)}» · "
+                     f"{archive.STATE_WORDS.get(t.state.value, t.state.value)} · круг {t.round} · ${go + usd:.3f}{dur}")
+    emit(args, {"tasks": [asdict(t) for t in done]}, "\n".join(lines) or "истории нет")
     return 0
 
 
@@ -205,7 +247,7 @@ def register(subparsers) -> None:
     lg.add_argument("--max-bytes", type=int, default=8000)
     lg.set_defaults(func=cmd_log)
     for name, fn, helptext in (("stop", cmd_stop, "остановить"), ("continue", cmd_continue, "продолжить"),
-                               ("accept", cmd_accept, "принять"), ("reject", cmd_reject, "отклонить")):
+                               ("accept", cmd_accept, "принять (код — слить)"), ("reject", cmd_reject, "отклонить")):
         x = subparsers.add_parser(name, help=helptext)
         x.add_argument("task")
         x.add_argument("--reason")
@@ -213,3 +255,41 @@ def register(subparsers) -> None:
         if name == "reject":
             x.add_argument("--keep", action="store_true", help="не удалять копию задачи")
         x.set_defaults(func=fn)
+    rw = subparsers.add_parser("rework", help="вернуть на доработку с указаниями")
+    rw.add_argument("task")
+    rw.add_argument("--notes", required=True)
+    rw.add_argument("--by", default="orchestrator")
+    rw.set_defaults(func=cmd_rework)
+    ed = sub.add_parser("edit", help="новая постановка (продолжение — новой сессией)")
+    ed.add_argument("task")
+    ed.add_argument("--title")
+    g2 = ed.add_mutually_exclusive_group()
+    g2.add_argument("--spec")
+    g2.add_argument("--spec-file")
+    ed.add_argument("--by", default="orchestrator")
+    ed.set_defaults(func=cmd_edit)
+    ex = subparsers.add_parser("extend", help="расширить разрешённые файлы задачи")
+    ex.add_argument("task")
+    ex.add_argument("--paths", required=True)
+    ex.add_argument("--by", default="orchestrator")
+    ex.set_defaults(func=cmd_extend)
+    bu = subparsers.add_parser("budget", help="продлить бюджет задачи (стоявшая из-за бюджета — продолжится)")
+    bu.add_argument("task")
+    gb = bu.add_mutually_exclusive_group(required=True)
+    gb.add_argument("--add", type=float)
+    gb.add_argument("--set", type=float)
+    bu.add_argument("--by", default="orchestrator")
+    bu.set_defaults(func=cmd_budget)
+    mo = subparsers.add_parser("model", help="сменить модель задачи")
+    mo.add_argument("task")
+    mo.add_argument("alias")
+    mo.add_argument("--by", default="orchestrator")
+    mo.set_defaults(func=cmd_model)
+    df = subparsers.add_parser("diff", help="дифф задачи от базы (L3)")
+    df.add_argument("task")
+    df.add_argument("--max-bytes", type=int, default=views.L3_DEFAULT)
+    df.set_defaults(func=cmd_diff)
+    hi = subparsers.add_parser("history", help="недавние задачи")
+    hi.add_argument("-n", type=int, default=20)
+    add_project_arg(hi)
+    hi.set_defaults(func=cmd_history)
