@@ -1,7 +1,7 @@
-"""Каталог строк EN/RU: t(key, **kw) — шаблон текущего языка через str.format.
+"""EN/RU string catalog: t(key, **kw) — the current language's template through str.format.
 
-Нет ключа в языке — шаблон из en; нет нигде — KeyError. Язык — лениво, один раз:
-AHUB_LANG → lang в конфиге хаба → LANG/LC_ALL/LC_MESSAGES (ru*) → en.
+A key missing in the language — the template from en; missing everywhere — KeyError. The language is resolved
+lazily, once: AHUB_LANG → lang in the hub config → LANG/LC_ALL/LC_MESSAGES (ru*) → en.
 """
 
 from __future__ import annotations
@@ -24,12 +24,12 @@ def _locale_lang() -> str:
 
 
 def _resolve() -> str:
-    """AHUB_LANG → lang в конфиге хаба → локаль (первая непустая из LC_ALL, LC_MESSAGES, LANG) → en."""
+    """AHUB_LANG → lang in the hub config → locale (first non-empty of LC_ALL, LC_MESSAGES, LANG) → en."""
     global _resolving
     env = os.environ.get("AHUB_LANG", "").strip().lower()[:2]
     if env in _CATALOGS:
         return env
-    if _resolving:  # ошибка конфига хаба сама строится через t() — читаем только окружение/локаль
+    if _resolving:  # a broken hub config is itself built through t() — read only env and locale
         return _locale_lang()
     _resolving = True
     try:
@@ -37,7 +37,7 @@ def _resolve() -> str:
             from ahub import config
 
             configured = config.load_hub().lang
-        except config.ConfigError:  # битый конфиг сообщит о себе сам — язык ему для этого и нужен
+        except config.ConfigError:  # a broken config reports itself — that is what the language is for
             configured = ""
     finally:
         _resolving = False
@@ -47,7 +47,7 @@ def _resolve() -> str:
 
 
 def lang() -> str:
-    """Текущий язык (\"en\" | \"ru\")."""
+    """Current language (\"en\" | \"ru\")."""
     global _lang
     if _lang is None:
         _lang = _resolve()
@@ -55,7 +55,7 @@ def lang() -> str:
 
 
 def set_lang(code: str) -> None:
-    """Жёстко задать язык (флаг --lang)."""
+    """Force the language (the --lang flag)."""
     global _lang
     c = code.strip().lower()
     if c not in _CATALOGS:
@@ -64,19 +64,19 @@ def set_lang(code: str) -> None:
 
 
 def _reset() -> None:
-    """Сбросить выбор языка (для тестов)."""
+    """Reset the language choice (for tests)."""
     global _lang
     _lang = None
 
 
 def t(key: str, **kw) -> str:
-    """Шаблон текущего языка, подстановка через str.format(**kw)."""
-    tpl = _CATALOGS[lang()].get(key) or _EN[key]  # нет нигде — KeyError: ошибка разработчика
+    """The current language's template, substitution through str.format(**kw)."""
+    tpl = _CATALOGS[lang()].get(key) or _EN[key]  # missing everywhere — KeyError: a developer error
     return tpl.format(**kw)
 
 
 class Words(Mapping[str, str]):
-    """Слова каталога по ключам (состояния, фазы): значение — t(prefix + key) при чтении, на текущем языке."""
+    """Catalog words by key (states, phases): the value is t(prefix + key) on read, in the current language."""
 
     def __init__(self, prefix: str, keys: Iterable[str]):
         self._prefix = prefix

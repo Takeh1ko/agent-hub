@@ -221,7 +221,7 @@ def check_opencode_auth() -> Check:
 
 
 def check_agy() -> Check:
-    """agy (Gemini): нашёлся — ok True/False по health() поставщика; не нашёлся — не установлен (None)."""
+    """agy (Gemini): found — ok True/False by the provider's health(); not found — not installed (None)."""
     from ahub import providers
     from ahub.providers.agy import agy_bin, agy_state_file
 

@@ -1,67 +1,72 @@
-# agent-hub v2 — карта кода (шпаргалка для Claude)
+# agent-hub v2 — code map (a cheat sheet for Claude)
 
-Сжатая карта, чтобы не изучать проект заново. Архитектура — `docs/architecture.md`,
-интерфейсы между частями — `docs/contracts.md`.
+A condensed map, so the project does not have to be learned from scratch. Architecture — `docs/architecture.md`,
+interfaces between the parts — `docs/contracts.md`.
 
-## Что это
-Сервис, через который оркестратор (Claude Code; любой CLI-агент — через CLI или MCP) и человек (терминал `ahub top`,
-Telegram) раздают работу дешёвым моделям-работникам (opencode: Spark 1.3 и др.), следят за ней и принимают
-результат. Команда `ahub` (пакет ahub; скрипт `hub` убран из пакета — конфликт с GitHub CLI `hub`).
+## What it is
+A service through which an orchestrator (Claude Code; any CLI agent — through CLI or MCP) and a human (the `ahub top`
+terminal, Telegram) hand work to cheap worker models (opencode: Spark 1.3 and others), watch it and accept the result.
+The command is `ahub` (package ahub; the `hub` script was removed from the package — it conflicted with the GitHub CLI
+`hub`).
 
-## Как течёт задача
+## How a task runs
 ```
-ahub task new (tasks.py: проверка полей, умолчания по типу)  → task: queued
-ahub service (service.py, systemd ahub.service): очередь, места, ресурсы, «после X» → spawn `python -m ahub.worker T12`
-worker.py → engine.py (владелец задачи, аренда):
-  разведка:  prepare(копия) → working → итог по форме (.ahub/result.json + report.md) → done
-  код/рутина: prepare.py (копия без секретов, хук, сбор приёмки) → working → checking (gates.py: коммит, дифф ⊆ paths,
-             result.json, приёмка под замком) → reviewing (review.py: панель в новых сессиях) → fixing → … → done
-  итоги хода (providers/runner.py → Outcome): сбой сети → повтор; тишина → одно продолжение; квота/таймаут/бюджет →
-  needs_decision; ошибка → error; стоп → stopped
-events.py: коды DONE/DECISION/ERROR/OWNER/ANSWER/ALARM (ALARM! — критичная) → Claude будит `ahub watch` (Monitor) / `ahub wait`
-accept.py: ahub accept (разведка — принять; код — merge --no-ff в рабочую ветку, приёмка, откат при красной, push,
-  уборка копии, архив), rework / reject / continue / task edit / extend / budget / model
+ahub task new (tasks.py: field checks, defaults by kind)  → task: queued
+ahub service (service.py, systemd ahub.service): queue, slots, resources, "after X" → spawn `python -m ahub.worker T12`
+worker.py → engine.py (task owner, lease):
+  scout:  prepare(copy) → working → result in the shape (.ahub/result.json + report.md) → done
+  code/routine: prepare.py (copy without secrets, hooks, acceptance collection) → working → checking (gates.py: commit,
+             diff ⊆ paths, result.json, acceptance under the lock) → reviewing (review.py: panel in new sessions) →
+             fixing → … → done
+  turn results (providers/runner.py → Outcome): network failure → retry; silence → one continuation;
+  quota/timeout/budget → needs_decision; error → error; stop → stopped
+events.py: codes DONE/DECISION/ERROR/OWNER/ANSWER/ALARM (ALARM! — critical) → Claude is woken by `ahub watch`
+  (Monitor) / `ahub wait`
+accept.py: ahub accept (scout — accept; code — merge --no-ff into the work branch, acceptance, roll back if red, push,
+  copy cleanup, archive), rework / reject / continue / task edit / extend / budget / model
 ```
-Состояния и переходы — `ahub/model.py` (единственный источник имён); переходы и аренда — `ahub/transitions.py`.
+States and transitions — `ahub/model.py` (the single source of the names); transitions and the lease —
+`ahub/transitions.py`.
 
-## Модули `ahub/`
-| Модуль | Роль |
+## `ahub/` modules
+| Module | Role |
 |---|---|
-| `cli.py`, `cliutil.py`, `commands/*.py` | CLI: автообнаружение `register()`; `--json`; ошибки — одна строка, код 2; `--lang {en,ru}` (вывод команды) |
-| `i18n/` | каталог строк EN/RU: `t(key, **kw)`, `en.py`/`ru.py` (порядок ключей одинаковый); язык — `AHUB_LANG` → `lang` в конфиге → `LANG`/`LC_ALL`/`LC_MESSAGES` (`ru*`) → `en` |
-| `config.py`, `paths.py` | `.hub.toml` v2 (v1 читается с переводом), `~/.config/ahub/config.toml` ([telegram] токен/чат/прокси, [usage] лимит Go, [paths] opencode/claude/opencode_db); данных `~/.local/share/ahub/ahub.db`, логи `~/.local/state/ahub/logs`; при `AHUB_HOME` всё в одном каталоге, глобальный конфиг тоже (`AHUB_HOME/config/config.toml`) — изолированный экземпляр не читает настоящий; отката к конфигу v1 (`~/.config/agent-hub`) нет; у `ProjectConfig` `python_bin()`: явный `python` → venv проекта (`.venv`, `venv`) → `python3` |
-| `store.py` + `migrations/` | SQLite WAL: task, task_dep, session, event (доставка/подтверждение), question, message, draft, model/role_model, presence, claude_launch, observer_report, op |
-| `model.py`, `transitions.py` | типы, состояния, переходы, события; move/acquire/renew/release/request_stop/once |
-| `tasks.py`, `drafts.py` | создание задачи с проверкой; черновик словами → модель → предпросмотр → запуск |
-| `registry.py` | модели (alias → поставщик/модель/вариант), меню ролей, запреты проекта |
-| `providers/` | `base.py` контракт; `runner.py` общий запуск (вывод в файл — opencode теряет хвост в пайп; тишина с учётом детей; стоп группой); `opencode.py`, `opencode_db.py`; `agy.py` (Antigravity/Gemini: `-p … --output-format stream-json`, session id из `init.conversation_id`, права `--dangerously-skip-permissions`, usage без денег — квота окном; нет export/find_session/цен); `fake.py` для тестов |
-| `workspace.py`, `prepare.py`, `gates.py`, `review.py`, `prompts.py` | копия/ветка, подготовка, ворота, панель ревью, промпты |
-| `engine.py`, `worker.py` | ход задачи, процесс задачи |
-| `service.py` | очередь, сироты, самообновление на новый код, сердцебиение, поток наблюдателя |
-| `events.py`, `comms.py`, `views.py`, `archive.py` | доставка/присутствие; сообщения/вопросы/тревоги; L1–L3 с лимитами; архив `<проект>/.agent-hub/` |
-| `pulse.py`, `observer.py` | пульс 🟢🟡🔴⚫⚪; наблюдатель (5 мин код, 30 мин модель, прокси Koala, эскалация) |
-| `doctor.py`, `commands/doctor.py` | `ahub doctor`: проверка установки (что не так → что сделать); проверки переиспользует мастер `ahub setup` |
-| `commands/setup.py` | мастер `ahub setup`: язык, проект, поставщики, бесплатный алиас без входа Go, служба, навык Claude, Telegram, итог через `doctor.run_all()`; TTY без `--yes` — интерактив, иначе как раньше + бесплатный алиас |
-| `tg/` | бот (`core.py` логика, `run.py` aiogram, `launcher.py` запуск Claude без живой сессии, `proxy.py`) |
-| `tui/` | `ahub top` (`data.py` данные, `app.py` textual) |
-| `mcp.py` | MCP-сервер (stdio) поверх тех же ручек |
-| `claude/SKILL.md` | навык для Claude Code (ставит `ahub setup --claude`) |
+| `cli.py`, `cliutil.py`, `commands/*.py` | CLI: auto-discovery via `register()`; `--json`; errors — one line, code 2; `--lang {en,ru}` (command output) |
+| `i18n/` | EN/RU string catalog: `t(key, **kw)`, `en.py`/`ru.py` (the key order is the same); language — `AHUB_LANG` → `lang` in the config → `LANG`/`LC_ALL`/`LC_MESSAGES` (`ru*`) → `en` |
+| `config.py`, `paths.py` | `.hub.toml` v2 (v1 is read with a translation), `~/.config/ahub/config.toml` ([telegram] token/chat/proxy, [usage] the Go limit, [paths] opencode/claude/opencode_db); data `~/.local/share/ahub/ahub.db`, logs `~/.local/state/ahub/logs`; under `AHUB_HOME` everything is in one directory, the global config too (`AHUB_HOME/config/config.toml`) — an isolated instance does not read the real one; there is no fallback to the v1 config (`~/.config/agent-hub`); `ProjectConfig` has `python_bin()`: explicit `python` → the project venv (`.venv`, `venv`) → `python3` |
+| `store.py` + `migrations/` | SQLite WAL: task, task_dep, session, event (delivery/ack), question, message, draft, model/role_model, presence, claude_launch, observer_report, tg_chat, op |
+| `model.py`, `transitions.py` | types, states, transitions, events; move/acquire/renew/release/request_stop/once |
+| `tasks.py`, `drafts.py` | task creation with checks; a draft in plain words → model → preview → launch |
+| `registry.py` | models (alias → provider/model/variant), role menus, project bans |
+| `providers/` | `base.py` contract; `runner.py` shared run (output to a file — opencode drops the tail into a pipe; silence with children counted; stop by group); `opencode.py`, `opencode_db.py`; `agy.py` (Antigravity/Gemini: `-p … --output-format stream-json`, session id from `init.conversation_id`, `--dangerously-skip-permissions`, usage without money — window quota; no export/find_session/prices); `fake.py` for tests |
+| `workspace.py`, `prepare.py`, `gates.py`, `review.py`, `prompts.py` | copy/branch, preparation, gates, review panel, prompts |
+| `engine.py`, `worker.py` | the turn of a task, the process of a task |
+| `service.py` | queue, orphans, self-update onto new code, heartbeat, observer thread |
+| `events.py`, `comms.py`, `views.py`, `archive.py` | delivery/presence; messages/questions/alarms; L1–L3 with limits; archive `<project>/.agent-hub/` |
+| `pulse.py`, `observer.py` | pulse 🟢🟡🔴⚫⚪; observer (5 min code, 30 min model, the Koala proxy, escalation) |
+| `doctor.py`, `commands/doctor.py` | `ahub doctor`: installation check (what is wrong → what to do); the `ahub setup` wizard reuses the checks |
+| `commands/setup.py` | the `ahub setup` wizard: language, project, providers, a free alias without a Go login, service, Claude skill, Telegram, the summary through `doctor.run_all()`; a TTY without `--yes` — interactive, otherwise as before + the free alias |
+| `tg/` | the bot (`core.py` logic, `run.py` aiogram, `launcher.py` launching Claude without a live session, `proxy.py`) |
+| `tui/` | `ahub top` (`data.py` data, `app.py` textual) |
+| `mcp.py` | MCP server (stdio) over the same handles |
+| `claude/SKILL.md` | the skill for Claude Code (installed by `ahub setup --claude`) |
 
-## Процессы
-- Служба ОС (`ahub service install`): Linux — юниты systemd --user `ahub.service` + `ahub-bot.service`
+## Processes
+- The OS service (`ahub service install`): Linux — systemd --user units `ahub.service` + `ahub-bot.service`
   (`commands/service.py`: `ExecStart=<python> -m ahub service|bot run`, `Restart=always`, `KillMode=process`);
-  macOS — plist launchd `dev.ahub.service.plist` + `dev.ahub.bot.plist` в `~/Library/LaunchAgents`
-  (`Label`, `ProgramArguments`, `RunAtLoad` + `KeepAlive`, то же окружение, логи в `state/logs`;
-  включение — `launchctl bootstrap gui/$(id -u) <путь>`). Юнит/plist бота — только если включён Telegram
-  (`[telegram] token`), иначе строка «бот не установлен: нет [telegram] token».
-- Без службы ОС: `ahub service start` — `service run` фоном (`start_new_session`, лог `state/logs/service.log`,
-  pid в `service_pid_path()` каталога данных); уже жив pid или тик сердцебиения < 30 с — второй не запускается.
-  `ahub service stop` — SIGTERM по pid-файлу, ждать до 10 с, файл удалить.
-- Процессы задач — отдельные (`python -m ahub.worker T<id>`), переживают перезапуск сервиса.
-- `ahub/procs.py` — дети, живость, cmdline, время старта: Linux через /proc, иначе psutil.
-- Claude: Monitor на `ahub watch`; `ahub status`; решения — `ahub accept|rework|reject`.
+  macOS — launchd plists `dev.ahub.service.plist` + `dev.ahub.bot.plist` in `~/Library/LaunchAgents`
+  (`Label`, `ProgramArguments`, `RunAtLoad` + `KeepAlive`, the same environment, logs in `state/logs`;
+  enabling — `launchctl bootstrap gui/$(id -u) <path>`). The bot unit/plist only when Telegram is on
+  (`[telegram] token`), otherwise the line "the bot is not installed: no [telegram] token".
+- Without an OS service: `ahub service start` — `service run` in the background (`start_new_session`, log
+  `state/logs/service.log`, the pid in `service_pid_path()` of the data dir); a live pid or a heartbeat tick < 30 s —
+  no second one is started. `ahub service stop` — SIGTERM by the pid file, wait up to 10 s, remove the file.
+- Task processes are separate (`python -m ahub.worker T<id>`), they survive a service restart.
+- `ahub/procs.py` — children, liveness, cmdline, start time: Linux via /proc, otherwise psutil.
+- Claude: Monitor on `ahub watch`; `ahub status`; decisions — `ahub accept|rework|reject`.
 
-## Работа с кодом
-- Тесты: `.venv/bin/python -m pytest -q` (~2.5 мин; HOME подменяется, сети нет); живые: `AHUB_LIVE=1 … -m live`.
-- Стиль: py3.11+, `from __future__ import annotations`, dataclasses, stdlib sqlite3, время параметром, по-русски.
-- Задачи для самого agent-hub тоже можно гонять через хаб (`.hub.toml`: рабочая ветка `main`).
+## Working with the code
+- Tests: `.venv/bin/python -m pytest -q` (~2.5 min; HOME is faked, no network); live: `AHUB_LIVE=1 … -m live`.
+- Style: py3.11+, `from __future__ import annotations`, dataclasses, stdlib sqlite3, time as a parameter,
+  comments and docstrings in English.
+- Tasks for agent-hub itself can also be run through the hub (`.hub.toml`: work branch `main`).
