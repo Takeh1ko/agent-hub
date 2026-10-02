@@ -69,6 +69,7 @@ _STATUS = re.compile(r"\b(?:status|code|http|error)\W{0,8}(\d{3})\b", re.IGNOREC
 _TOOL_TYPES = {"command_execution", "file_change", "mcp_tool_call", "web_search", "patch_apply",
                "tool_call", "dynamic_tool"}
 _SANDBOX_TIMEOUT_S = 30
+_CATALOG_TIMEOUT_S = 30  # `codex debug models` may hit the network (the observer calls it in its loop)
 
 
 def codex_bin() -> str:
@@ -327,8 +328,11 @@ class CodexProvider(Provider):
     # --- provider data ---
 
     def catalog(self) -> list[ModelInfo]:
+        """`codex debug models` — the catalog of this login (it refreshes the local cache, so the
+        timeout is short: health() runs it in the observer's loop)."""
         try:
-            rc, out, _err = run_capture([self._bin(), "debug", "models"], timeout=60, env=self.extra_env)
+            rc, out, _err = run_capture([self._bin(), "debug", "models"], timeout=_CATALOG_TIMEOUT_S,
+                                        env=self.extra_env)
         except (OSError, subprocess.SubprocessError) as e:
             _log.warning("models: %s", e)
             return []
@@ -360,8 +364,9 @@ class CodexProvider(Provider):
             return False, str(e)
         if rc == 0:
             return True, ""
-        first = next((ln.strip() for ln in (err or "").splitlines() if ln.strip()), "")
-        return False, clip(first or f"exit {rc}", 200)
+        lines = [ln.strip() for ln in (err or "").splitlines() if ln.strip()]
+        said = next((ln for ln in lines if not ln.startswith("WARNING")), lines[0] if lines else "")
+        return False, clip(said or f"exit {rc}", 200)
 
     def health(self) -> Health:
         problems: list[str] = []
