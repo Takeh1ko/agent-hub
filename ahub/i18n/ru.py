@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 MESSAGES: dict[str, str] = {
-    "cli.desc": "agent-hub v2: оркестратор моделей-работников",
+    "cli.desc": "agent-hub: оркестратор моделей-работников",
     "cli.error": "ошибка: {msg}",
     "cli.err_win": "Windows не поддерживается — используйте WSL2",
     "cli.help_json": "машинный вывод (JSON)",

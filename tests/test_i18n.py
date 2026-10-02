@@ -115,3 +115,16 @@ def test_lang_flag_overrides_env(capsys, monkeypatch, tmp_path):
 def test_set_lang_bad():
     with pytest.raises(ValueError):
         set_lang("de")
+
+
+def test_locale_first_nonempty_wins(monkeypatch):
+    from ahub import i18n
+
+    monkeypatch.delenv("AHUB_LANG", raising=False)
+    monkeypatch.setenv("LC_ALL", "en_US.UTF-8")
+    monkeypatch.setenv("LANG", "ru_RU.UTF-8")
+    i18n._reset()
+    assert i18n.lang() == "en"
+    monkeypatch.setenv("LC_ALL", "")
+    i18n._reset()
+    assert i18n.lang() == "ru"

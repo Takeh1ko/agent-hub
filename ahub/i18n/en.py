@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 MESSAGES: dict[str, str] = {
-    "cli.desc": "agent-hub v2: worker-model orchestrator",
+    "cli.desc": "agent-hub: worker-model orchestrator",
     "cli.error": "error: {msg}",
     "cli.err_win": "Windows is not supported — use WSL2",
     "cli.help_json": "machine output (JSON)",

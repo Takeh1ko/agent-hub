@@ -17,33 +17,20 @@ _lang: str | None = None
 
 
 def _resolve() -> str:
-    """Порядок выбора языка (первый подходящий)."""
-    v = os.environ.get("AHUB_LANG", "").strip().lower()
-    if v in ("en", "ru"):
-        return v
-    if v.startswith("ru"):
-        return "ru"
-    if v.startswith("en"):
-        return "en"
-    if v:
-        pass  # неизвестное значение — дальше по порядку
+    """AHUB_LANG → lang в конфиге хаба → локаль (первая непустая из LC_ALL, LC_MESSAGES, LANG) → en."""
+    env = os.environ.get("AHUB_LANG", "").strip().lower()[:2]
+    if env in _CATALOGS:
+        return env
     try:
-        from ahub import config as _cfg
+        from ahub import config
 
-        hub = _cfg.load_hub()
-    except Exception as e:
-        from ahub.config import ConfigError as _CE
-
-        if isinstance(e, _CE) and any("lang" in x for x in e.errors):
-            raise
-        hub = None
-    if hub is not None and getattr(hub, "lang", ""):
-        return hub.lang
-    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
-        loc = os.environ.get(var, "").strip().lower()
-        if loc.startswith("ru"):
-            return "ru"
-    return "en"
+        configured = config.load_hub().lang
+    except config.ConfigError:  # битый конфиг сообщит о себе сам — язык ему для этого и нужен
+        configured = ""
+    if configured:
+        return configured
+    locale = next((v for v in (os.environ.get(k, "") for k in ("LC_ALL", "LC_MESSAGES", "LANG")) if v), "")
+    return "ru" if locale.lower().startswith("ru") else "en"
 
 
 def lang() -> str:
@@ -58,7 +45,7 @@ def set_lang(code: str) -> None:
     """Жёстко задать язык (флаг --lang)."""
     global _lang
     c = code.strip().lower()
-    if c not in ("en", "ru"):
+    if c not in _CATALOGS:
         raise ValueError(f"lang: допустимо 'en' или 'ru', получено {code!r}")
     _lang = c
 
@@ -71,10 +58,5 @@ def _reset() -> None:
 
 def t(key: str, **kw) -> str:
     """Шаблон текущего языка, подстановка через str.format(**kw)."""
-    cur = lang()
-    tpl = _CATALOGS.get(cur, {}).get(key)
-    if tpl is None:
-        tpl = _EN.get(key)
-    if tpl is None:
-        raise KeyError(key)
+    tpl = _CATALOGS[lang()].get(key) or _EN[key]  # нет нигде — KeyError: ошибка разработчика
     return tpl.format(**kw)
