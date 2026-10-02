@@ -7,6 +7,7 @@ AHUB_LANG → lang в конфиге хаба → LANG/LC_ALL/LC_MESSAGES (ru*) 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable, Iterator, Mapping
 
 from ahub.i18n.en import MESSAGES as _EN
 from ahub.i18n.ru import MESSAGES as _RU
@@ -60,3 +61,22 @@ def t(key: str, **kw) -> str:
     """Шаблон текущего языка, подстановка через str.format(**kw)."""
     tpl = _CATALOGS[lang()].get(key) or _EN[key]  # нет нигде — KeyError: ошибка разработчика
     return tpl.format(**kw)
+
+
+class Words(Mapping[str, str]):
+    """Слова каталога по ключам (состояния, фазы): значение — t(prefix + key) при чтении, на текущем языке."""
+
+    def __init__(self, prefix: str, keys: Iterable[str]):
+        self._prefix = prefix
+        self._keys = tuple(keys)
+
+    def __getitem__(self, key: str) -> str:
+        if key not in self._keys:
+            raise KeyError(key)
+        return t(self._prefix + key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._keys)
+
+    def __len__(self) -> int:
+        return len(self._keys)

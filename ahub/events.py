@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+from ahub.i18n import t
 from ahub.model import Ev
 from ahub.store import Event, Store, Task
 from ahub.time import now_ms
@@ -126,7 +127,7 @@ def _money(p: dict) -> str:
     if go:
         parts.append(f"${go:.2f}")
     if usd:
-        parts.append(f"${usd:.2f} реальных")
+        parts.append(t("events.real", usd=f"{usd:.2f}"))
     return ", ".join(parts)
 
 
@@ -140,7 +141,7 @@ def format_line(ev: Event, task: Task | None) -> str:
     if k is Ev.DONE:
         extra = []
         if p.get("report_bytes"):
-            extra.append(f"отчёт {p['report_bytes'] / 1024:.1f} КБ")
+            extra.append(t("events.report", kb=f"{p['report_bytes'] / 1024:.1f}"))
         if p.get("summary"):
             extra.append(_clip(p["summary"], 70))
         m = _money(p)
