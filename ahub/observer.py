@@ -148,33 +148,20 @@ def _mark_seen(store: Store, sus: list[Suspicion], now: int) -> None:
 
 
 def _bot_pids(proc_root: str | Path = "/proc") -> list[int]:
-    """Живые pid бота: процессы с парой `bot run` в cmdline."""
-    out: list[int] = []
-    try:
-        pids = procs.pids(proc_root)
-    except Exception:
-        return []
-    for pid in pids:
-        try:
-            args = procs.cmdline(pid, proc_root)
-        except Exception:
-            continue
-        for i in range(len(args) - 1):
-            if args[i] == "bot" and args[i + 1] == "run":
-                try:
-                    if procs.alive(pid, proc_root):
-                        out.append(pid)
-                except Exception:
-                    pass
-                break
+    """Живые pid бота: процессы с `bot run` в cmdline."""
+    out = []
+    for pid in procs.pids(proc_root):
+        args = procs.cmdline(pid, proc_root)
+        if any(x == "bot" and y == "run" for x, y in zip(args, args[1:])) and procs.alive(pid, proc_root):
+            out.append(pid)
     return out
 
 
 def window_since(store: Store, *, deep: bool, now: int) -> int:
-    """Начало окна проверки: плановая — с прошлой плановой (или 30 мин), разбор — как у быстрой."""
+    """Начало окна проверки: с прошлой проверки того же вида (плановой или быстрой), иначе — её период."""
     if deep:
         return int(store.meta_get(LAST_DEEP) or 0) or now - DEEP_MS
-    return now - QUICK_MS
+    return int(store.meta_get(LAST_QUICK) or 0) or now - QUICK_MS
 
 
 def log_digest(since: int, *, now: int | None = None, limit_bytes: int = LOG_DIGEST_BYTES,
@@ -192,16 +179,9 @@ def log_digest(since: int, *, now: int | None = None, limit_bytes: int = LOG_DIG
     for sig, n in hublog.summarize(recs, limit=10):
         grp = [r for r in recs if hublog.signature(r) == sig]
         last = max(grp, key=lambda r: int(r.get("ts") or 0))
-        try:
-            ts = int(last.get("ts") or 0)
-        except (TypeError, ValueError):
-            ts = 0
+        ts = int(last.get("ts") or 0)
         pid = last.get("pid")
-        try:
-            alive = procs.alive(pid, proc_root) if isinstance(pid, int) else False
-        except Exception:
-            alive = False
-        mark = "" if alive else " — мёртвый pid"
+        mark = "" if isinstance(pid, int) and procs.alive(pid, proc_root) else " — мёртвый pid"
         msg = str(last.get("msg") or "")[:160].replace("\n", " ")
         lines.append(f"{n}× {last.get('lvl')} {last.get('comp')}: {msg}"
                      f" (последняя {fmt_local(ts, now=ts_now) if ts else '?'} ts={ts}, pid={pid}{mark})")
@@ -307,11 +287,10 @@ def cycle(store: Store, *, now: int | None = None, deep_due: bool | None = None,
           projects: list[config.ProjectConfig] | None = None) -> str:
     """Один проход наблюдателя. Возвращает вердикт: ok | false_alarm | alarm | critical | unknown."""
     ts = now if now is not None else now_ms()
-    prev_quick = int(store.meta_get(LAST_QUICK) or 0)
-    sus = quick_check(store, projects=projects, now=ts)
     last_deep = int(store.meta_get(LAST_DEEP) or 0)
     deep = deep_due if deep_due is not None else ts - last_deep >= DEEP_MS
-    win = (last_deep or ts - DEEP_MS) if deep else (prev_quick or ts - QUICK_MS)
+    win = window_since(store, deep=deep, now=ts)  # до quick_check: он сдвигает LAST_QUICK
+    sus = quick_check(store, projects=projects, now=ts)
     fresh = _fresh(store, sus, ts)
     if not fresh and not deep:
         _report(store, "quick", "ok", "чисто" if not sus else f"известное: {len(sus)}", {}, 0.0, ts)
