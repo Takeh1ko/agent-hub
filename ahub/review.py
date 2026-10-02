@@ -16,7 +16,7 @@ from pathlib import Path
 from ahub import workspace
 from ahub.config import ProjectConfig
 from ahub.gates import GateResult
-from ahub.prompts import rules_text
+from ahub.prompts import orchestrator_heading, reply_language_line, rules_text
 from ahub.store import Task
 
 VERDICTS = ("approve", "changes", "dispute")
@@ -70,21 +70,22 @@ def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResul
     out = review_path(".", round_no, model).as_posix().removeprefix("./")
     return "\n\n".join([
         rules_text(project).strip(),
-        f"# Ревью задачи {task.label}: {task.title}\nТы ревьюер в новой сессии; работу исполнителя не видел. "
-        "Файлы проекта не меняй и не коммить.",
-        "## Постановка\n" + strip_arbiter(task.spec.strip() or "(описание пусто)"),
-        f"## Разрешённые файлы\n{', '.join(task.limits.get('paths') or [])}\n"
-        f"## Приёмка\n{', '.join(task.limits.get('accept') or []) or '—'}",
-        f"## Ворота (без моделей)\n{gate.summary()}" + (f"\nХвост тестов:\n```\n{gate.tests_tail}\n```"
+        f"# Review of {task.label}: {task.title}\nYou are a reviewer in a fresh session; you have not seen "
+        "the worker's work. Do not change or commit project files.",
+        "## Task\n" + strip_arbiter(task.spec.strip() or "(empty description)"),
+        f"## Allowed files\n{', '.join(task.limits.get('paths') or [])}\n"
+        f"## Acceptance\n{', '.join(task.limits.get('accept') or []) or '—'}",
+        f"## Gates (no models)\n{gate.summary()}" + (f"\nTest tail:\n```\n{gate.tests_tail}\n```"
                                                         if gate.tests_tail else ""),
-        "## Дифф\n```diff\n" + diff + "\n```",
-        "## Что проверить\nСоответствие постановке и приёмке; тесты-пустышки (проходят при сломанной логике — "
-        "проверь, сломав логику локально и откатив через git checkout); гонки; утечки ресурсов; блокирующие "
-        "вызовы в async; выход за разрешённые файлы. Стиль/вкус — только low.",
-        f"## Как сдать\nЗапиши `{out}`:\n"
-        '{"verdict": "approve|changes|dispute", "summary": "одна фраза", "findings": [{"severity": '
-        '"high|medium|low", "file": "путь", "line": 12, "issue": "суть ≤ 300 симв.", "fix": "что сделать"}]}\n'
-        "Каждое замечание — с файлом, строкой и конкретным исправлением. Последнее сообщение — «готово».",
+        "## Diff\n```diff\n" + diff + "\n```",
+        "## What to check\nMatch to the task and acceptance; stub tests (pass on broken logic — "
+        "check by breaking the logic locally and reverting via git checkout); races; resource leaks; "
+        "blocking calls in async; changes outside allowed files. Style/taste — low only.",
+        f"## How to submit\nWrite `{out}`:\n"
+        '{"verdict": "approve|changes|dispute", "summary": "one sentence", "findings": [{"severity": '
+        '"high|medium|low", "file": "path", "line": 12, "issue": "point, <= 300 chars", "fix": "what to do"}]}\n'
+        f"Each finding needs file, line, and a concrete fix. {reply_language_line()} "
+        'Last message — one line: "done".',
     ])
 
 
@@ -140,13 +141,16 @@ def panel(reviews: list[Review], expected: list[str], round_no: int, max_rounds:
 
 
 def fix_prompt(findings: list[Finding], gate: GateResult | None = None, notes: str = "") -> str:
-    lines = ["Доработка по замечаниям (та же задача, та же сессия). Исправь, закоммить поимённо, обнови "
-             "`.ahub/result.json` (commit = новый HEAD) и ответь «готово». Спорное — объясни в notes."]
+    from ahub.prompts import final_line
+
+    lines = ["Rework on review findings (same task, same session). Fix, commit by name, update "
+             f"`.ahub/result.json` (commit = new HEAD). {reply_language_line()} {final_line()} "
+             "Disputed — explain in notes."]
     if notes:
-        lines.append("## Указания оркестратора\n" + notes.strip())
+        lines.append(f"{orchestrator_heading()}\n" + notes.strip())
     for i, f in enumerate(findings, 1):
         where = f"{f.file}:{f.line}" if f.line else f.file
-        lines.append(f"{i}. [{f.severity}] {where} — {f.issue}" + (f"\n   исправить: {f.fix}" if f.fix else ""))
+        lines.append(f"{i}. [{f.severity}] {where} — {f.issue}" + (f"\n   fix: {f.fix}" if f.fix else ""))
     if gate is not None and gate.tests_ok is False:
-        lines.append(f"## Приёмка красная\n`{gate.tests_cmd}`\n```\n{gate.tests_tail}\n```")
+        lines.append(f"## Failing acceptance\n`{gate.tests_cmd}`\n```\n{gate.tests_tail}\n```")
     return "\n\n".join(lines)
