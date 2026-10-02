@@ -1,15 +1,26 @@
 [project]
-name = "midas-ai-hub"
-version = "2.0.0"
-description = "agent-hub v2: сервис, через который оркестратор (Claude Code) и человек раздают работу моделям-работникам"
-requires-python = ">=3.12"
-dependencies = ["textual>=0.80", "aiogram>=3.13", "aiohttp-socks>=0.9", "psutil>=5.9; sys_platform != 'linux'"]
+name = "ahub"
+version = "3.0.0"
+description = "Service through which Claude Code and a human hand tasks to cheap worker models and accept the results"
+requires-python = ">=3.11"
+license = "MIT"
+readme = "README.md"
+keywords = ["agents", "orchestrator", "llm", "telegram"]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "License :: OSI Approved :: MIT License",
+]
+dependencies = ["textual>=0.80", "psutil>=5.9; sys_platform != 'linux'"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "psutil>=5.9"]
+telegram = ["aiogram>=3.13"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "psutil>=5.9", "aiogram>=3.13"]
 
 [project.scripts]
-hub = "ahub.cli:main"
 ahub = "ahub.cli:main"
 
 [build-system]
