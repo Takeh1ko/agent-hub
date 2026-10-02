@@ -98,6 +98,81 @@ def ensure_project_file(root: Path, *, name: str | None = None, deny: list[str] 
     return "создан шаблон v2 (проверьте allowed_paths, python, тесты)", f
 
 
+def _render_projects(items: list[str]) -> str:
+    """Одна строка projects для глобального конфига."""
+    return "projects = [" + ", ".join(_toml_str(p) for p in items) + "]"
+
+
+def _replace_projects_line(text: str, items: list[str]) -> str:
+    """Заменить ключ projects до первой [секции]; нет ключа — вставить первой строкой.
+
+    Остальное содержимое (секции, комментарии) — как было. Многострочный массив заменяется целиком.
+    """
+    new_line = _render_projects(items)
+    lines = text.splitlines()
+    first_section: int | None = None
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("[") and "]" in s:
+            first_section = i
+            break
+    end = first_section if first_section is not None else len(lines)
+    start: int | None = None
+    for i in range(end):
+        s = lines[i].strip()
+        if not s or s.startswith("#"):
+            continue
+        head = s[len("projects"):] if s.startswith("projects") else ""
+        # точный ключ projects (дальше — пробелы и `=`), а не префикс чужого ключа
+        if s.startswith("projects") and head.lstrip().startswith("="):
+            start = i
+            break
+    if start is None:
+        out = [new_line, *lines] if lines else [new_line]
+        return "\n".join(out) + "\n"
+    # конец значения: если массив — до строки с балансом скобок, иначе та же строка
+    depth = 0
+    in_single = in_double = False
+    esc = False
+    seen_open = False
+    # идём по символам от `=` до конца preamble
+    li, ci = start, lines[start].find("=") + 1
+    while li < end:
+        ln = lines[li]
+        while ci < len(ln):
+            ch = ln[ci]
+            if esc:
+                esc = False
+            elif in_single:
+                if ch == "'":
+                    in_single = False
+            elif in_double:
+                if ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_double = False
+            elif ch == "'":
+                in_single = True
+            elif ch == '"':
+                in_double = True
+            elif ch == "#":
+                break  # остаток строки — комментарий
+            elif ch == "[":
+                depth += 1
+                seen_open = True
+            elif ch == "]":
+                depth -= 1
+                if seen_open and depth <= 0:
+                    out = lines[:start] + [new_line] + lines[li + 1:]
+                    return "\n".join(out) + "\n"
+            ci += 1
+        li += 1
+        ci = 0
+    # не массив (или скобки не закрыты) — меняем только строку начала
+    out = lines[:start] + [new_line] + lines[start + 1:]
+    return "\n".join(out) + "\n"
+
+
 def register_project(root: Path) -> bool:
     gp = paths.global_config_path()
     hub = config.load_hub(gp) if gp.exists() else config.HubConfig()
@@ -112,7 +187,10 @@ def register_project(root: Path) -> bool:
         changed = True
     if changed:
         gp.parent.mkdir(parents=True, exist_ok=True)
-        gp.write_text("projects = [" + ", ".join(_toml_str(p) for p in items) + "]\n", encoding="utf-8")
+        if gp.exists():
+            gp.write_text(_replace_projects_line(gp.read_text(encoding="utf-8"), items), encoding="utf-8")
+        else:
+            gp.write_text(_render_projects(items) + "\n", encoding="utf-8")
     return changed
 
 
