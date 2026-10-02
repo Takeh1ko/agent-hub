@@ -33,7 +33,7 @@ def cmd_watch(args) -> int:
     from ahub.i18n import t
 
     store = Store()
-    pending = [e for e in events.unacked(store, args.project) if e.delivered_at is not None]
+    pending = events.watch_start_summary(store, who=args.who, project=args.project)
     if pending:
         tail = "; ".join(events.lines(store, pending[:3]))[:180]
         print(t("comms.unread", n=len(pending), text=tail), flush=True)

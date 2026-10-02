@@ -109,3 +109,50 @@ def test_redelivery_capped(store):
         t += events.REDELIVER_MS + 1
     assert events.ready_batch(store, now=t) == []  # from now on only "unread" in status
     assert len(events.unacked(store)) == 1
+
+
+def test_watch_summary_once(store):
+    done_task(store, now=0)
+    batch = events.ready_batch(store, now=events.GROUP_WINDOW_MS)
+    events.mark_delivered(store, [e.id for e in batch], now=events.GROUP_WINDOW_MS)
+    first = events.watch_start_summary(store)
+    assert len(first) == 1
+    assert len(events.unacked(store)) == 1  # old stays unread
+    assert events.watch_start_summary(store) == []  # restart stays silent
+    assert events.watch_start_summary(store) == []  # still silent
+
+
+def test_watch_summary_new_event_again(store):
+    done_task(store, title="первая", now=0)
+    batch = events.ready_batch(store, now=events.GROUP_WINDOW_MS)
+    events.mark_delivered(store, [e.id for e in batch], now=events.GROUP_WINDOW_MS)
+    assert len(events.watch_start_summary(store)) == 1
+    assert events.watch_start_summary(store) == []
+    done_task(store, title="вторая", now=1000)
+    batch = events.ready_batch(store, now=1000 + events.GROUP_WINDOW_MS)
+    assert len(batch) == 1 and batch[0].task_id == 2
+    events.mark_delivered(store, [e.id for e in batch], now=1000 + events.GROUP_WINDOW_MS)
+    again = events.watch_start_summary(store)
+    assert len(again) == 1 and again[0].task_id == 2  # only the new one, no repeat of the old
+    assert events.watch_start_summary(store) == []
+    assert len(events.unacked(store)) == 2  # both stay unread
+
+
+def test_watch_summary_ack(store):
+    done_task(store, now=0)
+    batch = events.ready_batch(store, now=events.GROUP_WINDOW_MS)
+    events.mark_delivered(store, [e.id for e in batch], now=events.GROUP_WINDOW_MS)
+    assert len(events.watch_start_summary(store)) == 1
+    assert events.ack(store) == 1
+    assert events.unacked(store) == []
+    assert events.watch_start_summary(store) == []  # acked — nothing to announce
+
+
+def test_watch_summary_per_who(store):
+    done_task(store, now=0)
+    batch = events.ready_batch(store, now=events.GROUP_WINDOW_MS)
+    events.mark_delivered(store, [e.id for e in batch], now=events.GROUP_WINDOW_MS)
+    assert len(events.watch_start_summary(store, who="claude")) == 1
+    assert events.watch_start_summary(store, who="claude") == []
+    assert len(events.watch_start_summary(store, who="other")) == 1  # another consumer hears it once
+    assert events.watch_start_summary(store, who="other") == []
