@@ -16,19 +16,29 @@ from ahub.providers.base import Act, Cap, Outcome, Provider, RunSpec
 from ahub.providers.runner import run
 
 AGY_DATA = Path(__file__).parent / "data" / "agy"
+CODEX_DATA = Path(__file__).parent / "data" / "codex"
+
+
+def _fake_from(root: Path, data: Path, body: str, name: str) -> Path:
+    """A fake CLI executable: the body of a sample script under this interpreter's shebang.
+
+    The sample directory is passed in the environment — the fake lives in a temp dir.
+    """
+    fake = root / name
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake.write_text(f"#!{sys.executable}\n" + (data / body).read_text(encoding="utf-8"), encoding="utf-8")
+    fake.chmod(0o755)
+    return fake
 
 
 def fake_agy(root: Path, env: dict[str, str] | None = None) -> Path:
-    """Fake agy executable: the body of tests/data/agy/fake_agy.py under this interpreter's shebang.
+    """Fake agy executable (samples — tests/data/agy), the data dir is in AHUB_AGY_FAKE_DATA."""
+    return _fake_from(root, AGY_DATA, "fake_agy.py", "agy")
 
-    The sample directory is passed in the environment (AGY_AGY_FAKE_DATA) — the fake lives in a temp dir.
-    """
-    fake = root / "agy"
-    fake.parent.mkdir(parents=True, exist_ok=True)
-    fake.write_text(f"#!{sys.executable}\n" + (AGY_DATA / "fake_agy.py").read_text(encoding="utf-8"),
-                    encoding="utf-8")
-    fake.chmod(0o755)
-    return fake
+
+def fake_codex(root: Path, env: dict[str, str] | None = None) -> Path:
+    """Fake codex executable (samples — tests/data/codex), the data dir is in AHUB_CODEX_FAKE_DATA."""
+    return _fake_from(root, CODEX_DATA, "fake_codex.py", "codex")
 
 
 def agy_state(root: Path) -> Path:

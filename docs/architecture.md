@@ -17,8 +17,8 @@ Principles, by importance:
    universality hurts quality of work with Claude, Claude wins.
 3. **Fault tolerance and observability.** Every error leaves a trace in the logs; every task has an honest pulse;
    a separate observer watches the hub itself; after a crash, restart or update everything continues where it stopped.
-4. **Extensible providers.** A model provider is a replaceable module registered by name (today opencode; agy next,
-   then Codex, a DeepSeek harness…).
+4. **Extensible providers.** A model provider is a replaceable module registered by name (today opencode, agy and
+   Codex; next a DeepSeek harness…).
 5. **The human sees everything and can intervene**, but by default only watches.
 
 ## 1. Participants
@@ -51,7 +51,7 @@ Principles, by importance:
  └──────────┬──────────────────────────────────────────────┬─────────────────┘
             ▼                                              ▼
  ┌──── PROVIDERS (modules) ────┐                ┌──── PROJECT ARCHIVE ────┐
- │ opencode · agy · (Codex …)  │── model sessions ──► │ <project>/.agent-hub/  │
+ │ opencode · agy · codex     │── model sessions ──► │ <project>/.agent-hub/  │
  └────────────────────────────┘   inside the copy  └────────────────────────┘
         ▲ external supervisor (an OS facility): restarts a fallen service
 ```
@@ -325,6 +325,17 @@ Heavy session transcripts live in the hub's storage; the archive holds a link or
   an OS sandbox (a separate user/namespace) a process of the same user can technically read and write files outside
   the copy — an accepted risk (the models are ours, the tasks come from Claude); hardening it is a separate task if
   needed.
+- **Codex has a real OS sandbox** — the first provider that does: `-s workspace-write` reads anything but writes only
+  the working copy, enforced by the kernel (Landlock inside bubblewrap on Linux, Seatbelt on macOS), so the worker can
+  run git and pytest in the copy and cannot touch anything outside it. The flip side must be checked on the host:
+  `codex sandbox <mode> -- true` starts the sandbox without a model and without the network, and if it fails codex
+  fails every command *silently* (the JSONL stream shows nothing — the error goes only to the model), so the turn comes
+  out empty. `check_codex`/`health()` therefore run this probe and report it as a problem (checked live
+  2026-10-03: inside a container without user namespaces bubblewrap cannot set a uid map —
+  `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`; on a normal host the probe passes). Non-interactive
+  mode is `-c approval_policy="never"` (the worker never waits for a human) plus `stdin=/dev/null`, which the shared
+  runner already gives the process; `--skip-git-repo-check` is added when the working copy is not a git repo
+  (codex otherwise stops to ask about the trust — on `exec resume` too).
 
 ## 14. v1 lessons (mandatory requirements — a checklist)
 
