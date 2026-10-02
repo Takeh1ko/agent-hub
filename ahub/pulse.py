@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ahub import procs, providers
 from ahub.config import ProjectConfig
+from ahub.i18n import t as _t
 from ahub.model import ACTIVE, State
 from ahub.store import Store, Task
 from ahub.time import now_ms
@@ -78,7 +79,7 @@ def task_pulse(store: Store, t: Task, *, live: dict[int, int], project: ProjectC
     ts = now if now is not None else now_ms()
     pid = live.get(t.id)
     if pid is None:
-        return Pulse(t.id, "dead", "процесса задачи нет", pid=None)
+        return Pulse(t.id, "dead", _t("pulse.dead"), pid=None)
     # Последняя сессия, которая идёт сейчас (или последняя вообще).
     sessions = store.list_sessions(t.id)
     running = [s for s in sessions if s.status == "running"]
@@ -106,23 +107,23 @@ def task_pulse(store: Store, t: Task, *, live: dict[int, int], project: ProjectC
         return Pulse(t.id, "working", "", last, tool, pid)
     if tool:
         mins = (ts - tool_since) // 60000 if tool_since else age // 60000
-        return Pulse(t.id, "waiting", f"идёт инструмент {tool} ({mins} мин)", last, tool, pid)
+        return Pulse(t.id, "waiting", _t("pulse.tool", tool=tool, mins=mins), last, tool, pid)
     if t.phase == "waiting":
-        why = t.state_reason or "ждёт"
+        why = t.state_reason or _t("pulse.waiting")
         if project is not None and project.test_resource in project.resources:
             lk = project.resources[project.test_resource].lock
             holder = lock_holder(lk, proc_root) if lk else None
             if holder:
-                why = f"ждёт замок тестов — держит {_describe(holder, proc_root)}"
+                why = _t("pulse.test_lock", holder=_describe(holder, proc_root))
         return Pulse(t.id, "waiting", why, last, "", pid)
     if kids:
-        return Pulse(t.id, "waiting", f"идут дочерние процессы ({_describe(kids[0], proc_root)})", last, "", pid)
+        return Pulse(t.id, "waiting", _t("pulse.children", desc=_describe(kids[0], proc_root)), last, "", pid)
     if not known:
-        return Pulse(t.id, "unknown", "поставщик не даёт сигнала", last, "", pid)
+        return Pulse(t.id, "unknown", _t("pulse.no_signal"), last, "", pid)
     limit = THRESHOLD_MS.get(t.state, 20 * 60_000)
     if age >= limit:
-        return Pulse(t.id, "silent", f"молчит {age // 60000} мин (порог {limit // 60000})", last, "", pid)
-    return Pulse(t.id, "working", f"тихо {age // 60000} мин", last, "", pid)
+        return Pulse(t.id, "silent", _t("pulse.silent", mins=age // 60000, limit=limit // 60000), last, "", pid)
+    return Pulse(t.id, "working", _t("pulse.quiet", mins=age // 60000), last, "", pid)
 
 
 def all_pulses(store: Store, *, live: dict[int, int] | None = None, projects: list[ProjectConfig] | None = None,
