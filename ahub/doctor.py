@@ -37,10 +37,12 @@ def _fail(name: str, err: Exception) -> Check:
     return Check(name, False, _t("doctor.check_error", err=f"{err.__class__.__name__}: {err}"[:200]), "")
 
 
-def check_python() -> Check:
-    v = sys.version_info
-    text = f"{v.major}.{v.minor}.{v.micro}"
-    if (v.major, v.minor) >= (3, 11):
+def check_python(version: tuple[int, ...] | None = None) -> Check:
+    v = version if version is not None else sys.version_info
+    major, minor = v[0], v[1]
+    micro = v[2] if len(v) > 2 else 0
+    text = f"{major}.{minor}.{micro}"
+    if (major, minor) >= (3, 11):
         return Check("python", True, _t("doctor.python_ok", version=text), "")
     return Check("python", False, _t("doctor.python_bad", version=text), _t("doctor.python_fix"))
 
@@ -250,11 +252,13 @@ def check_models(auth: list[str] | None = None) -> Check:
     providers = auth if auth is not None else auth_providers()
     go = has_go_login(providers)
     bad: list[str] = []
+    menus: dict[str, list[str]] = {}
     for role in Role:
         try:
             menu = registry.menu(store, role)
         except Exception:
             continue
+        menus[role.value] = [e.alias for e, _ in menu]
         default = next((e for e, d in menu if d), None)
         if default is None:
             continue
@@ -263,7 +267,14 @@ def check_models(auth: list[str] | None = None) -> Check:
     if not bad:
         return Check("models", True, _t("doctor.models_ok"), "")
     free = _free_alias(store)
-    cmds = "; ".join(f"ahub models role {r} --set-default {free}" for r in bad)
+    parts = []
+    for r in bad:
+        if free in menus.get(r, []):
+            parts.append(f"ahub models role {r} --set-default {free}")
+        else:
+            parts.append(f"ahub models role {r} --add {free}"
+                         f" && ahub models role {r} --set-default {free}")
+    cmds = "; ".join(parts)
     return Check("models", False, _t("doctor.models_bad", roles=", ".join(bad)),
                  _t("doctor.models_fix", cmds=cmds))
 
@@ -295,7 +306,7 @@ def check_claude() -> Check:
     from ahub.tg.launcher import claude_bin
 
     binary = claude_bin()
-    if binary:
+    if binary and os.path.isfile(binary) and os.access(binary, os.X_OK):
         return Check("claude", True, _t("doctor.claude_found", binary=binary), "")
     return Check("claude", False, _t("doctor.claude_missing"), _t("doctor.claude_fix"))
 

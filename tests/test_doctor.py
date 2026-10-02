@@ -6,7 +6,6 @@ import json
 import shutil
 import socket
 import subprocess
-import sys
 import types
 from pathlib import Path
 
@@ -18,16 +17,10 @@ from ahub.time import now_ms
 from tests.conftest import write
 
 
-def _ns_ver(major: int, minor: int):
-    return types.SimpleNamespace(major=major, minor=minor, micro=0)
-
-
-def test_python_ok_and_bad(monkeypatch):
-    monkeypatch.setattr(sys, "version_info", _ns_ver(3, 11))
-    c = doctor.check_python()
+def test_python_ok_and_bad():
+    c = doctor.check_python((3, 11))
     assert c.name == "python" and c.ok is True and "3.11" in c.detail and not c.fix
-    monkeypatch.setattr(sys, "version_info", _ns_ver(3, 10))
-    c = doctor.check_python()
+    c = doctor.check_python((3, 10))
     assert c.ok is False and "3.10" in c.detail and c.fix
 
 
@@ -160,6 +153,19 @@ def test_models_go_and_free_fix():
     assert c.ok is False and c.fix
 
 
+def test_models_fix_commands_execute(capsys):
+    """Suggested fix must run as-is: --add when the alias is out of the menu, then --set-default."""
+    c = doctor.check_models([])
+    assert c.ok is False and c.fix
+    assert "--add spark-free" in c.fix  # spark-free is not in role menus by default
+    for group in c.fix.split("; "):
+        for part in group.split(" && "):
+            assert part.startswith("ahub ")
+            assert cli.main(part.split()[1:]) == 0
+        capsys.readouterr()
+    assert doctor.check_models([]).ok is True
+
+
 def test_network_no_proxy_and_down(monkeypatch):
     for v in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
         monkeypatch.delenv(v, raising=False)
@@ -187,11 +193,16 @@ def test_network_proxy_ok(monkeypatch):
         srv.close()
 
 
-def test_claude_and_skill(monkeypatch):
+def test_claude_and_skill(monkeypatch, tmp_path):
     from ahub.tg import launcher
 
-    monkeypatch.setattr(launcher, "claude_bin", lambda: "/usr/bin/claude")
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(launcher, "claude_bin", lambda: str(fake))
     assert doctor.check_claude().ok is True
+    monkeypatch.setattr(launcher, "claude_bin", lambda: str(tmp_path / "gone"))
+    assert doctor.check_claude().ok is False
     monkeypatch.setattr(launcher, "claude_bin", lambda: None)
     c = doctor.check_claude()
     assert c.ok is False and c.fix
@@ -200,6 +211,18 @@ def test_claude_and_skill(monkeypatch):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("# skill\n", encoding="utf-8")
     assert doctor.check_claude_skill().ok is True
+
+
+def test_claude_config_override_needs_file_and_exec(tmp_path):
+    write(paths.global_config_path(), f'[paths]\nclaude = "{tmp_path}/nope"\n')
+    assert doctor.check_claude().ok is False
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\n")  # not executable yet
+    write(paths.global_config_path(), f'[paths]\nclaude = "{fake}"\n')
+    assert doctor.check_claude().ok is False
+    fake.chmod(0o755)
+    c = doctor.check_claude()
+    assert c.ok is True and str(fake) in c.detail
 
 
 def test_telegram_off_configured(monkeypatch):
