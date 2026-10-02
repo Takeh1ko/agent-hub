@@ -190,6 +190,50 @@ def test_dispatcher_builds(store):
     assert tgrun.build_dispatcher(store) is not None
 
 
+def test_chats_empty_and_fallback(store, tmp_path, monkeypatch):
+    from ahub import config, paths
+    from tests.conftest import write
+
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    assert core.chats(store) == []
+    write(paths.global_config_path(), "[telegram]\nchat_id = 77\n")
+    assert core.chats(store) == [77]
+    assert core.chats(store, hub=config.HubConfig()) == []
+    assert core.chats(store, hub=config.HubConfig(tg_chat_id=78)) == [78]
+    core.remember_chat(store, 42)
+    assert core.chats(store) == [42]  # живые чаты важнее запаса
+
+
+def test_bot_main_no_token(tmp_path, monkeypatch, capsys):
+    from ahub.tg import run as tgrun
+
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    rc = tgrun.main()
+    assert rc == 2
+    assert "токен" in capsys.readouterr().err.lower()
+
+
+def test_build_session_proxy_pref(tmp_path, monkeypatch):
+    from ahub import config
+    from ahub.tg import run as tgrun
+
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    assert tgrun.build_session(config.HubConfig()) is None
+    monkeypatch.setenv("HTTPS_PROXY", "http://sys:8080")
+    s = tgrun.build_session(config.HubConfig())
+    assert s is not None and s.proxy_url == "http://sys:8080"
+    hub = config.HubConfig(tg_proxy="socks5://127.0.0.1:1080")
+    assert tgrun.build_session(hub).proxy_url == "socks5://127.0.0.1:1080"
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    assert tgrun.build_session(hub).proxy_url == "socks5://127.0.0.1:1080"
+
+
 def test_launcher_fast_death_keeps_messages(store, tmp_path):
     project = make_project(tmp_path)
 

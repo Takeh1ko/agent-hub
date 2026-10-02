@@ -36,6 +36,58 @@ def test_screen_data(store):
     assert "Claude на связи" in data.header(store, {}, __import__("ahub.time", fromlist=["now_ms"]).now_ms())
 
 
+def _fake_totals(day_go: float, month_go: float):
+    from ahub.providers.base import Usage
+
+    calls: list = []
+
+    def _fake(since_ms: int, db_path=None, until_ms=None):
+        calls.append(since_ms)
+        if len(calls) == 1:
+            return Usage(cost_go=day_go, cost_usd=0.0)
+        return Usage(cost_go=month_go, cost_usd=0.0)
+
+    return _fake
+
+
+def test_money_with_limit(store, monkeypatch):
+    from ahub.providers import opencode_db
+    from ahub.time import now_ms
+
+    monkeypatch.setattr(opencode_db, "totals", _fake_totals(5.0, 30.0))
+    head = data.header(store, {}, now_ms(), go_limit=60.0)
+    assert "месяц $30.00 из $60" in head and "50 %" in head
+    assert "лимит превышен" not in head
+    over = data.header(store, {}, now_ms(), go_limit=20.0)
+    assert "лимит превышен" in over
+
+
+def test_money_without_limit(store, monkeypatch):
+    from ahub.providers import opencode_db
+    from ahub.time import now_ms
+
+    monkeypatch.setattr(opencode_db, "totals", _fake_totals(5.0, 30.0))
+    head = data.header(store, {}, now_ms(), go_limit=None)
+    assert "месяц $30.00" in head and "из $" not in head and "%" not in head
+
+
+def test_money_limit_from_config(store, tmp_path, monkeypatch):
+    from ahub import config, paths
+    from ahub.providers import opencode_db
+    from ahub.time import now_ms
+    from tests.conftest import write
+
+    from ahub.tui import data as tuidata
+
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    monkeypatch.setattr(opencode_db, "totals", _fake_totals(5.0, 30.0))
+    assert "из $" not in tuidata.header(store, {}, now_ms())
+    write(paths.global_config_path(), "[usage]\ngo_month_limit = 60.0\n")
+    assert config.load_hub().go_month_limit == 60.0
+    assert "из $60" in tuidata.header(store, {}, now_ms())
+
+
 async def test_app_view_mode_blocks_actions(store):
     a, b = fill(store)
     app = TopApp(store=store, projects=[])
