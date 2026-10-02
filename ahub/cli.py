@@ -2,22 +2,24 @@
 
 Общий флаг `--json` — машинный вывод; по умолчанию компактный текст (экономия токенов оркестратора).
 Ошибки конфига и ожидаемые отказы — одна строка в stderr и код 2, не трассировка.
+
+Импорты — внутри функций: main() на Windows отказывает до импорта команд
+(часть модулей тянет fcntl, которого там нет).
 """
 
 from __future__ import annotations
 
-import argparse
-import importlib
-import pkgutil
 import sys
 
-import ahub.commands as _cmds
-from ahub import log
-from ahub.config import ConfigError
-from ahub.cliutil import CliError
+_ERR_WIN = "Windows не поддерживается — используйте WSL2"
 
 
 def _discover(subparsers) -> list[str]:
+    import importlib
+    import pkgutil
+
+    import ahub.commands as _cmds
+
     found = []
     for mod in sorted(pkgutil.iter_modules(_cmds.__path__), key=lambda m: m.name):
         if mod.name.startswith("_"):
@@ -29,7 +31,9 @@ def _discover(subparsers) -> list[str]:
     return found
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser():
+    import argparse
+
     ap = argparse.ArgumentParser(prog="ahub", description="agent-hub v2: оркестратор моделей-работников")
     ap.add_argument("--json", action="store_true", help="машинный вывод (JSON)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -38,6 +42,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if sys.platform == "win32":
+        print(_ERR_WIN, file=sys.stderr)
+        return 2
+    from ahub import log
+    from ahub.cliutil import CliError
+    from ahub.config import ConfigError
+
     ap = build_parser()
     args = ap.parse_args(argv)
     func = getattr(args, "func", None)
