@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import sys
 
-_ERR_WIN = "Windows не поддерживается — используйте WSL2"
-
 
 def _discover(subparsers) -> list[str]:
     import importlib
@@ -34,8 +32,11 @@ def _discover(subparsers) -> list[str]:
 def build_parser():
     import argparse
 
-    ap = argparse.ArgumentParser(prog="ahub", description="agent-hub v2: оркестратор моделей-работников")
-    ap.add_argument("--json", action="store_true", help="машинный вывод (JSON)")
+    from ahub.i18n import t
+
+    ap = argparse.ArgumentParser(prog="ahub", description=t("cli.desc"))
+    ap.add_argument("--json", action="store_true", help=t("cli.help_json"))
+    ap.add_argument("--lang", choices=("en", "ru"), default=None, help=t("cli.help_lang"))
     sub = ap.add_subparsers(dest="cmd", required=True)
     _discover(sub)
     return ap
@@ -43,14 +44,19 @@ def build_parser():
 
 def main(argv: list[str] | None = None) -> int:
     if sys.platform == "win32":
-        print(_ERR_WIN, file=sys.stderr)
+        from ahub.i18n import t as _t
+
+        print(_t("cli.err_win"), file=sys.stderr)
         return 2
     from ahub import log
     from ahub.cliutil import CliError
     from ahub.config import ConfigError
+    from ahub.i18n import set_lang, t
 
     ap = build_parser()
     args = ap.parse_args(argv)
+    if getattr(args, "lang", None):
+        set_lang(args.lang)
     func = getattr(args, "func", None)
     if func is None:
         ap.print_help()
@@ -58,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return int(func(args) or 0)
     except (ConfigError, CliError) as e:
-        print(f"ошибка: {e}", file=sys.stderr)
+        print(t("cli.error", msg=e), file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 130

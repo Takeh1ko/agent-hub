@@ -75,11 +75,13 @@ def _branch(root: Path) -> str:
 
 def ensure_project_file(root: Path, *, name: str | None = None, deny: list[str] | None = None) -> tuple[str, Path]:
     """(что сделали, путь .hub.toml)."""
+    from ahub.i18n import t
+
     f = root / config.PROJECT_FILE
     if f.exists():
         data = tomllib.loads(f.read_text(encoding="utf-8"))
         if data.get("schema_version", 1) == config.SCHEMA_VERSION:
-            return "уже v2", f
+            return t("setup.already_v2"), f
         cfg = config.parse_project(data, root, str(f))
         if deny:
             import dataclasses
@@ -91,12 +93,12 @@ def ensure_project_file(root: Path, *, name: str | None = None, deny: list[str] 
         archive._exclude(cfg)
         backup.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
         f.write_text(render_v2(cfg, raw_root=str(data.get("root", ""))), encoding="utf-8")
-        return f"переведён v1 → v2 (старый — {archive.DIR}/{backup.name})", f
+        return t("setup.converted", dir=archive.DIR, name=backup.name), f
     cfg = config.parse_project({"schema_version": 2, "name": name or root.name,
                                 "worktrees": str(root.parent / f"{root.name}-wt"), "work_branch": _branch(root),
                                 "allowed_paths": ["**"], "models": {"deny": deny or []}}, root)
     f.write_text(render_v2(cfg), encoding="utf-8")
-    return "создан шаблон v2 (проверьте allowed_paths, python, тесты)", f
+    return t("setup.created"), f
 
 
 def _render_projects(items: list[str]) -> str:
@@ -113,7 +115,9 @@ def _replace_projects_line(text: str, items: list[str]) -> str:
     m = _PROJECTS_KEY.search(text)
     new = text[:m.start()] + line + text[m.end():] if m else line + text
     if tuple(tomllib.loads(new).get("projects", ())) != tuple(items):
-        raise CliError(f"не удалось обновить projects в {paths.global_config_path()} — поправьте файл вручную")
+        from ahub.i18n import t
+
+        raise CliError(t("err.setup_projects", path=paths.global_config_path()))
     return new
 
 
@@ -147,34 +151,38 @@ def install_skill() -> Path:
 
 
 def claude_md(root: Path) -> str:
+    from ahub.i18n import t
+
     f = root / "CLAUDE.md"
     text = f.read_text(encoding="utf-8") if f.exists() else ""
     if MARK_BEGIN in text:
         start, end = text.index(MARK_BEGIN), text.index(MARK_END) + len(MARK_END)
         new = text[:start] + CLAUDE_BLOCK.strip() + text[end:]
         if new == text:
-            return "CLAUDE.md: блок уже есть"
+            return t("setup.claude_exists")
         f.write_text(new, encoding="utf-8")
-        return "CLAUDE.md: блок обновлён"
+        return t("setup.claude_updated")
     f.write_text((text.rstrip() + "\n\n" if text else "") + CLAUDE_BLOCK, encoding="utf-8")
-    return "CLAUDE.md: блок добавлен"
+    return t("setup.claude_added")
 
 
 def cmd_setup(args) -> int:
+    from ahub.i18n import t
+
     root = Path(config.expand(args.path or ".")).resolve()
     if not (root / ".git").exists():
-        raise CliError(f"{root} — не git-репозиторий")
+        raise CliError(t("err.setup_not_git", root=root))
     deny = [x.strip() for x in (args.deny or "").split(",") if x.strip()]
     what, f = ensure_project_file(root, name=args.name, deny=deny)
     try:
         cfg = config.load_project_file(f)
     except config.ConfigError as e:
         raise CliError(str(e)) from e
-    lines = [f"{cfg.name}: {what}"]
+    lines = [t("setup.done", name=cfg.name, what=what)]
     if register_project(root):
-        lines.append(f"внесён в {paths.global_config_path()}")
+        lines.append(t("setup.registered", path=paths.global_config_path()))
     if args.claude:
-        lines.append(f"навык Claude: {install_skill()}")
+        lines.append(t("setup.skill", path=install_skill()))
         lines.append(claude_md(root))
     problems = config.check_project(cfg)
     lines += [f"! {p}" for p in problems]
@@ -183,9 +191,11 @@ def cmd_setup(args) -> int:
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("setup", help="подключить проект к хабу (и Claude Code)")
-    p.add_argument("path", nargs="?", help="корень проекта (по умолчанию — текущий каталог)")
+    from ahub.i18n import t
+
+    p = subparsers.add_parser("setup", help=t("help.setup"))
+    p.add_argument("path", nargs="?", help=t("help.setup_path"))
     p.add_argument("--name")
-    p.add_argument("--deny", help="модели, запрещённые в проекте (через запятую)")
-    p.add_argument("--claude", action="store_true", help="навык для Claude Code + блок в CLAUDE.md проекта")
+    p.add_argument("--deny", help=t("help.setup_deny"))
+    p.add_argument("--claude", action="store_true", help=t("help.setup_claude"))
     p.set_defaults(func=cmd_setup)

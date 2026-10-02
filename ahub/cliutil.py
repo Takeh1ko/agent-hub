@@ -24,8 +24,9 @@ def emit(args, data: Any, text: str) -> None:
 
 
 def add_project_arg(parser) -> None:
-    parser.add_argument("--project", "-P", default=None,
-                        help="имя проекта или путь; по умолчанию — проект текущего каталога")
+    from ahub.i18n import t
+
+    parser.add_argument("--project", "-P", default=None, help=t("cli.help_project"))
 
 
 def resolve_project(args, cwd: str | Path | None = None) -> config.ProjectConfig:
@@ -40,12 +41,16 @@ def resolve_project(args, cwd: str | Path | None = None) -> config.ProjectConfig
         for cfg in projects:
             if cfg.name == want:
                 return cfg
-        raise CliError(f"нет проекта {want!r}")
+        from ahub.i18n import t
+
+        raise CliError(t("err.no_project", want=want))
     try:
         return config.load_project(cwd)
     except FileNotFoundError:
         projects, _errors = config.load_projects()
         cfg = config.project_for(cwd, projects)
         if cfg is None:
-            raise CliError(f"каталог {cwd} не относится ни к одному проекту (нет {config.PROJECT_FILE})")
+            from ahub.i18n import t
+
+            raise CliError(t("err.no_project_cwd", cwd=cwd, file=config.PROJECT_FILE))
         return cfg

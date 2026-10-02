@@ -21,6 +21,8 @@ def _project_or_none(args):
 
 
 def cmd_list(args) -> int:
+    from ahub.i18n import t
+
     store = Store()
     project = _project_or_none(args)
     roles = [Role(args.role)] if args.role else list(Role)
@@ -33,16 +35,16 @@ def cmd_list(args) -> int:
         for e, d in items:
             mark = "★" if d else ""
             if not e.enabled:
-                mark += "(выкл)"
+                mark += t("models.tag_off")
             if registry.denied_by(e, project):
-                mark += "(запрет проекта)"
+                mark += t("models.tag_denied")
             cells.append(f"{e.alias}{mark}")
         lines.append(f"{role.value:<9} {', '.join(cells)}")
     if args.all:
         lines.append("")
         for m in registry.models(store):
-            flag = "" if m.enabled else " (выкл)"
-            deny = " (запрет проекта)" if registry.denied_by(m, project) else ""
+            flag = "" if m.enabled else t("models.flag_off")
+            deny = t("models.flag_denied") if registry.denied_by(m, project) else ""
             var = f" [{m.variant}]" if m.variant else ""
             lines.append(f"{m.alias:<15} {m.provider}: {m.model_id}{var}{flag}{deny}")
     emit(args, data, "\n".join(lines))
@@ -50,11 +52,13 @@ def cmd_list(args) -> int:
 
 
 def cmd_add(args) -> int:
+    from ahub.i18n import t
+
     try:
         registry.add_model(Store(), args.alias, args.provider, args.model_id, args.variant or "", args.note or "")
     except registry.RegistryError as e:
         raise CliError(str(e)) from e
-    emit(args, {"ok": True}, f"добавлена модель {args.alias}")
+    emit(args, {"ok": True}, t("models.added", alias=args.alias))
     return 0
 
 
@@ -68,7 +72,9 @@ def cmd_role(args) -> int:
         elif args.default_to:
             registry.set_default(store, args.role, args.default_to)
         else:
-            raise CliError("укажите --add, --remove или --set-default")
+            from ahub.i18n import t
+
+            raise CliError(t("err.models_need_opt"))
     except registry.RegistryError as e:
         raise CliError(str(e)) from e
     items = registry.menu(store, args.role)
@@ -78,35 +84,40 @@ def cmd_role(args) -> int:
 
 
 def cmd_enable(args, on: bool) -> int:
+    from ahub.i18n import t
+
     try:
         registry.set_enabled(Store(), args.alias, on)
     except registry.RegistryError as e:
         raise CliError(str(e)) from e
-    emit(args, {"ok": True}, f"{args.alias}: {'включена' if on else 'выключена'}")
+    state = t("models.enabled_on") if on else t("models.enabled_off")
+    emit(args, {"ok": True}, t("models.enabled_line", alias=args.alias, state=state))
     return 0
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("models", help="модели и роли")
+    from ahub.i18n import t
+
+    p = subparsers.add_parser("models", help=t("help.models"))
     add_project_arg(p)
     p.add_argument("--role", choices=[r.value for r in Role])
-    p.add_argument("--all", action="store_true", help="все модели с поставщиками")
+    p.add_argument("--all", action="store_true", help=t("help.models_all"))
     p.set_defaults(func=cmd_list)
     sub = p.add_subparsers(dest="models_cmd")
-    a = sub.add_parser("add", help="новая модель")
+    a = sub.add_parser("add", help=t("help.models_add"))
     a.add_argument("alias")
     a.add_argument("--provider", required=True)
     a.add_argument("--model-id", required=True)
     a.add_argument("--variant")
     a.add_argument("--note")
     a.set_defaults(func=cmd_add)
-    r = sub.add_parser("role", help="меню роли")
+    r = sub.add_parser("role", help=t("help.models_role"))
     r.add_argument("role", choices=[x.value for x in Role])
     g = r.add_mutually_exclusive_group()
     g.add_argument("--add")
     g.add_argument("--remove")
     g.add_argument("--set-default", dest="default_to")
-    r.add_argument("--default", action="store_true", help="с --add: сделать по умолчанию")
+    r.add_argument("--default", action="store_true", help=t("help.models_default"))
     r.set_defaults(func=cmd_role)
     for name, on in (("enable", True), ("disable", False)):
         e = sub.add_parser(name)

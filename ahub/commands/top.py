@@ -10,6 +10,8 @@ def cmd_top(args) -> int:
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("top", help="экран: задачи, пульс, деньги, события")
-    p.add_argument("--control", action="store_true", help="сразу в режиме управления")
+    from ahub.i18n import t
+
+    p = subparsers.add_parser("top", help=t("help.top"))
+    p.add_argument("--control", action="store_true", help=t("help.top_control"))
     p.set_defaults(func=cmd_top)

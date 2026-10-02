@@ -13,5 +13,7 @@ def cmd_mcp(args) -> int:
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("mcp", help="MCP-сервер (stdio): те же ручки для других агентов")
+    from ahub.i18n import t
+
+    p = subparsers.add_parser("mcp", help=t("help.mcp"))
     p.set_defaults(func=cmd_mcp)

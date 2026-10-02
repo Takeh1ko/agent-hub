@@ -15,12 +15,16 @@ def _isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("AHUB_HOME", str(tmp_path / "ahub-home"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
-    for var in ("XDG_DATA_HOME", "XDG_STATE_HOME", "AHUB_FAKE_QUEUE"):
+    monkeypatch.setenv("AHUB_LANG", "ru")
+    for var in ("XDG_DATA_HOME", "XDG_STATE_HOME", "AHUB_FAKE_QUEUE", "LANG", "LC_ALL", "LC_MESSAGES"):
         monkeypatch.delenv(var, raising=False)
     from ahub import log
+    from ahub.i18n import _reset
 
+    _reset()  # язык выбирается лениво — сбросить между тестами
     log.setup()  # логгеры модулей созданы при импорте с настоящим HOME — перенаправить лог во временный каталог
     yield
+    _reset()
 
 
 @pytest.fixture(scope="session", autouse=True)

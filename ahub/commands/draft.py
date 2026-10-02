@@ -8,37 +8,47 @@ from ahub.store import Store
 
 
 def cmd_new(args) -> int:
+    from ahub.i18n import t
+
     project = resolve_project(args)
     store = Store()
     did = drafts.create(store, project, args.text, source="cli")
-    emit(args, {"id": did}, drafts.preview(store, did) + f"\n\nзапустить: ahub draft start {did}")
+    emit(args, {"id": did}, drafts.preview(store, did) + "\n\n" + t("draft.start_hint", id=did))
     return 0
 
 
 def cmd_start(args) -> int:
+    from ahub.i18n import t
+
     project = resolve_project(args)
     try:
         tid = drafts.start(Store(), project, args.id)
     except ValueError as e:
         raise CliError(str(e)) from e
-    emit(args, {"task": tid}, f"T{tid} в очереди")
+    emit(args, {"task": tid}, t("draft.queued", tid=tid))
     return 0
 
 
 def cmd_cancel(args) -> int:
+    from ahub.i18n import t
+
     ok = drafts.cancel(Store(), args.id)
-    emit(args, {"ok": ok}, "отменён" if ok else "нельзя отменить")
+    emit(args, {"ok": ok}, t("draft.cancelled") if ok else t("draft.cancel_no"))
     return 0 if ok else 2
 
 
 def cmd_list(args) -> int:
+    from ahub.i18n import t
+
     rows = drafts.list_drafts(Store())
-    emit(args, {"drafts": rows}, "\n".join(f"#{r['id']} {r['status']} {r['text'][:70]}" for r in rows) or "черновиков нет")
+    emit(args, {"drafts": rows}, "\n".join(f"#{r['id']} {r['status']} {r['text'][:70]}" for r in rows) or t("draft.empty"))
     return 0
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("draft", help="задача словами: модель дописывает поля, запуск — явно")
+    from ahub.i18n import t
+
+    p = subparsers.add_parser("draft", help=t("help.draft"))
     sub = p.add_subparsers(dest="draft_cmd", required=True)
     n = sub.add_parser("new")
     n.add_argument("text")
