@@ -26,6 +26,7 @@ from pathlib import Path
 from ahub import log as hublog
 from ahub import gates, prepare, prompts, providers, registry, review, transitions, workspace
 from ahub.config import ProjectConfig
+from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Kind, Phase, Role, State
 from ahub.providers.base import Act, Activity, Outcome, RunResult, RunSpec
 from ahub.providers.runner import run as run_session
@@ -94,7 +95,7 @@ class Engine:
         if not transitions.acquire(self.store, self.task_id, self.owner, pid=os.getpid(), lease_ms=self.lease_ms):
             self.log.info("задача занята другим владельцем — выхожу")
             t = self.store.get_task(self.task_id)
-            return Settled(t.state if t else State.ERROR, "занята")
+            return Settled(t.state if t else State.ERROR, _t("engine.busy"))
         done = threading.Event()
         keeper = threading.Thread(target=self._keeper, args=(done,), daemon=True)
         keeper.start()
@@ -102,14 +103,14 @@ class Engine:
             return self._run()
         except LeaseLost:
             t = self.store.get_task(self.task_id)
-            return Settled(t.state if t else State.ERROR, "аренда потеряна")
+            return Settled(t.state if t else State.ERROR, _t("engine.lease_lost"))
         except workspace.WorkspaceError as e:
             self.log.error("рабочая копия: %s", e)
-            return self._settle(State.ERROR, f"рабочая копия: {e}")
+            return self._settle(State.ERROR, _t("engine.workspace_fail", err=e))
         except Exception as e:
             self.log.exception("движок упал")
             try:
-                return self._settle(State.ERROR, f"сбой хаба: {type(e).__name__}: {e}"[:500])
+                return self._settle(State.ERROR, _t("engine.hub_fail", typ=type(e).__name__, err=e)[:500])
             except Exception:
                 self.log.exception("не удалось записать ошибку")
                 raise
@@ -126,7 +127,7 @@ class Engine:
     def task(self) -> Task:
         t = self.store.get_task(self.task_id)
         if t is None:
-            raise RuntimeError(f"нет задачи T{self.task_id}")
+            raise RuntimeError(_t("trans.no_task", id=self.task_id))
         return t
 
     def _check_lease(self) -> None:
@@ -294,13 +295,14 @@ class Engine:
                 pause = tmo.retry_pause_s * (2 ** (attempt - 1))
                 self.store.add_event("retry", task_id=self.task_id, project=self.project.name,
                                      payload={"reason": r.error[:200], "attempt": attempt, "of": tmo.retry_max,
-                                              "pause_s": pause, "text": f"сбой поставщика → повтор {attempt}/"
-                                                                        f"{tmo.retry_max} через {int(pause)} с"})
+                                              "pause_s": pause, "text": _t("engine.retry_text", attempt=attempt,
+                                                                            of=tmo.retry_max,
+                                                                            pause=int(pause))})
                 self.log.warning("сбой поставщика: %s → повтор %d/%d через %d с", r.error[:200], attempt,
                                  tmo.retry_max, pause)
                 self.set_phase(Phase.WAITING)
                 if not self._pause(pause):
-                    return RunResult(Outcome.KILLED, r.session_id, error="остановлено во время паузы")
+                    return RunResult(Outcome.KILLED, r.session_id, error=_t("engine.pause_killed"))
                 if keep_session_on_retry and r.session_id:
                     session_id = r.session_id
                 continue
@@ -311,18 +313,18 @@ class Engine:
     def _run(self) -> Settled:
         t = self.task()
         if t.state is State.QUEUED:
-            t = self.move(State.PREPARING, "взята в работу")
+            t = self.move(State.PREPARING, _t("engine.taken"))
         elif t.state not in ACTIVE:
-            return Settled(t.state, "не в работе")
+            return Settled(t.state, _t("engine.not_active"))
         limit_min = int(t.limits.get("time_limit_min") or 60)
         self._deadline_ms = now_ms() + limit_min * 60_000
         if self.over_budget():
-            return self._settle(State.NEEDS_DECISION, "бюджет исчерпан до начала хода")
+            return self._settle(State.NEEDS_DECISION, _t("engine.budget_before"))
         if t.kind is Kind.SCOUT:
             return self._scout(t)
         if t.kind in (Kind.CODE, Kind.ROUTINE):
             return self._code(t)
-        return self._settle(State.NEEDS_DECISION, f"тип {t.kind.value} ещё не поддержан движком")
+        return self._settle(State.NEEDS_DECISION, _t("engine.unsupported", kind=t.kind.value))
 
     def _prepare(self, t: Task) -> Task:
         if t.state is State.PREPARING:
@@ -330,7 +332,7 @@ class Engine:
             fields = {"worktree": ws.path, "branch": ws.branch}
             if not t.base_sha:
                 fields["base_sha"] = ws.base_sha
-            t = self.move(State.WORKING, "работник начал", fields={**fields, "round": max(1, t.round)})
+            t = self.move(State.WORKING, _t("engine.worker_started"), fields={**fields, "round": max(1, t.round)})
         return t
 
     def _outcome_to_state(self, r: RunResult) -> tuple[State, str] | None:
@@ -339,16 +341,16 @@ class Engine:
             if self.lost.is_set():
                 raise LeaseLost()
             if self.budget_hit:
-                return State.NEEDS_DECISION, "бюджет исчерпан"
-            return State.STOPPED, "остановлена по просьбе"
+                return State.NEEDS_DECISION, _t("engine.budget_gone")
+            return State.STOPPED, _t("engine.stopped")
         if r.outcome is Outcome.TIMEOUT:
-            return State.NEEDS_DECISION, f"лимит времени задачи ({r.error})"
+            return State.NEEDS_DECISION, _t("engine.time_limit", err=r.error)
         if r.outcome is Outcome.QUOTA:
-            return State.NEEDS_DECISION, f"квота поставщика: {r.error[:300]}"
+            return State.NEEDS_DECISION, _t("engine.quota", err=r.error[:300])
         if r.outcome is Outcome.TRANSIENT:
-            return State.NEEDS_DECISION, f"сбой сети/сервера поставщика, повторы кончились: {r.error[:300]}"
+            return State.NEEDS_DECISION, _t("engine.transient_out", err=r.error[:300])
         if r.outcome in (Outcome.NO_ACCESS, Outcome.MODEL_ERROR, Outcome.CRASH, Outcome.NOT_STARTED):
-            return State.ERROR, f"{r.outcome.value}: {r.error[:400]}"
+            return State.ERROR, _t("engine.step_fail", outcome=r.outcome.value, err=r.error[:400])
         return None
 
     def _step_with_continue(self, role: Role, alias: str, prompt: str, *, session_id: str | None,
@@ -358,11 +360,11 @@ class Engine:
         if r.outcome is Outcome.SILENCE:
             self.store.add_event("silence", task_id=self.task_id, project=self.project.name,
                                  payload={"secs": r.silence_s, "action": "continue",
-                                          "text": f"работник молчал {r.silence_s} с → продолжаю ту же сессию"})
+                                          "text": _t("engine.silence_text", secs=r.silence_s)})
             r = self.session(role, alias, prompts.CONTINUE_PROMPT, session_id=r.session_id or session_id,
                              log_name=log_name)
             if r.outcome is Outcome.SILENCE:
-                return r, (State.NEEDS_DECISION, f"работник молчал дважды ({r.silence_s} с)")
+                return r, (State.NEEDS_DECISION, _t("engine.silence_twice", secs=r.silence_s))
         return r, self._outcome_to_state(r)
 
     # --- разведка ---
@@ -386,13 +388,13 @@ class Engine:
                 return self._settle(*final)
             problem = self._check_scout(t)
         if problem:
-            return self._settle(State.NEEDS_DECISION, f"итог разведки не принят: {problem.lstrip('!')}")
+            return self._settle(State.NEEDS_DECISION, _t("engine.scout_bad", problem=problem.lstrip("!")))
         res = self._result(t)
         if res.get("status") == "blocked":
-            return self._settle(State.NEEDS_DECISION, f"работник заблокирован: {res.get('summary', '')}"[:500],
+            return self._settle(State.NEEDS_DECISION, _t("engine.blocked", summary=res.get("summary", ""))[:500],
                                 payload={"summary": res.get("summary", "")})
         report = Path(t.worktree) / workspace.AHUB_DIR / "report.md"
-        return self._settle(State.DONE, "отчёт готов",
+        return self._settle(State.DONE, _t("engine.report_done"),
                             payload={"summary": str(res.get("summary", ""))[:500],
                                      "report_bytes": report.stat().st_size})
 
@@ -408,27 +410,27 @@ class Engine:
         """Пусто — итог по форме. «!…» — неисправимо repair'ом (разведка изменила файлы)."""
         changed = workspace.changed_files(t.worktree)
         if changed:
-            return "!разведка изменила файлы проекта: " + ", ".join(changed[:10])
+            return "!" + _t("engine.scout_files", files=", ".join(changed[:10]))
         if workspace.commits_since(t.worktree, t.base_sha):
-            return "!разведка сделала коммиты"
+            return "!" + _t("engine.scout_commits")
         base = Path(t.worktree) / workspace.AHUB_DIR
         problems = []
         res_path = base / "result.json"
         if not res_path.exists():
-            problems.append("нет .ahub/result.json")
+            problems.append(_t("engine.no_result"))
         else:
             res = self._result(t)
             if not res:
-                problems.append(".ahub/result.json — не JSON-объект")
+                problems.append(_t("engine.result_not_json"))
             else:
                 if not str(res.get("summary", "")).strip():
-                    problems.append("в result.json пустой summary")
+                    problems.append(_t("engine.empty_summary"))
                 if res.get("status") not in ("done", "blocked"):
-                    problems.append("в result.json status должен быть done или blocked")
+                    problems.append(_t("engine.bad_status"))
         report = base / "report.md"
         if not report.exists() or not report.read_text(encoding="utf-8", errors="replace").strip():
             if self._result(t).get("status") != "blocked":
-                problems.append("нет .ahub/report.md")
+                problems.append(_t("engine.no_report"))
         return "; ".join(problems)
 
     # --- код и рутина ---
@@ -442,19 +444,20 @@ class Engine:
         self.store.add_event("budget_hard", task_id=self.task_id, project=self.project.name,
                              payload={"go": round(go, 4), "usd": round(usd, 4)})
         t = self.task()
-        return self._settle(State.NEEDS_DECISION, f"бюджет исчерпан (${go:.3f} из ${t.budget_go:g})")
+        return self._settle(State.NEEDS_DECISION, _t("engine.budget_spent", go=f"{go:.3f}",
+                                                     budget=f"{t.budget_go:g}"))
 
     def _prepare_code(self, t: Task) -> Task:
         if t.state is State.PREPARING:
             try:
                 p = prepare.prepare(self.project, t)
             except prepare.PrepareError as e:
-                raise _Settle(State.ERROR, f"подготовка: {e}")
+                raise _Settle(State.ERROR, _t("engine.prepare_fail", err=e))
             fields = {"worktree": p.workspace.path, "branch": p.workspace.branch, "round": max(1, t.round)}
             if not t.base_sha:
                 fields["base_sha"] = p.workspace.base_sha
             to = State.FIXING if t.round > 1 else State.WORKING
-            t = self.move(to, "работник начал", fields=fields)
+            t = self.move(to, _t("engine.worker_started"), fields=fields)
         return t
 
     def _code(self, t: Task) -> Settled:
@@ -493,8 +496,8 @@ class Engine:
                 return self._settle(*final)
             blocked = self._blocked(t)
             if blocked:
-                return self._settle(State.NEEDS_DECISION, f"работник заблокирован: {blocked}"[:500])
-            t = self.move(State.CHECKING, "ворота")
+                return self._settle(State.NEEDS_DECISION, _t("engine.blocked", summary=blocked)[:500])
+            t = self.move(State.CHECKING, _t("engine.checking"))
             g = self._gate(t)
             fixed_once = False
             while True:
@@ -503,11 +506,12 @@ class Engine:
                                         payload={"diffstat": g.diffstat})
                 problem = "; ".join(g.repairable) if g.repairable else ""
                 if not problem and g.tests_ok is False:
-                    problem = "приёмка красная"
+                    problem = _t("engine.accept_red")
                 if not problem:
                     break
                 if fixed_once:
-                    return self._settle(State.NEEDS_DECISION, f"ворота не пройдены после исправления: {problem}"[:500],
+                    return self._settle(State.NEEDS_DECISION,
+                                        _t("engine.gates_retry_fail", problem=problem)[:500],
                                         payload={"tests_tail": g.tests_tail[-800:]})
                 fixed_once = True
                 fix = (review.fix_prompt([], gate=g) if g.tests_ok is False and not g.repairable
@@ -523,11 +527,11 @@ class Engine:
             payload = {"summary": str(summary)[:500], "diffstat": g.diffstat,
                        "tests": "зелёная" if g.tests_ok else ("нет" if g.tests_ok is None else "красная")}
             if not models:
-                return self._settle(State.DONE, "ворота пройдены" + ("" if t.kind is Kind.ROUTINE else
-                                                                     ", приёмка зелёная"), payload=payload)
+                return self._settle(State.DONE, _t("engine.gates_passed") + (
+                    "" if t.kind is Kind.ROUTINE else _t("engine.gates_passed_tests")), payload=payload)
             if self.over_budget():
                 return self._budget_stop(role, t.executor, sid)
-            t = self.move(State.REVIEWING, f"ревью, круг {round_no}")
+            t = self.move(State.REVIEWING, _t("engine.review_round", round=round_no))
             decision, reason, findings = self._review_round(t, g, models, round_no, max_rounds)
             if decision == "done":
                 return self._settle(State.DONE, reason, payload=payload)
@@ -576,8 +580,8 @@ class Engine:
             if self.lost.is_set():
                 raise LeaseLost()
             if self.budget_hit:
-                return "decision", "бюджет исчерпан во время ревью", []
-            return "decision", "остановлено во время ревью", []
+                return "decision", _t("engine.review_budget"), []
+            return "decision", _t("engine.review_stopped"), []
         changed = workspace.changed_files(t.worktree)
         if changed:  # ревьюер не должен менять файлы — откатываем
             self.log.warning("ревьюер изменил файлы, откат: %s", changed[:5])

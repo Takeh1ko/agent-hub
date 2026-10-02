@@ -23,6 +23,7 @@ from pathlib import Path
 
 from ahub import archive, workspace
 from ahub.config import ProjectConfig
+from ahub.i18n import t as _t
 from ahub.model import Kind
 from ahub.prepare import scrub_env, task_env
 from ahub.store import Task
@@ -49,9 +50,9 @@ class GateResult:
         return not self.repairable and not self.fatal and self.tests_ok is not False
 
     def summary(self) -> str:
-        parts = [self.diffstat or "дифф пуст"]
+        parts = [self.diffstat or _t("task.diff_empty")]
         if self.tests_ok is not None:
-            parts.append("приёмка зелёная" if self.tests_ok else "приёмка красная")
+            parts.append(_t("gates.accept_green") if self.tests_ok else _t("gates.accept_red"))
         return "; ".join(parts)
 
 
@@ -70,7 +71,7 @@ def diff_files(path: str, base: str) -> list[str]:
 def diff_text(path: str, base: str, limit: int = 200_000) -> str:
     r = workspace.git(path, "diff", f"{base}..HEAD", check=False)
     out = r.stdout
-    return out if len(out) <= limit else out[:limit] + f"\n… дифф обрезан ({len(out)} байт)"
+    return out if len(out) <= limit else out[:limit] + "\n" + _t("gates.diff_cut", size=len(out))
 
 
 def allowed(file: str, globs: list[str]) -> bool:
@@ -110,9 +111,9 @@ def with_lock(path: str, fn: Callable[[], object], *, wait_s: float = LOCK_WAIT_
                     on_wait()
                 waited = True
                 if time.monotonic() >= deadline:
-                    raise LockTimeout(f"замок {path} занят дольше {int(wait_s)} с")
+                    raise LockTimeout(_t("gates.lock_busy", path=path, secs=int(wait_s)))
                 if should_stop is not None and should_stop():
-                    raise LockTimeout("остановлено во время ожидания замка")
+                    raise LockTimeout(_t("gates.lock_stopped"))
                 time.sleep(1.0)
         try:
             return fn()
@@ -139,9 +140,9 @@ def run_acceptance(project: ProjectConfig, cwd: str, nodes: list[str], *, task_l
         try:
             r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=TEST_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            return False, f"таймаут {TEST_TIMEOUT_S} с"
+            return False, _t("gates.test_timeout", secs=TEST_TIMEOUT_S)
         except OSError as e:
-            return False, f"pytest не запустился: {e}"
+            return False, _t("tasks.pytest_start", err=e)
         tail = "\n".join((r.stdout + "\n" + r.stderr).strip().splitlines()[-TAIL_LINES:])
         return r.returncode == 0, tail
 
@@ -160,28 +161,29 @@ def check(project: ProjectConfig, task: Task, *, run_tests: bool = True, orch_ed
     head = workspace.head(path)
     g = GateResult(base=base, head=head)
     if workspace.commits_since(path, base) == 0:
-        g.repairable.append("нет коммита от базы")
+        g.repairable.append(_t("gates.no_commit"))
     dirty = workspace.changed_files(path)
     if dirty:
-        g.repairable.append("незакоммиченные изменения: " + ", ".join(dirty[:10]))
+        g.repairable.append(_t("gates.dirty", files=", ".join(dirty[:10])))
     g.diff_files = diff_files(path, base) if base else []
     stat = workspace.git(path, "diff", "--shortstat", f"{base}..HEAD", check=False).stdout.strip()
     g.diffstat = stat
     globs = list(task.limits.get("paths") or [])
     outside = [f for f in g.diff_files if not allowed(f, globs)]
     if outside:
-        g.fatal.append("изменены файлы вне разрешённых: " + ", ".join(outside[:10]))
+        g.fatal.append(_t("gates.outside", files=", ".join(outside[:10])))
     if not orch_edit:
         res = archive.read_json(Path(path) / workspace.AHUB_DIR / "result.json")
         if not res:
-            g.repairable.append("нет .ahub/result.json")
+            g.repairable.append(_t("gates.no_result"))
         else:
             if str(res.get("commit", ""))[:7] != head[:7] or not str(res.get("commit", "")).strip():
-                g.repairable.append(f"result.json: commit {str(res.get('commit', ''))[:10] or '—'} ≠ HEAD {head[:10]}")
+                g.repairable.append(_t("gates.result_commit", got=str(res.get("commit", ""))[:10] or "—",
+                                         head=head[:10]))
             files = res.get("files") or []
             extra = [f for f in files if f not in g.diff_files]
             if extra:
-                g.repairable.append("result.json: files не из диффа: " + ", ".join(map(str, extra[:10])))
+                g.repairable.append(_t("gates.result_files", files=", ".join(map(str, extra[:10]))))
     if run_tests and task.kind is Kind.CODE and not g.repairable and not g.fatal:
         nodes = list(task.limits.get("accept") or [])
         if nodes:
