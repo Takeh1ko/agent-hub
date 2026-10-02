@@ -21,6 +21,7 @@ import uuid
 from pathlib import Path
 
 from ahub import log as hublog
+from ahub.i18n import t as _t
 from ahub.providers.base import (Act, Activity, Cap, Health, ModelInfo, Provider, RunSpec, SessionState, Usage)
 
 PROMPT_ARG_LIMIT = 60_000  # байт; лимит одного аргумента Linux — 128 КБ
@@ -248,19 +249,19 @@ class OpencodeProvider(Provider):
         details: dict = {}
         binary = self._bin()
         if not os.access(binary, os.X_OK):
-            return Health(False, (f"нет исполняемого opencode ({binary})",))
+            return Health(False, (_t("opencode.no_binary", binary=binary),))
         try:
             rc, out, _err = run_capture([binary, "--version"], timeout=30, env=self.extra_env)
             details["version"] = out.strip()[:40]
             if rc != 0:
-                problems.append(f"opencode --version: код {rc}")
+                problems.append(_t("opencode.version_fail", code=rc))
         except (OSError, subprocess.SubprocessError) as e:
-            problems.append(f"opencode не отвечает: {e}")
+            problems.append(_t("opencode.no_answer", err=e))
         from ahub.providers import opencode_db
 
         st = opencode_db.check_schema(self.db_path)
         if not st.ok:
-            problems.extend(f"opencode.db: {p}" for p in st.problems)
+            problems.extend(_t("opencode.db_problem", problem=p) for p in st.problems)
         return Health(not problems, tuple(problems), details)
 
 

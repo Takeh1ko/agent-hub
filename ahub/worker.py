@@ -11,6 +11,7 @@ import sys
 from ahub import config
 from ahub import log as hublog
 from ahub.engine import Engine
+from ahub.i18n import t as _t
 from ahub.model import parse_task_id
 from ahub.store import Store
 
@@ -30,7 +31,7 @@ def find_project(name: str) -> config.ProjectConfig | None:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args:
-        print("использование: python -m ahub.worker T12", file=sys.stderr)
+        print(_t("worker.usage"), file=sys.stderr)
         return 2
     hublog.setup()
     hublog.install_excepthook("worker")
@@ -48,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     lg.info("старт процесса задачи")
     res = Engine(store, project, tid).run()
     lg.info("процесс задачи завершён: %s %s", res.state.value, res.reason[:200])
-    return 3 if res.reason == "занята" else 0
+    return 3 if res.reason == _t("engine.busy") else 0
 
 
 if __name__ == "__main__":

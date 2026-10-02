@@ -27,6 +27,7 @@ from pathlib import Path
 from ahub import config, paths, procs
 from ahub import log as hublog
 from ahub import transitions
+from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Ev, State
 from ahub.store import Store, Task
 from ahub.time import now_ms
@@ -141,9 +142,9 @@ class Service:
         for a in t.after:
             dep = self.store.get_task(a)
             if dep is None:
-                return f"нет задачи T{a}"
+                return _t("trans.no_task", id=a)
             if dep.state is not State.ACCEPTED:
-                return f"ждёт принятия T{a} ({dep.state.value})"
+                return _t("service.wait_dep", id=a, state=dep.state.value)
         return ""
 
     def _set_wait(self, t: Task, reason: str) -> None:
@@ -178,22 +179,22 @@ class Service:
             for t in queued:
                 reason = ""
                 if paused:
-                    reason = "очередь на паузе"
+                    reason = _t("service.paused_on")
                 if not reason:
                     reason = self._deps_ok(t)
                 if not reason and slots <= 0:
-                    reason = f"ждёт места ({len(running)}/{project.max_parallel})"
+                    reason = _t("service.wait_slot", running=len(running), max=project.max_parallel)
                 if not reason:
                     for r in t.limits.get("resources") or []:
                         spec = project.resources.get(r)
                         if spec is None:
-                            reason = f"ресурс {r} не объявлен проектом"
+                            reason = _t("service.no_resource", name=r)
                             break
                         if res_use.get(r, 0) >= spec.capacity:
-                            reason = f"ждёт ресурс {r}"
+                            reason = _t("service.wait_resource", name=r)
                             break
                         if spec.lock and self.lock_busy(spec.lock):
-                            reason = f"ждёт ресурс {r} (занят вне хаба)"
+                            reason = _t("service.wait_resource_busy", name=r)
                             break
                 if reason:
                     pl.waiting[t.id] = reason
@@ -204,7 +205,7 @@ class Service:
                     pid = self.spawn(t.id)
                 except OSError as e:
                     self.log.error("не запустился процесс T%d: %s", t.id, e, extra={"task": t.id})
-                    pl.waiting[t.id] = f"не запустился процесс: {e}"
+                    pl.waiting[t.id] = _t("service.spawn_fail", err=e)
                     continue
                 self.recent[t.id] = time.monotonic()
                 spawned.append(t.id)
@@ -236,11 +237,11 @@ class Service:
             self.store.update_task(t.id, limits=lim)
             try:
                 if t.state is State.ACCEPTING:
-                    to, reason = State.NEEDS_DECISION, "принятие прервано (процесс исчез) — проверьте корень проекта"
+                    to, reason = State.NEEDS_DECISION, _t("service.orphan_accepting")
                 elif count > MAX_ORPHANS:
-                    to, reason = State.NEEDS_DECISION, f"процесс задачи исчез повторно ({count} раз)"
+                    to, reason = State.NEEDS_DECISION, _t("service.orphan_repeat", n=count)
                 else:
-                    to, reason = State.QUEUED, "процесс задачи исчез — продолжение с места"
+                    to, reason = State.QUEUED, _t("service.orphan_once")
                 self.store.add_event(Ev.ORPHAN, task_id=t.id, project=t.project,
                                      payload={"from": t.state.value, "to": to.value, "count": count,
                                               "text": f"{t.label}: {reason}"})

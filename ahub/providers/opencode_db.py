@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ahub import log
+from ahub.i18n import t as _t
 from ahub.providers.base import SessionState, Usage
 
 # Кусок списка id для одного IN (...): ниже SQLITE_LIMIT_VARIABLE_NUMBER.
@@ -83,14 +84,14 @@ def _problems(con: sqlite3.Connection) -> list[str]:
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     for t in _REQUIRED_TABLES:
         if t not in tables:
-            out.append(f"нет таблицы {t}")
+            out.append(_t("odb.no_table", name=t))
     for t, want in _REQ_COLS.items():
         if t not in tables:
             continue
         cols = {r[1] for r in con.execute(f"PRAGMA table_info('{t}')").fetchall()}
         for c in want:
             if c not in cols:
-                out.append(f"нет колонки {t}.{c}")
+                out.append(_t("odb.no_column", table=t, col=c))
     return out
 
 
@@ -98,14 +99,14 @@ def check_schema(db_path: str | Path | None = None) -> SchemaStatus:
     """Есть ли файл и нужные таблицы/колонки. Не бросает."""
     path = _resolve(db_path)
     if not Path(path).exists():
-        return SchemaStatus(ok=False, problems=[f"нет базы {path}"])
+        return SchemaStatus(ok=False, problems=[_t("odb.no_db", path=path)])
     con: sqlite3.Connection | None = None
     try:
         try:
             con = _open(path)
         except sqlite3.Error as e:
             _warn("opencode.db не открылась %s: %s", path, e)
-            return SchemaStatus(ok=False, problems=[f"нет базы {path}"])
+            return SchemaStatus(ok=False, problems=[_t("odb.no_db", path=path)])
         probs = _problems(con)
         if probs:
             _warn("opencode.db %s: незнакомая схема: %s", path, "; ".join(probs))
@@ -113,7 +114,7 @@ def check_schema(db_path: str | Path | None = None) -> SchemaStatus:
         return SchemaStatus(ok=True, problems=[])
     except sqlite3.Error as e:
         _warn("opencode.db %s: схема не читается: %s", path, e)
-        return SchemaStatus(ok=False, problems=[f"схема не читается: {e}"])
+        return SchemaStatus(ok=False, problems=[_t("odb.bad_schema", err=e)])
     finally:
         _close(con)
 

@@ -165,6 +165,7 @@ def test_usd_budget_extend(store, project):
     transitions.move(store, t.id, State.QUEUED)
     for st in (State.PREPARING, State.WORKING):
         transitions.move(store, t.id, st)
+    store.add_event("budget_hard", task_id=t.id, project=t.project, payload={})  # как движок при остановке
     transitions.move(store, t.id, State.NEEDS_DECISION, reason="бюджет исчерпан ($0.000 из $1.5)")
     msg = accept.extend_budget(store, t.id, add_usd=0.5)
     assert "реальные $0 → $0.5" in msg and "продолжена" in msg
@@ -190,3 +191,14 @@ def test_red_after_merge_root_moved_not_reset(store, project, monkeypatch):
     with pytest.raises(accept.DecisionError, match="корень уехал"):
         accept.accept(store, project, t.id)
     assert (Path(project.root) / "foreign.txt").exists()  # чужое не тронуто
+
+
+def test_budget_extend_does_not_resume_other_decision(store, project):
+    t, _, _ = done_code(store, project)
+    from ahub import transitions
+    transitions.move(store, t.id, State.QUEUED)
+    for st in (State.PREPARING, State.WORKING):
+        transitions.move(store, t.id, st)
+    transitions.move(store, t.id, State.NEEDS_DECISION, reason="бюджет и круги ревью кончились")  # текст не важен
+    accept.extend_budget(store, t.id, add=1.0)
+    assert store.get_task(t.id).state is State.NEEDS_DECISION
