@@ -11,7 +11,7 @@ from ahub.service import HEARTBEAT_KEY, PAUSE_KEY, live_workers
 from ahub.store import Store, Task
 from ahub.time import fmt_local, now_ms, to_local
 
-GO_MONTH_LIMIT = 60.0
+_UNSET: object = object()  # маркер «лимит не передан — взять из конфига»
 PHASE = {"studying": "изучает", "writing": "пишет", "testing": "тесты", "waiting": "ждёт"}
 EV_WORDS = {"created": "создана", "retry": "повтор после сбоя", "silence": "работник молчал", "orphan": "потерян процесс",
             "budget_soft": "потрачено 80 % бюджета", "budget_hard": "бюджет исчерпан", "orch_edit": "правка Claude",
@@ -45,7 +45,17 @@ def _age(ms: int, now: int) -> str:
     return f"{m} мин" if m < 60 else (f"{m // 60} ч" if m < 1440 else f"{m // 1440} д")
 
 
-def header(store: Store, live: dict[int, int], now: int) -> str:
+def _go_limit(hub_limit: float | None | object) -> float | None:
+    """Лимит месяца: явный → он; _UNSET → из конфига; битого конфига — нет лимита."""
+    if hub_limit is not _UNSET:
+        return hub_limit  # type: ignore[return-value]
+    try:
+        return config.load_hub().go_month_limit
+    except config.ConfigError:
+        return None
+
+
+def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | None | object = _UNSET) -> str:
     hb = store.meta_get(HEARTBEAT_KEY)
     svc = "🟢 сервис" if hb and now - int(hb) < 30_000 else "🔴 сервис не отвечает"
     claude = "🟢 Claude на связи" if events.present(store, now=now) else "⚪ Claude не в сессии"
@@ -53,6 +63,7 @@ def header(store: Store, live: dict[int, int], now: int) -> str:
     waiting = store.list_tasks(states=WAITING_DECISION)
     queued = store.list_tasks(states={State.QUEUED})
     alarms = len(comms.alarms(store))
+    limit = _go_limit(go_limit)
     lt = to_local(now)
     day0 = int(lt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
     month0 = int(lt.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
@@ -60,8 +71,13 @@ def header(store: Store, live: dict[int, int], now: int) -> str:
         today = opencode_db.totals(day0)
         month = opencode_db.totals(month0)
         go_m = month.cost_go or 0.0
-        money = (f"сегодня ${today.cost_go or 0:.2f} · месяц ${go_m:.2f} из ${GO_MONTH_LIMIT:.0f}"
-                 f" ({go_m / GO_MONTH_LIMIT * 100:.0f} %)" + (" — лимит превышен!" if go_m > GO_MONTH_LIMIT else ""))
+        if limit is None:
+            money = f"сегодня ${today.cost_go or 0:.2f} · месяц ${go_m:.2f}"
+        elif limit > 0:
+            money = (f"сегодня ${today.cost_go or 0:.2f} · месяц ${go_m:.2f} из ${limit:.0f}"
+                     f" ({go_m / limit * 100:.0f} %)" + (" — лимит превышен!" if go_m > limit else ""))
+        else:
+            money = f"сегодня ${today.cost_go or 0:.2f} · месяц ${go_m:.2f} из ${limit:.0f}"
         if today.cost_usd or month.cost_usd:
             money += f" · реальные ${month.cost_usd or 0:.2f}"
     except Exception:
