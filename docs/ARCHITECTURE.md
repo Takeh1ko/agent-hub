@@ -40,6 +40,7 @@ accept.py: ahub accept (разведка — принять; код — merge --
 | `service.py` | очередь, сироты, самообновление на новый код, сердцебиение, поток наблюдателя |
 | `events.py`, `comms.py`, `views.py`, `archive.py` | доставка/присутствие; сообщения/вопросы/тревоги; L1–L3 с лимитами; архив `<проект>/.agent-hub/` |
 | `pulse.py`, `observer.py` | пульс 🟢🟡🔴⚫⚪; наблюдатель (5 мин код, 30 мин модель, прокси Koala, эскалация) |
+| `doctor.py`, `commands/doctor.py` | `ahub doctor`: проверка установки (что не так → что сделать); проверки переиспользует мастер `ahub setup` |
 | `tg/` | бот (`core.py` логика, `run.py` aiogram, `launcher.py` запуск Claude без живой сессии, `proxy.py`) |
 | `tui/` | `ahub top` (`data.py` данные, `app.py` textual) |
 | `mcp.py` | MCP-сервер (stdio) поверх тех же ручек |
