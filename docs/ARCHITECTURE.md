@@ -45,7 +45,15 @@ accept.py: hub accept (разведка — принять; код — merge --n
 | `claude/SKILL.md` | навык для Claude Code (ставит `hub setup --claude`) |
 
 ## Процессы
-- `systemctl --user … ahub.service` — `hub service run` (очередь + наблюдатель); `ahub-bot.service` — `hub bot run`.
+- Служба ОС (`hub service install`): Linux — юниты systemd --user `ahub.service` + `ahub-bot.service`
+  (`commands/service.py`: `ExecStart=<python> -m ahub service|bot run`, `Restart=always`, `KillMode=process`);
+  macOS — plist launchd `dev.ahub.service.plist` + `dev.ahub.bot.plist` в `~/Library/LaunchAgents`
+  (`Label`, `ProgramArguments`, `RunAtLoad` + `KeepAlive`, то же окружение, логи в `state/logs`;
+  включение — `launchctl bootstrap gui/$(id -u) <путь>`). Юнит/plist бота — только если включён Telegram
+  (`[telegram] token`), иначе строка «бот не установлен: нет [telegram] token».
+- Без службы ОС: `hub service start` — `service run` фоном (`start_new_session`, лог `state/logs/service.log`,
+  pid в `service_pid_path()` каталога данных); уже жив pid или тик сердцебиения < 30 с — второй не запускается.
+  `hub service stop` — SIGTERM по pid-файлу, ждать до 10 с, файл удалить.
 - Процессы задач — отдельные (`python -m ahub.worker T<id>`), переживают перезапуск сервиса.
 - `ahub/procs.py` — дети, живость, cmdline, время старта: Linux через /proc, иначе psutil.
 - Claude: Monitor на `hub watch`; `hub status`; решения — `hub accept|rework|reject`.
