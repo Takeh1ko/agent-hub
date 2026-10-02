@@ -12,9 +12,6 @@ the hub does without Claude.
 
 ![agent-hub: a task goes from Claude to a cheap model, through gates and review, and is merged](docs/demo.gif)
 
-```
-DONE T12 code «add retry to the payment client» — retry with backoff, 3 new tests; $0.04
-```
 
 ## Why
 
@@ -72,12 +69,12 @@ Requires Python 3.11+, git, and at least one provider: [opencode](https://openco
 Google Antigravity CLI (`agy`).
 
 ```
-pipx install ahub          # or: uv tool install ahub
+pipx install git+https://github.com/Takeh1ko/Midas-AI-HUB
 ahub setup                 # language, project, providers, models, service, Claude skill, Telegram (optional)
 ahub doctor                # what is wrong and how to fix it
 ```
 
-`ahub setup --yes` takes all defaults without questions. Telegram is optional: `pipx install 'ahub[telegram]'`.
+`ahub setup --yes` takes all defaults without questions. Telegram is optional: `pipx install 'ahub[telegram] @ git+https://github.com/Takeh1ko/Midas-AI-HUB'`.
 
 Platforms: Linux (systemd), macOS (launchd; tested in CI), Windows via WSL2 only.
 

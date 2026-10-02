@@ -11,9 +11,6 @@ agent-hub — локальный сервис между оркестратор�
 
 ![agent-hub: задача уходит от Claude дешёвой модели, проходит ворота и ревью и сливается](docs/demo.gif)
 
-```
-DONE T12 code «добавить повтор в платёжный клиент» — повтор с паузой, 3 новых теста; $0.04
-```
 
 ## Зачем
 
@@ -69,12 +66,12 @@ DONE T12 code «добавить повтор в платёжный клиент
 Google Antigravity CLI (`agy`).
 
 ```
-pipx install ahub          # или: uv tool install ahub
+pipx install git+https://github.com/Takeh1ko/Midas-AI-HUB
 ahub setup                 # язык, проект, поставщики, модели, служба, навык Claude, Telegram (по желанию)
 ahub doctor                # что не так и как исправить
 ```
 
-`ahub setup --yes` — все умолчания без вопросов. Telegram — по желанию: `pipx install 'ahub[telegram]'`.
+`ahub setup --yes` — все умолчания без вопросов. Telegram — по желанию: `pipx install 'ahub[telegram] @ git+https://github.com/Takeh1ko/Midas-AI-HUB'`.
 
 Платформы: Linux (systemd), macOS (launchd; проверяется в CI), Windows — только через WSL2.
 
