@@ -19,10 +19,13 @@ reports no prices and no quota numbers.
 
 Non-interactive: `-c approval_policy="never"` (the flag that keeps exec from waiting for a human) plus
 stdin=DEVNULL, which the shared runner already gives the process. `-s workspace-write` is the OS sandbox
-(Landlock on Linux, Seatbelt on macOS — in 0.153.4 it is bubblewrap around it): the tool may read
-everything but write only the working copy, and it never asks. It is worth checking that the sandbox
-works on the host (`codex sandbox <mode> -- true`): if it cannot initialize, codex silently fails every
-command and the turn comes out empty — health() reports it as a problem.
+(Landlock inside bubblewrap on Linux, Seatbelt on macOS): the tools may read everything but write only
+the working copy, and they never ask. The sandbox is worth probing on the host (`codex sandbox <mode>
+-- true` — no model, no network): when it cannot initialize, codex fails every command silently (the
+JSONL stream shows nothing, the reason goes only to the model) and the turn comes out empty, so
+health() runs the probe and reports the reason (checked live 2026-10-03: in a container without user
+namespaces bubblewrap cannot set a uid map — `bwrap: loopback: Failed RTM_NEWADDR` — and the probe
+catches exactly that).
 
 Errors (real forms): 400 with an unsupported model for a ChatGPT account, 401 without a login
 (`turn.failed`), reconnects on a dead network (`error` events, then it keeps retrying — the silence
@@ -210,19 +213,18 @@ class CodexProvider(Provider):
     # --- start ---
 
     def build_command(self, spec: RunSpec) -> list[str]:
-        cmd = [self._bin(), "exec"]
-        if spec.session_id:
-            cmd.append("resume")
+        resume = bool(spec.session_id)
+        cmd = [self._bin(), "exec"] + (["resume"] if resume else [])
         cmd += ["--json", "-m", spec.model_id]
         if spec.variant:
             cmd += ["-c", f"model_reasoning_effort={json.dumps(spec.variant)}"]
         if self.approvals:
             cmd += ["-c", f"approval_policy={json.dumps(self.approvals)}"]
-        if spec.session_id:
+        if resume:
             # `exec resume` has no -s/-C: the sandbox comes from -c, the cwd from the process
             if self.sandbox:
                 cmd += ["-c", f"sandbox_mode={json.dumps(self.sandbox)}"]
-            cmd += [spec.session_id]
+            cmd.append(spec.session_id or "")
         else:
             if self.sandbox:
                 cmd += ["-s", self.sandbox]
@@ -337,7 +339,7 @@ class CodexProvider(Provider):
         return parse_models(out)
 
     def login(self) -> tuple[bool, str]:
-        """`codex login status` → (logged in, what it said). Empty output without rc means unknown."""
+        """`codex login status` → (logged in, what it said): "Logged in using ChatGPT", rc 0."""
         try:
             rc, out, err = run_capture([self._bin(), "login", "status"], timeout=30, env=self.extra_env)
         except (OSError, subprocess.SubprocessError) as e:
