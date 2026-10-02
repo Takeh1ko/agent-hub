@@ -84,16 +84,16 @@ class Engine:
             try:
                 ok = transitions.renew(self.store, self.task_id, self.owner, lease_ms=self.lease_ms)
             except sqlite3.Error:
-                self.log.exception("продление аренды упало")
+                self.log.exception("lease renewal failed")
                 continue
             if not ok:
-                self.log.warning("аренда потеряна — прекращаю работу")
+                self.log.warning("lease lost — stopping")
                 self.lost.set()
                 return
 
     def run(self) -> Settled:
         if not transitions.acquire(self.store, self.task_id, self.owner, pid=os.getpid(), lease_ms=self.lease_ms):
-            self.log.info("задача занята другим владельцем — выхожу")
+            self.log.info("task owned by another owner — exiting")
             t = self.store.get_task(self.task_id)
             return Settled(t.state if t else State.ERROR, _t("engine.busy"))
         done = threading.Event()
@@ -105,14 +105,14 @@ class Engine:
             t = self.store.get_task(self.task_id)
             return Settled(t.state if t else State.ERROR, _t("engine.lease_lost"))
         except workspace.WorkspaceError as e:
-            self.log.error("рабочая копия: %s", e)
+            self.log.error("worktree: %s", e)
             return self._settle(State.ERROR, _t("engine.workspace_fail", err=e))
         except Exception as e:
-            self.log.exception("движок упал")
+            self.log.exception("engine crashed")
             try:
                 return self._settle(State.ERROR, _t("engine.hub_fail", typ=type(e).__name__, err=e)[:500])
             except Exception:
-                self.log.exception("не удалось записать ошибку")
+                self.log.exception("failed to record error")
                 raise
         finally:
             done.set()
@@ -120,7 +120,7 @@ class Engine:
             try:
                 transitions.release(self.store, self.task_id, self.owner)
             except sqlite3.Error:
-                self.log.exception("release упал")
+                self.log.exception("release failed")
 
     # --- помощники ---
 
@@ -148,7 +148,7 @@ class Engine:
         body = {"cost_go": round(cost[0], 4), "cost_usd": round(cost[1], 4)}
         body.update(payload or {})
         self.move(to, reason[:500], payload=body)
-        self.log.info("итог: %s%s", to.value, f" ({reason[:200]})" if reason else "")
+        self.log.info("settled: %s%s", to.value, f" ({reason[:200]})" if reason else "")
         lim = self.task().limits
         if lim.get("orphans"):  # эпизод завершён — счётчик сиротства с нуля
             lim = dict(lim)
@@ -214,7 +214,7 @@ class Engine:
             try:
                 self.store.update_task(self.task_id, phase=phase.value)
             except sqlite3.Error:
-                self.log.exception("фаза не записана")
+                self.log.exception("phase not recorded")
 
     def _on_activity(self, act: Activity) -> None:
         if act.kind in (Act.TOOL_START, Act.TOOL_END):
@@ -269,7 +269,7 @@ class Engine:
                 try:
                     self.store.update_session(_row, external_id=sid)
                 except sqlite3.IntegrityError:
-                    self.log.warning("сессия %s уже привязана к другой строке", sid)
+                    self.log.warning("session %s already linked to another row", sid)
 
             spec = RunSpec(prompt=prompt, cwd=cwd, model_id=entry.model_id, variant=entry.variant,
                            session_id=session_id, log_path=log_path, timeout_s=self._remaining_s(),
@@ -298,7 +298,7 @@ class Engine:
                                               "pause_s": pause, "text": _t("engine.retry_text", attempt=attempt,
                                                                             of=tmo.retry_max,
                                                                             pause=int(pause))})
-                self.log.warning("сбой поставщика: %s → повтор %d/%d через %d с", r.error[:200], attempt,
+                self.log.warning("provider failure: %s → retry %d/%d in %d s", r.error[:200], attempt,
                                  tmo.retry_max, pause)
                 self.set_phase(Phase.WAITING)
                 if not self._pause(pause):
@@ -525,7 +525,7 @@ class Engine:
                 g = self._gate(self.task())
             summary = self._result(t).get("summary", "")
             payload = {"summary": str(summary)[:500], "diffstat": g.diffstat,
-                       "tests": "зелёная" if g.tests_ok else ("нет" if g.tests_ok is None else "красная")}
+                       "tests": "green" if g.tests_ok else ("none" if g.tests_ok is None else "red")}
             if not models:
                 return self._settle(State.DONE, _t("engine.gates_passed") + (
                     "" if t.kind is Kind.ROUTINE else _t("engine.gates_passed_tests")), payload=payload)
@@ -619,7 +619,7 @@ class Engine:
         """Ревьюер не должен менять файлы — откатываем."""
         changed = workspace.changed_files(t.worktree)
         if changed:
-            self.log.warning("ревьюер изменил файлы, откат: %s", changed[:5])
+            self.log.warning("reviewer changed files, reverting: %s", changed[:5])
             workspace.git(t.worktree, "checkout", "--", ".", check=False)
             workspace.git(t.worktree, "clean", "-fd", "-e", workspace.AHUB_DIR, check=False)
 

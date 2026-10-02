@@ -24,7 +24,7 @@ def find_project(name: str) -> config.ProjectConfig | None:
         if p.name == name:
             return p
     for e in errors:
-        hublog.get("worker").warning("конфиг проекта: %s", e)
+        hublog.get("worker").warning("project config: %s", e)
     return None
 
 
@@ -40,15 +40,15 @@ def main(argv: list[str] | None = None) -> int:
     store = Store()
     task = store.get_task(tid)
     if task is None:
-        lg.error("нет задачи")
+        lg.error("no task")
         return 2
     project = find_project(task.project)
     if project is None:
-        lg.error("проект %s не найден в конфиге хаба", task.project)
+        lg.error("project %s not found in hub config", task.project)
         return 2
-    lg.info("старт процесса задачи")
+    lg.info("task process starting")
     res = Engine(store, project, tid).run()
-    lg.info("процесс задачи завершён: %s %s", res.state.value, res.reason[:200])
+    lg.info("task process done: %s %s", res.state.value, res.reason[:200])
     return 3 if res.reason == _t("engine.busy") else 0
 
 

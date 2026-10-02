@@ -240,7 +240,7 @@ class Store:
         kind = Kind(kind)
         state = State(state)
         if state not in (State.QUEUED, State.DRAFT):
-            raise ValueError(f"новая задача — только queued или draft, не {state}")
+            raise ValueError(f"new task must be queued or draft, not {state}")
 
         def _do(c: sqlite3.Connection) -> int:
             cur = c.execute(
@@ -312,7 +312,7 @@ class Store:
         """Обычные поля задачи (не состояние, не владение). Неизвестное поле — ошибка."""
         bad = set(fields) - _TASK_PLAIN_FIELDS - set(_TASK_JSON_FIELDS)
         if bad:
-            raise ValueError(f"поля нельзя менять update_task: {sorted(bad)}")
+            raise ValueError(f"cannot change fields update_task: {sorted(bad)}")
         if not fields:
             return
         sets, args = [], []
@@ -397,7 +397,7 @@ class Store:
                    "tokens", "log_path"}
         bad = set(fields) - allowed
         if bad:
-            raise ValueError(f"поля сессии: {sorted(bad)}")
+            raise ValueError(f"session fields: {sorted(bad)}")
         if not fields:
             return
         sets, args = [], []

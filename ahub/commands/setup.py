@@ -19,8 +19,8 @@ MARK_BEGIN = "<!-- ahub:begin -->"
 MARK_END = "<!-- ahub:end -->"
 CLAUDE_BLOCK = f"""{MARK_BEGIN}
 ## agent-hub
-Задачи для моделей-работников — через `ahub` (навык `ahub`). В начале сессии — Monitor на `ahub watch`;
-по строкам событий: `ahub status T<id>` → `ahub accept|rework|reject`. Сводка — `ahub status`.
+Tasks for worker models go through `ahub` (skill `ahub`). At session start — Monitor on `ahub watch`;
+by event lines: `ahub status T<id>` → `ahub accept|rework|reject`. Summary — `ahub status`.
 {MARK_END}
 """
 
@@ -58,7 +58,7 @@ def render_v2(cfg: config.ProjectConfig, *, raw_root: str = "") -> str:
         lines.append(f"task_setup = {_toml_str(cfg.hooks.task_setup)}")
         lines.append(f"task_cleanup = {_toml_str(cfg.hooks.task_cleanup)}")
     if cfg.models_deny:
-        lines.append(f"\n[models]\ndeny = {_toml_str(list(cfg.models_deny))}  # снимает только человек")
+        lines.append(f"\n[models]\ndeny = {_toml_str(list(cfg.models_deny))}  # only a human can lift it")
     lines.append(f"\n[budget]\ngo = {cfg.budget_go}\nusd = {cfg.budget_usd}")
     extra = [x for x in cfg.secret_excludes if x not in config.DEFAULT_SECRET_EXCLUDES]
     if extra:

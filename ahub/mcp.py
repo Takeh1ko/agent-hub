@@ -32,7 +32,7 @@ S = {"type": "string"}
 I = {"type": "integer"}  # noqa: E741
 
 
-@tool("task_new", "Поставить задачу работнику (scout|code|routine|review). Ответ — одна строка с номером.",
+@tool("task_new", "Create a task for a worker (scout|code|routine|review). Reply is one line with the number.",
       {"kind": {"type": "string", "enum": ["scout", "code", "routine", "review"]}, "title": S, "spec": S,
        "project": S, "paths": S, "accept": S, "level": I, "after": S, "budget": {"type": "number"}, "input": S,
        "model": S}, ["kind", "title"])
@@ -50,49 +50,49 @@ def _task_new(a: dict) -> list[str]:
     return argv
 
 
-@tool("status", "Сводка хаба (≤1.5 КБ) или задача (≤4 КБ), если указан task (T12).", {"task": S, "project": S})
+@tool("status", "Hub summary (<=1.5 KB) or a task (<=4 KB) when task is given (T12).", {"task": S, "project": S})
 def _status(a: dict) -> list[str]:
     argv = ["status"] + ([a["task"]] if a.get("task") else [])
     return argv + (["--project", a["project"]] if a.get("project") else [])
 
 
-@tool("result", "Результат задачи: кратко или full=true — полностью.", {"task": S, "full": {"type": "boolean"}},
+@tool("result", "Task result: short, or full=true for the full text.", {"task": S, "full": {"type": "boolean"}},
       ["task"])
 def _result(a: dict) -> list[str]:
     return ["result", a["task"]] + (["--full"] if a.get("full") else [])
 
 
-@tool("decide", "Решение по задаче: accept | reject | rework (notes) | continue | stop.",
+@tool("decide", "Decision on a task: accept | reject | rework (notes) | continue | stop.",
       {"task": S, "action": {"type": "string", "enum": ["accept", "reject", "rework", "continue", "stop"]},
        "notes": S, "reason": S}, ["task", "action"])
 def _decide(a: dict) -> list[str]:
     act = a["action"]
     argv = [act, a["task"]]
     if act == "rework":
-        argv += ["--notes", a.get("notes") or "доработать"]
+        argv += ["--notes", a.get("notes") or "rework"]
     elif a.get("reason") and act in ("accept", "reject", "continue", "stop"):
         argv += ["--reason", a["reason"]]
     return argv + ["--by", "mcp"]
 
 
-@tool("wait", "Ждать событий для оркестратора (строки DONE/DECISION/ERROR/OWNER/ALARM).",
+@tool("wait", "Wait for orchestrator events (DONE/DECISION/ERROR/OWNER/ALARM lines).",
       {"timeout": S, "project": S})
 def _wait(a: dict) -> list[str]:
     return ["wait", "--timeout", a.get("timeout") or "10m", "--who", "mcp"] + (
         ["--project", a["project"]] if a.get("project") else [])
 
 
-@tool("inbox", "Сообщения владельца (помечаются прочитанными).", {})
+@tool("inbox", "Owner messages (marked as read).", {})
 def _inbox(a: dict) -> list[str]:
     return ["inbox"]
 
 
-@tool("say", "Написать владельцу в Telegram.", {"text": S}, ["text"])
+@tool("say", "Write to the owner in Telegram.", {"text": S}, ["text"])
 def _say(a: dict) -> list[str]:
     return ["say", a["text"]]
 
 
-@tool("ask", "Вопрос владельцу с вариантами; ответ придёт событием ANSWER.", {"text": S, "options": S, "task": S},
+@tool("ask", "Question to the owner with options; the answer arrives as an ANSWER event.", {"text": S, "options": S, "task": S},
       ["text"])
 def _ask(a: dict) -> list[str]:
     argv = ["ask", a["text"]]
@@ -103,7 +103,7 @@ def _ask(a: dict) -> list[str]:
     return argv
 
 
-@tool("budget", "Продлить бюджет задачи (стоявшая из-за бюджета продолжится).", {"task": S, "add": {"type": "number"}},
+@tool("budget", "Extend the task budget (a budget-blocked task resumes).", {"task": S, "add": {"type": "number"}},
       ["task", "add"])
 def _budget(a: dict) -> list[str]:
     return ["budget", a["task"], "--add", str(a["add"]), "--by", "mcp"]
@@ -144,15 +144,15 @@ def handle(req: dict) -> dict | None:
         params = req.get("params") or {}
         name = params.get("name")
         if name not in TOOLS:
-            return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": f"нет инструмента {name}"}}
+            return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": f"no tool {name}"}}
         args = params.get("arguments") or {}
         missing = [k for k in TOOLS[name][1]["required"] if k not in args]
         if missing:
-            return ok({"content": [{"type": "text", "text": f"нет параметров: {', '.join(missing)}"}], "isError": True})
+            return ok({"content": [{"type": "text", "text": f"missing params: {', '.join(missing)}"}], "isError": True})
         rc, text = call_cli(TOOLS[name][2](args))
-        return ok({"content": [{"type": "text", "text": text or ("ok" if rc == 0 else f"код {rc}")}],
+        return ok({"content": [{"type": "text", "text": text or ("ok" if rc == 0 else f"code {rc}")}],
                    "isError": rc not in (0, 3)})
-    return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"неизвестный метод {method}"}}
+    return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"unknown method {method}"}}
 
 
 def serve(stdin=None, stdout=None) -> None:

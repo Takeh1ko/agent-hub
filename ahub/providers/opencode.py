@@ -223,13 +223,13 @@ class OpencodeProvider(Provider):
             _log.warning("export %s: %s", session_id, e)
             return None
         if rc != 0:
-            _log.warning("export %s: код %s: %s", session_id, rc, err[-300:])
+            _log.warning("export %s: code %s: %s", session_id, rc, err[-300:])
             return None
         start = out.find("{")
         try:
             data = json.loads(out[start:]) if start >= 0 else None
         except json.JSONDecodeError:
-            _log.warning("export %s: не JSON", session_id)
+            _log.warning("export %s: not JSON", session_id)
             return None
         return data if isinstance(data, dict) else None
 
@@ -240,7 +240,7 @@ class OpencodeProvider(Provider):
             _log.warning("models: %s", e)
             return []
         if rc != 0:
-            _log.warning("models: код %s", rc)
+            _log.warning("models: code %s", rc)
             return []
         return parse_models_verbose(out)
 

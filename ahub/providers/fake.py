@@ -111,4 +111,4 @@ class FakeProvider(Provider):
     def health(self) -> Health:
         if self.healthy:
             return Health(ok=True)
-        return Health(ok=False, problems=("фейк: выключен",))
+        return Health(ok=False, problems=("fake: disabled",))

@@ -70,7 +70,7 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
         _back(store, t.id, owner, str(e))
         raise
     except Exception as e:
-        _log.exception("принятие T%d упало", t.id, extra={"task": t.id})
+        _log.exception("accept T%d failed", t.id, extra={"task": t.id})
         _back(store, t.id, owner, _t("accept.fail", err=f"{type(e).__name__}: {e}"))
         raise DecisionError(_t("accept.fail", err=e)) from e
     finally:
@@ -125,7 +125,7 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str) -
     try:
         prepare.run_hook(project, "task_cleanup", t, t.worktree)
     except prepare.PrepareError as e:
-        _log.warning("хук task_cleanup T%d: %s", t.id, e, extra={"task": t.id})
+        _log.warning("hook task_cleanup T%d: %s", t.id, e, extra={"task": t.id})
     archive.write_task(store, project, t.id)
     workspace.remove(project, t.id, delete_branch=True)
     return _t("accept.merged_msg", label=t.label, branch=project.work_branch, sha=merged[:10], note=note)

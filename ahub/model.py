@@ -147,5 +147,5 @@ def parse_task_id(text: str | int) -> int:
     if s[:1] in ("T", "t"):
         s = s[1:]
     if not s.isdigit():
-        raise ValueError(f"не номер задачи: {text!r}")
+        raise ValueError(f"not a task number: {text!r}")
     return int(s)
