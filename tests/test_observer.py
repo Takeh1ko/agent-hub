@@ -99,7 +99,7 @@ def test_triage_alarm(store):
     transitions.move(store, tid, State.PREPARING)
     store.meta_set(observer.LAST_DEEP, str(now_ms()))
     assert observer.cycle(store, projects=[]) == "alarm"
-    assert events.lines(store, comms.alarms(store)) == ["ТРЕВОГА T1 висит → перезапустить"]
+    assert events.lines(store, comms.alarms(store)) == ["ALARM T1 висит → перезапустить"]
 
 
 def test_deep_runs_even_when_clean(store):

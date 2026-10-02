@@ -31,7 +31,7 @@ def test_screen_data(store):
     assert "сервис не отвечает" in screen.header and "тревог 1" in screen.header and "в очереди 1" in screen.header
     marks = {r.task_id: r.mark for r in screen.rows}
     assert marks[a] == "⏳" and marks[b] == "✅"
-    assert any("ГОТОВО" in f for f in screen.feed) and any("→ готово" in f for f in screen.feed)
+    assert any("DONE" in f for f in screen.feed) and any("→ готово" in f for f in screen.feed)
     events.touch(store)
     assert "Claude на связи" in data.header(store, {}, __import__("ahub.time", fromlist=["now_ms"]).now_ms())
 

@@ -18,7 +18,7 @@ worker.py → engine.py (владелец задачи, аренда):
              result.json, приёмка под замком) → reviewing (review.py: панель в новых сессиях) → fixing → … → done
   итоги хода (providers/runner.py → Outcome): сбой сети → повтор; тишина → одно продолжение; квота/таймаут/бюджет →
   needs_decision; ошибка → error; стоп → stopped
-events.py: done/needs_decision/error/owner_message/answer/alarm → Claude будит `ahub watch` (Monitor) / `ahub wait`
+events.py: коды DONE/DECISION/ERROR/OWNER/ANSWER/ALARM (ALARM! — критичная) → Claude будит `ahub watch` (Monitor) / `ahub wait`
 accept.py: ahub accept (разведка — принять; код — merge --no-ff в рабочую ветку, приёмка, откат при красной, push,
   уборка копии, архив), rework / reject / continue / task edit / extend / budget / model
 ```

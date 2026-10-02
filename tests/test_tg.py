@@ -25,7 +25,7 @@ def store() -> Store:
 def test_text_goes_to_claude(store):
     rep = core.on_text(store, 42, "как там оплата?", projects=["PlayerUP", "agent-hub"])
     assert "поднимаю" in rep.text
-    assert events.lines(store, events.unacked(store)) == ["ВЛАДЕЛЕЦ «как там оплата?»"]
+    assert events.lines(store, events.unacked(store)) == ["OWNER «как там оплата?»"]
     assert core.chats(store) == [42]
     events.touch(store)
     assert "на связи" in core.on_text(store, 42, "ещё", projects=[]).text
