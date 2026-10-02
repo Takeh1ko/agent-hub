@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 import pytest
 
@@ -167,6 +168,7 @@ def test_proxy_problem():
 
 def test_unit_carries_proxy(monkeypatch, capsys):
     from ahub import cli
+    monkeypatch.setattr(sys, "platform", "linux")  # прокси проверяем в юните systemd
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
     assert cli.main(["service", "install", "--print"]) == 0
     assert 'Environment="HTTPS_PROXY=http://127.0.0.1:7897"' in capsys.readouterr().out

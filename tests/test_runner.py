@@ -197,12 +197,9 @@ def test_registry():
 
 
 def _sleepers(marker: str) -> list[int]:
+    """Живые процессы с меткой в cmdline — через procs (на macOS psutil, без /proc)."""
     from ahub import procs
-    out = []
-    for d in __import__("pathlib").Path("/proc").iterdir():
-        if d.name.isdigit() and any(marker in a for a in procs.cmdline(int(d.name))) and procs.alive(int(d.name)):
-            out.append(int(d.name))
-    return out
+    return [pid for pid in procs.pids() if procs.alive(pid) and any(marker in a for a in procs.cmdline(pid))]
 
 
 @pytest.mark.parametrize("detach", [False, True])
