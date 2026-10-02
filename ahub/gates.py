@@ -1,13 +1,13 @@
-"""Ворота задач, меняющих файлы (V13, architecture §5–§6; перенос правил hub/gate/gate.py v1).
+"""Gates for file-changing tasks (V13, architecture §5–§6; port of hub/gate/gate.py v1 rules).
 
-База диффа — merge-base рабочей ветки и HEAD задачи: одна и та же для ревью, ворот и слияния (урок v1 H14b r3:
-после подтягивания рабочей ветки в задачу ревьюер не должен видеть чужие файлы).
+Diff base is the merge-base of the work branch and the task HEAD: same for review, gates, and merge (v1 lesson
+H14b r3: after pulling the work branch into the task, the reviewer must not see foreign files).
 
-Проверки:
-- есть коммит от базы; нет незакоммиченных изменений (кроме .ahub/)          → чинится одним repair;
-- дифф ⊆ разрешённых файлов задачи                                              → не чинится: «Нужно решение»;
-- .ahub/result.json: commit == HEAD, files ⊆ дифф (кроме правки оркестратора)  → чинится repair;
-- код: приёмка зелёная под ресурсом тестов проекта                             → красная — доработка.
+Checks:
+- a commit past base; no uncommitted changes (except .ahub/)                → fixed by one repair;
+- diff ⊆ task allowed files                                                 → unfixable: "Needs decision";
+- .ahub/result.json: commit == HEAD, files ⊆ diff (except orchestrator edit) → fixed by repair;
+- code: acceptance green under the project test resource                    → red — rework.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ class GateResult:
 
 
 def effective_base(project: ProjectConfig, task: Task) -> str:
-    """merge-base рабочей ветки и HEAD задачи; нет — исходная база задачи."""
+    """merge-base of the work branch and the task HEAD; fallback — the task's original base."""
     r = workspace.git(task.worktree, "merge-base", project.work_branch, "HEAD", check=False)
     sha = r.stdout.strip()
     return sha if r.returncode == 0 and sha else task.base_sha
@@ -94,7 +94,7 @@ class LockTimeout(RuntimeError):
 
 def with_lock(path: str, fn: Callable[[], object], *, wait_s: float = LOCK_WAIT_S,
               on_wait: Callable[[], None] | None = None, should_stop: Callable[[], bool] | None = None):
-    """Выполнить fn под внешним flock (общий замок тестов проекта). Пусто — без замка."""
+    """Run fn under an external flock (shared project test lock). Empty — no lock."""
     if not path:
         return fn()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -126,12 +126,12 @@ def with_lock(path: str, fn: Callable[[], object], *, wait_s: float = LOCK_WAIT_
 def run_acceptance(project: ProjectConfig, cwd: str, nodes: list[str], *, task_label: str = "",
                    on_wait: Callable[[], None] | None = None,
                    should_stop: Callable[[], bool] | None = None) -> tuple[bool, str, str]:
-    """(зелёная?, хвост вывода, команда). Под ресурсом тестов проекта."""
+    """(green?, output tail, command). Under the project test resource."""
     py = project.python or "python3"
     cmd = [py, "-m", "pytest", "-q", *nodes]
     env = scrub_env(dict(os.environ))
     env.update(task_env(task_label, cwd, project.root), PYTHONDONTWRITEBYTECODE="1")
-    clear_pycache(cwd)  # устаревший .pyc (правка того же размера в ту же секунду) дал бы ложную зелёную
+    clear_pycache(cwd)  # stale .pyc (same-size edit within the same second) would give a false green
     lock = ""
     if project.test_resource and project.test_resource in project.resources:
         lock = project.resources[project.test_resource].lock

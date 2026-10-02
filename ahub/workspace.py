@@ -1,6 +1,6 @@
-"""Рабочая копия задачи: git worktree + ветка (contracts §1).
+"""Task working copy: git worktree + branch (contracts §1).
 
-V08 — базовое создание/проверка/удаление. Копия без секретов, хуки проекта, проверка окружения — V12.
+V08 — basic create/check/remove. Secret-free copy, project hooks, env check — V12.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from ahub.config import ProjectConfig
 from ahub.i18n import t as _t
 
 AHUB_DIR = ".ahub"
-EXCLUDES = (f"{AHUB_DIR}/", "__pycache__/", ".pytest_cache/")  # служебное — мимо git копии
+EXCLUDES = (f"{AHUB_DIR}/", "__pycache__/", ".pytest_cache/")  # housekeeping — stays out of the git copy
 
 
 class WorkspaceError(RuntimeError):
@@ -44,7 +44,7 @@ def branch_name(project: ProjectConfig, task_id: int) -> str:
 
 
 def _exclude_ahub(path: Path) -> None:
-    """`.ahub/` и кэши Python не видны git'у копии (info/exclude общий для репозитория — это и нужно)."""
+    """`.ahub/` and Python caches invisible to the copy's git (info/exclude is repo-wide — which is what we want)."""
     r = git(path, "rev-parse", "--git-path", "info/exclude")
     excl = Path(r.stdout.strip())
     if not excl.is_absolute():
@@ -58,7 +58,7 @@ def _exclude_ahub(path: Path) -> None:
 
 
 def ensure(project: ProjectConfig, task_id: int, *, base_ref: str | None = None) -> Workspace:
-    """Создать копию задачи или вернуть существующую (идемпотентно: продолжение, повтор после сбоя)."""
+    """Create the task copy or return the existing one (idempotent: resume, retry after failure)."""
     path = worktree_path(project, task_id)
     branch = branch_name(project, task_id)
     root = project.root
@@ -84,7 +84,7 @@ def ensure(project: ProjectConfig, task_id: int, *, base_ref: str | None = None)
 
 
 def changed_files(path: str | Path) -> list[str]:
-    """Незакоммиченные изменения копии (без .ahub/)."""
+    """Uncommitted changes in the copy (without .ahub/)."""
     r = git(path, "status", "--porcelain", "--untracked-files=all")
     out = []
     for line in r.stdout.splitlines():

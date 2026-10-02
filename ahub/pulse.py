@@ -1,8 +1,8 @@
-"""Пульс задач (V19, architecture §7): доказательство жизни из нескольких источников.
+"""Task pulse (V19, architecture §7): proof of life from several sources.
 
-🟢 работает — свежая активность (поставщик/лог сессии) · 🟡 ждёт по делу — нет активности, но идёт инструмент,
-тесты (дети процесса), ожидание замка/ресурса/паузы · 🔴 молчит — ни активности, ни объяснения дольше порога фазы ·
-⚫ мёртв — процесса задачи нет, а задача активна · ⚪ нет данных — поставщик не даёт сигнала.
+🟢 working — fresh activity (provider/session log) · 🟡 legit wait — no activity, but a tool running,
+tests (process children), lock/resource/pause wait · 🔴 silent — neither activity nor explanation past the phase
+threshold · ⚫ dead — no task process while the task is active · ⚪ no data — provider gives no signal.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from ahub.store import Store, Task
 from ahub.time import now_ms
 
 FRESH_MS = 2 * 60_000
-THRESHOLD_MS = {  # молчание без объяснения дольше — 🔴
+THRESHOLD_MS = {  # unexplained silence past this — 🔴
     State.PREPARING: 15 * 60_000, State.WORKING: 20 * 60_000, State.FIXING: 20 * 60_000,
     State.CHECKING: 30 * 60_000, State.REVIEWING: 15 * 60_000, State.ACCEPTING: 30 * 60_000,
 }
@@ -41,7 +41,7 @@ class Pulse:
 
 
 def lock_holders(proc_root: str | Path = "/proc") -> dict[int, list[int]]:
-    """inode → pid'ы держателей flock/posix-замков (по /proc/locks)."""
+    """inode → pids holding flock/posix locks (via /proc/locks)."""
     out: dict[int, list[int]] = {}
     try:
         text = (Path(proc_root) / "locks").read_text()
@@ -49,7 +49,7 @@ def lock_holders(proc_root: str | Path = "/proc") -> dict[int, list[int]]:
         return out
     for line in text.splitlines():
         parts = line.split()
-        if "->" in parts:  # ожидающие — не держатели
+        if "->" in parts:  # waiters — not holders
             continue
         try:
             pid = int(parts[4])
@@ -80,7 +80,7 @@ def task_pulse(store: Store, t: Task, *, live: dict[int, int], project: ProjectC
     pid = live.get(t.id)
     if pid is None:
         return Pulse(t.id, "dead", _t("pulse.dead"), pid=None)
-    # Последняя сессия, которая идёт сейчас (или последняя вообще).
+    # Latest session running now (or latest overall).
     sessions = store.list_sessions(t.id)
     running = [s for s in sessions if s.status == "running"]
     s = running[-1] if running else (sessions[-1] if sessions else None)

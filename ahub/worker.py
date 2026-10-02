@@ -1,7 +1,7 @@
-"""Процесс задачи: python -m ahub.worker T12
+"""Task process: python -m ahub.worker T12
 
-Запускается сервисом (V09b) в своей группе процессов; ведёт одну задачу движком и выходит.
-Код выхода: 0 — задача пришла к решению (любому), 2 — нет задачи/проекта, 3 — занята другим владельцем.
+Started by the service (V09b) in its own process group; drives one task with the engine and exits.
+Exit code: 0 — task reached a decision (any), 2 — no task/project, 3 — held by another owner.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from ahub.i18n import t as _t
 from ahub.model import parse_task_id
 from ahub.store import Store
 
-CMD_MARK = "ahub.worker"  # по нему сервис находит процессы задач в /proc
+CMD_MARK = "ahub.worker"  # the service finds task processes in /proc by it
 
 
 def find_project(name: str) -> config.ProjectConfig | None:

@@ -1,10 +1,10 @@
-"""Подготовка задачи (V12, architecture §6.2): копия без секретов, хуки проекта, окружение, проверка приёмки.
+"""Task preparation (V12, architecture §6.2): secret-free copy, project hooks, env, acceptance check.
 
-Провал подготовки — «Ошибка» с причиной, модель не вызывается.
-- Секреты: неотслеживаемые файлы (.env и т.п.) в git worktree не попадают сами; отслеживаемые файлы по списку
-  `[secrets] exclude` проекта скрываются из копии (sparse-checkout, в индексе остаются — дифф их не видит).
-- Окружение работника: из окружения хаба убираются токены/пароли/ключи (кроме нужных поставщику моделей).
-- Хуки: shell-команды проекта в копии, env AHUB_TASK_ID / AHUB_WORKTREE / AHUB_PROJECT_ROOT.
+Failed preparation — "Error" with a reason, the model is never called.
+- Secrets: untracked files (.env etc.) never land in a git worktree on their own; tracked files on the project's
+  `[secrets] exclude` list stay out of the copy (sparse-checkout, remain indexed — diff never sees them).
+- Worker env: hub tokens/passwords/keys stripped (except what the model providers need).
+- Hooks: project shell commands in the copy, env AHUB_TASK_ID / AHUB_WORKTREE / AHUB_PROJECT_ROOT.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from ahub.store import Task
 HOOK_TIMEOUT_S = 600
 _SECRET_ENV = re.compile(r"(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|TELEGRAM|BOT_|API_KEY|_KEY$)",
                          re.IGNORECASE)
-# Что поставщикам моделей нужно из окружения, даже если похоже на секрет.
+# What model providers need from the env, even if it looks like a secret.
 KEEP_ENV = re.compile(r"^(OPENROUTER_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|"
                       r"DEEPSEEK_API_KEY|OPENCODE_.*|HTTPS?_PROXY|NO_PROXY|ALL_PROXY)$", re.IGNORECASE)
 
@@ -34,13 +34,13 @@ class PrepareError(RuntimeError):
 
 
 def task_env(label: str, worktree: str, root: str) -> dict[str, str]:
-    """Переменные задачи для хуков и приёмки; HUB_* — совместимость с хуками проектов, писанными под v1."""
+    """Task variables for hooks and acceptance; HUB_* — compat with project hooks written for v1."""
     return {"AHUB_TASK_ID": label, "AHUB_WORKTREE": worktree, "AHUB_PROJECT_ROOT": root,
             "HUB_TASK_ID": label, "HUB_WORKTREE": worktree, "HUB_PROJECT_ROOT": root}
 
 
 def scrub_env(env: dict[str, str]) -> dict[str, str]:
-    """Окружение без секретов хаба; ключи моделей и прокси остаются."""
+    """Env without hub secrets; model keys and proxies stay."""
     out = {}
     for k, v in env.items():
         if KEEP_ENV.match(k) or not _SECRET_ENV.search(k):
@@ -49,7 +49,7 @@ def scrub_env(env: dict[str, str]) -> dict[str, str]:
 
 
 def hide_secrets(project: ProjectConfig, path: str) -> list[str]:
-    """Скрыть из копии отслеживаемые файлы по списку исключений проекта. Возвращает скрытые."""
+    """Hide tracked files in the copy per the project exclude list. Returns the hidden ones."""
     tracked = workspace.git(path, "ls-files").stdout.splitlines()
     hidden = [f for f in tracked
               if any(fnmatch.fnmatch(f, pat) or fnmatch.fnmatch(Path(f).name, pat) for pat in project.secret_excludes)]
@@ -78,7 +78,7 @@ def run_hook(project: ProjectConfig, name: str, task: Task, worktree: str) -> No
 
 
 def collect(project: ProjectConfig, worktree: str, nodes: list[str]) -> None:
-    """Приёмка собирается в копии (существующие файлы; новые напишет работник)."""
+    """Acceptance collects in the copy (existing files; the worker writes new ones)."""
     existing = [n for n in nodes if (Path(worktree) / n.split("::")[0]).exists()]
     if not existing:
         return
@@ -101,7 +101,7 @@ class Prepared:
 
 
 def prepare(project: ProjectConfig, task: Task, *, base_ref: str | None = None) -> Prepared:
-    """Копия, скрытые секреты, хук task_setup, сбор приёмки. Идемпотентно (продолжение после сбоя)."""
+    """Copy, hidden secrets, task_setup hook, acceptance collect. Idempotent (resume after failure)."""
     ws = workspace.ensure(project, task.id, base_ref=base_ref)
     hidden = hide_secrets(project, ws.path)
     run_hook(project, "task_setup", task, ws.path)

@@ -1,9 +1,9 @@
-"""Модель задачи при создании: поля, умолчания по типу, проверка перед запуском (architecture §5).
+"""Task model at creation: fields, per-kind defaults, pre-launch validation (architecture §5).
 
-Задача, не прошедшая проверку, не создаётся — модель за деньги не зовётся. Проверки (перенос lint v1 под
-структурированные поля): разрешённые файлы ⊆ разрешённых проекту, файлы «прочитать» существуют, приёмка
-собирается pytest'ом (новые файлы приёмки допустимы, если попадают в разрешённые), модели доступны проекту,
-зависимости существуют, ресурсы объявлены проектом.
+An invalid task is never created — no paid model call. Checks (v1 lint ported to
+structured fields): allowed files ⊆ project allow-list, "read first" files exist, acceptance
+collects via pytest (new acceptance files are fine if within allowed paths), models available to the project,
+dependencies exist, resources declared by the project.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ MAX_TITLE = 200
 MAX_SPEC_BYTES = 40_000
 MAX_ROUNDS = 5
 
-# Уровни ревью (решение владельца 2026-09-30, как в v1): уровень → (модели, круги).
+# Review levels (owner decision 2026-09-30, as in v1): level → (models, rounds).
 REVIEW_LEVELS: dict[int, tuple[tuple[str, ...], int]] = {
     1: (("spark",), 1),
     2: (("spark",), 2),
@@ -34,7 +34,7 @@ REVIEW_LEVELS: dict[int, tuple[tuple[str, ...], int]] = {
     4: (("spark", "mimo-flash"), 2),
 }
 
-# Умолчания по типу: (уровень ревью или 0 — без ревью, лимит времени мин).
+# Per-kind defaults: (review level, 0 — no review; time limit, min).
 KIND_DEFAULTS: dict[Kind, tuple[int, int]] = {
     Kind.SCOUT: (0, 60),
     Kind.CODE: (2, 180),
@@ -51,7 +51,7 @@ class TaskInvalid(ValueError):
 
 @dataclass
 class TaskSpec:
-    """Что задаёт оркестратор или человек. None — взять умолчание."""
+    """What the orchestrator or human sets. None — take the default."""
 
     project: str
     kind: Kind
@@ -59,13 +59,13 @@ class TaskSpec:
     spec: str = ""
     result_format: str = ""
     model: str | None = None
-    review_level: int | None = None  # 0 — без ревью; 1–4 — уровни
-    review_models: list[str] | None = None  # явный состав (сильнее уровня)
+    review_level: int | None = None  # 0 — no review; 1–4 — levels
+    review_models: list[str] | None = None  # explicit roster (overrides level)
     review_rounds: int | None = None
-    paths: list[str] = field(default_factory=list)  # разрешённые файлы (glob)
-    accept: list[str] = field(default_factory=list)  # pytest-ноды приёмки
-    read: list[str] = field(default_factory=list)  # что прочитать первым
-    review_input: str = ""  # для типа «ревью»: ветка, sha, диапазон a..b или файлы
+    paths: list[str] = field(default_factory=list)  # allowed files (glob)
+    accept: list[str] = field(default_factory=list)  # acceptance pytest nodes
+    read: list[str] = field(default_factory=list)  # what to read first
+    review_input: str = ""  # for the "review" kind: branch, sha, a..b range, or files
     resources: list[str] = field(default_factory=list)
     after: list[int] = field(default_factory=list)
     budget_go: float | None = None
@@ -76,7 +76,7 @@ class TaskSpec:
 
 @dataclass(frozen=True)
 class Resolved:
-    """Задача после умолчаний и проверки — готова к записи."""
+    """Task after defaults and validation — ready to store."""
 
     executor: str
     review: dict
@@ -87,7 +87,7 @@ class Resolved:
 
 
 def spec_hash(spec: TaskSpec) -> str:
-    """Отпечаток постановки: меняется — продолжение пойдёт новой сессией."""
+    """Brief fingerprint: a change continues in a new session."""
     body = json.dumps({"t": spec.title, "s": spec.spec, "f": spec.result_format, "p": sorted(spec.paths),
                        "a": sorted(spec.accept), "i": spec.review_input}, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
@@ -115,7 +115,7 @@ def _covered(file: str, globs: list[str]) -> bool:
 
 
 def _collect(nodes: list[str], project: ProjectConfig) -> str | None:
-    """pytest --collect-only в корне проекта; текст ошибки или None."""
+    """pytest --collect-only at the project root; error text or None."""
     py = project.python or sys.executable
     if not Path(py).exists():
         return _t("tasks.no_python", py=py)
@@ -134,7 +134,7 @@ def _collect(nodes: list[str], project: ProjectConfig) -> str | None:
 
 
 def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bool = True) -> Resolved:
-    """Умолчания + все проверки. Ошибки — разом, в TaskInvalid."""
+    """Defaults + all checks. Errors — batched, in TaskInvalid."""
     errors: list[str] = []
     kind = Kind(spec.kind)
     if spec.project != project.name:
@@ -147,7 +147,7 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
     if len(spec.spec.encode("utf-8")) > MAX_SPEC_BYTES:
         errors.append(_t("tasks.spec_big", kb=MAX_SPEC_BYTES // 1000))
 
-    # Модели
+    # Models
     role = ROLE_FOR_KIND[kind]
     executor = ""
     try:
@@ -178,7 +178,7 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
     if kind is Kind.REVIEW and rmodels:
         errors.append(_t("tasks.review_self"))
 
-    # Файлы и приёмка
+    # Files and acceptance
     paths = [_norm(p) for p in spec.paths if p.strip()]
     if kind in (Kind.CODE, Kind.ROUTINE) and not paths:
         errors.append(_t("tasks.need_paths"))
@@ -211,7 +211,7 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
     if kind is Kind.REVIEW and not spec.review_input.strip():
         errors.append(_t("tasks.need_input"))
 
-    # Зависимости, ресурсы, лимиты
+    # Dependencies, resources, limits
     for a in spec.after:
         dep = store.get_task(a)
         if dep is None:
@@ -225,7 +225,7 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
             errors.append(_t("tasks.no_resource", name=r))
     resources = list(dict.fromkeys(spec.resources))
     if kind is Kind.CODE and project.test_resource and project.test_resource not in resources:
-        resources.append(project.test_resource)  # приёмка идёт под ресурсом тестов
+        resources.append(project.test_resource)  # acceptance runs under the test resource
     budget_go = project.budget_go if spec.budget_go is None else spec.budget_go
     budget_usd = project.budget_usd if spec.budget_usd is None else spec.budget_usd
     if budget_go < 0 or budget_usd < 0:
@@ -246,7 +246,7 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
 
 def create(store: Store, spec: TaskSpec, project: ProjectConfig, *, key: str | None = None,
            draft: bool = False, collect: bool = True) -> Task:
-    """Проверить и записать задачу (queued или draft). key — идемпотентность повтора команды."""
+    """Validate and store a task (queued or draft). key — idempotent command retry."""
     from ahub import transitions
 
     res = resolve(store, spec, project, collect=collect)

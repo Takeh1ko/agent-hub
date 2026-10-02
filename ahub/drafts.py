@@ -1,8 +1,8 @@
-"""Черновик задачи (architecture §5): человек пишет цель своими словами → модель (роль drafter) дописывает поля →
-проверка → предпросмотр → человек правит/запускает. Без явного «Запустить» задача не стартует.
+"""Task draft (architecture §5): a human writes the goal in their own words → model (drafter role) fills in the fields →
+validation → preview → human edits/launches. Nothing starts without an explicit "Launch".
 
-Модель работает в отдельной копии проекта (только читает), итог — JSON с полями TaskSpec в `.ahub/draft.json`.
-Проверка — tasks.resolve; ошибки → один повтор с их текстом, иначе черновик «failed».
+The model works in a separate project copy (read-only), the outcome is JSON with TaskSpec fields in `.ahub/draft.json`.
+Validation is tasks.resolve; errors → one retry with their text, else the draft is "failed".
 """
 
 from __future__ import annotations
@@ -130,7 +130,7 @@ def draft_with_model(store: Store, project: ProjectConfig, draft_id: int) -> dic
 
 
 def _draft_copy(project: ProjectConfig, draft_id: int) -> str:
-    """Отдельная копия (detached) для чтения моделью — корень проекта владельца не трогается."""
+    """Separate (detached) copy for model reading — the owner's project root untouched."""
     base = workspace.worktree_path(project, 0).parent / f"draft-{draft_id}"
     if not base.exists():
         base.parent.mkdir(parents=True, exist_ok=True)
@@ -183,7 +183,7 @@ def preview(store: Store, draft_id: int, limit: int = 1500) -> str:
 
 
 def start(store: Store, project: ProjectConfig, draft_id: int) -> int:
-    """Явный запуск: черновик → задача в очереди. Повтор — та же задача."""
+    """Explicit launch: draft → queued task. Repeat — same task."""
     row = _row(store, draft_id)
     if row is None:
         raise ValueError(_t("draft.no_draft", id=draft_id))

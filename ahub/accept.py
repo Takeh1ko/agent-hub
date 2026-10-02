@@ -1,10 +1,10 @@
-"""Решения по результату (V15–V18, architecture §6.7–§6.8): принять/слить, доработать, отклонить, правка оркестратора,
-расширение файлов, продление бюджета, смена модели, продолжение с новой постановкой.
+"""Decisions on results (V15–V18, architecture §6.7–§6.8): accept/merge, rework, reject, orchestrator edit,
+path extension, budget top-up, model change, resume with a new brief.
 
-Слияние: задача → «принимается» (аренда у того, кто принимает; второй «принять» получит отказ) → ворота на текущем
-HEAD копии (правка оркестратора — если HEAD ≠ commit итога работника: законно, с событием) → в корне проекта
-`git merge --no-ff` в рабочую ветку → приёмка под ресурсом тестов → красная — откат слияния → push по конфигу →
-«принята», хук task_cleanup, копия и ветка удаляются, архив.
+Merge: task → "accepting" (lease held by whoever accepts; a second "accept" is refused) → gates at the copy's
+current HEAD (orchestrator edit — if HEAD ≠ worker result commit: legitimate, with an event) → in the project root
+`git merge --no-ff` into the work branch → acceptance under the test resource → red — roll the merge back →
+push per config → "accepted", task_cleanup hook, copy and branch removed, archived.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ _log = hublog.get("accept")
 
 
 class DecisionError(RuntimeError):
-    """Действие невозможно (одна строка для оркестратора)."""
+    """Action impossible (one line for the orchestrator)."""
 
 
 def _get(store: Store, task_id: int) -> Task:
@@ -81,7 +81,7 @@ def _back(store: Store, task_id: int, owner: str, reason: str) -> None:
     t = store.get_task(task_id)
     if t is not None and t.state is State.ACCEPTING:
         transitions.move(store, task_id, State.NEEDS_DECISION, reason=reason[:500], by="accept", owner=owner)
-        events.ack_task(store, task_id)  # отказ оркестратор увидел в выводе команды
+        events.ack_task(store, task_id)  # the orchestrator saw the refusal in the command output
 
 
 def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str) -> str:
@@ -107,9 +107,9 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str) -
         ok, tail, cmd = gates.run_acceptance(project, project.root, nodes, task_label=t.label)
         if not ok:
             head_now = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
-            if head_now != merged:  # в рабочую ветку успели закоммитить — чужое не трогаем
+            if head_now != merged:  # someone committed into the work branch meanwhile — leave foreign commits alone
                 raise DecisionError(_t("accept.root_moved", now=head_now[:10], merged=merged[:10]))
-            workspace.git(project.root, "reset", "--keep", "HEAD~1", check=False)  # --keep не давит чужую грязь
+            workspace.git(project.root, "reset", "--keep", "HEAD~1", check=False)  # --keep leaves foreign dirt alone
             raise DecisionError(_t("accept.red_rolled_back", cmd=cmd, tail=tail[-600:]))
     note = ""
     if project.push.strip():
@@ -146,7 +146,7 @@ def reject(store: Store, project: ProjectConfig, task_id: int, *, reason: str = 
 
 
 def rework(store: Store, task_id: int, notes: str, *, by: str = "orchestrator") -> str:
-    """Вернуть на доработку с указаниями: та же сессия исполнителя, новый круг."""
+    """Send back for rework with notes: same executor session, new round."""
     t = _get(store, task_id)
     if t.state not in (State.DONE, State.NEEDS_DECISION, State.ERROR, State.STOPPED):
         raise DecisionError(_t("accept.rework_state", label=t.label, state=t.state.value))
@@ -172,7 +172,7 @@ def continue_task(store: Store, task_id: int, *, by: str = "orchestrator") -> st
 
 def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None = None,
          title: str | None = None, by: str = "orchestrator") -> str:
-    """Новая постановка: при продолжении — новая сессия исполнителя (другой отпечаток)."""
+    """New brief: on resume — a fresh executor session (different fingerprint)."""
     t = _get(store, task_id)
     if t.state in (State.ACCEPTED, State.REJECTED) or t.state in transitions.ACTIVE:
         raise DecisionError(_t("accept.edit_state", label=t.label))
@@ -208,7 +208,7 @@ def extend_paths(store: Store, project: ProjectConfig, task_id: int, paths: list
 
 
 def _stopped_by_budget(store: Store, task_id: int) -> bool:
-    """Задача стоит из-за бюджета: после остановки по бюджету (budget_hard) она не выходила из «нужно решение»."""
+    """Task parked on budget: after a hard budget stop (budget_hard) it never left "needs decision"."""
     stopped = False
     for e in store.events(task_id=task_id):
         if e.kind == Ev.BUDGET_HARD.value:
@@ -220,9 +220,9 @@ def _stopped_by_budget(store: Store, task_id: int) -> bool:
 
 def extend_budget(store: Store, task_id: int, *, add: float | None = None, set_to: float | None = None,
                   add_usd: float | None = None, by: str = "orchestrator") -> str:
-    """Продлить бюджет одним действием: увеличен + (если задача стояла из-за бюджета) продолжена.
+    """Top up the budget in one move: raised + resumed (if the task was parked on budget).
 
-    add/set_to — счётчик Go (подписка); add_usd — реальные деньги (по умолчанию 0 = тратить нельзя).
+    add/set_to — Go counter (subscription); add_usd — real money (default 0 = no spending).
     """
     t = _get(store, task_id)
     new = set_to if set_to is not None else t.budget_go + (add or 0.0)
@@ -251,7 +251,7 @@ def change_model(store: Store, project: ProjectConfig, task_id: int, alias: str,
     except registry.RegistryError as e:
         raise DecisionError(str(e)) from e
     lim = dict(t.limits)
-    lim["fresh_session"] = True  # сессию другой модели не продолжить
+    lim["fresh_session"] = True  # never resume another model's session
     store.update_task(t.id, executor=alias, limits=lim)
     store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project, payload={"from": t.executor, "to": alias, "by": by})
     return _t("accept.model_msg", label=t.label, old=t.executor, new=alias)

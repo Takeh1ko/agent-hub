@@ -1,10 +1,10 @@
-"""Точка входа ahub: подкоманды — модули ahub/commands/*.py с register(subparsers).
+"""ahub entry point: subcommands are ahub/commands/*.py modules with register(subparsers).
 
-Общий флаг `--json` — машинный вывод; по умолчанию компактный текст (экономия токенов оркестратора).
-Ошибки конфига и ожидаемые отказы — одна строка в stderr и код 2, не трассировка.
+Shared `--json` flag — machine output; default compact text (orchestrator token savings).
+Config errors and expected refusals — one stderr line and exit 2, no traceback.
 
-Импорты — внутри функций: main() на Windows отказывает до импорта команд
-(часть модулей тянет fcntl, которого там нет).
+Imports live inside functions: main() refuses on Windows before command imports
+(some modules pull fcntl, which is missing there).
 """
 
 from __future__ import annotations

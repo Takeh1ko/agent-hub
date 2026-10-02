@@ -1,4 +1,4 @@
-"""Что видит оркестратор: уровни L1 (сводка) и L2/L3 (задача, результат) с жёсткими лимитами (contracts §5)."""
+"""What the orchestrator sees: L1 (summary) and L2/L3 (task, result) levels with hard limits (contracts §5)."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def _short(s: str, n: int) -> str:
 
 def status_text(store: Store, *, project: str | None = None, live: dict[int, int] | None = None,
                 now: int | None = None, pulses: dict | None = None) -> str:
-    """L1: активные (с пульсом), ждущие решения, очередь, вопросы, непрочитанное. ≤ 1500 байт."""
+    """L1: active (with pulse), awaiting decision, queue, questions, unread. ≤ 1500 bytes."""
     ts = now if now is not None else now_ms()
     live = live or {}
     lines: list[str] = []
@@ -109,7 +109,7 @@ def _result_paths(t: Task) -> tuple[Path | None, Path | None]:
 
 
 def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now: int | None = None) -> str:
-    """L2: задача целиком, но кратко. ≤ 4000 байт."""
+    """L2: whole task, but brief. ≤ 4000 bytes."""
     ts = now if now is not None else now_ms()
     go, usd = archive.task_cost(store, t.id)
     st = archive.STATE_WORDS.get(t.state.value, t.state.value)
@@ -143,7 +143,7 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
 
 
 def result_text(store: Store, t: Task, *, full: bool = False, max_bytes: int = L3_DEFAULT) -> str:
-    """L2 (по умолчанию) или L3 (--full): отчёт целиком, постранично по лимиту."""
+    """L2 (default) or L3 (--full): whole report, paged by limit."""
     if not full:
         return task_text(store, t)
     rj, rp = _result_paths(t)
@@ -158,7 +158,7 @@ def result_text(store: Store, t: Task, *, full: bool = False, max_bytes: int = L
 
 
 def log_text(store: Store, t: Task, *, max_bytes: int = L3_DEFAULT) -> str:
-    """L3: хвост сырых логов последних сессий."""
+    """L3: tail of raw logs from recent sessions."""
     out = []
     for s in store.list_sessions(t.id)[-3:]:
         if s.log_path and Path(s.log_path).exists():

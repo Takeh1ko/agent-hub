@@ -1,8 +1,8 @@
-"""Связь оркестратор ↔ человек: сообщения (TG) и вопросы с вариантами (architecture §9, §11).
+"""Orchestrator ↔ human link: messages (TG) and questions with options (architecture §9, §11).
 
-Входящее сообщение человека пишет TG-мост (V26): строка message(direction=in) + событие owner_message.
-Исходящее от оркестратора (`ahub say`) — message(direction=out); мост отправляет и ставит delivered_at.
-Вопрос (`ahub ask`) — question(open); ответ человека (кнопка/текст) → answered + событие answer.
+The TG bridge (V26) writes incoming human messages: a message(direction=in) row + owner_message event.
+Outgoing from the orchestrator (`ahub say`) — message(direction=out); the bridge sends it and stamps delivered_at.
+Question (`ahub ask`) — question(open); human answer (button/text) → answered + answer event.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def owner_message(store: Store, text: str, *, project: str = "", chat_id: int | 
 
 
 def inbox(store: Store, *, mark: bool = True, now: int | None = None) -> list[dict]:
-    """Непрочитанные сообщения человека; mark — пометить прочитанными и подтвердить их события."""
+    """Unread human messages; mark — mark read and ack their events."""
     ts = now if now is not None else now_ms()
     with store.tx() as c:
         rows = [dict(r) for r in c.execute(
@@ -66,7 +66,7 @@ def ask(store: Store, text: str, options: list[str] | None = None, *, task_id: i
 
 
 def answer(store: Store, question_id: int, text: str, *, via: str = "tg", now: int | None = None) -> bool:
-    """Ответ человека. False — вопроса нет или уже отвечен (первый ответ побеждает)."""
+    """Human answer. False — no such question or already answered (first answer wins)."""
     ts = now if now is not None else now_ms()
     with store.tx() as c:
         row = c.execute("SELECT * FROM question WHERE id=?", (question_id,)).fetchone()
@@ -108,7 +108,7 @@ ESCALATE_MS = 15 * 60_000
 
 
 def alarms_for_tg(store: Store, *, now: int | None = None, escalate_ms: int = ESCALATE_MS) -> list:
-    """Тревоги, которые пора отправить человеку: критичные — сразу; обычные — без подтверждения дольше escalate_ms."""
+    """Alarms due for the human: critical — at once; plain — unacked past escalate_ms."""
     ts = now if now is not None else now_ms()
     out = []
     for e in store.events(needs_reaction=True):
