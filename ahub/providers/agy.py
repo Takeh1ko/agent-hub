@@ -32,7 +32,7 @@ from pathlib import Path
 from ahub import log as hublog
 from ahub.i18n import t as _t
 from ahub.providers.base import (Act, Activity, Cap, Health, ModelInfo, Outcome, Provider, RunSpec, Usage)
-from ahub.providers.opencode import extract_json, prompt_arg  # общие мелочи: prompt → аргумент, JSON из текста
+from ahub.providers.opencode import extract_json, prompt_arg  # shared bits: prompt → argument, JSON out of text
 
 _log = hublog.get("agy")
 
@@ -45,12 +45,12 @@ QUOTA_MARKERS = ("quota", "resource_exhausted", "resource exhausted", "usage lim
                  "rate_limit", "limit exceeded", "credits", "billing")
 NO_ACCESS_MARKERS = ("unauthorized", "unauthenticated", "forbidden", "permission denied", "not signed in",
                      "no credentials", "invalid credentials", "api key not valid", "sign in", "login required")
-PRINT_TIMEOUT_MARKER = "print timeout"  # stderr: agy сработал --print-timeout, ход не закончен
-RESUME_GONE_MARKER = "not found"  # stderr: `conversation "…" not found` — agy открыл новую сессию
+PRINT_TIMEOUT_MARKER = "print timeout"  # stderr: agy hit --print-timeout, the turn did not finish
+RESUME_GONE_MARKER = "not found"  # stderr: `conversation "…" not found` — agy opened a new session
 _STATUS = re.compile(r"\b(?:status(?:_?code)?|http[ _]?status)\D{0,3}(\d{3})\b", re.IGNORECASE)
 _AGY_ERROR = re.compile(r"AGY_ERROR:\s*(\{.*\})")
 _MODEL_LINE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.:/-]*)\t(\S.*?)\s*$")
-_DELTA_LIMIT = 256  # буферов текста на процесс (шаги растут, сессии — нет)
+_DELTA_LIMIT = 256  # text buffers per process (steps grow, sessions do not)
 
 
 def agy_bin() -> str:
@@ -105,7 +105,7 @@ def classify_stderr(stderr_tail: str) -> tuple[str, dict]:
 
 
 def usage_of(raw) -> Usage | None:
-    """agy usage dict → Usage (context — входные токены шага плюс кэш)."""
+    """agy usage dict → Usage (context — the step's input tokens plus cache)."""
     if not isinstance(raw, dict):
         return None
     tin, tout, cache = raw.get("input_tokens"), raw.get("output_tokens"), raw.get("cache_read_tokens")
@@ -146,20 +146,21 @@ def _outcome_of(flags: dict) -> Outcome:
 
 class AgyProvider(Provider):
     name = "agy"
-    # Честно нет: export, find_session, cost_money/cost_quota (квота окном, цен agy не отдаёт).
+    # Honestly absent: export, find_session, cost_money/cost_quota (window quota, agy reports no prices).
     capabilities = frozenset({Cap.RESUME, Cap.STREAM, Cap.STRUCTURED, Cap.TOKENS, Cap.ACTIVE_TOOL,
                               Cap.CATALOG, Cap.HEALTH})
 
     def __init__(self, binary: str | None = None, env: dict[str, str] | None = None,
                  skip_permissions: bool = True) -> None:
         self.binary = binary
-        self.extra_env = dict(env or {})  # окружение вспомогательных вызовов (models/--version)
-        # Прав в CLI два режима, и ни один не ограничивает запись по cwd (проверено живьём
-        # 2026-10-03): accept-edits — файлы пишутся без вопросов, но команды в headless
-        # запрещены (auto-deny, ход получается пустым); skip-permissions — всё разрешено, иначе
-        # работник не может запустить git и тесты. Сдерживает копия проекта, scrub_env и ворота.
+        self.extra_env = dict(env or {})  # environment for helper calls (models/--version)
+        # The CLI has two permission modes and neither of them limits writes to cwd (checked live
+        # 2026-10-03): accept-edits — files are written without questions, but commands are denied
+        # in headless mode (auto-deny, the turn comes out empty); skip-permissions — everything is
+        # allowed, otherwise the worker cannot run git and the tests. What holds agy in place is the
+        # project copy, scrub_env and the gates.
         self.skip_permissions = skip_permissions
-        self._deltas: dict[str, str] = {}  # (conversation_id, step_index) → накопленный текст
+        self._deltas: dict[str, str] = {}  # (conversation_id, step_index) → accumulated text
 
     def _bin(self) -> str:
         return self.binary or agy_bin()
@@ -191,7 +192,7 @@ class AgyProvider(Provider):
             return []
         kind = ev.get("event")
         if kind == "init":
-            if len(self._deltas) > _DELTA_LIMIT:  # буферы прошлых ходов (шаги растут, id сессии — нет)
+            if len(self._deltas) > _DELTA_LIMIT:  # buffers of past turns (steps grow, session ids do not)
                 self._deltas.clear()
             cid = str(ev.get("conversation_id") or "")
             return [Activity(Act.SESSION, now, text=cid)] if cid else []
@@ -264,7 +265,7 @@ class AgyProvider(Provider):
 
     def classify(self, *, exit_code: int | None, activities: list[Activity], session_id: str | None,
                  stderr_tail: str) -> tuple[Outcome, str]:
-        """Итог хода решает событие result, а не код выхода (с --print-timeout код бывает 0)."""
+        """The result event decides the turn's outcome, not the exit code (with --print-timeout the code is often 0)."""
         err_text, err_flags = classify_stderr(stderr_tail)
         terminal = next((a for a in activities if a.kind is Act.ERROR and a.data.get("terminal")), None)
         if terminal is not None:
@@ -275,10 +276,10 @@ class AgyProvider(Provider):
                          if PRINT_TIMEOUT_MARKER in ln.lower()), "")
             return Outcome.TIMEOUT, (line or _t("agy.print_timeout"))[:2000]
         denied = next((a for a in activities if a.kind is Act.ERROR and a.data.get("denied")), None)
-        if denied is not None:  # ход ничего не сделал: права спрашивать было не у кого
+        if denied is not None:  # the turn did nothing: there was nobody to ask for permissions
             hint = next((ln.strip() for ln in (stderr_tail or "").splitlines() if "permission" in ln.lower()), "")
             return Outcome.MODEL_ERROR, "; ".join(p for p in (denied.text, hint) if p)[:2000]
-        if err_text:  # AGY_ERROR без события result (вывод оборвался)
+        if err_text:  # AGY_ERROR without a result event (the output was cut off)
             return _outcome_of(err_flags), err_text[:2000]
         if RESUME_GONE_MARKER in (stderr_tail or "").lower():
             _log.warning("agy: conversation not found — a new session was opened instead of a resume")
@@ -286,7 +287,7 @@ class AgyProvider(Provider):
                                 stderr_tail=stderr_tail)
 
     def stream_usage(self, activities: list[Activity]) -> Usage | None:
-        """Итог agy (сумма шагов) важнее суммы шагов; деньги не приходят — cost None."""
+        """The final agy total (the sum of steps) beats the sum of steps; no money comes — cost None."""
         final: Usage | None = None
         acc: Usage | None = None
         for a in activities:
@@ -300,7 +301,7 @@ class AgyProvider(Provider):
         return final or acc
 
     def structured(self, final_text: str, activities: list[Activity], schema: dict | None) -> dict | None:
-        """--json-schema: agy сам кладёт разобранный объект в result.structured_output."""
+        """--json-schema: agy itself puts the parsed object into result.structured_output."""
         for a in reversed(activities):
             data = a.data.get("structured")
             if isinstance(data, dict):

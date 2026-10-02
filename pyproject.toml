@@ -39,4 +39,4 @@ ahub = ["migrations/*.sql", "claude/*.md"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-markers = ["live: настоящие поставщики (деньги), только при AHUB_LIVE=1"]
+markers = ["live: real providers (cost money), only with AHUB_LIVE=1"]
