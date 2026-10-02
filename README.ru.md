@@ -1,6 +1,8 @@
-# agent-hub
+<p align="center"><img src="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/assets/banner.png" alt="agent-hub" width="100%"></p>
 
-[English version](README.md)
+<p align="center"><a href="https://github.com/Takeh1ko/agent-hub/actions/workflows/ci.yml"><img src="https://github.com/Takeh1ko/agent-hub/actions/workflows/ci.yml/badge.svg" alt="CI"></a> <a href="https://pypi.org/project/ahub/"><img src="https://img.shields.io/pypi/v/ahub" alt="PyPI"></a> <img src="https://img.shields.io/badge/python-3.11%E2%80%933.13-blue" alt="Python 3.11–3.13"> <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT"></p>
+
+<p align="center"><a href="https://github.com/Takeh1ko/agent-hub/blob/main/README.md">English version</a></p>
 
 Пусть Claude Code отдаёт работу дешёвым моделям, а свои токены тратит только на решения.
 
@@ -8,8 +10,6 @@ agent-hub — локальный сервис между оркестратор�
 (opencode: Muse Spark, бесплатные модели; Gemini через Antigravity). Claude ставит задачу, замолкает, и его будит
 одна строка, когда нужно решение: принять, вернуть с замечаниями или отклонить. Всё между этим — запуск работника
 в своей копии репозитория, проверка его работы, ревью другими моделями, повторы, бюджеты — хаб делает без Claude.
-
-![agent-hub: задача уходит от Claude дешёвой модели, проходит ворота и ревью и сливается](docs/demo.gif)
 
 
 ## Зачем
@@ -60,18 +60,24 @@ agent-hub — локальный сервис между оркестратор�
 Нужна панель на двадцать параллельных агентов с автоматикой PR — берите оркестратор флота. Нужно, чтобы Claude Code
 перестал жечь контекст на работу, которую сделает модель дешевле, и чтобы результату можно было верить, — это сюда.
 
+<details>
+<summary>Как это выглядит: настоящая задача на Muse Spark ($0.007)</summary>
+
+<img src="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/demo.gif" alt="demo">
+</details>
+
 ## Установка
 
 Нужны Python 3.11+, git и хотя бы один поставщик: [opencode](https://opencode.ai) (бесплатные модели подходят) или
 Google Antigravity CLI (`agy`).
 
 ```
-pipx install git+https://github.com/Takeh1ko/Midas-AI-HUB
+pipx install ahub
 ahub setup                 # язык, проект, поставщики, модели, служба, навык Claude, Telegram (по желанию)
 ahub doctor                # что не так и как исправить
 ```
 
-`ahub setup --yes` — все умолчания без вопросов. Telegram — по желанию: `pipx install 'ahub[telegram] @ git+https://github.com/Takeh1ko/Midas-AI-HUB'`.
+`ahub setup --yes` — все умолчания без вопросов. Telegram — по желанию: `pipx install 'ahub[telegram]'`.
 
 Платформы: Linux (systemd), macOS (launchd; проверяется в CI), Windows — только через WSL2.
 
@@ -94,9 +100,9 @@ Claude держит Monitor на `ahub watch`; пришла строка `DONE T
 
 ## Документация (на английском)
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — карта кода, начинать с неё
-- [docs/architecture.md](docs/architecture.md) — архитектура
-- [docs/contracts.md](docs/contracts.md) — интерфейсы между частями
+- [docs/ARCHITECTURE.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/ARCHITECTURE.md) — карта кода, начинать с неё
+- [docs/architecture.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/architecture.md) — архитектура
+- [docs/contracts.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/contracts.md) — интерфейсы между частями
 
 ## Разработка
 

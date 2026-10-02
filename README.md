@@ -1,6 +1,8 @@
-# agent-hub
+<p align="center"><img src="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/assets/banner.png" alt="agent-hub" width="100%"></p>
 
-[Русская версия](README.ru.md)
+<p align="center"><a href="https://github.com/Takeh1ko/agent-hub/actions/workflows/ci.yml"><img src="https://github.com/Takeh1ko/agent-hub/actions/workflows/ci.yml/badge.svg" alt="CI"></a> <a href="https://pypi.org/project/ahub/"><img src="https://img.shields.io/pypi/v/ahub" alt="PyPI"></a> <img src="https://img.shields.io/badge/python-3.11%E2%80%933.13-blue" alt="Python 3.11–3.13"> <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT"></p>
+
+<p align="center"><a href="https://github.com/Takeh1ko/agent-hub/blob/main/README.ru.md">Русская версия</a></p>
 
 Let Claude Code hand work to cheap models — and only spend its own tokens on decisions.
 
@@ -9,8 +11,6 @@ agent-hub is a local service between an orchestrator (Claude Code, or any CLI ag
 one line when there is something to decide: accept, send back with notes, or reject. Everything in between —
 running the worker in its own copy of the repo, checking its work, review by other models, retries, budgets —
 the hub does without Claude.
-
-![agent-hub: a task goes from Claude to a cheap model, through gates and review, and is merged](docs/demo.gif)
 
 
 ## Why
@@ -63,18 +63,24 @@ agent-hub is narrower in scope and deeper in the task lifecycle:
 If you want a dashboard for twenty parallel agents with PR automation, use a fleet orchestrator. If you want
 Claude Code to stop burning its context on work a cheaper model can do — and to trust the result — this is it.
 
+<details>
+<summary>See it work: a real task on Muse Spark ($0.007)</summary>
+
+<img src="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/demo.gif" alt="demo">
+</details>
+
 ## Install
 
 Requires Python 3.11+, git, and at least one provider: [opencode](https://opencode.ai) (free models work) or
 Google Antigravity CLI (`agy`).
 
 ```
-pipx install git+https://github.com/Takeh1ko/Midas-AI-HUB
+pipx install ahub
 ahub setup                 # language, project, providers, models, service, Claude skill, Telegram (optional)
 ahub doctor                # what is wrong and how to fix it
 ```
 
-`ahub setup --yes` takes all defaults without questions. Telegram is optional: `pipx install 'ahub[telegram] @ git+https://github.com/Takeh1ko/Midas-AI-HUB'`.
+`ahub setup --yes` takes all defaults without questions. Telegram is optional: `pipx install 'ahub[telegram]'`.
 
 Platforms: Linux (systemd), macOS (launchd; tested in CI), Windows via WSL2 only.
 
@@ -97,9 +103,9 @@ Everything else: `ahub --help`.
 
 ## Documentation
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — code map, start here
-- [docs/architecture.md](docs/architecture.md) — design
-- [docs/contracts.md](docs/contracts.md) — interfaces between the parts
+- [docs/ARCHITECTURE.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/ARCHITECTURE.md) — code map, start here
+- [docs/architecture.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/architecture.md) — design
+- [docs/contracts.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/contracts.md) — interfaces between the parts
 
 ## Development
 

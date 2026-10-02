@@ -15,6 +15,10 @@ classifiers = [
 ]
 dependencies = ["textual>=0.80", "psutil>=5.9; sys_platform != 'linux'"]
 
+[project.urls]
+Homepage = "https://github.com/Takeh1ko/agent-hub"
+Issues = "https://github.com/Takeh1ko/agent-hub/issues"
+
 [project.optional-dependencies]
 telegram = ["aiogram>=3.13"]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "psutil>=5.9", "aiogram>=3.13"]
