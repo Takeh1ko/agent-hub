@@ -13,15 +13,16 @@ from pathlib import Path
 from ahub import log as hublog
 from ahub import workspace
 from ahub.config import ProjectConfig
+from ahub.i18n import Words
+from ahub.i18n import t as _t
 from ahub.model import CHANGES_FILES
 from ahub.store import Store, Task
 from ahub.time import fmt_local
 
 DIR = ".agent-hub"
-STATE_WORDS = {"draft": "черновик", "queued": "в очереди", "preparing": "подготовка", "working": "в работе",
-               "checking": "проверка", "reviewing": "ревью", "fixing": "доработка", "done": "готово",
-               "needs_decision": "нужно решение", "error": "ошибка", "stopped": "остановлена",
-               "accepting": "принимается", "accepted": "принята", "rejected": "отклонена"}
+STATE_WORDS: Words = Words("archive.state_", ("draft", "queued", "preparing", "working", "checking",
+                                             "reviewing", "fixing", "done", "needs_decision", "error",
+                                             "stopped", "accepting", "accepted", "rejected"))
 _log = hublog.get("archive")
 
 
@@ -58,23 +59,24 @@ def _task_md(store: Store, t: Task) -> str:
     go, usd = task_cost(store, t.id)
     sessions = store.list_sessions(t.id)
     lines = [f"# {t.label} — {t.title}", "",
-             f"- Тип: {t.kind.value}; итог: {STATE_WORDS.get(t.state.value, t.state.value)}"
+             _t("archive.type", kind=t.kind.value, state=STATE_WORDS.get(t.state.value, t.state.value))
              + (f" — {t.state_reason}" if t.state_reason else ""),
-             f"- Модель: {t.executor}; ревью: {', '.join(t.review.get('models', [])) or 'нет'}"
+             _t("archive.model", executor=t.executor,
+               review=', '.join(t.review.get('models', [])) or _t("archive.no_review"))
              + (f" × {t.review.get('rounds')}" if t.review else ""),
-             f"- Кругов: {t.round}; сессий: {len(sessions)}",
-             f"- Стоимость: Go ${go:.3f}" + (f", реальные ${usd:.3f}" if usd else ""),
-             f"- Создана: {fmt_local(t.created_at)} ({t.created_by or '—'})"
-             + (f"; завершена: {fmt_local(t.finished_at)}" if t.finished_at else ""),
+             _t("archive.rounds", round=t.round, sessions=len(sessions)),
+             _t("archive.cost", go=f"{go:.3f}") + (_t("archive.cost_real", usd=f"{usd:.3f}") if usd else ""),
+             _t("archive.created", when=fmt_local(t.created_at), by=t.created_by or '—')
+             + (_t("archive.finished", when=fmt_local(t.finished_at)) if t.finished_at else ""),
              ""]
     if t.after:
-        lines.insert(-1, f"- После: {', '.join(f'T{a}' for a in t.after)}")
+        lines.insert(-1, _t("archive.after", items=', '.join(f'T{a}' for a in t.after)))
     if t.limits.get("paths"):
-        lines.insert(-1, f"- Разрешённые файлы: {', '.join(t.limits['paths'])}")
+        lines.insert(-1, _t("archive.paths", items=', '.join(t.limits['paths'])))
     if t.limits.get("accept"):
-        lines.insert(-1, f"- Приёмка: {', '.join(t.limits['accept'])}")
+        lines.insert(-1, _t("archive.accept", items=', '.join(t.limits['accept'])))
     if t.spec.strip():
-        lines += ["## Описание", "", t.spec.strip(), ""]
+        lines += [_t("archive.spec"), "", t.spec.strip(), ""]
     return "\n".join(lines)
 
 
@@ -108,7 +110,7 @@ def write_task(store: Store, project: ProjectConfig, task_id: int) -> Path | Non
 
 def write_index(store: Store, project: ProjectConfig) -> None:
     tasks = store.list_tasks(project=project.name, newest_first=True)
-    rows = ["# Задачи agent-hub", "", "| Задача | Когда | Тип | Цель | Итог | $ |", "|---|---|---|---|---|---|"]
+    rows = [_t("archive.index_title"), "", _t("archive.index_head"), "|---|---|---|---|---|---|"]
     for t in tasks:
         go, usd = task_cost(store, t.id)
         title = t.title.replace("|", "/")[:80]
