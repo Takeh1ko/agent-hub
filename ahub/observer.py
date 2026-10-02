@@ -215,36 +215,36 @@ def snapshot(store: Store, *, now: int, proc_root: str | Path = "/proc") -> str:
     return "\n".join(lines)
 
 
-TRIAGE_PROMPT = """Ты — наблюдатель хаба agent-hub (оркестратор моделей-работников). Твоя задача — понять, работает ли
-сам хаб как нужно: процессы задач живы, модели отвечают, очередь движется, логи без настоящих ошибок. Проекты и их
-код тебя не касаются. Ничего не меняй и не запускай.
-Сейчас {now_str} (ts={now_ms}); смотри только записи лога с ts ≥ {since} ({since_str}); старые записи — история,
-не текущие проблемы. Подробности при нужде читай в файле {log}, но только записи с ts ≥ {since}.
+TRIAGE_PROMPT = """You are the agent-hub observer (orchestrator of worker models). Your job is to tell whether
+the hub itself works as it should: task processes are alive, models answer, the queue moves, logs have no real
+errors. Projects and their code are not your concern. Change and run nothing.
+Now is {now_str} (ts={now_ms}); look only at log records with ts >= {since} ({since_str}); older records are
+history, not current problems. Read details in {log} if needed, but only records with ts >= {since}.
 
 {kind}
 
-## Подозрения кода
+## Code suspicions
 {suspicions}
 
-## Выжимка лога за окно (WARNING/ERROR, сгруппировано)
+## Log digest for the window (WARNING/ERROR, grouped)
 {log_digest}
 
 {snapshot}
 
-Ответь ТОЛЬКО JSON-объектом:
-{{"verdict": "ok | false_alarm | alarm | critical", "summary": "одна фраза: что происходит",
-  "action": "что сделать Claude/человеку (если alarm/critical)"}}
-critical — хаб не может работать (поставщик лёг, сервис стоит, все задачи висят). alarm — конкретная задача/компонент
-сломан и сам не восстановится. false_alarm — объяснимо (долгие тесты, ожидание замка, штатный повтор).
+Answer with ONLY a JSON object:
+{{"verdict": "ok | false_alarm | alarm | critical", "summary": "one sentence: what is happening",
+  "action": "what Claude/human should do (if alarm/critical)"}}
+critical — the hub cannot work (provider down, service stopped, all tasks stuck). alarm — a specific task/component
+is broken and will not recover by itself. false_alarm — explainable (long tests, lock wait, routine retry).
 """
 
-DEEP_CHECKLIST = """## Плановая проверка (раз в 30 мин) — пройди чек-лист
-1. Есть ли задачи «работает», но давно без результата (фаза не меняется, стоимость растёт)?
-2. Растёт ли очередь при свободных местах?
-3. Есть ли сироты (активна без процесса)?
-4. Сходятся ли траты с активностью (траты без активности / активность без трат)?
-5. Не молчат ли логи при явных проблемах в событиях (сбои, повторы, тишина)?
-6. Всё ли в порядке у поставщиков (сбои сети/сервера подряд)?"""
+DEEP_CHECKLIST = """## Scheduled check (every 30 min) — go through the checklist
+1. Are there tasks "working" but with no result for a long time (phase not changing, cost growing)?
+2. Is the queue growing while slots are free?
+3. Are there orphans (active without a process)?
+4. Do costs match activity (spending without activity / activity without spending)?
+5. Are logs silent while events show clear problems (failures, retries, silence)?
+6. Are providers healthy (network/server failures in a row)?"""
 
 
 def triage(store: Store, sus: list[Suspicion], *, deep: bool = False, now: int | None = None,
@@ -258,12 +258,14 @@ def triage(store: Store, sus: list[Suspicion], *, deep: bool = False, now: int |
     win = since if since is not None else window_since(store, deep=deep, now=ts)
     cwd = paths.state_dir() / "observer" / str(ts)
     cwd.mkdir(parents=True, exist_ok=True)
+    from ahub.prompts import reply_language_line
+
     prompt = TRIAGE_PROMPT.format(
-        log=hublog.log_file(), kind=DEEP_CHECKLIST if deep else "## Разбор подозрений",
-        suspicions="\n".join(f"- {'КРИТИЧНО ' if s.critical else ''}{s.text}" for s in sus) or "- нет",
+        log=hublog.log_file(), kind=DEEP_CHECKLIST if deep else "## Suspicion triage",
+        suspicions="\n".join(f"- {'CRITICAL ' if s.critical else ''}{s.text}" for s in sus) or "- none",
         snapshot=snapshot(store, now=ts),
         now_str=fmt_local(ts, now=ts), now_ms=ts, since=win, since_str=fmt_local(win, now=ts),
-        log_digest=log_digest(win, now=ts))
+        log_digest=log_digest(win, now=ts)) + "\n\n" + reply_language_line()
     prov = providers.get(entry.provider)
     r = run_session(prov, RunSpec(prompt=prompt, cwd=str(cwd), model_id=entry.model_id, variant=entry.variant,
                                   log_path=str(cwd / "observer.log"), timeout_s=15 * 60, idle_s=600))

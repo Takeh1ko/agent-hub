@@ -108,8 +108,8 @@ def prompt_arg(prompt: str, cwd: str) -> str:
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"prompt_{int(time.time() * 1000)}_{os.getpid()}_{uuid.uuid4().hex[:8]}.md"
     path.write_text(prompt, encoding="utf-8")
-    return (f"Твоё задание целиком — в файле {path}. Прочитай его полностью (он длинный, читай по частям "
-            f"до конца) и выполни.")
+    return (f"Your full task is in file {path}. Read it fully (it is long, read it in parts "
+            f"to the end) and execute it.")
 
 
 def _usage_of_part(part: dict) -> Usage | None:

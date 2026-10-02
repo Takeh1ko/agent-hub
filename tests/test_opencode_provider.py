@@ -102,7 +102,7 @@ def test_build_command(oc, tmp_path):
 def test_long_prompt_goes_to_file(tmp_path):
     long = "x" * 70_000
     arg = prompt_arg(long, str(tmp_path))
-    assert len(arg) < 1000 and "в файле" in arg
+    assert len(arg) < 1000 and "in file" in arg
     files = list((tmp_path / ".ahub").glob("prompt_*.md"))
     assert len(files) == 1 and files[0].read_text() == long
 

@@ -64,7 +64,7 @@ def test_repair_once(store, project):
     ])
     t = new_scout(store, project)
     assert run(store, project, t.id).state is State.DONE
-    assert "Итог не сдан по форме" in fake.calls[1]["prompt"] and fake.calls[1]["session_id"] == "ses_r"
+    assert "Result is not in the required form" in fake.calls[1]["prompt"] and fake.calls[1]["session_id"] == "ses_r"
     assert len(store.list_sessions(t.id)) == 1  # продолжение — та же сессия
 
 
@@ -116,7 +116,7 @@ def test_silence_then_continue(store, project):
     fake = install_fake(store, [{"session": "ses_q", "steps": [{"sleep": 10}]}, scout_ok("ses_q")])
     t = new_scout(store, project)
     assert run(store, project, t.id).state is State.DONE
-    assert fake.calls[1]["session_id"] == "ses_q" and "продолжи" in fake.calls[1]["prompt"].lower()
+    assert fake.calls[1]["session_id"] == "ses_q" and "continue the task" in fake.calls[1]["prompt"].lower()
     assert "silence" in events(store, t.id)
 
 
@@ -169,7 +169,7 @@ def test_orphan_resumes_same_session(store, project):
                                                          "base_sha": ws.base_sha, "round": 1})
     store.add_session(task_id=t.id, provider="fake", role="scout", model="fake", external_id="ses_old")
     assert run(store, project, t.id).state is State.DONE
-    assert fake.calls[0]["session_id"] == "ses_old" and "продолжи" in fake.calls[0]["prompt"].lower()
+    assert fake.calls[0]["session_id"] == "ses_old" and "continue the task" in fake.calls[0]["prompt"].lower()
 
 
 def test_unsupported_kind_is_decision(store, project):

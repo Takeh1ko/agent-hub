@@ -63,7 +63,7 @@ def test_code_no_review(store, project):
     assert res.state is State.DONE, res.reason
     done = store.events(task_id=t.id, needs_reaction=True)[-1].payload
     assert done["tests"] == "зелёная" and "1 file changed" in done["diffstat"] and done["summary"] == "сделал"
-    assert "Разрешённые файлы" in fake.calls[0]["prompt"] and "tests/test_a.py::test_x" in fake.calls[0]["prompt"]
+    assert "Allowed files" in fake.calls[0]["prompt"] and "tests/test_a.py::test_x" in fake.calls[0]["prompt"]
 
 
 def test_review_approve(store, project):
@@ -113,7 +113,7 @@ def test_no_commit_repair(store, project):
     fake = install_fake(store, [nocommit, fix])
     t = code_task(store, project)
     assert run(store, project, t.id).state is State.DONE
-    assert "Итог не сдан по форме" in fake.calls[1]["prompt"] and "незакоммиченные" in fake.calls[1]["prompt"]
+    assert "Result is not in the required form" in fake.calls[1]["prompt"] and "незакоммиченные" in fake.calls[1]["prompt"]
 
 
 def test_red_tests_fixed_once(store, project):
@@ -122,7 +122,7 @@ def test_red_tests_fixed_once(store, project):
     fake = install_fake(store, [red, green])
     t = code_task(store, project)
     assert run(store, project, t.id).state is State.DONE
-    assert "Приёмка красная" in fake.calls[1]["prompt"]
+    assert "Failing acceptance" in fake.calls[1]["prompt"]
 
 
 def test_red_tests_twice(store, project):
@@ -146,7 +146,7 @@ def test_budget_exhausted_stops_with_save(store, project):
     t = code_task(store, project, review_models=["fake"], budget_go=0.01)
     res = run(store, project, t.id)
     assert res.state is State.NEEDS_DECISION and "бюджет исчерпан" in res.reason
-    assert "остановиться" in fake.calls[1]["prompt"] and fake.calls[1]["session_id"] == "ses_x"
+    assert "asks you to stop" in fake.calls[1]["prompt"] and fake.calls[1]["session_id"] == "ses_x"
     assert "budget_hard" in [e.kind for e in store.events(task_id=t.id)]
 
 
