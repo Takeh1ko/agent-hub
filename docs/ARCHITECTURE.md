@@ -47,6 +47,7 @@ accept.py: hub accept (разведка — принять; код — merge --n
 ## Процессы
 - `systemctl --user … ahub.service` — `hub service run` (очередь + наблюдатель); `ahub-bot.service` — `hub bot run`.
 - Процессы задач — отдельные (`python -m ahub.worker T<id>`), переживают перезапуск сервиса.
+- `ahub/procs.py` — дети, живость, cmdline, время старта: Linux через /proc, иначе psutil.
 - Claude: Monitor на `hub watch`; `hub status`; решения — `hub accept|rework|reject`.
 
 ## Работа с кодом

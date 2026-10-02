@@ -44,13 +44,8 @@ _TASK_ARG = re.compile(r"^[Tt]?(\d+)$")
 def live_workers(proc_root: str | Path = "/proc") -> dict[int, int]:
     """task_id → pid живых процессов задач на машине."""
     out: dict[int, int] = {}
-    root = Path(proc_root)
-    try:
-        entries = [e for e in root.iterdir() if e.name.isdigit()]
-    except OSError:
-        return out
-    for e in entries:
-        args = procs.cmdline(int(e.name), proc_root)
+    for pid in procs.pids(proc_root):
+        args = procs.cmdline(pid, proc_root)
         if not args or not any(CMD_MARK in a for a in args):
             continue
         try:
@@ -60,8 +55,8 @@ def live_workers(proc_root: str | Path = "/proc") -> dict[int, int]:
         for a in args[i + 1:]:
             m = _TASK_ARG.match(a)
             if m:
-                if procs.alive(int(e.name), proc_root):
-                    out[int(m.group(1))] = int(e.name)
+                if procs.alive(pid, proc_root):
+                    out[int(m.group(1))] = pid
                 break
     return out
 
