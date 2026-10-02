@@ -73,11 +73,9 @@ def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | No
         go_m = month.cost_go or 0.0
         if limit is None:
             money = f"сегодня ${today.cost_go or 0:.2f} · месяц ${go_m:.2f}"
-        elif limit > 0:
+        else:
             money = (f"сегодня ${today.cost_go or 0:.2f} · месяц ${go_m:.2f} из ${limit:.0f}"
                      f" ({go_m / limit * 100:.0f} %)" + (" — лимит превышен!" if go_m > limit else ""))
-        else:
-            money = f"сегодня ${today.cost_go or 0:.2f} · месяц ${go_m:.2f} из ${limit:.0f}"
         if today.cost_usd or month.cost_usd:
             money += f" · реальные ${month.cost_usd or 0:.2f}"
     except Exception:
