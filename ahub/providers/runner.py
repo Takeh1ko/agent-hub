@@ -131,7 +131,7 @@ def run(provider: Provider, spec: RunSpec, *,
     except OSError as e:
         out_f.close()
         err_f.close()
-        _log.error("не запустился: %s", e, extra=ctx)
+        _log.error("failed to start: %s", e, extra=ctx)
         return RunResult(Outcome.NOT_STARTED, spec.session_id, error=clip(f"{cmd[0]}: {e}"),
                          started_ms=started, ended_ms=now_ms(), log_path=log_path)
     out_f.close()  # дескрипторы унаследовал процесс
@@ -140,7 +140,7 @@ def run(provider: Provider, spec: RunSpec, *,
         try:
             on_start(proc.pid)
         except Exception:  # колбэк не должен ронять шаг
-            _log.exception("on_start упал", extra=ctx)
+            _log.exception("on_start failed", extra=ctx)
 
     activities: list[Activity] = []
     acts_lock = threading.Lock()
@@ -159,19 +159,19 @@ def run(provider: Provider, spec: RunSpec, *,
                 try:
                     on_session(act.text)
                 except Exception:
-                    _log.exception("on_session упал", extra=ctx)
+                    _log.exception("on_session failed", extra=ctx)
         if on_activity is not None:
             try:
                 on_activity(act)
             except Exception:
-                _log.exception("on_activity упал", extra=ctx)
+                _log.exception("on_activity failed", extra=ctx)
 
     def _handle(raw: bytes) -> None:
         line = raw[:MAX_LINE].decode("utf-8", "replace")
         try:
             acts = provider.parse_line(line, now_ms())
         except Exception:
-            _log.exception("parse_line упал", extra=ctx)
+            _log.exception("parse_line failed", extra=ctx)
             acts = []
         if acts:  # сторож тишины сбрасывается только распознанной активностью, не любым мусором
             last_line[0] = time.monotonic()
@@ -231,7 +231,7 @@ def run(provider: Provider, spec: RunSpec, *,
                 try:
                     stop = bool(should_stop())
                 except Exception:
-                    _log.exception("should_stop упал", extra=ctx)
+                    _log.exception("should_stop failed", extra=ctx)
                     stop = False
                 if stop:
                     forced = Outcome.KILLED
@@ -254,9 +254,9 @@ def run(provider: Provider, spec: RunSpec, *,
         try:
             left = reap(proc.pid, tracked)  # pgid = pid лидера (start_new_session)
             if left:
-                _log.warning("добиты брошенные процессы агента: %s", left[:10], extra=ctx)
+                _log.warning("reaped stray agent processes: %s", left[:10], extra=ctx)
         except Exception:
-            _log.exception("добивание остатков агента упало", extra=ctx)
+            _log.exception("reaping agent leftovers failed", extra=ctx)
 
     ended = now_ms()
     with acts_lock:
@@ -266,7 +266,7 @@ def run(provider: Provider, spec: RunSpec, *,
         try:
             sid = provider.find_session(spec.cwd, started)
         except Exception:
-            _log.exception("find_session упал", extra=ctx)
+            _log.exception("find_session failed", extra=ctx)
     if sid is None and spec.session_id:
         sid = spec.session_id
     try:
@@ -291,7 +291,7 @@ def run(provider: Provider, spec: RunSpec, *,
             outcome, error = provider.classify(exit_code=proc.returncode, activities=acts, session_id=sid,
                                                stderr_tail=tail)
         except Exception as e:
-            _log.exception("classify упал", extra=ctx)
+            _log.exception("classify failed", extra=ctx)
             outcome, error = Outcome.CRASH, clip(f"classify: {e}")
 
     final = provider.final_text(acts)
@@ -300,15 +300,15 @@ def run(provider: Provider, spec: RunSpec, *,
         try:
             structured = provider.structured(final, acts, spec.schema)
         except Exception:
-            _log.exception("structured упал", extra=ctx)
+            _log.exception("structured failed", extra=ctx)
     usage = None
     try:
         db_usage = provider.usage(sid) if sid and (provider.has(Cap.COST_MONEY) or provider.has(Cap.TOKENS)) else None
         usage = merge_usage(db_usage, provider.stream_usage(acts))
     except Exception:
-        _log.exception("usage упал", extra=ctx)
+        _log.exception("usage failed", extra=ctx)
     level = "info" if outcome is Outcome.OK else "warning"
-    getattr(_log, level)("сессия: %s%s", outcome.value, f" ({error[:200]})" if error else "",
+    getattr(_log, level)("session: %s%s", outcome.value, f" ({error[:200]})" if error else "",
                          extra={**ctx, "session": sid, "exit": proc.returncode,
                                 "secs": round((ended - started) / 1000, 1)})
     return RunResult(outcome=outcome, session_id=sid, final_text=final, structured=structured, usage=usage,

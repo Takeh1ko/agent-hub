@@ -36,7 +36,7 @@ def test_install_linux_no_telegram(capsys, monkeypatch):
     assert (d / "ahub.service").exists()
     assert not (d / "ahub-bot.service").exists()
     out = capsys.readouterr().out
-    assert "ahub.service" in out and svccmd.BOT_SKIP in out
+    assert "ahub.service" in out and "бот не установлен" in out
 
 
 def test_install_linux_with_telegram(monkeypatch):
@@ -64,7 +64,7 @@ def test_install_darwin_plist(capsys, monkeypatch):
     assert "PATH" in pl["EnvironmentVariables"]
     assert str(paths.log_dir()) in pl["StandardOutPath"] + pl["StandardErrorPath"]
     out = capsys.readouterr().out
-    assert "launchctl bootstrap gui/$(id -u)" in out and svccmd.BOT_SKIP in out
+    assert "launchctl bootstrap gui/$(id -u)" in out and "бот не установлен" in out
 
 
 def test_install_darwin_with_telegram(monkeypatch):

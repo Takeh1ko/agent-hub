@@ -104,7 +104,7 @@ def write_task(store: Store, project: ProjectConfig, task_id: int) -> Path | Non
         write_index(store, project)
         return d
     except Exception:
-        _log.exception("архив T%s не записан", task_id, extra={"task": task_id})
+        _log.exception("archive T%s not written", task_id, extra={"task": task_id})
         return None
 
 

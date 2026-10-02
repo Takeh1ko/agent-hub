@@ -16,6 +16,7 @@ from pathlib import Path
 from ahub import workspace
 from ahub.config import ProjectConfig
 from ahub.gates import GateResult
+from ahub.i18n import t as _t
 from ahub.prompts import orchestrator_heading, reply_language_line, rules_text
 from ahub.store import Task
 
@@ -141,16 +142,16 @@ def panel(reviews: list[Review], expected: list[str], round_no: int, max_rounds:
     got = {r.model for r in reviews}
     missing = [m for m in expected if m not in got]
     if missing:
-        return "decision", f"ревьюер(ы) не сдали вердикт: {', '.join(missing)}"
+        return "decision", _t("review.panel_missing", items=", ".join(missing))
     if all(r.effective == "approve" for r in reviews):
-        return "done", "ревью: все согласны"
+        return "done", _t("review.panel_agree")
     if any(r.effective == "dispute" for r in reviews) and not any(r.effective == "changes" for r in reviews):
-        return "decision", "исполнитель/ревьюер спорят — нужно решение"
+        return "decision", _t("review.panel_dispute")
     blocking = dedup([f for r in reviews if r.effective != "approve" for f in r.findings if f.severity != "low"])
     if round_no < max_rounds:
-        return "fix", f"ревью: {len(blocking)} замечаний"
+        return "fix", _t("review.panel_fix", n=len(blocking))
     highs = sum(1 for f in blocking if f.severity == "high")
-    return "decision", f"круги ревью кончились ({len(blocking)} замечаний, high: {highs})"
+    return "decision", _t("review.panel_exhausted", n=len(blocking), highs=highs)
 
 
 def fix_prompt(findings: list[Finding], gate: GateResult | None = None, notes: str = "") -> str:

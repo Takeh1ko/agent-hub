@@ -132,7 +132,7 @@ class Service:
             return self._projects
         projects, errors = config.load_projects()
         for e in errors:
-            self.log.warning("конфиг проекта: %s", e)
+            self.log.warning("project config: %s", e)
         return projects
 
     def paused(self) -> bool:
@@ -204,7 +204,7 @@ class Service:
                 try:
                     pid = self.spawn(t.id)
                 except OSError as e:
-                    self.log.error("не запустился процесс T%d: %s", t.id, e, extra={"task": t.id})
+                    self.log.error("worker process T%d failed to start: %s", t.id, e, extra={"task": t.id})
                     pl.waiting[t.id] = _t("service.spawn_fail", err=e)
                     continue
                 self.recent[t.id] = time.monotonic()
@@ -213,7 +213,7 @@ class Service:
                 slots -= 1
                 for r in t.limits.get("resources") or []:
                     res_use[r] = res_use.get(r, 0) + 1
-                self.log.info("запущен процесс T%d (pid %s)", t.id, pid, extra={"task": t.id})
+                self.log.info("worker process T%d started (pid %s)", t.id, pid, extra={"task": t.id})
         self.store.meta_set(HEARTBEAT_KEY, str(now_ms()))
         return TickReport(live=live, spawned=spawned, load=load, paused=paused)
 
@@ -246,7 +246,7 @@ class Service:
                                      payload={"from": t.state.value, "to": to.value, "count": count,
                                               "text": f"{t.label}: {reason}"})
                 transitions.move(self.store, t.id, to, reason=reason, by="service", owner=token)
-                self.log.warning("сирота T%d (%s) → %s", t.id, t.state.value, to.value, extra={"task": t.id})
+                self.log.warning("orphan T%d (%s) → %s", t.id, t.state.value, to.value, extra={"task": t.id})
                 handled.append(t.id)
             finally:
                 transitions.release(self.store, t.id, token)
@@ -269,7 +269,7 @@ class Service:
             try:
                 observer.cycle(self.store, projects=self.projects())
             except Exception:
-                self.log.exception("наблюдатель упал")
+                self.log.exception("observer crashed")
 
         self._obs = threading.Thread(target=_run, name="observer", daemon=True)
         self._obs.start()
@@ -277,13 +277,13 @@ class Service:
     def run_forever(self, poll_s: float = 2.0, *, self_update: bool = True, observe: bool = True) -> None:
         from ahub import observer
 
-        self.log.info("сервис запущен (pid %d)", os.getpid())
+        self.log.info("service started (pid %d)", os.getpid())
         code0 = code_fingerprint()
         last_check = time.monotonic()
         self._obs = None
 
         def _sig(signum, frame):
-            self.log.info("сигнал %d — останавливаюсь (процессы задач продолжают работу)", signum)
+            self.log.info("signal %d — stopping (task processes keep running)", signum)
             self._stop.set()
 
         for s in (signal.SIGTERM, signal.SIGINT):
@@ -298,20 +298,20 @@ class Service:
                     self._observe()
                     observer.watchdog(self.store)
             except Exception:
-                self.log.exception("тик сервиса упал")
+                self.log.exception("service tick failed")
             if self_update and time.monotonic() - last_check >= CODE_CHECK_S:
                 last_check = time.monotonic()
                 code = code_fingerprint()
                 if code != code0:
                     ok, why = new_code_healthy()
                     if ok:
-                        self.log.info("код хаба изменился — перезапуск сервиса на новый код (задачи не трогаются)")
+                        self.log.info("hub code changed — restarting service on new code (tasks untouched)")
                         restart_self()
                     else:
-                        self.log.error("код хаба изменился, но не проходит проверку — остаюсь на старом: %s", why)
+                        self.log.error("hub code changed but fails check — staying on old: %s", why)
                         code0 = code  # не долбить проверкой каждые 10 с; следующее изменение проверим снова
             self._stop.wait(poll_s)
-        self.log.info("сервис остановлен")
+        self.log.info("service stopped")
 
 
 def code_fingerprint() -> str:

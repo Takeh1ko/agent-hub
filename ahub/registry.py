@@ -20,13 +20,13 @@ SPARK = "opencode-go/muse-spark-1.3-contributor"
 
 # alias → (provider, model_id, variant, note)
 DEFAULT_MODELS: dict[str, tuple[str, str, str, str]] = {
-    "spark": ("opencode", SPARK, "xhigh", "Muse Spark 1.3, основной"),
-    "spark-high": ("opencode", SPARK, "high", "Spark 1.3, размышление high"),
-    "spark-medium": ("opencode", SPARK, "medium", "Spark 1.3, размышление medium"),
+    "spark": ("opencode", SPARK, "xhigh", "Muse Spark 1.3, main"),
+    "spark-high": ("opencode", SPARK, "high", "Spark 1.3, high reasoning"),
+    "spark-medium": ("opencode", SPARK, "medium", "Spark 1.3, medium reasoning"),
     "mimo-flash": ("opencode", "opencode-go/mimo-v2.6-flash", "", "MiMo 2.6 Flash"),
-    "deepseek-flash": ("opencode", "opencode-go/deepseek-v4.1-flash", "high", "DeepSeek v4.1 Flash (дороже Spark)"),
-    "spark-free": ("opencode", "opencode/muse-spark-1.3-contributor-free", "xhigh", "бесплатный Spark (медленнее)"),
-    "gemini": ("agy", "gemini-3.8-flash-high", "", "Gemini через agy (квота окном)"),
+    "deepseek-flash": ("opencode", "opencode-go/deepseek-v4.1-flash", "high", "DeepSeek v4.1 Flash (pricier than Spark)"),
+    "spark-free": ("opencode", "opencode/muse-spark-1.3-contributor-free", "xhigh", "free Spark (slower)"),
+    "gemini": ("agy", "gemini-3.8-flash-high", "", "Gemini via agy (window quota)"),
 }
 
 # role → [(alias, is_default)] в порядке показа

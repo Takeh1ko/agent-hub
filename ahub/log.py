@@ -113,7 +113,7 @@ def install_excepthook(component: str) -> None:
 
     def hook(exc_type, exc, tb):
         if not issubclass(exc_type, KeyboardInterrupt):
-            logger.critical("необработанное исключение: %s", exc, exc_info=(exc_type, exc, tb))
+            logger.critical("unhandled exception: %s", exc, exc_info=(exc_type, exc, tb))
         prev(exc_type, exc, tb)
 
     sys.excepthook = hook

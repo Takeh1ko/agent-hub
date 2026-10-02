@@ -23,7 +23,7 @@ def get(name: str) -> Provider:
     if name not in _cache:
         spec = _REGISTRY.get(name)
         if spec is None:
-            raise KeyError(f"неизвестный поставщик: {name}")
+            raise KeyError(f"unknown provider: {name}")
         mod, cls = spec.split(":")
         _cache[name] = getattr(importlib.import_module(mod), cls)()
     return _cache[name]

@@ -62,7 +62,7 @@ def test_code_no_review(store, project):
     res = run(store, project, t.id)
     assert res.state is State.DONE, res.reason
     done = store.events(task_id=t.id, needs_reaction=True)[-1].payload
-    assert done["tests"] == "зелёная" and "1 file changed" in done["diffstat"] and done["summary"] == "сделал"
+    assert done["tests"] == "green" and "1 file changed" in done["diffstat"] and done["summary"] == "сделал"
     assert "Allowed files" in fake.calls[0]["prompt"] and "tests/test_a.py::test_x" in fake.calls[0]["prompt"]
 
 

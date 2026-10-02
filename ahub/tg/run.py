@@ -84,10 +84,10 @@ async def background(bot, store: Store) -> None:
                 last_launch = loop.time()
                 res = await asyncio.to_thread(launcher.tick, store)
                 if res == "limit":
-                    _log.warning("лимит запусков Claude в час исчерпан")
+                    _log.warning("Claude launch hourly limit exhausted")
             await asyncio.to_thread(store.meta_set, HEARTBEAT_KEY, str(int(loop.time())))
         except Exception:
-            _log.exception("фоновый цикл бота упал")
+            _log.exception("bot background loop crashed")
         await asyncio.sleep(LOOP_S)
 
 
@@ -161,7 +161,7 @@ async def amain(hub: config.HubConfig | None = None) -> None:
                 await dp.start_polling(bot, handle_signals=False)
                 break
             except Exception:
-                _log.exception("polling упал — повтор через 15 с")
+                _log.exception("polling failed — retry in 15 s")
                 await asyncio.sleep(15)
     finally:
         task.cancel()

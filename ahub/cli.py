@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     except Exception:
-        log.get("cli").exception("команда %s упала", args.cmd)
+        log.get("cli").exception("command %s failed", args.cmd)
         raise
 
 

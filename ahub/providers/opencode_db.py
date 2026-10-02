@@ -105,15 +105,15 @@ def check_schema(db_path: str | Path | None = None) -> SchemaStatus:
         try:
             con = _open(path)
         except sqlite3.Error as e:
-            _warn("opencode.db не открылась %s: %s", path, e)
+            _warn("opencode.db cannot open %s: %s", path, e)
             return SchemaStatus(ok=False, problems=[_t("odb.no_db", path=path)])
         probs = _problems(con)
         if probs:
-            _warn("opencode.db %s: незнакомая схема: %s", path, "; ".join(probs))
+            _warn("opencode.db %s: unknown schema: %s", path, "; ".join(probs))
             return SchemaStatus(ok=False, problems=probs)
         return SchemaStatus(ok=True, problems=[])
     except sqlite3.Error as e:
-        _warn("opencode.db %s: схема не читается: %s", path, e)
+        _warn("opencode.db %s: schema unreadable: %s", path, e)
         return SchemaStatus(ok=False, problems=[_t("odb.bad_schema", err=e)])
     finally:
         _close(con)
@@ -218,11 +218,11 @@ def session_usage(session_id: str, db_path: str | Path | None = None) -> Usage |
         try:
             con = _open(path)
         except sqlite3.Error as e:
-            _warn("opencode.db не открылась %s: %s", path, e)
+            _warn("opencode.db cannot open %s: %s", path, e)
             return None
         try:
             if _problems(con):
-                _warn("opencode.db %s: незнакомая схема", path)
+                _warn("opencode.db %s: unknown schema", path)
                 return None
             row = con.execute(
                 "SELECT cost, model, tokens_input, tokens_output, tokens_reasoning,"
@@ -230,7 +230,7 @@ def session_usage(session_id: str, db_path: str | Path | None = None) -> Usage |
                 (session_id,),
             ).fetchone()
         except sqlite3.Error as e:
-            _warn("opencode.db %s: чтение сессии: %s", path, e)
+            _warn("opencode.db %s: read session: %s", path, e)
             return None
         if row is None:
             return None
@@ -241,7 +241,7 @@ def session_usage(session_id: str, db_path: str | Path | None = None) -> Usage |
                 (session_id,),
             ).fetchall()
         except sqlite3.Error as e:
-            _warn("opencode.db %s: чтение сообщений: %s", path, e)
+            _warn("opencode.db %s: read messages: %s", path, e)
             return None
         return _usage_from_row(row, _live_context(msgs))
     except sqlite3.Error as e:
@@ -264,14 +264,14 @@ def sessions_usage(
         try:
             con = _open(path)
         except sqlite3.Error as e:
-            _warn("opencode.db не открылась %s: %s", path, e)
+            _warn("opencode.db cannot open %s: %s", path, e)
             return {}
         try:
             if _problems(con):
-                _warn("opencode.db %s: незнакомая схема", path)
+                _warn("opencode.db %s: unknown schema", path)
                 return {}
         except sqlite3.Error as e:
-            _warn("opencode.db %s: схема не читается: %s", path, e)
+            _warn("opencode.db %s: schema unreadable: %s", path, e)
             return {}
         out: dict[str, Usage] = {}
         for part_ids in _chunks(want, _ID_CHUNK):
@@ -284,13 +284,13 @@ def sessions_usage(
                     tuple(part_ids),
                 ).fetchall()
             except sqlite3.Error as e:
-                _warn("opencode.db %s: пакетное чтение: %s", path, e)
+                _warn("opencode.db %s: batch read: %s", path, e)
                 return {}
             for r in rows:
                 try:
                     out[str(r["id"])] = _usage_from_row(r, None)
                 except (sqlite3.Error, json.JSONDecodeError, TypeError, ValueError) as e:
-                    _warn("opencode.db: сессия пропущена: %s", e)
+                    _warn("opencode.db: session skipped: %s", e)
         return out
     except sqlite3.Error as e:
         _warn("opencode.db %s: %s", path, e)
@@ -309,11 +309,11 @@ def session_state(session_id: str, db_path: str | Path | None = None) -> Session
         try:
             con = _open(path)
         except sqlite3.Error as e:
-            _warn("opencode.db не открылась %s: %s", path, e)
+            _warn("opencode.db cannot open %s: %s", path, e)
             return None
         try:
             if _problems(con):
-                _warn("opencode.db %s: незнакомая схема", path)
+                _warn("opencode.db %s: unknown schema", path)
                 return None
             srow = con.execute(
                 "SELECT cost, model, tokens_input, tokens_output, tokens_reasoning,"
@@ -322,7 +322,7 @@ def session_state(session_id: str, db_path: str | Path | None = None) -> Session
                 (session_id,),
             ).fetchone()
         except sqlite3.Error as e:
-            _warn("opencode.db %s: чтение сессии: %s", path, e)
+            _warn("opencode.db %s: read session: %s", path, e)
             return None
         if srow is None:
             return None
@@ -347,7 +347,7 @@ def session_state(session_id: str, db_path: str | Path | None = None) -> Session
                 (session_id,),
             ).fetchall()
         except sqlite3.Error as e:
-            _warn("opencode.db %s: чтение деталей: %s", path, e)
+            _warn("opencode.db %s: read details: %s", path, e)
             return None
         # Активный инструмент — свежайший tool со статусом running.
         active_tool = ""
@@ -409,11 +409,11 @@ def find_session(
         try:
             con = _open(path)
         except sqlite3.Error as e:
-            _warn("opencode.db не открылась %s: %s", path, e)
+            _warn("opencode.db cannot open %s: %s", path, e)
             return None
         try:
             if _problems(con):
-                _warn("opencode.db %s: незнакомая схема", path)
+                _warn("opencode.db %s: unknown schema", path)
                 return None
             row = con.execute(
                 "SELECT id FROM session WHERE directory=? AND time_created>=?"
@@ -422,7 +422,7 @@ def find_session(
                 (directory, started_after_ms - 5000),
             ).fetchone()
         except sqlite3.Error as e:
-            _warn("opencode.db %s: поиск сессии: %s", path, e)
+            _warn("opencode.db %s: find session: %s", path, e)
             return None
         return str(row[0]) if row and row[0] else None
     except sqlite3.Error as e:
@@ -444,11 +444,11 @@ def totals(
         try:
             con = _open(path)
         except sqlite3.Error as e:
-            _warn("opencode.db не открылась %s: %s", path, e)
+            _warn("opencode.db cannot open %s: %s", path, e)
             return zeros
         try:
             if _problems(con):
-                _warn("opencode.db %s: незнакомая схема", path)
+                _warn("opencode.db %s: unknown schema", path)
                 return zeros
             if until_ms is None:
                 rows = con.execute(
@@ -465,14 +465,14 @@ def totals(
                     (since_ms, until_ms),
                 ).fetchall()
         except sqlite3.Error as e:
-            _warn("opencode.db %s: чтение итогов: %s", path, e)
+            _warn("opencode.db %s: read totals: %s", path, e)
             return zeros
         acc = zeros
         for r in rows:
             try:
                 acc = acc.add(_usage_from_row(r, None))
             except (TypeError, ValueError, json.JSONDecodeError) as e:
-                _warn("opencode.db: строка итогов пропущена: %s", e)
+                _warn("opencode.db: totals row skipped: %s", e)
         acc.context = None
         return acc
     except sqlite3.Error as e:

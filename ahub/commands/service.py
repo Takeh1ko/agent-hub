@@ -80,11 +80,10 @@ KillMode=process
 [Install]
 WantedBy=default.target
 """
-UNITS = {"ahub.service": ("agent-hub: сервис (очередь, процессы задач, наблюдатель)", "service run"),
-         "ahub-bot.service": ("agent-hub: Telegram-бот (связь с Claude)", "bot run")}
+UNITS = {"ahub.service": ("agent-hub: service (queue, task processes, observer)", "service run"),
+         "ahub-bot.service": ("agent-hub: Telegram bot (link to Claude)", "bot run")}
 LABELS = {"ahub.service": "dev.ahub.service", "ahub-bot.service": "dev.ahub.bot"}
 PLIST_FILES = {"ahub.service": "dev.ahub.service.plist", "ahub-bot.service": "dev.ahub.bot.plist"}
-BOT_SKIP = "бот не установлен: нет [telegram] token"
 _ENV_KEYS = ("PATH", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "LANG",
              "AHUB_LANG", "AHUB_TZ", "AHUB_HOME")
 

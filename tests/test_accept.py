@@ -146,7 +146,7 @@ def test_model_change_fresh_session(store, project):
     Engine(store, project, t.id, sleep=lambda s: None).run()
     # новая модель — новая сессия с полной постановкой и указаниями доработки
     assert fake.calls[1]["session_id"] is None
-    assert "ещё раз" in fake.calls[1]["prompt"] and "Разрешённые файлы" in fake.calls[1]["prompt"]
+    assert "ещё раз" in fake.calls[1]["prompt"] and "Allowed files" in fake.calls[1]["prompt"]
 
 
 def test_edit_spec_new_session(store, project):

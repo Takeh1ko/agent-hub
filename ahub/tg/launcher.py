@@ -188,7 +188,7 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
             turns = int(prev.get("turns", 0)) + 1 if prev.get("id") == sid else 1
             store.meta_set(SESSION_KEY, json.dumps({"id": sid, "day": to_local(ts).date().isoformat(),
                                                     "turns": turns}))
-        _log.info("запущенный Claude завершён: %s", status)
+        _log.info("launched Claude finished: %s", status)
         return "killed" if status == "killed" else "finished"
     msgs = _pending(store)
     if not msgs or events.present(store, now=ts):
@@ -200,7 +200,7 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
     project = _pick_project(store, msgs, projects)
     binary = binary or claude_bin()
     if project is None or binary is None:
-        _log.error("не могу поднять Claude: %s", "нет проекта" if project is None else "нет бинаря claude")
+        _log.error("cannot launch Claude: %s", "no project" if project is None else "no claude binary")
         return "idle"
     prompt = PROMPT.format(messages="\n".join(f"- {m['text']}" for m in msgs)[:6000],
                            status=views.status_text(store, now=ts),
@@ -208,7 +208,7 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
     resume = _session(store, ts)
     with store.tx() as c:
         lid = int(c.execute("INSERT INTO claude_launch(ts, project, session_id, reason) VALUES(?,?,?,?)",
-                            (ts, project.name, resume or "", f"{len(msgs)} сообщений")).lastrowid)
+                            (ts, project.name, resume or "", f"{len(msgs)} messages")).lastrowid)
     log_path = paths.state_dir() / "claude" / f"launch_{lid}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = build_command(binary, prompt, resume)
@@ -223,5 +223,5 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
         c.execute("UPDATE claude_launch SET pid=? WHERE id=?", (pid, lid))
     # сообщения помечаются переданными, когда запущенный Claude поживёт (см. MIN_ALIVE_MS) — не сразу
     store.meta_set(f"launch_msgs:{lid}", json.dumps([m["id"] for m in msgs]))
-    _log.info("поднял Claude в %s (pid %s, %s)", project.name, pid, "продолжение" if resume else "новая сессия")
+    _log.info("launched Claude in %s (pid %s, %s)", project.name, pid, "resume" if resume else "new session")
     return "launched"

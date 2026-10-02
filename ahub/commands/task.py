@@ -118,7 +118,7 @@ def cmd_stop(args) -> int:
     from ahub.i18n import t as _t
 
     try:
-        how = transitions.request_stop(store, t.id, reason=args.reason or "остановлена командой", by=args.by)
+        how = transitions.request_stop(store, t.id, reason=args.reason or _t("trans.stop_default"), by=args.by)
     except transitions.TransitionError as e:
         raise CliError(str(e)) from e
     if how == "stopped":

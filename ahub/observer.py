@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ahub import comms, config, events, paths, procs, providers, pulse, registry
 from ahub import log as hublog
+from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Role, State
 from ahub.providers.base import RunSpec
 from ahub.providers.opencode import extract_json
@@ -55,11 +56,12 @@ def _log_suspicions(since: int) -> list[Suspicion]:
     out = []
     for sig, n in hublog.summarize(recs, limit=5):
         sample = next(r for r in recs if hublog.signature(r) == sig)
-        out.append(Suspicion(f"log:{sig}", f"лог: {n}× {sample.get('lvl')} {sample.get('comp')}: "
-                                           f"{str(sample.get('msg'))[:160]}",
+        out.append(Suspicion(f"log:{sig}", _t("observer.log_group", n=n, lvl=sample.get("lvl"),
+                                                              comp=sample.get("comp"),
+                                                              msg=str(sample.get("msg"))[:160]),
                              critical=sample.get("lvl") == "CRITICAL", data={"count": n, "sample": sample}))
     if res.broken_lines:
-        out.append(Suspicion("log:broken", f"лог: {res.broken_lines} битых строк"))
+        out.append(Suspicion("log:broken", _t("observer.log_broken", n=res.broken_lines)))
     return out
 
 
@@ -77,23 +79,30 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
             t = store.get_task(tid)
             if pl.state == "dead" and ((t.lease_until or 0) + ORPHAN_GRACE_MS > ts or ts - t.updated_at < ORPHAN_GRACE_MS):
                 continue  # сервис ещё может подхватить (грейс сиротства) — не тревога
-            sus.append(Suspicion(f"pulse:{tid}:{pl.state}", f"T{tid} {pl.mark} {pl.reason} (этап {t.state.value})",
+            sus.append(Suspicion(f"pulse:{tid}:{pl.state}", _t("observer.pulse", tid=tid, mark=pl.mark,
+                                                                                   reason=pl.reason,
+                                                                                   state=t.state.value),
                                  data={"task": tid, "state": pl.state}))
     last = int(store.meta_get(LAST_QUICK) or 0)
     sus += _log_suspicions(since if since is not None else (last or ts - QUICK_MS))
     hb = store.meta_get("service_heartbeat")
     if hb is None or ts - int(hb) > HEARTBEAT_STALE_MS:
-        sus.append(Suspicion("service:heartbeat", "сервис не тикает" + (f" с {fmt_local(int(hb))}" if hb else ""),
-                             critical=True))
+        if hb:
+            text = _t("observer.no_heartbeat_since", time=fmt_local(int(hb)))
+        else:
+            text = _t("observer.no_heartbeat")
+        sus.append(Suspicion("service:heartbeat", text, critical=True))
     queued = store.list_tasks(states={State.QUEUED})
     for t in queued:
         if not t.state_reason and ts - t.updated_at > QUEUE_STUCK_MS:
-            sus.append(Suspicion(f"queue:{t.id}", f"T{t.id} в очереди {(ts - t.updated_at) // 60000} мин без причины"))
+            sus.append(Suspicion(f"queue:{t.id}", _t("observer.queue_stuck", id=t.id,
+                                                                     mins=(ts - t.updated_at) // 60000)))
     if not events.present(store, now=ts):
         old = [e for e in events.unacked(store) if ts - e.ts > UNACKED_MS and e.kind != "alarm"]
         if old:
-            sus.append(Suspicion("delivery:unacked", f"{len(old)} событий ждут оркестратора > {UNACKED_MS // 60000} мин,"
-                                                     " Claude не слушает", data={"events": [e.id for e in old[:5]]}))
+            sus.append(Suspicion("delivery:unacked", _t("observer.unacked", n=len(old),
+                                                                         mins=UNACKED_MS // 60000),
+                                 data={"events": [e.id for e in old[:5]]}))
     if health:
         bad = proxy_problem()
         if bad:
@@ -102,10 +111,11 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
             try:
                 h = providers.get(name).health()
             except Exception as e:  # модуль поставщика не должен ронять наблюдателя
-                sus.append(Suspicion(f"health:{name}:exc", f"поставщик {name}: проверка упала: {e}"))
+                sus.append(Suspicion(f"health:{name}:exc", _t("observer.health_exc", name=name, err=e)))
                 continue
             if not h.ok and name == "opencode":
-                sus.append(Suspicion(f"health:{name}", f"поставщик {name}: " + "; ".join(h.problems)[:200],
+                sus.append(Suspicion(f"health:{name}", _t("observer.health_bad", name=name,
+                                                                             problems="; ".join(h.problems)[:200]),
                                      critical=True))
     store.meta_set(LAST_QUICK, str(ts))
     return sus
@@ -127,7 +137,7 @@ def proxy_problem(env: dict | None = None, timeout: float = 3.0) -> str:
         with socket.create_connection((host, port), timeout=timeout):
             return ""
     except OSError as e:
-        return f"прокси {host}:{port} не отвечает ({e.__class__.__name__}) — модели и Telegram без сети; проверь системный прокси"
+        return _t("observer.proxy_down", host=host, port=port, err=e.__class__.__name__)
 
 
 def _fresh(store: Store, sus: list[Suspicion], now: int) -> list[Suspicion]:
@@ -171,22 +181,23 @@ def log_digest(since: int, *, now: int | None = None, limit_bytes: int = LOG_DIG
     try:
         res = hublog.scan(since, until_ms=ts_now)
     except OSError:
-        return "лог недоступен"
+        return _t("observer.log_unavailable")
     recs = [r for r in res.records if r.get("comp") != "observer"]
     if not recs:
-        return "нет WARNING/ERROR за окно"
+        return _t("observer.log_empty")
     lines: list[str] = []
     for sig, n in hublog.summarize(recs, limit=10):
         grp = [r for r in recs if hublog.signature(r) == sig]
         last = max(grp, key=lambda r: int(r.get("ts") or 0))
         ts = int(last.get("ts") or 0)
         pid = last.get("pid")
-        mark = "" if isinstance(pid, int) and procs.alive(pid, proc_root) else " — мёртвый pid"
+        mark = "" if isinstance(pid, int) and procs.alive(pid, proc_root) else _t("observer.dead_pid")
         msg = str(last.get("msg") or "")[:160].replace("\n", " ")
-        lines.append(f"{n}× {last.get('lvl')} {last.get('comp')}: {msg}"
-                     f" (последняя {fmt_local(ts, now=ts_now) if ts else '?'} ts={ts}, pid={pid}{mark})")
+        lines.append(_t("observer.log_line", n=n, lvl=last.get("lvl"), comp=last.get("comp"), msg=msg,
+                                            when=fmt_local(ts, now=ts_now) if ts else "?", ts=ts, pid=pid,
+                                            mark=mark))
     if res.broken_lines:
-        lines.append(f"битых строк: {res.broken_lines}")
+        lines.append(_t("observer.broken_lines", n=res.broken_lines))
     text = "\n".join(lines)
     while len(text.encode("utf-8")) > limit_bytes and len(lines) > 1:
         lines.pop()  # выбрасываем самые редкие группы, пока не влезет
@@ -203,15 +214,16 @@ def snapshot(store: Store, *, now: int, proc_root: str | Path = "/proc") -> str:
     from ahub.service import live_workers
 
     live = live_workers()
-    lines = ["## Сводка", views.status_text(store, live=live, now=now)]
+    none = _t("observer.none")
+    lines = [_t("observer.snap_summary"), views.status_text(store, live=live, now=now)]
     evs = store.events(after_id=max(0, store.last_event_id() - 40))
-    lines.append("## Последние события")
+    lines.append(_t("observer.snap_events"))
     lines += [f"{fmt_local(e.ts)} {e.kind} T{e.task_id or '-'} {json.dumps(e.payload, ensure_ascii=False)[:140]}"
               for e in evs[-25:]]
-    lines.append(f"## Процессы задач: {live or 'нет'}")
+    lines.append(_t("observer.snap_procs", val=live or none))
     bots = _bot_pids(proc_root)
-    lines.append(f"## Живые pid: сервис {os.getpid()}, бот {bots[0] if bots else 'нет'},"
-                 f" задачи {live or 'нет'} — ошибки с других pid от мёртвых процессов (история)")
+    lines.append(_t("observer.snap_pids", service=os.getpid(), bot=bots[0] if bots else none,
+                                          tasks=live or none))
     return "\n".join(lines)
 
 
@@ -254,7 +266,7 @@ def triage(store: Store, sus: list[Suspicion], *, deep: bool = False, now: int |
     try:
         entry = registry.pick(store, Role.OBSERVER, project)
     except registry.RegistryError as e:
-        return {"verdict": "unknown", "summary": f"нет модели наблюдателя: {e}", "action": "", "cost_go": 0.0}
+        return {"verdict": "unknown", "summary": _t("observer.no_model", err=e), "action": "", "cost_go": 0.0}
     win = since if since is not None else window_since(store, deep=deep, now=ts)
     cwd = paths.state_dir() / "observer" / str(ts)
     cwd.mkdir(parents=True, exist_ok=True)
@@ -273,8 +285,9 @@ def triage(store: Store, sus: list[Suspicion], *, deep: bool = False, now: int |
     cost = (r.usage.cost_go or 0.0) if r.usage else 0.0
     verdict = str(data.get("verdict", "")).strip()
     if not r.ok or verdict not in ("ok", "false_alarm", "alarm", "critical"):
-        return {"verdict": "unknown", "summary": f"модель наблюдателя не ответила по форме ({r.outcome.value}:"
-                                                 f" {r.error[:100]})", "action": "", "cost_go": cost}
+        return {"verdict": "unknown", "summary": _t("observer.bad_model", outcome=r.outcome.value,
+                                                                          err=r.error[:100]),
+                "action": "", "cost_go": cost}
     return {"verdict": verdict, "summary": str(data.get("summary", ""))[:300],
             "action": str(data.get("action", ""))[:300], "cost_go": cost}
 
@@ -295,7 +308,8 @@ def cycle(store: Store, *, now: int | None = None, deep_due: bool | None = None,
     sus = quick_check(store, projects=projects, now=ts)
     fresh = _fresh(store, sus, ts)
     if not fresh and not deep:
-        _report(store, "quick", "ok", "чисто" if not sus else f"известное: {len(sus)}", {}, 0.0, ts)
+        _report(store, "quick", "ok", _t("observer.clean") if not sus else _t("observer.known", n=len(sus)),
+                {}, 0.0, ts)
         return "ok"
     crit_code = [s for s in fresh if s.critical]
     if not use_model:
@@ -305,7 +319,7 @@ def cycle(store: Store, *, now: int | None = None, deep_due: bool | None = None,
         res = triage(store, fresh, deep=deep, now=ts, since=win)
         if res["verdict"] == "unknown" and crit_code:  # модель не ответила, а код видит критичное — не молчим
             res["verdict"] = "critical"
-            res["summary"] = "; ".join(s.text for s in crit_code)[:300] + " (модель наблюдателя не ответила)"
+            res["summary"] = "; ".join(s.text for s in crit_code)[:300] + _t("observer.no_answer_suffix")
     if deep:
         store.meta_set(LAST_DEEP, str(ts))
     _mark_seen(store, fresh, ts)
@@ -316,7 +330,7 @@ def cycle(store: Store, *, now: int | None = None, deep_due: bool | None = None,
         text = res["summary"] + (f" → {res['action']}" if res["action"] else "")
         comms.raise_alarm(store, text[:400], critical=res["verdict"] == "critical",
                           details={"suspicions": [s.text for s in fresh][:5]})
-        _log.warning("тревога наблюдателя (%s): %s", res["verdict"], text[:200])
+        _log.warning("observer alarm (%s): %s", res["verdict"], text[:200])
     return res["verdict"]
 
 
@@ -329,7 +343,7 @@ def watchdog(store: Store, *, now: int | None = None) -> bool:
     if store.meta_get("observer_watchdog_alarm") == last:
         return False
     store.meta_set("observer_watchdog_alarm", last)
-    comms.raise_alarm(store, f"наблюдатель не проверял хаб с {fmt_local(int(last))}", critical=False)
+    comms.raise_alarm(store, _t("observer.no_check", when=fmt_local(int(last))), critical=False)
     return True
 
 
