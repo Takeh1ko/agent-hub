@@ -20,6 +20,10 @@ def store() -> Store:
     return Store()
 
 
+needs_locks = pytest.mark.skipif(sys.platform != "linux", reason="держатель замка читается только из /proc/locks")
+NOPROC = "/nonexistent"  # нет такого каталога — «нет данных» о держателе (как на macOS)
+
+
 class StatefulFake(FakeProvider):
     def __init__(self, st):
         super().__init__()
@@ -92,6 +96,7 @@ def test_children_explain(store):
         child.kill()
 
 
+@needs_locks
 def test_lock_holder(tmp_path):
     lk = tmp_path / "t.lock"
     lk.write_text("")
@@ -106,6 +111,7 @@ def test_lock_holder(tmp_path):
     assert pulse.lock_holder(str(tmp_path / "nope")) is None
 
 
+@needs_locks
 def test_waiting_phase_names_lock_holder(store, tmp_path):
     from ahub import config
     lk = tmp_path / "db.lock"
@@ -120,5 +126,26 @@ def test_waiting_phase_names_lock_holder(store, tmp_path):
     try:
         p = pulse.task_pulse(store, store.get_task(tid), live={tid: 1}, project=proj, now=60 * 60_000)
         assert p.state == "waiting" and "держит" in p.reason
+    finally:
+        os.close(fd)
+
+
+def test_waiting_without_locks_names_no_holder(store, tmp_path):
+    """Без /proc/locks (на macOS) замок занят, а данных о держателе нет — пульс не врёт (тест на любой ОС)."""
+    from ahub import config
+    lk = tmp_path / "db.lock"
+    lk.write_text("")
+    proj = config.parse_project({"schema_version": 2, "name": "P", "resources": {"db": {"lock": str(lk)}},
+                                 "test_resource": "db"}, tmp_path)
+    tid = active(store, phase="waiting")
+    store.add_session(task_id=tid, provider="fake", role="executor", external_id="s1")
+    providers.register("fake", StatefulFake(SessionState(last_activity_ms=1)))
+    fd = os.open(lk, os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        assert pulse.lock_holder(str(lk), NOPROC) is None
+        p = pulse.task_pulse(store, store.get_task(tid), live={tid: 1}, project=proj, now=60 * 60_000,
+                             proc_root=NOPROC)
+        assert p.state == "waiting" and p.reason == "ждёт"
     finally:
         os.close(fd)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -259,8 +260,9 @@ def test_self_update_skips_broken_code(store, tmp_path, monkeypatch):
     s.run_forever(poll_s=0.01)
 
 
-def test_install_unit_print(capsys):
+def test_install_unit_print(capsys, monkeypatch):
     from ahub import cli
+    monkeypatch.setattr(sys, "platform", "linux")  # этот тест — про systemd; plist в test_service_cmd.py
     assert cli.main(["service", "install", "--print"]) == 0
     out = capsys.readouterr().out
     assert "Restart=always" in out and "StartLimitBurst" in out and "KillMode=process" in out
