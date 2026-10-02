@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,7 +32,18 @@ _REQ_COLS: dict[str, tuple[str, ...]] = {
 
 
 def default_db() -> Path:
-    """Путь к чужой базе opencode (HOME читается при вызове)."""
+    """Путь к чужой базе opencode: [paths].opencode_db → $XDG_DATA_HOME/… → ~/.local/share/…."""
+    try:
+        from ahub import config
+
+        override = config.load_hub().opencode_db
+        if override:
+            return Path(override)
+    except config.ConfigError:
+        pass
+    raw = os.environ.get("XDG_DATA_HOME")
+    if raw:
+        return Path(raw) / "opencode" / "opencode.db"
     return Path.home() / ".local/share/opencode/opencode.db"
 
 
