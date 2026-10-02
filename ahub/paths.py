@@ -1,6 +1,6 @@
-"""Где хаб хранит данные, логи и конфиг. Всё читается из окружения при вызове (тесты подменяют HOME).
+"""Where the hub keeps data, logs, and config. All read from the env at call time (tests fake HOME).
 
-Имена отличаются от v1 (AGENT_HUB_HOME, ~/.local/share/agent-hub), чтобы v2 при стройке не задевал v1.
+Names differ from v1 (AGENT_HUB_HOME, ~/.local/share/agent-hub) so v2 never touches v1 while under construction.
 """
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-ENV_HOME = "AHUB_HOME"  # всё состояние хаба в одном каталоге (тесты, изоляция работников)
+ENV_HOME = "AHUB_HOME"  # all hub state in one dir (tests, worker isolation)
 
 
 def _xdg(var: str, default: str) -> Path:
@@ -17,7 +17,7 @@ def _xdg(var: str, default: str) -> Path:
 
 
 def data_dir() -> Path:
-    """Хранилище хаба: база, журналы сессий."""
+    """Hub storage: database, session journals."""
     raw = os.environ.get(ENV_HOME)
     if raw:
         return Path(raw)
@@ -25,7 +25,7 @@ def data_dir() -> Path:
 
 
 def state_dir() -> Path:
-    """Логи и файлы состояния (позиция потока пробуждения и т.п.)."""
+    """Logs and state files (wakeup stream position etc.)."""
     raw = os.environ.get(ENV_HOME)
     if raw:
         return Path(raw) / "state"
@@ -49,5 +49,5 @@ def global_config_path() -> Path:
 
 
 def service_pid_path() -> Path:
-    """Pid-файл фонового `service start` (запуск без службы ОС)."""
+    """Pid file of background `service start` (launch without an OS service)."""
     return data_dir() / "service.pid"

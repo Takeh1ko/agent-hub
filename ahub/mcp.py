@@ -1,8 +1,8 @@
-"""MCP-сервер ahub (M7, architecture §9): те же ручки, что у CLI, как инструменты — для Codex и других агентов.
+"""ahub MCP server (M7, architecture §9): same handles as the CLI, as tools — for Codex and other agents.
 
-Транспорт — stdio, JSON-RPC 2.0 построчно (протокол MCP 2025-06-18: initialize, tools/list, tools/call, ping).
-Без внешних зависимостей. Каждый инструмент вызывает CLI-ручку в этом же процессе и возвращает её текст
-(те же лимиты L0–L3, та же экономия). Подключение: `ahub mcp` как stdio-сервер в настройках агента.
+Transport — stdio, line-delimited JSON-RPC 2.0 (MCP protocol 2025-06-18: initialize, tools/list, tools/call, ping).
+No outside deps. Each tool calls a CLI handle in this process and returns its text
+(same L0–L3 limits, same savings). Wiring: `ahub mcp` as a stdio server in agent settings.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from ahub import __version__
 
 PROTOCOL = "2025-06-18"
 
-# имя → (описание, схема параметров, как собрать argv для CLI)
+# name → (description, param schema, how to build CLI argv)
 TOOLS: dict[str, tuple[str, dict, Any]] = {}
 
 
@@ -127,7 +127,7 @@ def call_cli(argv: list[str]) -> tuple[int, str]:
 def handle(req: dict) -> dict | None:
     rid = req.get("id")
     method = req.get("method", "")
-    if rid is None:  # уведомление (notifications/initialized и т.п.)
+    if rid is None:  # notification (notifications/initialized etc.)
         return None
 
     def ok(result: dict) -> dict:

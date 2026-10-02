@@ -1,12 +1,12 @@
-"""Переходы состояний задачи, владение (аренда) и идемпотентность команд.
+"""Task state transitions, ownership (lease), and command idempotency.
 
-Правило владения (architecture §2): у активной задачи один владелец — её процесс. Он берёт аренду
-(`acquire`), продлевает её (`renew`) и отпускает, когда задача уходит из активных состояний. Пока аренда жива,
-состояние активной задачи меняет только владелец; остальные просят (`request_stop`). Сервис забирает задачу,
-только когда аренда истекла (процесс умер) — `acquire` это позволяет.
+Ownership rule (architecture §2): an active task has one owner — its process. It acquires the lease
+(`acquire`), renews it (`renew`), and releases it when the task leaves active states. While the lease is alive,
+only the owner changes an active task's state; everyone else asks (`request_stop`). The service reclaims a task
+only once the lease has expired (process died) — `acquire` allows that.
 
-Все проверки и изменения — в одной транзакции BEGIN IMMEDIATE: двое не переведут задачу одновременно.
-Повтор того же перехода (задача уже в целевом состоянии) — без изменений и без события.
+All checks and writes run in one BEGIN IMMEDIATE transaction: two actors never transition a task at once.
+Repeating the same transition (task already in the target state) is a no-op, with no event.
 """
 
 from __future__ import annotations
@@ -21,15 +21,15 @@ from ahub.i18n import t as _t
 from ahub.store import Store, Task, _dumps
 from ahub.time import now_ms
 
-DEFAULT_LEASE_MS = 90_000  # владелец продлевает чаще (раз в ~30 с)
+DEFAULT_LEASE_MS = 90_000  # the owner renews more often (roughly every 30 s)
 
 
 class TransitionError(ValueError):
-    """Переход запрещён таблицей состояний."""
+    """Transition forbidden by the state table."""
 
 
 class ConflictError(RuntimeError):
-    """Задача занята другим владельцем или изменилась с момента чтения."""
+    """Task held by another owner or changed since it was read."""
 
 
 def _lease_alive(task: Task, now: int) -> bool:
@@ -40,11 +40,11 @@ def move(store: Store, task_id: int, to: State | str, *, reason: str = "", by: s
          owner: str | None = None, expect_from: set[State] | frozenset[State] | None = None,
          fields: dict[str, Any] | None = None, payload: dict | None = None, critical: bool = False,
          now: int | None = None, con: sqlite3.Connection | None = None) -> Task:
-    """Перевести задачу в `to`. Возвращает задачу после перехода.
+    """Move a task to `to`. Returns the task after the transition.
 
-    owner — токен вызывающего владельца (процесс задачи/сервис); None — клиент без владения.
-    expect_from — допустимые исходные состояния (защита от гонки «прочитал — перевёл»).
-    fields — обычные поля задачи, меняемые тем же действием (раунд, ветка, база…).
+    owner — caller owner token (task process/service); None — client without ownership.
+    expect_from — allowed source states (guard against "read then moved" races).
+    fields — plain task fields changed by the same action (round, branch, base…).
     """
     ts = now if now is not None else now_ms()
     dst = State(to)
@@ -54,7 +54,7 @@ def move(store: Store, task_id: int, to: State | str, *, reason: str = "", by: s
         if task is None:
             raise TransitionError(_t("trans.no_task", id=task_id))
         if task.state is dst:
-            return task  # идемпотентный повтор
+            return task  # idempotent repeat
         if expect_from is not None and task.state not in expect_from:
             raise ConflictError(_t("trans.expect_from", label=task.label,
                                    expected=sorted(s.value for s in expect_from), actual=task.state.value))
@@ -95,13 +95,13 @@ def move(store: Store, task_id: int, to: State | str, *, reason: str = "", by: s
 
 
 def _cascade(store: Store, c: sqlite3.Connection, task: Task, dst: State, ts: int) -> None:
-    """Зависимые, ещё не начатые задачи → «Нужно решение»: их основа не будет принята."""
+    """Dependents not yet started → "Needs decision": their base will never be accepted."""
     for (dep_id,) in c.execute("SELECT task_id FROM task_dep WHERE after_id=?", (task.id,)).fetchall():
         dep = store.get_task(dep_id, con=c)
         if dep is None or dep.state not in (State.QUEUED, State.DRAFT):
             continue
         if dep.state is State.DRAFT:
-            continue  # черновик ещё не запущен — решит человек при запуске
+            continue  # still a draft — a human decides at launch
         if dst is State.REJECTED:
             reason = _t("trans.cascade_rejected", label=task.label)
         else:
@@ -109,13 +109,13 @@ def _cascade(store: Store, c: sqlite3.Connection, task: Task, dst: State, ts: in
         move(store, dep_id, State.NEEDS_DECISION, reason=reason, by="hub", now=ts, con=c)
 
 
-# --- владение ---
+# --- ownership ---
 
 def acquire(store: Store, task_id: int, owner: str, *, pid: int | None, lease_ms: int = DEFAULT_LEASE_MS,
             now: int | None = None) -> bool:
-    """Взять задачу в очереди или в работе: свободна, аренда истекла или уже наша.
+    """Claim a queued or running task: free, lease expired, or already ours.
 
-    False — занята живым владельцем или задача не в очереди/работе (решённую не берут).
+    False — held by a live owner, or the task is not queued/working (finished ones are never claimed).
     """
     ts = now if now is not None else now_ms()
     with store.tx() as c:
@@ -130,7 +130,7 @@ def acquire(store: Store, task_id: int, owner: str, *, pid: int | None, lease_ms
 
 def renew(store: Store, task_id: int, owner: str, *, lease_ms: int = DEFAULT_LEASE_MS,
           now: int | None = None) -> bool:
-    """Продлить аренду. False — задачу забрали (владелец должен немедленно прекратить работу)."""
+    """Renew the lease. False — the task was taken over (the owner must stop work at once)."""
     ts = now if now is not None else now_ms()
     with store.tx() as c:
         cur = c.execute("UPDATE task SET lease_until=? WHERE id=? AND owner=?",
@@ -146,15 +146,15 @@ def release(store: Store, task_id: int, owner: str) -> bool:
 
 
 def is_orphan(task: Task, now: int) -> bool:
-    """Активная задача без живой аренды — процесс умер или не взял её."""
+    """Active task with no live lease — the process died or never claimed it."""
     return task.state in ACTIVE and not _lease_alive(task, now)
 
 
-# --- просьбы владельцу ---
+# --- requests to the owner ---
 
 def request_stop(store: Store, task_id: int, *, reason: str | None = None, by: str = "",
                  now: int | None = None) -> str:
-    """Остановить задачу. Возвращает 'stopped' (сразу) или 'requested' (попросили владельца)."""
+    """Stop a task. Returns 'stopped' (at once) or 'requested' (asked the owner)."""
     ts = now if now is not None else now_ms()
     if reason is None:
         reason = _t("trans.stop_default")
@@ -175,13 +175,13 @@ def request_stop(store: Store, task_id: int, *, reason: str | None = None, by: s
         return "stopped"
 
 
-# --- идемпотентность ---
+# --- idempotency ---
 
 def once(store: Store, key: str, fn: Callable[[sqlite3.Connection], Any], *, now: int | None = None) -> Any:
-    """Выполнить fn(con) один раз для ключа. Повтор с тем же ключом возвращает прежний результат.
+    """Run fn(con) once per key. A repeat with the same key returns the earlier result.
 
-    fn работает в той же транзакции, что и запись ключа: либо и действие, и ключ, либо ничего.
-    Результат должен сериализоваться в JSON.
+    fn runs in the same transaction as the key write: either both the action and the key, or neither.
+    The result must serialize to JSON.
     """
     ts = now if now is not None else now_ms()
     with store.tx() as c:

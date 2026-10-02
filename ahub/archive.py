@@ -1,7 +1,7 @@
-"""Архив задач в проекте (architecture §12): `<проект>/.agent-hub/` — локально, не в git проекта.
+"""Task archive inside the project (architecture §12): `<project>/.agent-hub/` — local, not in project git.
 
-tasks.md — общий список; tasks/T<id>/ — постановка, итог работника, отчёт, дифф (для кода), стоимость, итог.
-Хаб только пишет; чистит человек. Ошибки архива не ломают работу — только лог.
+tasks.md — shared list; tasks/T<id>/ — brief, worker result, report, diff (for code), cost, outcome.
+The hub only writes; a human cleans up. Archive errors never break work — just a log line.
 """
 
 from __future__ import annotations

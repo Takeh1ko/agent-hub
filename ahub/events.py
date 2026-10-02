@@ -1,11 +1,11 @@
-"""Доставка событий оркестратору и его присутствие (contracts §4, §6).
+"""Event delivery to the orchestrator and its presence (contracts §4, §6).
 
-- Будят только события с needs_reaction. Сразу — owner_message, answer и критичные; остальные — пачкой
-  по окну группировки (от самого старого недоставленного).
-- «Доставлено» ставит отдача в wait/watch; «подтверждено» — ack (явный или неявный при чтении задачи/входящих).
-- Доставленное, но не подтверждённое, отдаётся повторно один раз через REDELIVER_MS — чтобы не потерялось,
-  если оркестратор его не взял, и чтобы не будить его одним и тем же в цикле.
-- Присутствие: wait/watch отмечают `presence` не реже раза в PRESENCE_TOUCH_S; «есть» — моложе PRESENT_MS.
+- Only needs_reaction events wake anyone. At once — owner_message, answer, and critical ones; the rest — batched
+  over the grouping window (from the oldest undelivered).
+- "Delivered" is set by wait/watch handoff; "acked" — ack (explicit, or implicit on reading the task/inbox).
+- Delivered but unacked is re-offered once after REDELIVER_MS — so nothing is lost
+  if the orchestrator never picked it up, without waking it with the same thing in a loop.
+- Presence: wait/watch stamp `presence` at least every PRESENCE_TOUCH_S; "present" — younger than PRESENT_MS.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from ahub.time import now_ms
 
 GROUP_WINDOW_MS = 120_000
 REDELIVER_MS = 30 * 60_000
-MAX_DELIVERIES = 3  # первая доставка + 2 напоминания; дальше — только в status («непрочитано»)
+MAX_DELIVERIES = 3  # first delivery + 2 reminders; after that — status only ("unread")
 PRESENT_MS = 180_000
 PRESENCE_TOUCH_S = 60
 LINE_LIMIT = 200
@@ -47,7 +47,7 @@ def is_immediate(ev: Event) -> bool:
 
 def ready_batch(store: Store, *, now: int | None = None, project: str | None = None,
                 window_ms: int = GROUP_WINDOW_MS) -> list[Event]:
-    """Что отдать сейчас: всё доступное, если есть срочное или окно самого старого истекло; иначе пусто."""
+    """What to hand out now: everything available if urgent or the oldest window expired; else empty."""
     ts = now if now is not None else now_ms()
     evs = _deliverable(store, ts, project)
     if not evs:
@@ -67,7 +67,7 @@ def mark_delivered(store: Store, ids: list[int], *, now: int | None = None) -> N
 
 def ack(store: Store, ids: list[int] | None = None, *, kinds: tuple[str, ...] | None = None,
         task_id: int | None = None, project: str | None = None, now: int | None = None) -> int:
-    """Подтвердить: по id, по видам и/или задаче. Без фильтров — все неподтверждённые. Возвращает сколько."""
+    """Ack: by id, by kind and/or task. No filters — everything unacked. Returns the count."""
     sql = "UPDATE event SET acked_at=?, delivered_at=COALESCE(delivered_at, ?) WHERE needs_reaction=1 AND acked_at IS NULL"
     ts = now if now is not None else now_ms()
     args: list = [ts, ts]
@@ -90,7 +90,7 @@ def ack(store: Store, ids: list[int] | None = None, *, kinds: tuple[str, ...] | 
 
 
 def ack_task(store: Store, task_id: int) -> int:
-    """Неявное подтверждение: оркестратор прочитал задачу."""
+    """Implicit ack: the orchestrator has read the task."""
     return ack(store, kinds=TASK_REACTIONS, task_id=task_id)
 
 
@@ -104,9 +104,9 @@ def unacked(store: Store, project: str | None = None) -> list[Event]:
         return [Event.from_row(r) for r in c.execute(sql + " ORDER BY id", args)]
 
 
-# --- строки пробуждения (L0) ---
+# --- wakeup lines (L0) ---
 
-# Стабильные английские коды начала строки (не переводятся никогда).
+# Stable English codes at line start (never translated).
 EVENT_CODES: dict[Ev, str] = {
     Ev.DONE: "DONE",
     Ev.NEEDS_DECISION: "DECISION",
@@ -176,7 +176,7 @@ def lines(store: Store, evs: list[Event]) -> list[str]:
     return out
 
 
-# --- присутствие ---
+# --- presence ---
 
 def touch(store: Store, who: str = DEFAULT_WHO, *, project: str = "", via: str = "", session_id: str = "",
           now: int | None = None) -> None:
@@ -201,12 +201,12 @@ def present(store: Store, who: str = DEFAULT_WHO, *, now: int | None = None, fre
     return bool(p) and ts - int(p["last_seen"]) < fresh_ms
 
 
-# --- ожидание ---
+# --- waiting ---
 
 def wait(store: Store, *, timeout_s: float, project: str | None = None, who: str = DEFAULT_WHO,
          poll_s: float = 1.0, sleep: Callable[[float], None] = time.sleep,
          clock: Callable[[], float] = time.monotonic) -> list[str]:
-    """Блокироваться до пачки событий или таймаута. Отданное помечается доставленным."""
+    """Block until an event batch or timeout. Handed-out events are marked delivered."""
     deadline = clock() + timeout_s
     last_touch = -1e9
     while True:

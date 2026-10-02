@@ -1,4 +1,4 @@
-"""Общее для подкоманд: вывод текст/JSON, выбор проекта."""
+"""Shared by subcommands: text/JSON output, project pick."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from ahub import config
 
 
 class CliError(RuntimeError):
-    """Ожидаемый отказ команды: печатается одной строкой, код 2."""
+    """Expected command refusal: printed on one line, exit 2."""
 
 
 def emit(args, data: Any, text: str) -> None:
-    """--json → data как JSON, иначе text."""
+    """--json → data as JSON, else text."""
     if getattr(args, "json", False):
         json.dump(data, sys.stdout, ensure_ascii=False, separators=(",", ":"), default=str)
         sys.stdout.write("\n")
@@ -30,7 +30,7 @@ def add_project_arg(parser) -> None:
 
 
 def resolve_project(args, cwd: str | Path | None = None) -> config.ProjectConfig:
-    """Проект по --project (имя из конфига хаба или путь) или по текущему каталогу."""
+    """Project by --project (hub config name or path) or by current dir."""
     want = getattr(args, "project", None)
     cwd = Path(cwd) if cwd is not None else Path.cwd()
     if want:

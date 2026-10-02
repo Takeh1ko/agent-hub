@@ -1,9 +1,9 @@
-"""Панель ревью (V14, contracts §3; перенос hub/gate/verdict.py v1).
+"""Review panel (V14, contracts §3; port of hub/gate/verdict.py v1).
 
-Ревьюер — новая сессия, видит задачу, дифф и итог ворот, но не решения-эталоны оркестратора; пишет вердикт в
-`.ahub/review_r<N>_<model>.json`. Панель: все approve → Готово; есть changes → доработка (если круги остались),
-иначе «Нужно решение». dispute засчитывается только с file+line+issue ≥ 50 символов у каждого замечания.
-Замечания только low не держат задачу. Дубли (file, line, issue) схлопываются.
+The reviewer is a fresh session: sees the task, diff, and gate summary, but not the orchestrator's reference
+decisions; writes the verdict to `.ahub/review_r<N>_<model>.json`. Panel: all approve → Done; any changes →
+rework (if rounds remain), else "Needs decision". dispute counts only with file+line+issue ≥ 50 chars per finding.
+low-only findings never block. Duplicates (file, line, issue) collapse.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ class Finding:
 @dataclass
 class Review:
     model: str
-    verdict: str  # как записал ревьюер
+    verdict: str  # as the reviewer wrote it
     findings: list[Finding] = field(default_factory=list)
     summary: str = ""
 
@@ -62,19 +62,19 @@ def review_path(worktree: str, round_no: int, model: str) -> Path:
 
 
 def strip_arbiter(text: str) -> str:
-    """Решения-эталоны оркестратора ревьюеру не показываются."""
+    """Orchestrator reference decisions are never shown to the reviewer."""
     return _ARBITER.sub("", text)
 
 
 def verdict_format() -> str:
-    """Форма вердикта из contracts §3 — одна, для постановки и повтора."""
+    """Verdict shape from contracts §3 — one for both brief and retry."""
     return ('{"verdict": "approve|changes|dispute", "summary": "one sentence", "findings": [{"severity": '
             '"high|medium|low", "file": "path", "line": 12, "issue": "point, <= 300 chars", '
             '"fix": "what to do"}]}')
 
 
 def verdict_repair_prompt(round_no: int, model: str) -> str:
-    """Один повтор несдавшего вердикт — в той же сессии, только JSON."""
+    """One retry for a missing verdict — same session, JSON only."""
     out = review_path(".", round_no, model).as_posix().removeprefix("./")
     return (f"You did not write the verdict file `{out}` (or it is malformed). "
             f"Write it now in exactly this JSON format:\n{verdict_format()}\n"
@@ -138,7 +138,7 @@ def dedup(findings: list[Finding]) -> list[Finding]:
 
 
 def panel(reviews: list[Review], expected: list[str], round_no: int, max_rounds: int) -> tuple[str, str]:
-    """(решение, причина): done | fix | decision."""
+    """(decision, reason): done | fix | decision."""
     got = {r.model for r in reviews}
     missing = [m for m in expected if m not in got]
     if missing:

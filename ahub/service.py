@@ -1,13 +1,14 @@
-"""Хаб-сервис: очередь, места, ресурсы, запуск процессов задач (architecture §2, §6, §13; contracts §8).
+"""Hub service: queue, slots, resources, task process launches (architecture §2, §6, §13; contracts §8).
 
-- Занятость — по живым процессам задач в /proc (`python -m ahub.worker T12`), а не по «своим детям»: после
-  перезапуска сервиса задачи, начатые прежним экземпляром, продолжают работать и занимают места (урок v1 #3).
-- Процесс задачи запускается в своей группе и не зависит от сервиса: перезапуск сервиса его не убивает.
-- Задача из очереди запускается, когда: очередь не на паузе, все «после X» приняты, есть место в проекте
-  (max_parallel), свободны её ресурсы (capacity + внешний flock не занят). Иначе — причина ожидания в задаче.
-- Сервис состояние задач не меняет (кроме причины ожидания в очереди): задачу берёт её процесс (аренда).
-- Сироты (V20): активная задача без живого процесса и с истёкшей арендой → обратно в очередь с событием и
-  продолжение с места (та же сессия); повторное сиротство → «Нужно решение»; прерванное принятие → «Нужно решение».
+- Busyness counts live task processes in /proc (`python -m ahub.worker T12`), not "own children": after
+  a service restart, tasks started by the previous instance keep running and hold slots (v1 lesson #3).
+- A task process runs in its own group, independent of the service: a service restart does not kill it.
+- A queued task launches when: the queue is not paused, all "after X" are accepted, the project has
+  a free slot (max_parallel), and its resources are free (capacity + external flock not held). Otherwise —
+  the wait reason is stored on the task.
+- The service never changes task states (except the queue wait reason): the task's own process claims it (lease).
+- Orphans (V20): an active task with no live process and an expired lease → back to queue with an event and
+  resume in place (same session); repeated orphaning → "Needs decision"; interrupted acceptance → "Needs decision".
 """
 
 from __future__ import annotations
@@ -34,16 +35,16 @@ from ahub.time import now_ms
 from ahub.worker import CMD_MARK
 
 SPAWN_GRACE_S = 30.0
-ORPHAN_GRACE_MS = 60_000  # после истечения аренды — ещё минута на «вдруг процесс просто медленный»
-MAX_ORPHANS = 1  # автоматический подхват — один раз  # после запуска процесс ещё может не быть виден / не взять задачу — не запускать повторно
+ORPHAN_GRACE_MS = 60_000  # past lease expiry — another minute in case the process is just slow
+MAX_ORPHANS = 1  # one automatic pickup  # after spawn the process may not be visible / may not have claimed the task yet — do not spawn again
 HEARTBEAT_KEY = "service_heartbeat"
-CODE_CHECK_S = 10.0  # как часто сверять код (самообновление)
+CODE_CHECK_S = 10.0  # how often to compare code (self-update)
 PAUSE_KEY = "queue_paused"
 _TASK_ARG = re.compile(r"^[Tt]?(\d+)$")
 
 
 def live_workers(proc_root: str | Path = "/proc") -> dict[int, int]:
-    """task_id → pid живых процессов задач на машине."""
+    """task_id → pid of live task processes on this machine."""
     out: dict[int, int] = {}
     for pid in procs.pids(proc_root):
         args = procs.cmdline(pid, proc_root)
@@ -63,7 +64,7 @@ def live_workers(proc_root: str | Path = "/proc") -> dict[int, int]:
 
 
 def external_lock_busy(path: str) -> bool:
-    """Внешний flock занят кем-то (тесты другого инструмента)? Не создаёт лишнего: файл открывается на чтение."""
+    """Whether an external flock is held by someone (another tool's tests). Creates nothing extra: opens read-only."""
     if not path:
         return False
     try:
@@ -86,7 +87,7 @@ def external_lock_busy(path: str) -> bool:
 
 
 def spawn_worker(task_id: int) -> int:
-    """Запустить процесс задачи отдельно от сервиса. Вывод — в state_dir/workers/T<id>.log."""
+    """Start a task process detached from the service. Output — state_dir/workers/T<id>.log."""
     d = paths.state_dir() / "workers"
     d.mkdir(parents=True, exist_ok=True)
     out = open(d / f"T{task_id}.log", "ab")
@@ -123,7 +124,7 @@ class Service:
         self.spawn = spawn
         self.proc_root = proc_root
         self.lock_busy = lock_busy
-        self.recent: dict[int, float] = {}  # task_id → когда запускали
+        self.recent: dict[int, float] = {}  # task_id → when it was spawned
         self.log = hublog.get("service")
         self._stop = threading.Event()
 
@@ -218,16 +219,16 @@ class Service:
         return TickReport(live=live, spawned=spawned, load=load, paused=paused)
 
     def _orphans(self, live: dict[int, int], busy: set[int]) -> list[int]:
-        """Активные задачи без процесса: в очередь (продолжение с места) или «Нужно решение»."""
+        """Active tasks with no process: back to queue (resume in place) or "Needs decision"."""
         now = now_ms()
         handled = []
         for t in self.store.list_tasks(states=ACTIVE):
             if t.id in busy or t.id in live:
                 continue
             if t.owner and t.lease_until and t.lease_until + ORPHAN_GRACE_MS > now:
-                continue  # аренда (или её грейс) ещё жива — владелец мог быть вне процесса задачи (CLI)
+                continue  # lease (or its grace) still alive — the owner may be outside the task process (CLI)
             if not t.owner and now - t.updated_at < ORPHAN_GRACE_MS:
-                continue  # только что перешла — процесс ещё может появиться
+                continue  # just transitioned — the process may still appear
             token = f"service:{os.getpid()}"
             if not transitions.acquire(self.store, t.id, token, pid=os.getpid(), lease_ms=30_000):
                 continue
@@ -256,7 +257,7 @@ class Service:
         self._stop.set()
 
     def _observe(self) -> None:
-        """Наблюдатель — в своём потоке: разбор моделью не должен тормозить очередь."""
+        """Observer — on its own thread: model parsing must not stall the queue."""
         from ahub import observer
 
         if self._obs is not None and self._obs.is_alive():
@@ -289,7 +290,7 @@ class Service:
         for s in (signal.SIGTERM, signal.SIGINT):
             try:
                 signal.signal(s, _sig)
-            except ValueError:  # не главный поток (тесты)
+            except ValueError:  # not the main thread (tests)
                 pass
         while not self._stop.is_set():
             try:
@@ -309,13 +310,13 @@ class Service:
                         restart_self()
                     else:
                         self.log.error("hub code changed but fails check — staying on old: %s", why)
-                        code0 = code  # не долбить проверкой каждые 10 с; следующее изменение проверим снова
+                        code0 = code  # do not re-check every 10 s; the next change will be checked again
             self._stop.wait(poll_s)
         self.log.info("service stopped")
 
 
 def code_fingerprint() -> str:
-    """Отпечаток кода пакета ahub (время и размер .py-файлов): изменился — пора перезапуститься."""
+    """Fingerprint of the ahub package code (.py file mtimes and sizes): changed — time to restart."""
     import hashlib
 
     root = Path(__file__).resolve().parent
@@ -330,7 +331,7 @@ def code_fingerprint() -> str:
 
 
 def new_code_healthy() -> tuple[bool, str]:
-    """Новый код импортируется и отвечает — иначе не переключаемся (без цикла падений)."""
+    """New code imports and answers — otherwise do not switch (no crash loop)."""
     try:
         r = subprocess.run([sys.executable, "-c", "import ahub.service, ahub.engine, ahub.worker, ahub.cli;"
                             "from ahub.store import Store; Store()"],
@@ -343,6 +344,6 @@ def new_code_healthy() -> tuple[bool, str]:
 
 
 def restart_self() -> None:
-    """Заменить процесс сервиса новым с тем же командным вызовом (pid сохраняется — systemd не заметит)."""
+    """Replace the service process with the same command line (pid stays — systemd never notices)."""
     os.execv(sys.executable, [sys.executable, "-m", "ahub", *sys.argv[1:]] if sys.argv[0].endswith("ahub")
              else [sys.executable, *sys.argv])

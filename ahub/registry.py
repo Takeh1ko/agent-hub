@@ -1,10 +1,10 @@
-"""Реестр моделей и ролей (architecture §4, contracts §9).
+"""Model and role registry (architecture §4, contracts §9).
 
-- Модель хаба = короткое имя → поставщик + модель + вариант (таблица model).
-- Меню роли = какие модели показываются и какая по умолчанию (таблица role_model).
-- Выбор модели для задачи: явная или по умолчанию роли; явная — любая включённая модель.
-- Запрет проекта (`[models] deny` в .hub.toml) действует всегда: запись — алиас или часть id модели.
-  Снимает его только человек правкой файла проекта — у реестра такой ручки нет по построению.
+- Hub model = short name → provider + model + variant (model table).
+- Role menu = which models are shown and which is default (role_model table).
+- Task model pick: explicit or role default; explicit — any enabled model.
+- Project deny (`[models] deny` in .hub.toml) always applies: an entry is an alias or part of the model id.
+  Only a human editing the project file lifts it — the registry has no such knob by design.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ DEFAULT_MODELS: dict[str, tuple[str, str, str, str]] = {
     "gemini": ("agy", "gemini-3.8-flash-high", "", "Gemini via agy (window quota)"),
 }
 
-# role → [(alias, is_default)] в порядке показа
+# role → [(alias, is_default)] in display order
 DEFAULT_MENUS: dict[Role, list[tuple[str, bool]]] = {
     Role.EXECUTOR: [("spark", True), ("mimo-flash", False), ("deepseek-flash", False)],
     Role.REVIEWER: [("spark", True), ("mimo-flash", False), ("deepseek-flash", False)],
@@ -55,7 +55,7 @@ class ModelEntry:
 
 
 def seed(store: Store) -> bool:
-    """Заполнить реестр умолчаниями, если он пуст. True — заполнили."""
+    """Seed the registry with defaults if empty. True — seeded."""
     with store.tx() as c:
         if c.execute("SELECT COUNT(*) FROM model").fetchone()[0]:
             return False
@@ -90,7 +90,7 @@ def get(store: Store, alias: str) -> ModelEntry:
 
 
 def menu(store: Store, role: Role | str) -> list[tuple[ModelEntry, bool]]:
-    """Меню роли: [(модель, по умолчанию)] в порядке показа."""
+    """Role menu: [(model, default)] in display order."""
     seed(store)
     with store.read() as c:
         rows = c.execute("SELECT m.*, rm.is_default FROM role_model rm JOIN model m ON m.alias=rm.alias"
@@ -99,7 +99,7 @@ def menu(store: Store, role: Role | str) -> list[tuple[ModelEntry, bool]]:
 
 
 def denied_by(entry: ModelEntry, project: ProjectConfig | None) -> str | None:
-    """Запись запрета проекта, которая касается модели, или None."""
+    """Project deny entry matching the model, or None."""
     if project is None:
         return None
     for rule in project.models_deny:
@@ -110,7 +110,7 @@ def denied_by(entry: ModelEntry, project: ProjectConfig | None) -> str | None:
 
 
 def check(store: Store, alias: str, project: ProjectConfig | None) -> ModelEntry:
-    """Модель годится для задачи проекта: есть, включена, не запрещена проектом."""
+    """Model fit for a project task: exists, enabled, not denied by the project."""
     entry = get(store, alias)
     if not entry.enabled:
         raise RegistryError(_t("registry.disabled", alias=alias))
@@ -121,7 +121,7 @@ def check(store: Store, alias: str, project: ProjectConfig | None) -> ModelEntry
 
 
 def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit: str | None = None) -> ModelEntry:
-    """Модель для роли: явная (проверенная) или по умолчанию; если умолчание запрещено — первая разрешённая из меню."""
+    """Model for a role: explicit (checked) or default; if the default is denied — first allowed menu entry."""
     if explicit:
         return check(store, explicit, project)
     items = menu(store, role)
@@ -140,7 +140,7 @@ def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit
     raise RegistryError(_t("registry.no_role", role=Role(role).value, reasons=suffix))
 
 
-# --- изменения (человек в терминале / оркестратор) ---
+# --- changes (human in the terminal / orchestrator) ---
 
 def add_model(store: Store, alias: str, provider: str, model_id: str, variant: str = "", note: str = "") -> None:
     seed(store)

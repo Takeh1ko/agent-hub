@@ -1,10 +1,10 @@
-"""Логи хаба: JSON-строки в одном файле для всех компонентов и процессов, поиск WARNING/ERROR за период.
+"""Hub logs: JSON lines in one file for all components and processes, WARNING/ERROR search over a period.
 
-- Каждая запись: {"ts": мс, "lvl": "WARNING", "comp": "service", "msg": "...", "pid": 123, ...контекст}.
-  Контекст (task, session, provider…) — через `get(component, **ctx)` или `extra={...}`.
-- Пишут много процессов сразу: файл открыт на дозапись (строка — одна запись write), обработчик
-  переоткрывает файл после ротации (WatchedFileHandler). Ротацию делает любой процесс под flock — один за раз.
-- Наблюдатель читает `scan(since)` — записи уровня ≥ WARNING за период из текущего и ротированных файлов.
+- Each record: {"ts": ms, "lvl": "WARNING", "comp": "service", "msg": "...", "pid": 123, ...context}.
+  Context (task, session, provider…) — via `get(component, **ctx)` or `extra={...}`.
+- Many processes write at once: the file is opened for append (one write per line), the handler
+  reopens the file after rotation (WatchedFileHandler). Any process rotates under flock — one at a time.
+- The observer reads `scan(since)` — records at level ≥ WARNING over the period from current and rotated files.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class JsonFormatter(logging.Formatter):
 
 
 class _Handler(logging.handlers.WatchedFileHandler):
-    """Дозапись + переоткрытие после ротации; ротация по размеру под flock."""
+    """Append + reopen after rotation; size-based rotation under flock."""
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -76,7 +76,7 @@ _configured: Path | None = None
 
 
 def setup(level: str | int = "INFO", *, to_stderr: bool = False) -> None:
-    """Подключить файл логов к логгеру «ahub». Повторный вызов с тем же файлом — без дублей."""
+    """Attach the log file to the "ahub" logger. Repeat call with the same file — no duplicates."""
     global _configured
     root = logging.getLogger("ahub")
     target = log_file()
@@ -100,14 +100,14 @@ def setup(level: str | int = "INFO", *, to_stderr: bool = False) -> None:
 
 
 def get(component: str, **ctx: Any) -> logging.LoggerAdapter:
-    """Логгер компонента с постоянным контекстом: get("task", task=12).warning("…")."""
+    """Component logger with fixed context: get("task", task=12).warning("…")."""
     if _configured != log_file():
         setup()
     return _Adapter(logging.getLogger(f"ahub.{component}"), {"comp": component, **ctx})
 
 
 def install_excepthook(component: str) -> None:
-    """Необработанное исключение процесса — в лог уровнем CRITICAL (и дальше как обычно)."""
+    """Unhandled process exception — to the log at CRITICAL (then as usual)."""
     prev = sys.excepthook
     logger = get(component)
 
@@ -120,7 +120,7 @@ def install_excepthook(component: str) -> None:
 
 
 def rotate_if_needed(max_bytes: int = MAX_BYTES, keep: int = KEEP) -> bool:
-    """Ротация ahub.log → ahub.log.1 … .keep под flock. True — повернули."""
+    """Rotate ahub.log → ahub.log.1 … .keep under flock. True — rotated."""
     f = log_file()
     lock_path = f.parent / ".rotate.lock"
     f.parent.mkdir(parents=True, exist_ok=True)
@@ -142,7 +142,7 @@ def rotate_if_needed(max_bytes: int = MAX_BYTES, keep: int = KEEP) -> bool:
 @dataclass
 class ScanResult:
     records: list[dict]
-    broken_lines: int  # строк, которые не разобрались как JSON (тоже сигнал наблюдателю)
+    broken_lines: int  # lines that did not parse as JSON (also a signal to the observer)
 
 
 def _files_since(since_ms: int) -> list[Path]:
@@ -160,7 +160,7 @@ def _files_since(since_ms: int) -> list[Path]:
 
 def scan(since_ms: int, until_ms: int | None = None, *, min_level: str = "WARNING",
          component: str | None = None) -> ScanResult:
-    """Записи уровня ≥ min_level за [since, until) — от старых к новым."""
+    """Records at level ≥ min_level over [since, until) — oldest first."""
     floor = _LEVELS.get(min_level.upper(), 30)
     records: list[dict] = []
     broken = 0
@@ -194,10 +194,10 @@ _NUM = re.compile(r"\d+")
 
 
 def signature(rec: dict) -> str:
-    """Подпись записи без чисел: одна проблема с разными id — одна подпись (для паузы на повтор)."""
+    """Record signature without numbers: one problem with different ids — one signature (for repeat backoff)."""
     return f"{rec.get('lvl')}|{rec.get('comp')}|{_NUM.sub('#', str(rec.get('msg', '')))[:160]}"
 
 
 def summarize(records: list[dict], limit: int = 10) -> list[tuple[str, int]]:
-    """Самые частые подписи: [(подпись, сколько)]."""
+    """Most frequent signatures: [(signature, count)]."""
     return Counter(signature(r) for r in records).most_common(limit)

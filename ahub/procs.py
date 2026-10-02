@@ -1,6 +1,6 @@
-"""Процессы: дети, живость, cmdline, время старта (для сторожа тишины и пульса).
+"""Processes: children, liveness, cmdline, start time (for the silence watchdog and pulse).
 
-Linux — через /proc, иначе — psutil (macOS). Нет ни того ни другого — «нет данных».
+Linux — via /proc, otherwise — psutil (macOS). Neither — "no data".
 """
 
 from __future__ import annotations
@@ -9,13 +9,13 @@ from pathlib import Path
 
 
 def _proc_dir(proc_root: str | Path) -> Path | None:
-    """Каталог /proc, если он есть (Linux и тесты с подменным корнем); иначе None — идём через psutil."""
+    """The /proc dir, if present (Linux and tests with a fake root); else None — go via psutil."""
     root = Path(proc_root)
     return root if root.is_dir() else None
 
 
 def _psutil():
-    """Модуль psutil или None (не установлен — «нет данных»)."""
+    """The psutil module or None (not installed — "no data")."""
     try:
         import psutil
     except ImportError:
@@ -24,7 +24,7 @@ def _psutil():
 
 
 def pids(proc_root: str | Path = "/proc") -> list[int]:
-    """Все pid процессов."""
+    """All process pids."""
     root = _proc_dir(proc_root)
     if root is not None:
         try:
@@ -38,7 +38,7 @@ def pids(proc_root: str | Path = "/proc") -> list[int]:
 
 
 def children(pid: int | None, proc_root: str | Path = "/proc") -> list[int]:
-    """Прямые дети процесса (по всем его потокам)."""
+    """Direct children of a process (across all its threads)."""
     if pid is None:
         return []
     root = _proc_dir(proc_root)
@@ -66,7 +66,7 @@ def children(pid: int | None, proc_root: str | Path = "/proc") -> list[int]:
 
 
 def descendants(pid: int | None, proc_root: str | Path = "/proc", limit: int = 500) -> list[int]:
-    """Все потомки (обход в ширину, с защитой от циклов)."""
+    """All descendants (breadth-first, cycle-safe)."""
     seen: list[int] = []
     queue = children(pid, proc_root)
     while queue and len(seen) < limit:
@@ -83,7 +83,7 @@ def has_children(pid: int | None, proc_root: str | Path = "/proc") -> bool:
 
 
 def alive(pid: int | None, proc_root: str | Path = "/proc") -> bool:
-    """Процесс существует и не зомби."""
+    """Process exists and is not a zombie."""
     if pid is None:
         return False
     root = _proc_dir(proc_root)
@@ -103,7 +103,7 @@ def alive(pid: int | None, proc_root: str | Path = "/proc") -> bool:
     try:
         return ps.Process(int(pid)).status() != ps.STATUS_ZOMBIE
     except ps.AccessDenied:
-        return True  # чужой процесс: есть, но статус не виден
+        return True  # someone else's process: exists, but status invisible
     except ps.Error:
         return False
 
@@ -126,7 +126,7 @@ def cmdline(pid: int, proc_root: str | Path = "/proc") -> list[str]:
 
 
 def start_time(pid: int, proc_root: str | Path = "/proc") -> int | None:
-    """Время старта процесса — отличает процесс от нового с тем же pid (сравнение только на равенство)."""
+    """Process start time — tells a process apart from a new one reusing the pid (equality compare only)."""
     root = _proc_dir(proc_root)
     if root is not None:
         try:

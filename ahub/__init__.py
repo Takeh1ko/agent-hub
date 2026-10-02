@@ -1,3 +1,3 @@
-"""agent-hub v2: сервис, через который оркестратор и человек раздают работу моделям-работникам."""
+"""agent-hub v2: the service through which the orchestrator and humans hand work to worker models."""
 
 __version__ = "3.0.0"
