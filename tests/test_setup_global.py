@@ -1,4 +1,4 @@
-"""register_project: меняет только projects, [telegram]/[usage] и комментарии целы."""
+"""register_project: only projects changes, [telegram]/[usage] and the comments stay intact."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def test_replaces_multiline_projects(tmp_path, monkeypatch):
     assert hub.projects == (str(a), str(b))
     text = paths.global_config_path().read_text(encoding="utf-8")
     assert '[telegram]' in text and 'token = "t"' in text
-    assert register_project(b) is False  # повтор — без дублей и без перезаписи
+    assert register_project(b) is False  # a repeat — no duplicates, no rewrite
     assert config.load_hub().projects == (str(a), str(b))
 
 
@@ -51,7 +51,7 @@ def test_creates_file_and_inserts_before_section(tmp_path, monkeypatch):
     proj.mkdir()
     assert register_project(proj) is True
     assert config.load_hub().projects == (str(proj),)
-    # файла нет, но есть секция без projects — projects вставляется до неё
+    # no file, but there is a section without projects — projects goes before it
     other = tmp_path / "m"
     other.mkdir()
     write(paths.global_config_path(), '# коммент\n[telegram]\ntoken = "t"\n')

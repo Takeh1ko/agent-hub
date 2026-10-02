@@ -1,4 +1,4 @@
-"""Мастер ahub setup: интерактив, --yes, бесплатный алиас, Telegram, запись конфига."""
+"""The ahub setup wizard: interactive, --yes, the free alias, Telegram, writing the config."""
 
 from __future__ import annotations
 
@@ -52,14 +52,14 @@ def test_wizard_full_lang_project_free_telegram(tmp_path, monkeypatch, capsys):
     make_repo(root)
     write(paths.global_config_path(), '# мой хаб\n[usage]\ngo_month_limit = 60.0\n')
     _answers(monkeypatch, [
-        "",  # язык: умолчание ru
-        str(root),  # путь проекта
-        "",  # модели: да (умолчание)
-        "n",  # служба install: нет
-        "",  # служба start: нет (умолчание)
-        "",  # claude: да (умолчание)
-        "y",  # telegram: да
-        "tok123",  # токен
+        "",  # language: the ru default
+        str(root),  # project path
+        "",  # models: yes (default)
+        "n",  # service install: no
+        "",  # service start: no (default)
+        "",  # claude: yes (default)
+        "y",  # telegram: yes
+        "tok123",  # token
         "77",  # chat id
     ])
     assert cli.main(["setup"]) == 0
@@ -69,19 +69,19 @@ def test_wizard_full_lang_project_free_telegram(tmp_path, monkeypatch, capsys):
     assert str(root) in hub.projects
     assert (root / ".hub.toml").exists()
     assert config.load_project(root).name == "shop"
-    # без входа в Go — роли на бесплатном алиасе
+    # no Go login — the roles are on the free alias
     assert doctor.check_models([]).ok is True
     free = doctor._free_alias(Store())
     for role in Role:
         menu = registry.menu(Store(), role)
         default = next((e for e, d in menu if d), None)
         assert default is not None and default.alias == free
-    # Telegram записан, секции и комментарий целы
+    # Telegram is written, the sections and the comment stay intact
     assert hub.tg_token == "tok123" and hub.tg_chat_id == 77
     text = paths.global_config_path().read_text(encoding="utf-8")
     assert "# мой хаб" in text and "[usage]" in text and "go_month_limit = 60.0" in text
     assert "[telegram]" in text
-    # навык и блок
+    # the skill and the block
     assert (Path.home() / ".claude/skills/ahub/SKILL.md").exists()
     assert "ahub:begin" in (root / "CLAUDE.md").read_text(encoding="utf-8")
 
@@ -96,8 +96,8 @@ def test_wizard_service_install_writes_units(tmp_path, monkeypatch, capsys):
     root = tmp_path / "proj"
     make_repo(root)
     _answers(monkeypatch, [
-        "", str(root), "", "y",  # install: да
-        "n",  # telegram: нет
+        "", str(root), "", "y",  # install: yes
+        "n",  # telegram: no
     ])
     assert cli.main(["setup"]) == 0
     out = capsys.readouterr().out

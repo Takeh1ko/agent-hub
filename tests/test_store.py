@@ -17,7 +17,7 @@ def store() -> Store:
 def test_default_path_and_migration(store):
     assert store.path == paths.db_path()
     assert store.schema_version() >= 1
-    Store()  # повторное открытие не падает и ничего не применяет заново
+    Store()  # a second open neither fails nor applies the migrations again
     with store.read() as c:
         assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -108,7 +108,7 @@ def test_sessions(store):
     assert s.external_id == "ses_1" and s.cost_go == 0.12 and s.tokens == {"input": 10} and s.started_at == 7
     assert [x.id for x in store.list_sessions(tid, status="ok")] == [sid]
     other = store.add_session(task_id=tid, provider="opencode", role="reviewer")
-    with pytest.raises(sqlite3.IntegrityError):  # один external_id у поставщика — одна сессия
+    with pytest.raises(sqlite3.IntegrityError):  # one external_id per provider — one session
         store.update_session(other, external_id="ses_1")
     with pytest.raises(ValueError):
         store.update_session(sid, task_id=5)
@@ -127,7 +127,7 @@ def test_transition_table_consistent():
         assert src not in dsts, f"петля {src}"
     assert not TRANSITIONS[State.ACCEPTED] and not TRANSITIONS[State.REJECTED]
     assert can_move("done", "accepting") and not can_move("queued", "done")
-    # Из любого состояния, кроме финальных и черновика, есть путь к финалу.
+    # From any state except the finals and the draft there is a path to a final one.
     for s in State:
         seen, stack = set(), [s]
         while stack:

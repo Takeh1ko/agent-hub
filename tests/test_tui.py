@@ -1,4 +1,4 @@
-"""`ahub top`: данные экрана и поведение приложения (пилот textual, без терминала)."""
+"""`ahub top`: screen data and app behaviour (textual pilot, no terminal)."""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ async def test_app_view_mode_blocks_actions(store):
         await pilot.pause(0.5)
         assert "ПРОСМОТР" in str(app.query_one("#mode").render())
         assert len(app._ids) == 2
-        await pilot.press("s")  # в просмотре — ничего не делает
+        await pilot.press("s")  # in view mode it does nothing
         await pilot.pause(0.2)
         assert store.get_task(app.selected()).state in (State.QUEUED, State.DONE)
         await pilot.press("c")
@@ -125,7 +125,7 @@ async def test_app_help(store):
 
 
 def test_screen_data_en(store, monkeypatch):
-    """Шаг 4: шапка и строка задачи TUI на английском (AHUB_LANG=en)."""
+    """Step 4: the TUI header and task row in English (AHUB_LANG=en)."""
     import re as _re
 
     from ahub.i18n import _reset

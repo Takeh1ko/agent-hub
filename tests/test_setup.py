@@ -17,7 +17,7 @@ def test_setup_new_project(tmp_path, capsys):
     assert cfg.name == "shop" and cfg.work_branch == "main" and cfg.models_deny == ("deepseek",)
     assert str(root) in paths.global_config_path().read_text()
     assert (Path.home() / ".claude/skills/ahub/SKILL.md").read_text().startswith("---\nname: ahub")
-    assert cli.main(["setup", str(root), "--claude"]) == 0  # повтор — без дублей
+    assert cli.main(["setup", str(root), "--claude"]) == 0  # a repeat — no duplicates
     out = capsys.readouterr().out
     assert "уже v2" in out and "блок уже есть" in out
     assert (root / "CLAUDE.md").read_text().count("ahub:begin") == 1

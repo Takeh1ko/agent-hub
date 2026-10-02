@@ -1,4 +1,4 @@
-"""Поставщик opencode: разбор реальных событий, классификация ошибок, команда, каталог. Живой — с пометкой live."""
+"""opencode provider: parsing real events, error classification, command, database path. Live runs are marked live."""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def test_classify_outcomes(oc):
 
     assert outcome([REAL["text"]], 0) is Outcome.OK
     assert outcome([REAL["err503"]], 1) is Outcome.TRANSIENT
-    assert outcome([REAL["err503"], REAL["text"]], 0) is Outcome.OK  # промежуточный сбой при rc=0
+    assert outcome([REAL["err503"], REAL["text"]], 0) is Outcome.OK  # a transient blip with rc=0
     assert outcome([REAL["err400"]], 1) is Outcome.MODEL_ERROR
     assert outcome([], 0, sid=None) is Outcome.CRASH
 
@@ -145,12 +145,12 @@ def test_capabilities_and_missing_binary(oc):
 
 @pytest.mark.live
 def test_live_contract(tmp_path):
-    """Живая сессия Spark (≈ $0.001): AHUB_LIVE=1 pytest -m live tests/test_opencode_provider.py"""
+    """Live Spark session (≈ $0.001): AHUB_LIVE=1 pytest -m live tests/test_opencode_provider.py"""
     import pwd
 
     from tests import provider_contract as contract
 
-    home = pwd.getpwuid(os.getuid()).pw_dir  # conftest подменил HOME — opencode нужен настоящий (авторизация)
+    home = pwd.getpwuid(os.getuid()).pw_dir  # conftest faked HOME — opencode needs the real one (auth)
     real_env = {"HOME": home, "XDG_CONFIG_HOME": f"{home}/.config", "XDG_DATA_HOME": f"{home}/.local/share"}
     real = OpencodeProvider(db_path=f"{home}/.local/share/opencode/opencode.db", env=real_env)
 

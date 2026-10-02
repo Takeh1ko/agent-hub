@@ -1,4 +1,4 @@
-"""service install (systemd/launchd) и service start/stop без службы ОС."""
+"""service install (systemd/launchd) and service start/stop without an OS service."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def _with_telegram():
 
 def test_env_keys_extra():
     assert {"AHUB_LANG", "AHUB_TZ", "AHUB_HOME"} <= set(svccmd._ENV_KEYS)
-    assert "AHUB_HOME" in svccmd.unit_text("ahub.service")  # AHUB_HOME задан фикстурой conftest
+    assert "AHUB_HOME" in svccmd.unit_text("ahub.service")  # AHUB_HOME is set by the conftest fixture
 
 
 def test_install_linux_no_telegram(capsys, monkeypatch):
@@ -55,7 +55,7 @@ def test_install_darwin_plist(capsys, monkeypatch):
     d = Path.home() / "Library" / "LaunchAgents"
     svc = d / "dev.ahub.service.plist"
     assert svc.exists()
-    assert not (d / "dev.ahub.bot.plist").exists()  # бот без telegram не пишется
+    assert not (d / "dev.ahub.bot.plist").exists()  # no bot unit without telegram
     pl = plistlib.loads(svc.read_bytes())
     assert pl["Label"] == "dev.ahub.service"
     assert pl["ProgramArguments"] == [sys.executable, "-m", "ahub", "service", "run"]
@@ -106,13 +106,13 @@ def test_start_stop_fake(monkeypatch, capsys):
     assert procs.alive(pid)
     assert (paths.log_dir() / "service.log").exists()
     capsys.readouterr()
-    assert cli.main(["service", "start"]) == 0  # повторный — второй не запускает
+    assert cli.main(["service", "start"]) == 0  # a repeat — does not start a second one
     assert int(paths.service_pid_path().read_text(encoding="utf-8").strip()) == pid
     assert "уже запущен" in capsys.readouterr().out
     assert cli.main(["service", "stop"]) == 0
     assert not paths.service_pid_path().exists()
     assert not procs.alive(pid)
-    assert cli.main(["service", "stop"]) == 0  # остановка пустого — тихо, код 0
+    assert cli.main(["service", "stop"]) == 0  # stopping nothing — quiet, code 0
 
 
 def test_start_refuses_when_heartbeat_alive(monkeypatch, capsys):

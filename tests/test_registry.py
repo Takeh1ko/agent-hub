@@ -31,7 +31,7 @@ def test_seed_once(store):
 def test_pick_default_and_explicit(store):
     assert registry.pick(store, Role.EXECUTOR, None).alias == "spark"
     assert registry.pick(store, Role.EXECUTOR, None, explicit="deepseek-flash").alias == "deepseek-flash"
-    assert registry.pick(store, Role.EXECUTOR, None, explicit="spark-free").alias == "spark-free"  # вне меню — явно можно
+    assert registry.pick(store, Role.EXECUTOR, None, explicit="spark-free").alias == "spark-free"  # outside the menu — explicit is fine
     with pytest.raises(registry.RegistryError, match="нет модели"):
         registry.pick(store, Role.EXECUTOR, None, explicit="nope")
 
@@ -41,12 +41,12 @@ def test_project_deny_blocks_explicit_and_default(store):
     with pytest.raises(registry.RegistryError, match="запрещена в проекте webapp"):
         registry.pick(store, Role.EXECUTOR, p, explicit="deepseek-flash")
     registry.set_default(store, Role.SCOUT, "deepseek-flash")
-    assert registry.pick(store, Role.SCOUT, p).alias == "spark"  # умолчание запрещено — первая разрешённая
-    assert registry.pick(store, Role.SCOUT, _proj()).alias == "deepseek-flash"  # в другом проекте доступна
+    assert registry.pick(store, Role.SCOUT, p).alias == "spark"  # the default is denied — first allowed one
+    assert registry.pick(store, Role.SCOUT, _proj()).alias == "deepseek-flash"  # allowed in another project
 
 
 def test_orchestrator_cannot_lift_project_deny(store):
-    """Никакая ручка реестра не снимает запрет проекта: даже добавив свою модель с тем же id."""
+    """No registry knob lifts a project deny: not even by adding your own model with the same id."""
     p = _proj(deny=["deepseek"])
     registry.add_model(store, "ds2", "opencode", "opencode-go/deepseek-v4.1-flash", "low")
     registry.add_to_role(store, Role.EXECUTOR, "ds2", default=True)
@@ -68,7 +68,7 @@ def test_disabled_and_empty_menu(store):
 def test_menu_edits(store):
     registry.add_to_role(store, Role.SCOUT, "mimo-flash")
     assert [e.alias for e, _ in registry.menu(store, Role.SCOUT)] == ["spark", "deepseek-flash", "mimo-flash"]
-    registry.remove_from_role(store, Role.SCOUT, "spark")  # был по умолчанию → умолчание переходит первому
+    registry.remove_from_role(store, Role.SCOUT, "spark")  # it was the default → the default goes to the first one
     assert [e.alias for e, d in registry.menu(store, Role.SCOUT) if d] == ["deepseek-flash"]
     registry.remove_from_role(store, Role.SCOUT, "mimo-flash")
     with pytest.raises(registry.RegistryError, match="хотя бы одна"):

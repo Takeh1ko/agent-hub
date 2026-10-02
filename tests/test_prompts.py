@@ -1,12 +1,12 @@
-"""i18n шаг 7: промпты моделям на английском, язык ответа = язык хаба."""
+"""i18n step 7: prompts to models in English, the answer language follows the hub language."""
 
 from __future__ import annotations
 
 import re
 
 _CYR = re.compile(r"[а-яА-ЯёЁ]")
-# Кириллица, разрешённая в промптах при ru: заголовок сути, финальное слово-пример,
-# заголовок арбитра и указаний оркестратора (п.3 плана; review/views понимают оба).
+# Cyrillic allowed in prompts when lang is ru: the essence heading, the final-word example,
+# the arbiter and orchestrator headings (plan item 3; review/views understand both).
 _ALLOWED_RU = ["Суть", "готово", "заблокировано", "причина", "Решение", "решения",
                "арбитра", "арбитр", "оркестратора", "оркестратор", "Указания", "доработка"]
 
@@ -15,7 +15,7 @@ def _strip_allowed(text: str) -> str:
     out = text
     for w in _ALLOWED_RU:
         out = out.replace(w, "").replace(w.capitalize(), "")
-    # ## Суть без решётки тоже вычищена через "Суть"
+    # "## Суть" without the hashes is stripped too, via "Суть"
     return out
 
 
@@ -73,7 +73,7 @@ def _collect(lang: str, tmp_path) -> list[str]:
         oc.prompt_arg("x" * 70_000, str(tmp_path)),
         oc.prompt_arg("short", str(tmp_path)),
     ]
-    # findings + red gate branch of fix_prompt
+    # findings + the red-gate branch of fix_prompt
     f = review.Finding(severity="high", file="core/b.py", line=1, issue="Y must be 3", fix="set 3")
     out.append(review.fix_prompt([f], gate=gates.GateResult(
         base="b", head="h", tests_ok=False, tests_cmd="pytest", tests_tail="fail")))
@@ -127,7 +127,7 @@ def test_no_cyrillic_ru_except_allowed(tmp_path, monkeypatch):
 
 
 def test_drafts_kind_ru_en(tmp_path):
-    """Разбор черновика принимает kind на обоих языках, коды — английские."""
+    """Draft parsing accepts kind in both languages, the codes are English."""
     from ahub import config, drafts
 
     import sys
@@ -143,7 +143,7 @@ def test_drafts_kind_ru_en(tmp_path):
 
 
 def test_verdict_codes_english():
-    """Вердикты ревью/наблюдателя — английские коды."""
+    """Review/observer verdicts are English codes."""
     from ahub import review
 
     assert set(review.VERDICTS) == {"approve", "changes", "dispute"}
