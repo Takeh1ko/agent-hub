@@ -45,9 +45,9 @@ def build_session(hub: config.HubConfig | None = None):
     proxy = cfg_proxy or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     if not proxy:
         return None
-    from ahub.tg.proxy import HttpProxySession
+    from ahub.tg.proxy import build as _build_session
 
-    return HttpProxySession(proxy)
+    return _build_session(proxy)
 
 
 async def _send(bot, store: Store, reply: core.Reply) -> list[tuple[int, int]]:
