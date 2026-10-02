@@ -6,28 +6,18 @@ import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-def _system_tz():
-    """Системный локальный пояс; нет — UTC (без падения)."""
-    tz = datetime.now().astimezone().tzinfo
-    return tz if tz is not None else timezone.utc
-
-
-def local_tz():
-    """Пояс экрана: AHUB_TZ (имя IANA) или системный; неверное имя — системный."""
+def local_tz() -> ZoneInfo | None:
+    """Пояс экрана: ZoneInfo(AHUB_TZ) или None (системный). Неверное имя — None."""
     name = os.environ.get("AHUB_TZ", "").strip()
-    if name:
-        try:
-            return ZoneInfo(name)
-        except Exception:
-            pass
-    return _system_tz()
-
-
-# Снимок на момент импорта (совместимость); актуальный — local_tz().
-TZ = local_tz()
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
 
 
 def now_ms() -> int:
@@ -36,8 +26,17 @@ def now_ms() -> int:
 
 
 def to_local(ms: int) -> datetime:
-    """Мс UTC → локальное время (системный пояс или AHUB_TZ)."""
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(local_tz())
+    """Мс UTC → локальное время (AHUB_TZ или системный, по правилам даты)."""
+    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+    tz = local_tz()
+    return dt.astimezone(tz) if tz is not None else dt.astimezone()
+
+
+def _local_dt(y: int, mo: int, d: int, hh: int = 0, mm: int = 0, tz: ZoneInfo | None = None) -> datetime:
+    """Локальная стена → aware (AHUB_TZ или системный, по правилам даты)."""
+    if tz is not None:
+        return datetime(y, mo, d, hh, mm, tzinfo=tz)
+    return datetime(y, mo, d, hh, mm).astimezone()
 
 
 def fmt_local(ms: int, now: int | None = None) -> str:
@@ -74,7 +73,7 @@ def _unit_ms(unit: str | None) -> int | None:
 
 
 def parse_since(text: str, now: int) -> int:
-    """Строка → мс UTC. Пояс экрана (системный или AHUB_TZ).
+    """Строка → мс UTC. Пояс экрана (AHUB_TZ или системный).
 
     Понимает «2026-09-28 20:00» (локальное), «сегодня 20:00»,
     «2ч», «30м», «1д». Возвращает мс для сравнения с now_ms().
@@ -86,20 +85,19 @@ def parse_since(text: str, now: int) -> int:
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
         hh = int(m.group(4)) if m.group(4) is not None else 0
         mm = int(m.group(5)) if m.group(5) is not None else 0
-        dt = datetime(y, mo, d, hh, mm, tzinfo=tz)
-        return int(dt.timestamp() * 1000)
+        return int(_local_dt(y, mo, d, hh, mm, tz).timestamp() * 1000)
     m = _TODAY.match(s)
     if m:
-        base = to_local(now).replace(hour=0, minute=0, second=0, microsecond=0)
-        if m.group(1) is not None:
-            base = base.replace(hour=int(m.group(1)), minute=int(m.group(2)))
-        return int(base.timestamp() * 1000)
+        day = to_local(now).date()
+        hh = int(m.group(1)) if m.group(1) is not None else 0
+        mm = int(m.group(2)) if m.group(2) is not None else 0
+        return int(_local_dt(day.year, day.month, day.day, hh, mm, tz).timestamp() * 1000)
     m = _YESTERDAY.match(s)
     if m:
-        base = to_local(now).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
-        if m.group(1) is not None:
-            base = base.replace(hour=int(m.group(1)), minute=int(m.group(2)))
-        return int(base.timestamp() * 1000)
+        day = to_local(now).date() - timedelta(days=1)
+        hh = int(m.group(1)) if m.group(1) is not None else 0
+        mm = int(m.group(2)) if m.group(2) is not None else 0
+        return int(_local_dt(day.year, day.month, day.day, hh, mm, tz).timestamp() * 1000)
     m = _REL.match(s)
     if m:
         unit_ms = _unit_ms(m.group(2))
