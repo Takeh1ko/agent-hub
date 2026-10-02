@@ -207,6 +207,17 @@ def extend_paths(store: Store, project: ProjectConfig, task_id: int, paths: list
     return _t("accept.paths_added", label=t.label, items=", ".join(added))
 
 
+def _stopped_by_budget(store: Store, task_id: int) -> bool:
+    """Задача стоит из-за бюджета: после остановки по бюджету (budget_hard) она не выходила из «нужно решение»."""
+    stopped = False
+    for e in store.events(task_id=task_id):
+        if e.kind == Ev.BUDGET_HARD.value:
+            stopped = True
+        elif e.kind == Ev.STATE.value and (e.payload or {}).get("to") != State.NEEDS_DECISION.value:
+            stopped = False
+    return stopped
+
+
 def extend_budget(store: Store, task_id: int, *, add: float | None = None, set_to: float | None = None,
                   add_usd: float | None = None, by: str = "orchestrator") -> str:
     """Продлить бюджет одним действием: увеличен + (если задача стояла из-за бюджета) продолжена.
@@ -224,7 +235,7 @@ def extend_budget(store: Store, task_id: int, *, add: float | None = None, set_t
     msg = _t("accept.budget_msg", label=t.label, old=f"{t.budget_go:g}", new=f"{new:g}") + (
         _t("accept.budget_usd", old=f"{t.budget_usd:g}", new=f"{new_usd:g}")
         if new_usd != t.budget_usd else "")
-    if t.state is State.NEEDS_DECISION and t.state_reason.startswith(("бюджет", "budget")):
+    if t.state is State.NEEDS_DECISION and _stopped_by_budget(store, t.id):
         transitions.move(store, t.id, State.QUEUED, reason=_t("accept.budget_long"), by=by)
         events.ack_task(store, t.id)
         msg += _t("accept.budget_resumed")
