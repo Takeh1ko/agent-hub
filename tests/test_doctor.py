@@ -1,0 +1,272 @@
+"""ahub doctor: installation check on a faked env (HOME is tmp via conftest)."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import socket
+import subprocess
+import types
+from pathlib import Path
+
+from ahub import cli, doctor, paths
+from ahub.providers.base import Health
+from ahub.service import HEARTBEAT_KEY
+from ahub.store import Store
+from ahub.time import now_ms
+from tests.conftest import write
+
+
+def test_python_ok_and_bad():
+    c = doctor.check_python((3, 11))
+    assert c.name == "python" and c.ok is True and "3.11" in c.detail and not c.fix
+    c = doctor.check_python((3, 10))
+    assert c.ok is False and "3.10" in c.detail and c.fix
+
+
+def _fake_run_ok(cmd, **kw):
+    assert cmd[:2] == ["/usr/bin/git", "--version"] or cmd[1] == "--version"
+    return subprocess.CompletedProcess(cmd, 0, stdout="git version 2.43.0\n", stderr="")
+
+
+def test_git_ok_missing_fail(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/git" if name == "git" else None)
+    monkeypatch.setattr(subprocess, "run", _fake_run_ok)
+    c = doctor.check_git()
+    assert c.ok is True and "2.43.0" in c.detail
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    c = doctor.check_git()
+    assert c.ok is False and c.fix
+    def _boom(cmd, **kw):
+        raise OSError("no exec")
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/git")
+    monkeypatch.setattr(subprocess, "run", _boom)
+    assert doctor.check_git().ok is False
+
+
+def test_config_ok_and_bad():
+    c = doctor.check_config()
+    assert c.name == "config" and c.ok is True
+    write(paths.global_config_path(), 'lang = "de"\n')
+    c = doctor.check_config()
+    assert c.ok is False and c.detail and c.fix
+
+
+def test_service_alive_dead_unit(monkeypatch):
+    c = doctor.check_service()
+    assert c.ok is False and "install" in c.fix  # no heartbeat, no unit in tmp HOME
+    Store().meta_set(HEARTBEAT_KEY, str(now_ms()))
+    assert doctor.check_service().ok is True
+    Store().meta_set(HEARTBEAT_KEY, str(now_ms() - 600_000))
+    unit = Path.home() / ".config" / "systemd" / "user" / "ahub.service"
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("[Unit]\n", encoding="utf-8")
+    c = doctor.check_service()
+    assert c.ok is False and "start" in c.fix and str(unit) in c.detail
+
+
+def test_opencode_bin_found_missing(monkeypatch, tmp_path):
+    fake = tmp_path / "opencode"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda name: str(fake) if name == "opencode" else None)
+    c = doctor.check_opencode()
+    assert c.ok is True and str(fake) in c.detail
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    c = doctor.check_opencode()
+    assert c.ok is False and c.fix
+
+
+def test_opencode_health_ok_bad(monkeypatch):
+    from ahub import providers
+
+    monkeypatch.setattr(providers, "get",
+                        lambda name: types.SimpleNamespace(health=lambda: Health(True, (), {"version": "1.2.3"})))
+    c = doctor.check_opencode_health()
+    assert c.ok is True and "1.2.3" in c.detail
+    monkeypatch.setattr(providers, "get",
+                        lambda name: types.SimpleNamespace(health=lambda: Health(False, ("db gone",), {})))
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    c = doctor.check_opencode_health()
+    assert c.ok is False and "db gone" in c.detail
+
+
+def _write_auth(data: dict) -> Path:
+    p = doctor.auth_file_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data), encoding="utf-8")
+    return p
+
+
+def test_auth_providers_only_keys_no_values(monkeypatch, tmp_path):
+    secret = "SECRET-KEY-12345"
+    _write_auth({"opencode-go": {"apiKey": secret}, "opencode": {"type": "api", "key": secret}})
+    monkeypatch.setattr(shutil, "which", lambda name: None)  # no `opencode auth list`, only the file
+    provs = doctor.auth_providers()
+    assert provs == ["opencode", "opencode-go"]
+    assert doctor.has_go_login(provs) is True
+    c = doctor.check_opencode_auth()
+    assert c.ok is True and "opencode-go" in c.detail
+    assert secret not in c.detail and secret not in c.fix
+    assert secret not in json.dumps([vars(x) for x in doctor.run_all()], ensure_ascii=False)
+
+
+def test_auth_list_colors_and_free_only(monkeypatch):
+    colored = "\x1b[0m\n\x1b[90mCreds\n\x1b[0m\u25cf  OpenCode Zen \x1b[90mapi\n\u25cf  OpenCode Go \x1b[90mapi\n"
+    def _run(cmd, **kw):
+        assert cmd[-2:] == ["auth", "list"]
+        return subprocess.CompletedProcess(cmd, 0, stdout=colored, stderr="")
+    monkeypatch.setattr(subprocess, "run", _run)
+    assert doctor._providers_from_auth_list("/fake/opencode") == {"opencode", "opencode-go"}
+    # file without go -> free-only detail (auth list disabled)
+    def _no_run(cmd, **kw):
+        raise OSError("no binary")
+    monkeypatch.setattr(subprocess, "run", _no_run)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _write_auth({"opencode": {"k": "v"}})
+    c = doctor.check_opencode_auth()
+    assert c.ok is True and "opencode" in c.detail
+    # no login at all
+    p = doctor.auth_file_path()
+    if p.exists():
+        p.unlink()
+    c = doctor.check_opencode_auth()
+    assert c.ok is False and "auth login" in c.fix
+
+
+def test_agy_found_missing(monkeypatch, tmp_path):
+    fake = tmp_path / "agy"
+    fake.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(shutil, "which", lambda name: str(fake) if name == "agy" else None)
+    c = doctor.check_agy()
+    assert c.ok is None and str(fake) in c.detail
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert doctor.check_agy().ok is None
+
+
+def test_models_go_and_free_fix():
+    assert doctor.check_models(["opencode", "opencode-go"]).ok is True
+    c = doctor.check_models(["opencode"])
+    assert c.ok is False and "executor" in c.detail
+    assert "ahub models role executor --set-default spark-free" in c.fix
+    c = doctor.check_models([])
+    assert c.ok is False and c.fix
+
+
+def test_models_fix_commands_execute(capsys):
+    """Suggested fix must run as-is: --add when the alias is out of the menu, then --set-default."""
+    c = doctor.check_models([])
+    assert c.ok is False and c.fix
+    assert "--add spark-free" in c.fix  # spark-free is not in role menus by default
+    for group in c.fix.split("; "):
+        for part in group.split(" && "):
+            assert part.startswith("ahub ")
+            assert cli.main(part.split()[1:]) == 0
+        capsys.readouterr()
+    assert doctor.check_models([]).ok is True
+
+
+def test_network_no_proxy_and_down(monkeypatch):
+    for v in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(v, raising=False)
+    assert doctor.check_network().ok is True
+    import ahub.observer as obs
+
+    monkeypatch.setattr(obs, "proxy_problem", lambda *a, **k: "proxy 1.2.3.4:5 is not responding (X)")
+    c = doctor.check_network()
+    assert c.ok is False and c.fix
+
+
+def test_network_proxy_ok(monkeypatch):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{port}")
+        for v in ("https_proxy", "ALL_PROXY", "all_proxy"):
+            monkeypatch.delenv(v, raising=False)
+        c = doctor.check_network()
+        assert c.ok is True and str(port) in c.detail
+    finally:
+        srv.close()
+
+
+def test_claude_and_skill(monkeypatch, tmp_path):
+    from ahub.tg import launcher
+
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(launcher, "claude_bin", lambda: str(fake))
+    assert doctor.check_claude().ok is True
+    monkeypatch.setattr(launcher, "claude_bin", lambda: str(tmp_path / "gone"))
+    assert doctor.check_claude().ok is False
+    monkeypatch.setattr(launcher, "claude_bin", lambda: None)
+    c = doctor.check_claude()
+    assert c.ok is False and c.fix
+    assert doctor.check_claude_skill().ok is False
+    p = doctor.skill_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# skill\n", encoding="utf-8")
+    assert doctor.check_claude_skill().ok is True
+
+
+def test_claude_config_override_needs_file_and_exec(tmp_path):
+    write(paths.global_config_path(), f'[paths]\nclaude = "{tmp_path}/nope"\n')
+    assert doctor.check_claude().ok is False
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\n")  # not executable yet
+    write(paths.global_config_path(), f'[paths]\nclaude = "{fake}"\n')
+    assert doctor.check_claude().ok is False
+    fake.chmod(0o755)
+    c = doctor.check_claude()
+    assert c.ok is True and str(fake) in c.detail
+
+
+def test_telegram_off_configured(monkeypatch):
+    assert doctor.check_telegram().ok is None  # no [telegram] token
+    write(paths.global_config_path(), 'projects = []\n[telegram]\ntoken = "bot123"\nchat_id = 1\n')
+    import importlib.util as iu
+
+    monkeypatch.setattr(iu, "find_spec", lambda name: object())
+    assert doctor.check_telegram().ok is True
+    monkeypatch.setattr(iu, "find_spec", lambda name: None)
+    c = doctor.check_telegram()
+    assert c.ok is False and "ahub[telegram]" in c.fix
+
+
+def test_run_all_never_raises(monkeypatch):
+    def _boom():
+        raise RuntimeError("boom")
+    monkeypatch.setattr(doctor, "check_git", _boom)
+    checks = doctor.run_all()
+    assert len(checks) == 13
+    git = next(c for c in checks if c.name == "git")
+    assert git.ok is False and "boom" in git.detail
+
+
+def test_cli_codes_and_json(capsys, monkeypatch):
+    secret = "SECRET-CLI-999"
+    _write_auth({"opencode": {"apiKey": secret}})
+    assert cli.main(["--json", "doctor"]) in (0, 1)
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert isinstance(data["checks"], list) and len(data["checks"]) == 13
+    assert secret not in out
+    for c in data["checks"]:
+        assert set(c) == {"name", "ok", "detail", "fix"}
+        assert c["ok"] in (True, False, None)
+    # forced all-ok -> exit 0, one fail -> exit 1 with marks and fix arrow
+    monkeypatch.setattr(doctor, "run_all",
+                        lambda: [doctor.Check("python", True, "d", ""),
+                                 doctor.Check("git", None, "d", "")])
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "\u2713" in out and "\u2013" in out
+    monkeypatch.setattr(doctor, "run_all",
+                        lambda: [doctor.Check("python", False, "bad", "fix it")])
+    assert cli.main(["doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "\u2717" in out and "\u2192" in out and "fix it" in out
