@@ -1,335 +1,354 @@
-# agent-hub v2 — архитектура (финал, абстрактный уровень)
+# agent-hub v2 — architecture (final, abstract level)
 
-Статус: финал 2026-09-30 — после двух кругов критики Spark (`critique_r1.md`, `critique_r2.md`) и согласования
-с владельцем. План выполнения — `plan.md`. Без технических деталей: кто есть в
-системе, что делает, кто кого вызывает, как идут задача и данные. Числа (пороги, повторы, дефолты) — ориентиры
-из v1, окончательно — в плане.
+Status: final, 2026-09-30 — after two rounds of Spark critique and agreement with the owner.
+No technical details: who is in the system, what it does, who calls whom, how a task and its data flow.
+Numbers (thresholds, retries, defaults) are orientation from v1; the plan holds the final values.
 
-## 0. Зачем и главные принципы
+## 0. Why, and the main principles
 
-agent-hub — сервис, через который **оркестратор** (Claude Code или любой CLI-агент) и **человек** раздают
-работу дешёвым моделям-работникам, следят за ней и принимают результат.
+agent-hub is a service through which an **orchestrator** (Claude Code or any CLI agent) and a **human** hand work to
+cheap worker models, watch that work, and accept the result.
 
-Принципы по важности:
-1. **Экономия токенов оркестратора.** Оркестратор получает минимум, достаточный для решения, и отдаёт минимум —
-   но не меньше: работа должна делаться. Подробности — только по явному запросу, уровнями, с жёсткими лимитами
-   размера. Хаб сам будит оркестратора, когда нужно его решение, — оркестратор не опрашивает.
-2. **Связная работа с Claude Code — первым классом.** Универсальный интерфейс для любого CLI-агента — основа;
-   если универсальность мешает качеству работы с Claude, выигрывает Claude.
-3. **Отказоустойчивость и наблюдаемость.** Любая ошибка оставляет след в логах; у каждой задачи честный пульс;
-   отдельный наблюдатель следит за работой самого хаба; после падения/перезапуска/обновления всё продолжается с места.
-4. **Расширяемость поставщиков.** Поставщик моделей (opencode, agy; позже Codex, DeepSeek harness…) — сменный модуль.
-5. **Человек видит всё и может вмешаться**, но по умолчанию только смотрит.
+Principles, by importance:
+1. **Save the orchestrator's tokens.** The orchestrator receives the minimum needed to decide and gives the minimum back —
+   but no less: the work must get done. Details only on explicit request, level by level, with hard size limits.
+   The hub wakes the orchestrator when it needs a decision — the orchestrator does not poll.
+2. **Working with Claude Code is a first-class case.** A universal interface for any CLI agent is the base; where
+   universality hurts quality of work with Claude, Claude wins.
+3. **Fault tolerance and observability.** Every error leaves a trace in the logs; every task has an honest pulse;
+   a separate observer watches the hub itself; after a crash, restart or update everything continues where it stopped.
+4. **Extensible providers.** A model provider is a replaceable module registered by name (today opencode; agy next,
+   then Codex, a DeepSeek harness…).
+5. **The human sees everything and can intervene**, but by default only watches.
 
-## 1. Участники
+## 1. Participants
 
-| Участник | Кто это | Как связан с хабом |
+| Participant | What it is | How it connects to the hub |
 |---|---|---|
-| Оркестратор | Claude Code (в приоритете), Codex, DeepSeek harness, любой CLI-агент | ручки оркестратора (§9) |
-| Человек в терминале | владелец | терминальное приложение (§10) |
-| Человек в TG | владелец «из отпуска» | связь с Claude + просмотр задач (§11) |
-| Работник | дешёвая модель в роли исполнителя/ревьюера/разведчика/рутинщика | через модуль поставщика (§3) |
-| Наблюдатель | системная роль (Spark, medium/high) | следит за хабом (§8) |
-| Хаб-сервис | один фоновый сервис под присмотром ОС | ведёт задачи, пульс, наблюдателя, связь с TG |
+| Orchestrator | Claude Code (preferred), Codex, DeepSeek harness, any CLI agent | orchestrator handles (§9) |
+| Human in a terminal | the owner | terminal app (§10) |
+| Human in Telegram | the owner "on holiday" | link to Claude + task view (§11) |
+| Worker | a cheap model as executor / reviewer / scout / routine hand | through a provider module (§3) |
+| Observer | a system role (Spark, medium/high) | watches the hub (§8) |
+| Hub service | one background service supervised by the OS | owns tasks, pulse, observer, Telegram link |
 
-## 2. Общая схема
+## 2. General scheme
 
 ```
-  Оркестратор (Claude Code / CLI-агент)      Человек (терминал)        Человек (TG)
-        │  команды / поток событий                │                         │
-        ▼                                         ▼                         ▼
- ┌──────────────────────────────── КЛИЕНТЫ (единые ручки) ──────────────────────────────┐
- │  ручки оркестратора           терминальное приложение       TG-бот: связь с Claude   │
- │  (CLI · пакет Claude · MCP)   (просмотр / управление)        + просмотр задач        │
- └───────────────────────────────────────────┬──────────────────────────────────────────┘
-                                             ▼
- ┌──────────────────────────────── ХАБ-СЕРВИС (ядро) ───────────────────────────────────┐
- │  Реестр моделей и ролей · Задачи и очередь · Движок · Ворота · Пульс · Бюджеты       │
- │  Журнал событий и доставка · Логи · Наблюдатель · Присутствие и запуск Claude        │
- │  Процессы задач (отдельные, переживают перезапуск сервиса)                           │
- └───────────┬──────────────────────────────────────────────────────┬───────────────────┘
-             ▼                                                      ▼
- ┌──── ПОСТАВЩИКИ (модули) ────┐                        ┌──── АРХИВ ПРОЕКТА ────┐
- │ opencode · agy · (Codex …)  │── сессии моделей ──►   │ <проект>/.agent-hub/  │
- └─────────────────────────────┘   в копии проекта      └───────────────────────┘
-        ▲ внешний сторож (средство ОС): поднимает упавший сервис
+  Orchestrator (Claude Code / CLI agent)    Human (terminal)         Human (Telegram)
+         │  commands / event stream               │                          │
+         ▼                                        ▼                          ▼
+ ┌────────────────────── CLIENTS (one set of handles) ─────────────────────────┐
+ │ orchestrator handles      terminal app              Telegram bot: link to    │
+ │ (CLI · Claude package ·   (view / control)          Claude + task view       │
+ │  MCP)                                                              │          │
+ └──────────────────────────────────────────────────┬──────────────────────────┘
+                                                    ▼
+ ┌───────────────────────── HUB SERVICE (core) ────────────────────────────────┐
+ │  Model and role registry · Tasks and queue · Engine · Gates · Pulse ·      │
+ │  Budgets · Event log and delivery · Logs · Observer · Presence and          │
+ │  launching Claude · Task processes (separate, survive a service restart)   │
+ └──────────┬──────────────────────────────────────────────┬─────────────────┘
+            ▼                                              ▼
+ ┌──── PROVIDERS (modules) ────┐                ┌──── PROJECT ARCHIVE ────┐
+ │ opencode · agy · (Codex …)  │── model sessions ──► │ <project>/.agent-hub/  │
+ └────────────────────────────┘   inside the copy  └────────────────────────┘
+        ▲ external supervisor (an OS facility): restarts a fallen service
 ```
 
-- **Один владелец у каждой задачи.** Шаги задачи (подготовка, работа, ворота, ревью, слияние) выполняет её
-  собственный процесс — он единственный, кто меняет её состояние, пока жив. Сервис планирует (очередь, места),
-  наблюдает и забирает задачу себе только когда её процесс умер. Клиенты (CLI, терминал, TG, MCP) состояние
-  не меняют напрямую — они просят сервис/владельца задачи через ручки. Переходы идемпотентны: повтор команды
-  или перезапуск посреди шага не дают дубля (двойного слияния, второй сессии).
-- Один хаб на машину, обслуживает все проекты; проект определяется по каталогу, из которого пришла команда.
-- Состояние хаба — в его хранилище (вне проектов). В проекте — только локальный архив для человека (§12).
-- **Истина о работе — у первоисточников**: поставщик (активность, токены, деньги), git (коммиты, дифф), ОС
-  (живы ли процессы). Хранилище хаба — связи, очередь, события, решения; спорное перепроверяется по первоисточнику.
+- **Every task has one owner.** The steps of a task (preparation, work, gates, review, merge) are performed by its own
+  process — while it lives, it is the only one that changes the task's state. The service plans (queue, slots), watches,
+  and takes the task over only when its process is dead. Clients (CLI, terminal, Telegram, MCP) never change state
+  directly — they ask the service or the task owner through handles. Transitions are idempotent: a repeated command
+  or a restart in the middle of a step never duplicates work (no double merge, no second session).
+- One hub per machine, serving all projects; the project is determined by the directory a command came from.
+- Hub state lives in its own storage (outside projects). Inside a project there is only a local archive for the human
+  (§12).
+- **The truth about work lives at the sources**: the provider (activity, tokens, money), git (commits, diff), the OS
+  (are processes alive). The hub's storage holds relations, queue, events, decisions; anything disputed is rechecked
+  against the source.
 
-## 3. Поставщики моделей
+## 3. Model providers
 
-Поставщик — модуль, работающий с одним источником моделей, куда у пользователя есть вход. Все модули отвечают
-одному **контракту возможностей**; ядро не знает, как устроен конкретный поставщик.
+A provider is a module that works with one source of models the user has access to. All modules answer one
+**capability contract**; the core does not know how a concrete provider is built.
 
-Контракт:
-- **Каталог:** модели, варианты размышления, цены или квоты, что модель умеет.
-- **Сессия:** начать с заданием в заданном каталоге; продолжить ту же сессию новым сообщением (идентификатор
-  сессии ловится сразу при старте; есть запасной способ найти сессию, если он не пойман); прервать; жив ли процесс
-  и его дочерние процессы.
-- **Поток активности:** шаги, вызовы инструментов (какой идёт сейчас и сколько), текст, ошибки — нормализованно,
-  плюс сырые события для разбора.
-- **Итог:** последний ответ; структурированный итог по заданной форме, если поставщик умеет; статус завершения —
-  **классифицированный**: успех / ошибка модели / сбой сети-сервера / тишина / квота / нет доступа.
-- **Учёт:** токены, деньги по счётчикам (подписка Go «по прайсу», реальные деньги, квота окном), остаток лимита.
-- **Журнал сессии:** полная расшифровка по запросу (глубокий разбор, не для оркестратора).
-- **Здоровье:** доступен ли, авторизован ли, работает ли сеть/прокси, не исчерпана ли квота.
-- **Изоляция:** работа только в выданном каталоге, без доступа к боевому хранилищу хаба и секретам.
+The contract:
+- **Catalog:** models, reasoning variants, prices or quotas, what a model can do.
+- **Session:** start with an assignment in a given directory; continue the same session with a new message (the session
+  id is caught at start; there is a fallback way to find the session if it was not caught); interrupt; whether the
+  process and its children are alive.
+- **Activity stream:** steps, tool calls (which one is running and for how long), text, errors — normalized, plus
+  raw events for analysis.
+- **Outcome:** the last answer; a structured result in a given shape if the provider can do that; completion status —
+  **classified**: success / model error / network-server failure / silence / quota / no access.
+- **Accounting:** tokens, money by counters (a Go subscription "at plan price", real money, quota windows), limit left.
+- **Session log:** a full transcript on request (deep analysis, not for the orchestrator).
+- **Health:** reachable, authorized, network/proxy working, quota not exhausted.
+- **Isolation:** work only in the given directory, without access to the live hub storage or to secrets.
 
-Разделение ответственности: поставщик **классифицирует** сбой, ядро **решает**, что делать (повтор, ожидание,
-«Нужно решение»). Каждый модуль объявляет, что из контракта поддерживает; чего нет — честное «нет данных», не
-падение. Новый поставщик = новый модуль, ядро не меняется.
+Division of responsibility: the provider **classifies** the failure, the core **decides** what to do (retry, wait,
+"needs decision"). Every module declares which parts of the contract it supports; what it does not have is an honest
+"no data", not a failure. A new provider is a new module; the core does not change.
 
-Модель в хабе = поставщик + модель + вариант размышления под коротким именем (`spark`, `spark-medium`, `mimo-flash`…).
+A model in the hub = provider + model + reasoning variant under a short name (`spark`, `spark-medium`, `mimo-flash`…).
 
-## 4. Реестр моделей и ролей
+## 4. Model and role registry
 
-Роли: **исполнитель**, **ревьюер**, **разведчик**, **рутинщик**, **наблюдатель** (системная).
+Roles: **executor**, **reviewer**, **scout**, **routine hand**, **observer** (system), **drafter** (system).
 
-- На каждую роль — набор допустимых моделей (добавить/убрать) и модель по умолчанию.
-  По умолчанию: исполнитель, ревьюер — Spark 1.3, MiMo 2.6 Flash, DeepSeek v4.1 Flash; разведчик — Spark 1.3,
-  DeepSeek; наблюдатель — Spark 1.3 medium/high.
-- Набор — **меню**: берётся модель по умолчанию или явно выбранная. **Автоподмены нет**: если модель не работает,
-  это видно (пульс, событие), и человек или Claude вручную меняет модель задачи ручкой «сменить модель».
-- Уровень проекта сужает меню (в PlayerUP DeepSeek запрещён; на уровне хаба доступен).
-- Меню хаба меняет человек в терминале (режим управления) или оркестратор ручкой. **Запреты проекта снимает
-  только человек** — ручка оркестратора их не обходит.
+- Every role has a set of allowed models (add/remove) and a default model.
+  Defaults: executor, reviewer — Spark 1.3, MiMo 2.6 Flash, DeepSeek v4.1 Flash; scout — Spark 1.3, DeepSeek;
+  observer — Spark 1.3 medium/high; drafter — Spark 1.3 high.
+- A set is a **menu**: the default model is used, or an explicitly chosen one. **No automatic substitution**: if a model
+  does not work, that is visible (pulse, event), and a human or Claude changes the task's model by hand with the
+  "change model" handle.
+- The project level narrows the menu (a project can ban DeepSeek; at hub level it is available).
+- A human changes the hub menu in the terminal (control mode) or the orchestrator changes it with a handle.
+  **A project ban is lifted only by a human** — the orchestrator handle does not bypass it.
 
-## 5. Задачи
+## 5. Tasks
 
-### Типы и ворота
-| Тип | Работник | Результат | Файлы | Ворота |
+### Kinds and gates
+| Kind | Worker | Result | Files | Gates |
 |---|---|---|---|---|
-| **Разведка** | изучает код/документы/информацию | отчёт | не меняет | отчёт есть и по форме; изменений нет |
-| **Код** | пишет код и тесты в своей копии проекта | ветка + отчёт | через слияние | строгие: коммит есть, дифф ⊆ разрешённых файлов, приёмка зелёная под замком проекта, отчёт работника по форме |
-| **Ревью** | проверяет явно указанный вход: ветку, коммит, диапазон или файлы | замечания | не меняет | замечания по форме (файл, строка, что исправить) |
-| **Рутина** | лёгкая работа с файлами (документация, раскладка, переименования; «документы» — сюда же) | изменения + отчёт | через слияние | облегчённые: коммит есть, дифф ⊆ разрешённых, без приёмочных тестов |
+| **Scout** | studies code / documents / information | report | changes nothing | the report exists and fits the shape; no changes |
+| **Code** | writes code and tests in its own copy of the project | branch + report | through a merge | strict: a commit exists, the diff ⊆ allowed files, acceptance is green under the project lock, the worker's report fits the shape |
+| **Review** | checks an explicitly given input: a branch, a commit, a range or files | findings | changes nothing | findings in the given shape (file, line, what to fix) |
+| **Routine** | light file work (documentation, laying out files, renames; "documents" belongs here too) | changes + report | through a merge | light: a commit exists, the diff ⊆ allowed files, no acceptance tests |
 
-Мелкий провал ворот (нет коммита, нет отчёта по форме) → одно «исправь и отчитайся» в ту же сессию; второй — Ошибка.
+A minor gate failure (no commit, no report in the shape) → one "fix it and report back" in the same session; a second
+one → Error.
 
-### Что задаётся при создании
-- цель (одна фраза) и описание (текст или файл);
-- тип и формат результата (свободный отчёт / по шаблону / изменения);
-- модель исполнителя (по умолчанию — из роли);
-- ревью: без ревью / N кругов / какие модели;
-- ограничения: разрешённые файлы, критерий приёмки, бюджет, лимит времени, «после задачи X», «не параллельно с …».
+### What a task is given at creation
+- a goal (one sentence) and a description (text or a file);
+- the kind and the shape of the result (free report / template / changes);
+- the executor model (by default — from the role);
+- review: none / N rounds / which models;
+- limits: allowed files, the acceptance criterion, budget, time limit, "after task X", "not in parallel with …".
 
-Всё, кроме цели и описания, имеет умолчания по типу. Перед запуском задача проверяется на полноту и
-противоречия (файлы существуют и разрешены проекту, приёмка собирается, модель доступна) — не прошла → отказ с
-причиной, модель за деньги не зовётся.
+Everything except the goal and the description has per-kind defaults. Before it starts, a task is checked for
+completeness and contradictions (the files exist and the project allows them, acceptance collects, the model is
+available) — if it does not pass → refusal with a reason, no model is called with money.
 
-**Черновик задачи.** Человек (терминал) пишет цель и описание своими словами → модель дописывает остальное
-(тип, файлы, проверку, модели) → предпросмотр → человек правит при желании → явное «Запустить». Без явного
-запуска задача не стартует. Оркестратор задаёт задачи сразу полностью (он знает поля), либо тоже через черновик.
+**Task draft.** A human (terminal) writes the goal and description in their own words → a model fills in the rest
+(kind, files, acceptance, models) → preview → the human edits if they want → an explicit "Start". Without an explicit
+start the task does not run. The orchestrator files tasks fully from the start (it knows the fields), or also through
+a draft.
 
-### Жизненный цикл (словами)
+### Lifecycle (in words)
 ```
-Черновик → В очереди → Подготовка → Изучает → Пишет → Проверка → Ревью → Доработка → … →
-   → Готово  |  Нужно решение  |  Ошибка  |  Остановлена
-   → Принята (слита / отчёт принят)  |  Отклонена
+Draft → Queued → Preparing → Studying → Writing → Checking → Reviewing → Fixing → … →
+   → Done  |  Needs decision  |  Error  |  Stopped
+   → Accepted (merged / report accepted)  |  Rejected
 ```
-- Разведка и ревью: Подготовка → Изучает → Отчёт → Готово.
-- Фазы «Изучает / Пишет / Проверка / Ревью» определяются по активности работника и этапу движка.
-- «Готово» → решение за оркестратором или человеком: принять / вернуть на доработку с замечаниями / отклонить.
-  Хаб сам ничего не сливает.
-- **Зависимость «после X»** выполняется, только когда X **принята**; новая задача стартует от кода, где X уже есть.
-  X отклонена или в Ошибке → зависимые переходят в «Нужно решение» с причиной.
+- Scout and review: Preparing → Studying → Reporting → Done.
+- The phases "Studying / Writing / Checking / Reviewing" are derived from worker activity and the engine stage.
+- "Done" → the decision belongs to the orchestrator or the human: accept / send back for rework with findings /
+  reject. The hub never merges on its own.
+- **An "after X" dependency** is met only when X is **accepted**; the new task starts from the code that already
+  contains X. If X is rejected or in Error, the dependent tasks move to "Needs decision" with the reason.
 
-### Активные и история
-- **Активные:** фаза, пульс, модель, круг, траты, сколько идёт.
-- **История:** итог, стоимость, длительность, круги ревью, модели, решения, отчёты, дифф — кратко в списке,
-  подробно по запросу.
+### Active tasks and history
+- **Active:** phase, pulse, model, round, spend, how long it has been going.
+- **History:** outcome, cost, duration, review rounds, models, decisions, reports, diff — briefly in the list, in
+  detail on request.
 
-## 6. Движок задачи (как всё дёргается)
+## 6. The task engine (how everything is kicked)
 
-Задача кода:
-1. **Приём и проверка** (§5) → **Очередь**: свободное место (лимит параллельности проекта), «после X», конфликтующие
-   ресурсы (общая тестовая БД, внешний сервис «строго по одной»).
-2. **Подготовка:** отдельная копия проекта (без секретов) и ветка; окружение (тесты собираются, хуки проекта
-   прошли, замок доступен). Провал подготовки → Ошибка с причиной, модель не вызывается.
-3. **Работа:** поставщик начинает сессию с заданием (правила + задача). Активность → пульс и фазы.
-   Классифицированный сбой → решение ядра: сбой сети/сервера → повтор с паузой (та же сессия, если известна);
-   тишина → прервать и **один раз** продолжить той же сессией, потом — Нужно решение; квота → ожидание окна
-   или Нужно решение; нет доступа/ошибка модели → Ошибка.
-4. **Ворота** (§5, без моделей).
-5. **Ревью:** ревьюеры в новых сессиях видят задачу и изменения, но не решения-эталоны оркестратора.
-   Все согласны → Готово. Замечания → Доработка той же сессией исполнителя (новый круг). Спор засчитывается только
-   с обоснованием и местом в коде. Круги кончились → Нужно решение.
-6. **Итог:** событие «Готово / Нужно решение / Ошибка» → доставка оркестратору (§9) → запись в архив (§12).
-7. **Принятие:** принять (слить в рабочую ветку → приёмка ещё раз → при провале откат) / доработать / отклонить.
-   Законные пути для оркестратора: **своя правка поверх результата** («правка оркестратора» — отмечается в журнале,
-   дальше обычные ворота) и **расширение разрешённых файлов** решением оркестратора (явный список, запись в журнал).
-   Дифф для ревью, ворота и слияние считаются от одной и той же базы.
-8. **Продолжить** (после Остановлена/Ошибка/Нужно решение): незакоммиченная работа сохраняется, задача идёт дальше
-   той же сессией; если постановка изменилась (другой отпечаток текста) — новой сессией.
+A code task:
+1. **Intake and validation** (§5) → **Queue**: a free slot (the project's parallelism limit), "after X", conflicting
+   resources (a shared test database, an external service that is "strictly one at a time").
+2. **Preparation:** a separate copy of the project (without secrets) and a branch; the environment (tests collect,
+   the project hooks have run, the lock is available). Preparation fails → Error with the reason, the model is not
+   called.
+3. **Work:** the provider starts a session with the assignment (rules + task). Activity → pulse and phases.
+   A classified failure → a core decision: network/server failure → retry after a pause (the same session, if it is
+   known); silence → interrupt and continue **once** in the same session, then → Needs decision; quota → wait for the
+   window or Needs decision; no access / model error → Error.
+4. **Gates** (§5, no models involved).
+5. **Review:** reviewers in new sessions see the task and the changes, but not the orchestrator's reference decisions.
+   All agree → Done. Findings → Fixing in the same executor session (a new round). A dispute counts only with a
+   justification and a place in the code. Rounds are over → Needs decision.
+6. **Outcome:** a "Done / Needs decision / Error" event → delivery to the orchestrator (§9) → a record in the archive
+   (§12).
+7. **Acceptance:** accept (merge into the working branch → acceptance once more → roll back if it fails) / rework /
+   reject. Legal paths for the orchestrator: **its own fix on top of the result** ("orchestrator edit" — recorded in
+   the log, then the usual gates) and **widening the allowed files** by an orchestrator decision (an explicit list,
+   recorded in the log). The diff for review, for the gates and for the merge are all counted from the same base.
+8. **Continue** (after Stopped / Error / Needs decision): uncommitted work is kept, the task continues in the same
+   session; if the assignment has changed (a different text fingerprint) — in a new session.
 
-Разведка: шаги 1–3, «отчёт есть и по форме» → Готово. Оркестратор читает отчёт (сжатый до нужного) и закрывает.
+Scout: steps 1–3, "the report exists and fits the shape" → Done. The orchestrator reads the report (compressed to
+what it needs) and closes the task.
 
-**Бюджет** (настраиваемый, по счётчикам Go / реальные деньги / квота) считается **на всю задачу**, включая ревью.
-На 80 % — отметка в журнале (оркестратору не шлётся); на 100 % — новых шагов нет, работник получает
-«сохрани работу и остановись» (кооперативно, не убийство посреди шага), задача → «Нужно решение».
-«Продлить на N» — одним действием: бюджет увеличен, задача продолжена, событие в журнале; «нет» — Остановлена.
-Ожидание окна квоты — «ждёт по делу», не тревога.
+**Budget** (configurable, by Go counters / real money / quota) is counted for the **whole task**, review included.
+At 80 % — a note in the log (not sent to the orchestrator); at 100 % — no new steps, the worker gets
+"save your work and stop" (cooperatively, not killed in the middle of a step), the task → "Needs decision".
+"Extend by N" is one action: the budget is raised, the task continues, an event goes into the log; "no" → Stopped.
+Waiting for a quota window is "waiting for a reason", not an alarm.
 
-**Очередь и ресурсы:** проект объявляет лимит параллельности и общие ресурсы (тестовая БД, внешний сервис
-«строго по одной»). Занятость — по реально идущим процессам задач. Ожидание места/ресурса — «ждёт по делу»
-с причиной, не тревога наблюдателя. Задача «после X» стартует от рабочей ветки, в которую X уже влита.
+**Queue and resources:** a project declares a parallelism limit and shared resources (a test database, an external
+service that is "strictly one at a time"). Busyness is counted by the task processes actually running. Waiting for a
+slot or a resource is "waiting for a reason" with a cause, not an observer alarm. An "after X" task starts from the
+working branch that already contains X.
 
-## 7. Пульс
+## 7. Pulse
 
-Пульс — **доказательство жизни**, собранное из нескольких источников: поток активности поставщика, процессы
-(сам агент и его дети: тесты, ожидание замка — и кто держит замок), активный инструмент, свежесть данных
-поставщика.
-- 🟢 **Работает** — свежая активность.
-- 🟡 **Ждёт по делу** — активности нет, но есть объяснение: долгий инструмент, тесты, замок, окно квоты.
-- 🔴 **Молчит** — ни активности, ни объяснения дольше порога фазы (свой порог у работы, ревью, тестов).
-- ⚫ **Мёртв** — процесса нет, а задача не в финальном состоянии.
-- ⚪ **Нет данных** — поставщик не даёт нужного сигнала (честно, без догадок).
+The pulse is **proof of life**, collected from several sources: the provider's activity stream, processes (the agent
+itself and its children: tests, waiting for the lock — and who holds the lock), the active tool, the freshness of the
+provider's data.
+- 🟢 **Working** — fresh activity.
+- 🟡 **Waiting for a reason** — no activity, but there is an explanation: a long tool, tests, a lock, a quota window.
+- 🔴 **Silent** — neither activity nor an explanation, longer than the threshold of the phase (each of work, review and
+  tests has its own threshold).
+- ⚫ **Dead** — there is no process, and the task is not in a final state.
+- ⚪ **No data** — the provider does not give the signal needed (honestly, without guesses).
 
-Пульс считает хаб-сервис постоянно. «Молчит» → действие движка (§6.3). «Мёртв» (осиротела) → через N минут без
-процесса и без сессии задача возвращается в очередь и продолжается с места, с событием в журнале; повторное
-сиротство → Нужно решение.
+The hub service counts the pulse continuously. "Silent" → an engine action (§6.3). "Dead" (orphaned) → after N minutes
+with no process and no session the task returns to the queue and continues where it stopped, with an event in the log;
+a repeated orphaning → Needs decision.
 
-## 8. Наблюдатель
+## 8. Observer
 
-Системная роль, следит **за хабом, а не за проектами**.
+A system role that watches **the hub, not the projects**.
 
-1. **Каждые 5 минут — код, без модели:** пульс всех активных задач, WARNING/ERROR в логах хаба за период,
-   здоровье поставщиков (сеть, прокси, авторизация, квота) и компонентов (очередь, процессы задач, TG-бот,
-   доставка событий). Всё чисто → ничего. Подозрение → модель-наблюдатель разбирает: ложная тревога → журнал;
-   настоящая → эскалация. Одна и та же проблема не разбирается повторно, пока не изменилась (пауза).
-2. **Каждые 30 минут — модель в любом случае**, по чек-листу: есть ли задачи «работает», но давно без результата;
-   растёт ли очередь при свободных местах; нет ли сирот; сходятся ли траты с активностью; жив ли TG-бот и доставка
-   событий; не молчат ли логи при явных проблемах; всё ли в порядке у поставщиков.
-3. **Эскалация:** обычная тревога → Claude; нет реакции 15 минут → человеку в TG. **Критичная** (хаб не может
-   работать: поставщик лёг, сервис деградировал) → сразу и Claude, и человеку.
-4. **Кто следит за наблюдателем:** хаб-сервис знает время его последней проверки и поднимает тревогу при пропуске;
-   сам сервис страхует средство ОС (перезапуск при падении). Отчёты наблюдателя хранятся.
+1. **Every 5 minutes — code, without a model:** the pulse of all active tasks, WARNING/ERROR in the hub logs for the
+   period, provider health (network, proxy, authorization, quota) and component health (queue, task processes, the
+   Telegram bot, event delivery). All clean → nothing. Suspicion → an observer model looks into it: a false alarm →
+   the log; a real one → escalation. The same problem is not looked into again while it has not changed (a pause).
+2. **Every 30 minutes — a model regardless, by checklist:** are there tasks that are "working" but have had no result
+   for a long time; is the queue growing while slots are free; are there orphans; do the costs match the activity; is
+   the Telegram bot and the event delivery alive; are the logs quiet while there are obvious problems; is everything
+   all right with the providers.
+3. **Escalation:** an ordinary alarm → Claude; no reaction for 15 minutes → the human in Telegram. **Critical** (the hub
+   cannot work: a provider is down, the service has degraded) → immediately both to Claude and to the human.
+4. **Who watches the observer:** the hub service knows the time of its last check and raises an alarm when it is
+   missed; the OS facility backs the service itself (restart on a crash). The observer's reports are kept.
 
-## 9. Ручки оркестратора
+## 9. Orchestrator handles
 
-### Доставка событий (без потерь)
-- Каждое событие, требующее реакции (Готово, Нужно решение, Ошибка, сообщение/ответ человека, тревога), хранится
-  с отметками «доставлено» и «подтверждено». Оркестратор **явно подтверждает**, что взял событие; неподтверждённое
-  не пропадает. Перезапуск потока пробуждения (Monitor живёт ≤ 30 минут), рестарт хаба, закрытая сессия — события
-  дождутся.
-- **Поток пробуждения** выдаёт только новое неподтверждённое: критичное — сразу, остальное — пачкой за окно;
-  помнит, где остановился; при первом запуске старое не вываливает, а даёт одну сводку.
-- **«Разбуди меня»** — блокирующее ожидание до новых событий или таймаута; возвращает только дельту.
-- **Присутствие Claude** — свежая отметка его ожидания/потока. Нет отметки дольше порога = Claude нет. На этом
-  строятся эскалация (§8) и запуск Claude из TG (§11).
+### Event delivery (without losses)
+- Every event that needs a reaction (Done, Needs decision, Error, a message/an answer from the human, an alarm) is
+  stored with "delivered" and "acknowledged" marks. The orchestrator **explicitly acknowledges** that it took the
+  event; an unacknowledged one does not disappear. A restart of the wakeup stream (the Monitor lives ≤ 30 minutes), a
+  hub restart, a closed session — the events will wait.
+- The **wakeup stream** yields only new unacknowledged events: critical ones at once, the rest batched over a window;
+  it remembers where it stopped; on the first start it does not dump everything old but gives one summary.
+- **"Wake me"** — blocking wait until new events or a timeout; returns only the delta.
+- **Claude presence** — a fresh mark of its wait/stream. No mark longer than the threshold = Claude is not there. Both
+  the observer's escalation (§8) and launching Claude from Telegram (§11) are built on this.
 
-### Как экономим токены
-- **Уровни детализации с жёстким лимитом размера:** L0 — одна строка («есть ли что-то для меня»), L1 — сводка
-  (≈ до 1,5 КБ на всё), L2 — подробности задачи (замечания без дублей, фазы, траты), L3 — сырьё (дифф, журнал
-  сессии) — только явно.
-- **Результат готов к решению:** разведка — отчёт, сжатый до сути; код — что сделано, сводка диффа, итог проверок
-  с хвостом вывода тестов, замечания ревью без дублей, одна строка стоимости.
-- Бюджеты, пульс, фазы — не шлются, пока не стали проблемой.
+### How tokens are saved
+- **Detail levels with a hard size limit:** L0 — one line ("is there anything for me"), L1 — a summary
+  (≈ up to 1.5 KB for everything), L2 — task details (findings without duplicates, phases, spend), L3 — raw material
+  (diff, session log) — only on explicit request.
+- **A result ready to decide on:** scout — a report compressed to the essence; code — what was done, a diff summary,
+  the outcome of the checks with the tail of the test output, review findings without duplicates, one line of cost.
+- Budgets, pulse, phases — not sent until they become a problem.
 
-### Что умеют ручки
-- задачи: создать (сразу или черновиком), список активных, статус, результат, принять/слить, вернуть на доработку,
-  отклонить, остановить, продолжить, сменить модель, продлить бюджет;
-- история: список, подробно по задаче;
-- реестр моделей: посмотреть, изменить;
-- связь с человеком: написать в TG, вопрос с вариантами (например, «сливать T12?»), получить ответ;
-- тревоги наблюдателя: посмотреть, отметить разобранной;
-- ожидание: «разбуди меня, когда будет что-то для меня».
+### What the handles can do
+- tasks: create (at once or through a draft), list active, status, result, accept/merge, send back for rework, reject,
+  stop, continue, change model, extend the budget;
+- history: list, in detail per task;
+- model registry: look, change;
+- link with the human: write to Telegram, ask a question with options (for example "merge T12?"), get an answer;
+- observer alarms: look, mark as looked into;
+- waiting: "wake me when there is something for me".
 
-### Три формы одних и тех же ручек (в порядке реализации)
-1. **Командная строка** с компактным выводом — понимает любой CLI-агент.
-2. **Пакет для Claude Code** — навык (как работать с хабом экономно), поток событий для Monitor, настройка
-   проекта одной командой.
-3. **MCP-сервер** — те же ручки как инструменты (для Codex и других); в архитектуре есть, реализуется после 1–2.
+### Three forms of the same handles (in the order of implementation)
+1. **Command line** with compact output — understandable to any CLI agent.
+2. **Package for Claude Code** — a skill (how to work with the hub cheaply), an event stream for the Monitor, project
+   setup with one command.
+3. **MCP server** — the same handles as tools (for Codex and others); it is in the architecture, implemented after 1–2.
 
-## 10. Терминальное приложение (человек)
+## 10. Terminal app (the human)
 
-- Экран: активные задачи (фаза, пульс, модель, траты), история, подробности задачи, журнал событий,
-  реестр моделей, тревоги наблюдателя, здоровье поставщиков.
-- **Тумблер «Просмотр / Управление».** В просмотре кнопки действий скрыты. В управлении: создать задачу
-  (черновиком, §5), остановить, принять/отклонить, сменить модель, продлить бюджет, поменять реестр.
-- Всё словами, понятно не программисту.
+- Screen: active tasks (phase, pulse, model, spend), history, task details, the event log, the model registry, observer
+  alarms, provider health.
+- **A "View / Control" toggle.** In view mode the action buttons are hidden. In control mode: create a task (through
+  a draft, §5), stop, accept/reject, change model, extend the budget, change the registry.
+- All in words, understandable to a non-programmer.
 
-## 11. Telegram: связь с Claude + просмотр
+## 11. Telegram: a link to Claude + a view
 
-TG — **не пульт хаба**: задачи из TG не создаются и не меняются напрямую. Это связь с Claude, как с сеньором в
-офисе, пока владелец в отпуске, плюс удобный просмотр.
+Telegram is **not a remote control for the hub**: tasks are not created or changed from there directly. It is a link to
+Claude, like a senior in the office while the owner is on holiday, plus a convenient view.
 
-**Связь с Claude:**
-- Сообщение человека → событие для оркестратора:
-  - живая сессия Claude есть → сообщение приходит в неё (§9);
-  - живой сессии нет (нет отметки присутствия) → **хаб запускает Claude Code** (`--dangerously-skip-permissions`,
-    как обычно у владельца) в проекте, где Claude работал последним; если в сообщении назван другой проект — в нём.
-    Передаёт: навык работы с хабом, сводку L1, сообщение. Тот через ручки управляет хабом и отвечает.
-- **Один Claude за раз:** второй запускается, только если первый умер. Сообщения, пришедшие, пока запущенный
-  Claude работает, копятся и передаются ему следующим ходом (не новые запуски). Запущенный Claude — процесс под
-  надзором (таймаут, пульс), его сессия хранится: одна продолжаемая «TG-сессия» помнит переписку; новая — когда
-  старая разрослась или прошли сутки. Запуски — в журнале.
-- Claude → человек: ответы, вопросы с кнопками (например, согласование слияния), отчёты по желанию.
-  **Кнопка — это ответ Claude**, действует он через ручки; хаб по кнопке сам ничего не делает.
+**Link to Claude:**
+- A human's message → an event for the orchestrator:
+  - a live Claude session exists → the message goes into it (§9);
+  - no live session (no presence mark) → **the hub launches Claude Code** (`--dangerously-skip-permissions`, as the
+    owner normally runs it) in the project where Claude worked last; if the message names another project — in that
+    one. It passes on: the skill for working with the hub, an L1 summary, the message. That Claude controls the hub
+    through the handles and answers.
+- **One Claude at a time:** a second one starts only after the first has died. Messages that arrive while a launched
+  Claude is working accumulate and are passed to it on its next turn (no new launches). A launched Claude is a
+  supervised process (timeout, pulse), and its session is kept: one continuable "Telegram session" remembers the
+  conversation; a new one when the old has grown too large or a day has passed. Launches go into the log.
+- Claude → human: answers, questions with buttons (for example, approving a merge), reports on request.
+  **A button is an answer addressed to Claude** — he acts on it through the handles; the hub itself does nothing on a
+  button.
 
-**Просмотр задач (только чтение):** список активных кнопками → нажал — подробно по задаче (что делаем, фаза,
-модель, пульс, траты, замечания) словами; недавние задачи так же.
+**Task view (read only):** a list of active tasks with buttons → pressed — task details (what we are doing, phase,
+model, pulse, spend, findings) in words; recent tasks the same way.
 
-**Напрямую хаб пишет человеку** только тревоги наблюдателя (§8.3). Итоги задач человеку сообщает Claude, когда
-считает нужным.
+**The hub writes to the human directly** only for observer alarms (§8.3). Task outcomes reach the human when Claude
+decides it is worth telling.
 
-## 12. Архив проекта
+## 12. Project archive
 
-В корне рабочего проекта — локальная папка хаба (не в git проекта), для человека. Хаб только пишет, чистит человек.
-- по каждой задаче: постановка, отчёты работника, итоговый дифф, замечания ревью по кругам, решения оркестратора,
-  стоимость и длительность, итог;
-- общий список задач проекта (что, когда, чем кончилось, сколько стоило).
-Тяжёлые расшифровки сессий — в хранилище хаба, в архиве — ссылка/выжимка.
+In the root of the working project — a local folder for the hub (not in the project's git), for the human. The hub only
+writes; a human cleans it.
+- per task: the assignment, worker reports, the final diff, review findings per round, orchestrator decisions, cost and
+  duration, the outcome;
+- a common list of the project's tasks (what, when, how it ended, what it cost).
 
-## 13. Отказоустойчивость и логи
+Heavy session transcripts live in the hub's storage; the archive holds a link or a digest.
 
-- Логи всех компонентов — структурированные, с уровнями; каждая ошибка и предупреждение — с задачей, компонентом,
-  причиной; ротация. Журнал событий задач — отдельно от логов.
-- **Процессы задач отдельны от сервиса:** перезапуск сервиса их не убивает; после старта сервис находит идущие
-  задачи по процессам ОС и продолжает вести. Занятость мест = все реально идущие задачи проекта, не только «свои».
-- **Обновление кода хаба:** сервис сам перезапускается на новый код, когда видит изменение, не трогая идущие задачи;
-  новые задачи стартуют на новом коде.
-- Сбои поставщика различаются (§3) и обрабатываются по-разному (§6.3).
-- Работники изолированы: своё окружение (без токенов хаба; и у хуков), копия проекта без секретов, не видят боевое
-  хранилище хаба; opencode сам отклоняет доступ вне выданного каталога. Предел: без песочницы ОС (отдельный
-  пользователь/namespace) процесс того же пользователя технически может прочитать файлы вне копии — это
-  принятый риск (модели свои, задачи от Claude); усиление — отдельной задачей при необходимости.
+## 13. Fault tolerance and logs
 
-## 14. Уроки v1 (обязательные требования — список для проверки)
+- The logs of all components are structured, with levels; every error and warning has a task, a component and a reason;
+  rotation. The task event log is separate from the logs.
+- **Task processes are separate from the service:** a service restart does not kill them; after starting, the service
+  finds the running tasks by OS processes and keeps leading them. A slot is busy if any task of the project is really
+  running, not only "its own".
+- **Updating the hub's code:** the service restarts itself onto the new code when it sees a change, without touching
+  running tasks; new tasks start on the new code.
+- Provider failures are told apart (§3) and handled differently (§6.3).
+- Workers are isolated: their own environment (without the hub's tokens; and in hooks), a copy of the project without
+  secrets, no access to the live hub storage; opencode itself refuses access outside the given directory. The limit:
+  without an OS sandbox (a separate user/namespace) a process of the same user can technically read files outside the
+  copy — an accepted risk (the models are ours, the tasks come from Claude); hardening it is a separate task if
+  needed.
 
-Из `docs/field_issues_2026-09-30.md`:
-1. Зависимость — только от принятой задачи (§5).
-2. Обновление кода без застоя очереди (§13).
-3. Лимит параллельности считает все реально идущие задачи (§13).
-4. Ответ на «продлить бюджет?» реально применяется (§6).
-5. Правка оркестратора после ревью — законный путь к слиянию (§6.7).
-6. Решение оркестратора может расширить разрешённые файлы (§6.7).
-7. Осиротевшие задачи не висят (§7).
-8. Продолжение на «грязной» копии не ломается (§6.8).
-9. Тишина платной модели — одно автопродолжение, не мгновенный провал (§6.3).
-10. Пробуждение Claude не теряет события при перезапуске Monitor (§9).
-11. Дифф ревью, ворота и слияние — от одной базы (§6.7).
+## 14. v1 lessons (mandatory requirements — a checklist)
 
-## 15. Решения владельца (зафиксировано)
+From the field issues of 2026-09-30:
+1. A dependency only from an accepted task (§5).
+2. Updating the code without the queue stalling (§13).
+3. The parallelism limit counts all really running tasks (§13).
+4. An answer to "extend the budget?" is really applied (§6).
+5. An orchestrator fix after review is a legal path to a merge (§6.7).
+6. An orchestrator decision can widen the allowed files (§6.7).
+7. Orphaned tasks do not hang (§7).
+8. Continuing on a "dirty" copy does not break (§6.8).
+9. The silence of a paid model is one auto-continuation, not an instant failure (§6.3).
+10. Waking Claude loses no events on a Monitor restart (§9).
+11. The review diff, the gates and the merge are counted from the same base (§6.7).
 
-1. Хаб-сервис — один фоновый процесс; CLI, терминал, TG — клиенты.
-2. Ручки: CLI → пакет Claude Code → MCP (позже).
-3. Claude Code запускается хабом только если живая сессия умерла; один Claude за раз; `--dangerously-skip-permissions`;
-   TG-сессия продолжаемая.
-4. Наблюдатель: 5 мин код, 30 мин модель (Spark medium/high); эскалация: обычная — через 15 мин без реакции,
-   критичная — сразу обоим.
-5. Меню моделей без автоподмены; смена модели — вручную (человек или Claude).
-6. Человек ставит задачи в терминале черновиком (текст → модель дописывает → предпросмотр → запуск).
-7. TG: связь с Claude + просмотр задач кнопками; не пульт.
-8. События задач — Claude; человеку пишет Claude. «Документ» ⊂ «Рутина». Один хаб на машину. Архив — только запись.
-9. Запрет моделей на уровне проекта (DeepSeek в PlayerUP); снимает только человек.
-10. Claude из TG запускается в проекте, где работал последним (или в названном в сообщении).
+## 15. Owner decisions (recorded)
+
+1. The hub service is one background process; the CLI, the terminal app and Telegram are clients.
+2. Handles: CLI → Claude Code package → MCP (later).
+3. Claude Code is launched by the hub only if the live session has died; one Claude at a time;
+   `--dangerously-skip-permissions`; the Telegram session is continuable.
+4. Observer: 5 min code, 30 min model (Spark medium/high); escalation: ordinary — after 15 min without a reaction,
+   critical — to both at once.
+5. Model menus without automatic substitution; a model is changed by hand (a human or Claude).
+6. A human files tasks in the terminal through a draft (text → a model fills it in → preview → start).
+7. Telegram: a link to Claude + a task view with buttons; not a remote control.
+8. Task events go to Claude; Claude writes to the human. "Document" ⊂ "Routine". One hub per machine. The archive is
+   write-only.
+9. A project-level model ban (e.g. DeepSeek banned in one project); only a human lifts it.
+10. Claude from Telegram starts in the project where it worked last (or the one named in the message).

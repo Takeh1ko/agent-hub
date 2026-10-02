@@ -1,15 +1,16 @@
 # agent-hub
 
-Карта кода — читать первой, вместо изучения кода с нуля:
+Code map — read it first, instead of learning the code from scratch:
 @docs/ARCHITECTURE.md
 
-Архитектура — `docs/architecture.md`, контракты — `docs/contracts.md`. Текущая работа — выпуск на GitHub:
-`docs/v3/plan.md`. История v1/v2 и личные заметки — вне репозитория: `~/Projects/Python/agent-hub-notes/`.
+Architecture — `docs/architecture.md`, contracts — `docs/contracts.md`.
 
-После заметных изменений структуры (модуль, состояние, таблица, процесс) — обновить `docs/ARCHITECTURE.md`.
+After a notable structural change (a module, a state, a table, a process) — update `docs/ARCHITECTURE.md`.
+
+Tests: `.venv/bin/python -m pytest -q` (no network, HOME is faked).
 
 <!-- ahub:begin -->
 ## agent-hub
-Задачи для моделей-работников — через `ahub` (навык `ahub`). В начале сессии — Monitor на `ahub watch`;
-по строкам событий: `ahub status T<id>` → `ahub accept|rework|reject`. Сводка — `ahub status`.
+Tasks for worker models go through `ahub` (skill `ahub`). At session start — Monitor on `ahub watch`;
+by event lines: `ahub status T<id>` → `ahub accept|rework|reject`. Summary — `ahub status`.
 <!-- ahub:end -->
