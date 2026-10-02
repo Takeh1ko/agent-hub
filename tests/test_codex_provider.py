@@ -124,6 +124,7 @@ def test_unknown_session_still_ok(codex):
     ("The 'gpt-4o' model is not supported when using Codex with a ChatGPT account.", "no_access"),
     ("unexpected status 400 invalid_request_error", None),
     ("the response was cut short", None),
+    ("request id: req_8ff2551c044e47f5a675b8a96a0e96ab", None),  # ids must not look like a status
 ])
 def test_classify_forms(text, flag):
     flags = classify_text(text)

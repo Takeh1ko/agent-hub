@@ -58,11 +58,11 @@ TRANSIENT_MARKERS = ("stream disconnected", "connection refused", "connection re
                      "timed out", "timeout", "temporarily unavailable", "service unavailable", "overloaded",
                      "internal server error", "bad gateway", "gateway timeout", "dns", "econnreset",
                      "econnrefused", "network")
-QUOTA_MARKERS = ("usage limit", "usage_limit", "rate limit", "rate_limit", "too many requests", "429",
+QUOTA_MARKERS = ("usage limit", "usage_limit", "rate limit", "rate_limit", "too many requests",
                  "quota", "credits exhausted", "credit balance", "limit reached", "usage_limited",
                  "spend_control")
-NO_ACCESS_MARKERS = ("401", "unauthorized", "403", "forbidden", "not logged in", "please log in",
-                     "please sign in", "run codex login", "missing bearer", "no api key", "invalid api key",
+NO_ACCESS_MARKERS = ("unauthorized", "forbidden", "not logged in", "please log in", "please sign in",
+                     "run codex login", "missing bearer", "no api key", "invalid api key",
                      "authentication", "permission denied", "not supported when using codex with a chatgpt account")
 RESUME_GONE_MARKER = "no rollout found"  # stderr: `thread/resume failed: no rollout found for thread id …`
 _STATUS = re.compile(r"\b(?:status|code|http|error)\W{0,8}(\d{3})\b", re.IGNORECASE)
@@ -138,9 +138,9 @@ def parse_models(out: str) -> list[ModelInfo]:
     except json.JSONDecodeError:
         return []
     models = data.get("models") if isinstance(data, dict) else None
-    out_models: list[ModelInfo] = []
     if not isinstance(models, list):
-        return out_models
+        return []
+    out: list[ModelInfo] = []
     for m in models:
         if not isinstance(m, dict):
             continue
@@ -151,9 +151,9 @@ def parse_models(out: str) -> list[ModelInfo]:
         variants = tuple(str(r["effort"]) for r in levels if isinstance(r, dict) and r.get("effort")) \
             if isinstance(levels, list) else ()
         # a ChatGPT subscription: no per-token prices and no quota numbers in the stream
-        out_models.append(ModelInfo(slug, variants=variants, counter="quota",
-                                    note=str(m.get("display_name") or "")))
-    return out_models
+        out.append(ModelInfo(slug, variants=variants, counter="quota",
+                             note=str(m.get("display_name") or "")))
+    return out
 
 
 def _tool_input(item: dict) -> dict:
@@ -165,10 +165,10 @@ def _tool_input(item: dict) -> dict:
     changes = item.get("changes")
     if isinstance(changes, list) and changes:
         data["paths"] = [str(c.get("path"))[:200] for c in changes if isinstance(c, dict) and c.get("path")][:20]
-    for key in ("server", "tool", "name", "query"):
+    for key in ("server", "tool", "query"):
         v = item.get(key)
         if isinstance(v, str) and v:
-            data[key if key != "name" else "tool"] = v[:200]
+            data[key] = v[:200]
     return data
 
 
