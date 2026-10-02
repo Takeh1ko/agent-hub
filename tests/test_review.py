@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from ahub.review import strip_arbiter
+import re
+
+from ahub.review import strip_arbiter, verdict_format, verdict_repair_prompt
 
 
 def test_strip_arbiter_ru():
@@ -21,3 +23,10 @@ def test_strip_orchestrator_decision_en_case_insensitive():
     spec = "# Task\ndo button\n## orchestrator decision\nmerge that way\n## Acceptance\ntests\n"
     out = strip_arbiter(spec)
     assert "orchestrator" not in out.lower() and "merge" not in out
+
+
+def test_verdict_repair_prompt_reuses_format():
+    prompt = verdict_repair_prompt(1, "m")
+    assert ".ahub/review_r1_m.json" in prompt and verdict_format() in prompt
+    assert "Do not change any other files" in prompt
+    assert not re.search(r"[а-яА-ЯёЁ]", prompt)

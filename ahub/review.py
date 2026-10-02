@@ -65,6 +65,21 @@ def strip_arbiter(text: str) -> str:
     return _ARBITER.sub("", text)
 
 
+def verdict_format() -> str:
+    """Форма вердикта из contracts §3 — одна, для постановки и повтора."""
+    return ('{"verdict": "approve|changes|dispute", "summary": "one sentence", "findings": [{"severity": '
+            '"high|medium|low", "file": "path", "line": 12, "issue": "point, <= 300 chars", '
+            '"fix": "what to do"}]}')
+
+
+def verdict_repair_prompt(round_no: int, model: str) -> str:
+    """Один повтор несдавшего вердикт — в той же сессии, только JSON."""
+    out = review_path(".", round_no, model).as_posix().removeprefix("./")
+    return (f"You did not write the verdict file `{out}` (or it is malformed). "
+            f"Write it now in exactly this JSON format:\n{verdict_format()}\n"
+            "Do not change any other files.")
+
+
 def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResult, round_no: int,
                   model: str) -> str:
     out = review_path(".", round_no, model).as_posix().removeprefix("./")
@@ -81,9 +96,7 @@ def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResul
         "## What to check\nMatch to the task and acceptance; stub tests (pass on broken logic — "
         "check by breaking the logic locally and reverting via git checkout); races; resource leaks; "
         "blocking calls in async; changes outside allowed files. Style/taste — low only.",
-        f"## How to submit\nWrite `{out}`:\n"
-        '{"verdict": "approve|changes|dispute", "summary": "one sentence", "findings": [{"severity": '
-        '"high|medium|low", "file": "path", "line": 12, "issue": "point, <= 300 chars", "fix": "what to do"}]}\n'
+        f"## How to submit\nWrite `{out}`:\n{verdict_format()}\n"
         f"Each finding needs file, line, and a concrete fix. {reply_language_line()} "
         'Last message — one line: "done".',
     ])
