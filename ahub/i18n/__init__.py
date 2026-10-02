@@ -15,23 +15,35 @@ from ahub.i18n.ru import MESSAGES as _RU
 _CATALOGS: dict[str, dict[str, str]] = {"en": _EN, "ru": _RU}
 
 _lang: str | None = None
+_resolving: bool = False
+
+
+def _locale_lang() -> str:
+    locale = next((v for v in (os.environ.get(k, "") for k in ("LC_ALL", "LC_MESSAGES", "LANG")) if v), "")
+    return "ru" if locale.lower().startswith("ru") else "en"
 
 
 def _resolve() -> str:
     """AHUB_LANG → lang в конфиге хаба → локаль (первая непустая из LC_ALL, LC_MESSAGES, LANG) → en."""
+    global _resolving
     env = os.environ.get("AHUB_LANG", "").strip().lower()[:2]
     if env in _CATALOGS:
         return env
+    if _resolving:  # ошибка конфига хаба сама строится через t() — читаем только окружение/локаль
+        return _locale_lang()
+    _resolving = True
     try:
-        from ahub import config
+        try:
+            from ahub import config
 
-        configured = config.load_hub().lang
-    except config.ConfigError:  # битый конфиг сообщит о себе сам — язык ему для этого и нужен
-        configured = ""
+            configured = config.load_hub().lang
+        except config.ConfigError:  # битый конфиг сообщит о себе сам — язык ему для этого и нужен
+            configured = ""
+    finally:
+        _resolving = False
     if configured:
         return configured
-    locale = next((v for v in (os.environ.get(k, "") for k in ("LC_ALL", "LC_MESSAGES", "LANG")) if v), "")
-    return "ru" if locale.lower().startswith("ru") else "en"
+    return _locale_lang()
 
 
 def lang() -> str:
