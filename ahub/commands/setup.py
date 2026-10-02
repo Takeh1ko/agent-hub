@@ -360,9 +360,7 @@ def run_wizard(args) -> int:
         print(t("setup.wizard_providers_ok", providers=", ".join(provs)))
     else:
         auth_c = doctor.check_opencode_auth()
-        print(auth_c.detail)
-        if auth_c.fix:
-            print(auth_c.fix)
+        print(f"✗ {t(f'doctor.name_{auth_c.name}')} — {auth_c.detail}" + (f"\n  → {auth_c.fix}" if auth_c.fix else ""))
     # 4) models
     store = Store()
     bad = _roles_needing_free(store)
