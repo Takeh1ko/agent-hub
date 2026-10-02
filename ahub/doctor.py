@@ -56,7 +56,7 @@ def check_git() -> Check:
     except (OSError, subprocess.SubprocessError):
         return Check("git", False, _t("doctor.git_missing"), _t("doctor.git_fix"))
     out = (r.stdout or r.stderr or "").strip().splitlines()
-    ver = out[0].strip()[:60] if out else "git"
+    ver = out[0].strip().removeprefix("git version ")[:60] if out else "?"
     if r.returncode != 0:
         return Check("git", False, _t("doctor.git_missing"), _t("doctor.git_fix"))
     return Check("git", True, _t("doctor.git_ok", version=ver), "")
