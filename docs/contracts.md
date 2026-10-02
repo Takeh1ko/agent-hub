@@ -141,5 +141,6 @@ is the phase `waiting` with a reason, not an alarm.
 | mimo-flash | opencode / opencode-go/mimo-v2.6-flash / — | executor, reviewer, routine |
 | deepseek-flash | opencode / opencode-go/deepseek-v4.1-flash / high | executor, reviewer, scout |
 | spark-free | opencode / opencode/muse-spark-1.3-contributor-free / xhigh | (outside the menu, available explicitly) |
-| gemini | agy / gemini-3.8-flash-high / — | (outside the menu until V29) |
+| gemini | agy / gemini-3.8-flash-high / — | (outside the menu — chosen explicitly; window quota) |
+| gemini-low | agy / gemini-3.8-flash-low / — | (outside the menu — chosen explicitly; window quota) |
 ★ — the default in the role.

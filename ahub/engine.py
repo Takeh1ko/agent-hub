@@ -38,8 +38,23 @@ STOP_POLL_S = 3.0
 BUDGET_POLL_S = 30.0
 REPORT_MAX_BYTES = 18_000  # 12 KB per contract plus margin; over that is flagged, not rejected
 
-_WRITE_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch"}
-_READ_TOOLS = {"read", "grep", "glob", "list", "webfetch", "websearch"}
+_WRITE_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch",
+                "write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file"}
+_READ_TOOLS = {"read", "grep", "glob", "list", "webfetch", "websearch",
+               "view_file", "list_dir", "grep_search", "find_by_name"}
+_CMD_TOOLS = {"bash", "run_command"}  # opencode bash; agy run_command
+_CMD_KEYS = {"command", "commandline", "cmd"}  # agy keeps the command in the parameter CommandLine
+
+
+def _tool_command(data: dict) -> str:
+    """Command line of a tool call: opencode `command`, agy `CommandLine` inside tool parameters."""
+    inp = data.get("input") if isinstance(data, dict) else None
+    if not isinstance(inp, dict):
+        return ""
+    for key, val in inp.items():
+        if isinstance(key, str) and key.lower() in _CMD_KEYS and isinstance(val, str):
+            return val[:200]
+    return ""
 
 
 class LeaseLost(RuntimeError):
@@ -219,12 +234,11 @@ class Engine:
     def _on_activity(self, act: Activity) -> None:
         if act.kind in (Act.TOOL_START, Act.TOOL_END):
             tool = act.tool.lower()
-            cmd = str(act.data.get("input", {}).get("command", ""))
-            if tool == "bash" and "pytest" in cmd:
-                self.set_phase(Phase.TESTING)
-            elif tool in _WRITE_TOOLS:
+            if tool in _WRITE_TOOLS:
                 self.set_phase(Phase.WRITING)
-            elif tool in _READ_TOOLS or tool == "bash":
+            elif tool in _CMD_TOOLS:
+                self.set_phase(Phase.TESTING if "pytest" in _tool_command(act.data) else Phase.STUDYING)
+            elif tool in _READ_TOOLS:
                 self.set_phase(Phase.STUDYING)
 
     def task_cost(self) -> tuple[float, float]:

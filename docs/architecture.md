@@ -317,9 +317,13 @@ Heavy session transcripts live in the hub's storage; the archive holds a link or
   running tasks; new tasks start on the new code.
 - Provider failures are told apart (§3) and handled differently (§6.3).
 - Workers are isolated: their own environment (without the hub's tokens; and in hooks), a copy of the project without
-  secrets, no access to the live hub storage; opencode itself refuses access outside the given directory. The limit:
-  without an OS sandbox (a separate user/namespace) a process of the same user can technically read files outside the
-  copy — an accepted risk (the models are ours, the tasks come from Claude); hardening it is a separate task if
+  secrets, no access to the live hub storage. opencode itself refuses access outside the given directory. **agy does
+  not**: in headless mode it denies every command unless it is started with `--dangerously-skip-permissions` (checked
+  live 2026-10-03), and no agy mode limits writing to a directory — `accept-edits` writes files without questions but
+  forbids commands, which makes the turn empty. What holds agy in place is the copy itself (cwd), the clean
+  environment and the gates (the diff ⊆ the allowed files, counted from the base before a merge). The limit: without
+  an OS sandbox (a separate user/namespace) a process of the same user can technically read and write files outside
+  the copy — an accepted risk (the models are ours, the tasks come from Claude); hardening it is a separate task if
   needed.
 
 ## 14. v1 lessons (mandatory requirements — a checklist)

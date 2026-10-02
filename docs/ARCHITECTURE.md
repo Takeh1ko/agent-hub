@@ -29,7 +29,7 @@ accept.py: ahub accept (разведка — принять; код — merge --
 |---|---|
 | `cli.py`, `cliutil.py`, `commands/*.py` | CLI: автообнаружение `register()`; `--json`; ошибки — одна строка, код 2; `--lang {en,ru}` (вывод команды) |
 | `i18n/` | каталог строк EN/RU: `t(key, **kw)`, `en.py`/`ru.py` (порядок ключей одинаковый); язык — `AHUB_LANG` → `lang` в конфиге → `LANG`/`LC_ALL`/`LC_MESSAGES` (`ru*`) → `en` |
-| `config.py`, `paths.py` | `.hub.toml` v2 (v1 читается с переводом), `~/.config/ahub/config.toml` ([telegram] токен/чат/прокси, [usage] лимит Go, [paths] opencode/claude/opencode_db); данные `~/.local/share/ahub/ahub.db`, логи `~/.local/state/ahub/logs` (`AHUB_HOME` — всё в одном каталоге) |
+| `config.py`, `paths.py` | `.hub.toml` v2 (v1 читается с переводом), `~/.config/ahub/config.toml` ([telegram] токен/чат/прокси, [usage] лимит Go, [paths] opencode/claude/opencode_db); данных `~/.local/share/ahub/ahub.db`, логи `~/.local/state/ahub/logs`; при `AHUB_HOME` всё в одном каталоге, глобальный конфиг тоже (`AHUB_HOME/config/config.toml`) — изолированный экземпляр не читает настоящий; отката к конфигу v1 (`~/.config/agent-hub`) нет; у `ProjectConfig` `python_bin()`: явный `python` → venv проекта (`.venv`, `venv`) → `python3` |
 | `store.py` + `migrations/` | SQLite WAL: task, task_dep, session, event (доставка/подтверждение), question, message, draft, model/role_model, presence, claude_launch, observer_report, op |
 | `model.py`, `transitions.py` | типы, состояния, переходы, события; move/acquire/renew/release/request_stop/once |
 | `tasks.py`, `drafts.py` | создание задачи с проверкой; черновик словами → модель → предпросмотр → запуск |
