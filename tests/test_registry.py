@@ -16,7 +16,7 @@ def store() -> Store:
 
 
 def _proj(deny=()):
-    return config.parse_project({"schema_version": 2, "name": "PlayerUP", "models": {"deny": list(deny)}}, "/tmp")
+    return config.parse_project({"schema_version": 2, "name": "webapp", "models": {"deny": list(deny)}}, "/tmp")
 
 
 def test_seed_once(store):
@@ -38,7 +38,7 @@ def test_pick_default_and_explicit(store):
 
 def test_project_deny_blocks_explicit_and_default(store):
     p = _proj(deny=["deepseek"])
-    with pytest.raises(registry.RegistryError, match="запрещена в проекте PlayerUP"):
+    with pytest.raises(registry.RegistryError, match="запрещена в проекте webapp"):
         registry.pick(store, Role.EXECUTOR, p, explicit="deepseek-flash")
     registry.set_default(store, Role.SCOUT, "deepseek-flash")
     assert registry.pick(store, Role.SCOUT, p).alias == "spark"  # умолчание запрещено — первая разрешённая

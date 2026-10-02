@@ -28,12 +28,12 @@ def test_setup_converts_v1(tmp_path, capsys):
     root = tmp_path / "old"
     make_repo(root)
     (root / ".hub.toml").write_text("""schema_version = 1
-name = "PlayerUP"
+name = "webapp"
 worktrees = "/tmp/pu-wt"
 python = "/usr/bin/python3"
-test_lock = "/tmp/playerup_test_db.lock"
-work_branch = "market"
-push = "origin market:claude/x"
+test_lock = "/tmp/webapp_test_db.lock"
+work_branch = "main"
+push = "origin main:claude/x"
 allowed_paths = ["core/**", "tests/**"]
 [hooks]
 task_setup = "python -m tools.task_db create"
@@ -47,9 +47,9 @@ budget_go = 1.5
     data = tomllib.loads((root / ".hub.toml").read_text())
     assert data["schema_version"] == 2 and data["test_resource"] == "test_lock"
     cfg = config.load_project(root)
-    assert cfg.resources["test_lock"].lock == "/tmp/playerup_test_db.lock" and cfg.push == "origin market:claude/x"
+    assert cfg.resources["test_lock"].lock == "/tmp/webapp_test_db.lock" and cfg.push == "origin main:claude/x"
     assert cfg.hooks.task_setup.startswith("python -m tools.task_db") and cfg.models_deny == ("deepseek",)
-    assert cfg.work_branch == "market" and cfg.budget_go == 1.5
+    assert cfg.work_branch == "main" and cfg.budget_go == 1.5
 
 
 def test_import_v1(tmp_path):

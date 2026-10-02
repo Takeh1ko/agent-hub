@@ -25,7 +25,7 @@ def project(tmp_path):
     return config.parse_project({
         "schema_version": 2, "name": "P", "python": sys.executable,
         "allowed_paths": ["core/**", "tests/**", "docs/**"],
-        "resources": {"test_db": {"lock": "/tmp/x.lock"}, "playerok": {}}, "test_resource": "test_db",
+        "resources": {"test_db": {"lock": "/tmp/x.lock"}, "payments": {}}, "test_resource": "test_db",
         "models": {"deny": ["deepseek"]}, "budget": {"go": 1.5},
     }, root)
 
