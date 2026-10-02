@@ -1,4 +1,4 @@
-"""ahub config — разобранный конфиг проекта и проблемы на диске."""
+"""ahub config — parsed project config and on-disk problems."""
 
 from __future__ import annotations
 

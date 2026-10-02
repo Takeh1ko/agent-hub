@@ -1,4 +1,4 @@
-"""ahub bot run — TG-бот v2 (связь с Claude, просмотр задач, тревоги, запуск Claude)."""
+"""ahub bot run — TG bot v2 (link to Claude, task view, alarms, Claude launch)."""
 
 from __future__ import annotations
 

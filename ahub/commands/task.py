@@ -1,6 +1,6 @@
-"""Ручки задач для оркестратора: task new | status | result | log | stop | continue | accept | reject.
+"""Task handles for the orchestrator: task new | status | result | log | stop | continue | accept | reject.
 
-Вывод компактный (contracts §5, §7); чтение задачи неявно подтверждает её события.
+Compact output (contracts §5, §7); reading a task implicitly acks its events.
 """
 
 from __future__ import annotations

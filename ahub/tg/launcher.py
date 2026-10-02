@@ -1,11 +1,11 @@
-"""Запуск Claude Code из TG, когда живой сессии нет (V27, architecture §11; решение владельца).
+"""Claude Code launch from TG when no live session exists (V27, architecture §11; owner decision).
 
-- Повод: есть непрочитанные сообщения человека, Claude не отмечается присутствием (wait/watch), запущенного нет.
-- Один Claude за раз: пока запущенный работает, новые сообщения копятся — он сам заберёт их `ahub inbox`
-  перед завершением, остальное уйдёт следующим запуском.
-- Проект: названный в сообщении, иначе тот, где Claude работал последним (presence), иначе первый проект хаба.
-- Одна продолжаемая «TG-сессия» (claude --resume) в пределах суток и пока ходов меньше MAX_TURNS.
-- `--dangerously-skip-permissions` — как у владельца. Надзор: таймаут, журнал запусков (claude_launch), лимит в час.
+- Trigger: unread human messages, Claude not marking presence (wait/watch), nothing running.
+- One Claude at a time: while one runs, new messages queue — it picks them up via `ahub inbox`
+  before finishing, the rest goes to the next launch.
+- Project: named in the message, else where Claude last worked (presence), else the hub's first project.
+- One resumable "TG session" (claude --resume) within a day and while turns stay under MAX_TURNS.
+- `--dangerously-skip-permissions` — same as the owner. Supervision: timeout, launch journal (claude_launch), hourly limit.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ SESSION_KEY = "tg_claude_session"
 TIMEOUT_MS = 30 * 60_000
 MAX_TURNS = 30
 MAX_PER_HOUR = 6
-MIN_ALIVE_MS = 20_000  # прожил меньше и без сессии — сообщения не считаются переданными (перезапуск их заберёт)
+MIN_ALIVE_MS = 20_000  # lived too briefly with no session — messages stay undelivered (a restart picks them up)
 _log = hublog.get("launcher")
 
 
@@ -58,7 +58,7 @@ How to work:
 
 
 def claude_bin() -> str | None:
-    """Бинарь claude: [paths].claude → which → ~/.claude/local/claude."""
+    """claude binary: [paths].claude → which → ~/.claude/local/claude."""
     try:
         override = config.load_hub().claude
         if override:
@@ -124,7 +124,7 @@ def _launches_last_hour(store: Store, now: int) -> int:
 
 
 def _deliver(store: Store, message_ids: list[int], now: int) -> None:
-    """Сообщения переданы Claude: прочитаны + их события подтверждены."""
+    """Messages handed to Claude: marked read + their events acked."""
     with store.tx() as c:
         c.execute(f"UPDATE message SET delivered_at=? WHERE delivered_at IS NULL AND id IN "
                   f"({','.join('?' * len(message_ids))})", (now, *message_ids))
@@ -157,7 +157,7 @@ def session_id_from_log(path: str) -> str:
 
 def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, now: int | None = None,
          spawn=None, binary: str | None = None) -> str:
-    """Один шаг надзора/запуска. Возвращает, что сделали: idle | running | finished | killed | launched | limit."""
+    """One supervise/launch step. Returns what happened: idle | running | finished | killed | launched | limit."""
     ts = now if now is not None else now_ms()
     cur = running(store)
     if cur is not None:
@@ -221,7 +221,7 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
         pid = spawn(cmd, project.root, str(log_path))
     with store.tx() as c:
         c.execute("UPDATE claude_launch SET pid=? WHERE id=?", (pid, lid))
-    # сообщения помечаются переданными, когда запущенный Claude поживёт (см. MIN_ALIVE_MS) — не сразу
+    # messages count as delivered once the launched Claude has lived a while (see MIN_ALIVE_MS) — not at once
     store.meta_set(f"launch_msgs:{lid}", json.dumps([m["id"] for m in msgs]))
     _log.info("launched Claude in %s (pid %s, %s)", project.name, pid, "resume" if resume else "new session")
     return "launched"

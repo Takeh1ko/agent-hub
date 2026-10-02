@@ -1,7 +1,7 @@
-"""TG-бот v2: aiogram 3, long polling через HTTPS_PROXY. Логика — ahub.tg.core, запуск Claude — ahub.tg.launcher.
+"""TG bot v2: aiogram 3, long polling via HTTPS_PROXY. Logic — ahub.tg.core, Claude launch — ahub.tg.launcher.
 
-Блокирующее (sqlite, /proc) — через asyncio.to_thread. Фоновые циклы: исходящие Claude (outbox), вопросы,
-тревоги наблюдателя, надзор за запущенным Claude.
+Blocking (sqlite, /proc) goes via asyncio.to_thread. Background loops: Claude outbox, questions,
+observer alarms, launched-Claude supervision.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ LOOP_S = 5
 LAUNCH_S = 10
 HEARTBEAT_KEY = "tg_heartbeat"
 _log = hublog.get("tg")
-_QMSG: dict[tuple[int, int], int] = {}  # (chat, bot_msg_id) → question_id — ответ реплаем
+_QMSG: dict[tuple[int, int], int] = {}  # (chat, bot_msg_id) → question_id — reply answers
 
 
 def _markup(rows):
@@ -34,7 +34,7 @@ def _markup(rows):
 
 
 def build_session(hub: config.HubConfig | None = None):
-    """Сессия бота: прокси из [telegram] вместо системного; без прокси — None."""
+    """Bot session: [telegram] proxy over the system one; no proxy — None."""
     cfg_proxy = ""
     if hub is None:
         try:
@@ -57,7 +57,7 @@ async def _send(bot, store: Store, reply: core.Reply) -> list[tuple[int, int]]:
         try:
             m = await bot.send_message(chat, core.clip(reply.text), reply_markup=_markup(reply.buttons))
             sent.append((chat, m.message_id))
-        except Exception as e:  # чат мог заблокировать бота
+        except Exception as e:  # chat may have blocked the bot
             _log.warning("TG %s: %s", chat, e)
             if "blocked" in str(e).lower() or "chat not found" in str(e).lower():
                 await asyncio.to_thread(core.mark_dead, store, chat)

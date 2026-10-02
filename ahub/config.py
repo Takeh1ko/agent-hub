@@ -1,41 +1,41 @@
-"""Конфиг хаба (~/.config/ahub/config.toml) и проектов (.hub.toml, schema_version = 2).
+"""Hub config (~/.config/ahub/config.toml) and project configs (.hub.toml, schema_version = 2).
 
-Чтение — чистые функции. Ошибки не глотаются: разбор копит все проблемы и бросает ConfigError со списком,
-проверка файловой системы — отдельно (`check_project`), чтобы конфиг можно было разобрать без диска.
-Файлы v1 (schema_version = 1) читаются с переводом полей — нужно для переключения (V31a).
+Reading is pure functions. Errors are never swallowed: parsing collects every problem and raises ConfigError,
+filesystem checks live separately (`check_project`) so a config parses without disk access.
+v1 files (schema_version = 1) are read with field migration — needed for the switchover (V31a).
 
-Пример ~/.config/ahub/config.toml:
+Example ~/.config/ahub/config.toml:
 
     projects = ["$HOME/Projects/webapp"]
 
-    [telegram]                          # всё необязательно; бот включён, если есть token
+    [telegram]                          # all optional; bot is on when token is set
     token = "..."
     chat_id = 123
     proxy = "http://127.0.0.1:8080"
 
     [usage]
-    go_month_limit = 60.0               # нет — лимит не показывается
+    go_month_limit = 60.0               # unset — limit not shown
 
-    [paths]                             # всё необязательно; переопределение путей
+    [paths]                             # all optional; path overrides
     opencode = "$HOME/bin/opencode"
     claude = "~/.claude/local/claude"
     opencode_db = "$HOME/.local/share/opencode/opencode.db"
 
-Пример .hub.toml v2:
+Example .hub.toml v2:
 
     schema_version = 2
     name = "webapp"
-    root = "$HOME/Projects/webapp"        # по умолчанию — каталог файла
+    root = "$HOME/Projects/webapp"        # default — the file's directory
     worktrees = "$HOME/Projects/webapp-wt"
     work_branch = "main"
     python = "$HOME/Projects/webapp/venv/bin/python"
     rules = "docs/agents/rules.md"
     allowed_paths = ["core/**", "tests/**"]
     max_parallel = 2
-    test_resource = "test_db"                      # приёмка идёт под этим ресурсом
+    test_resource = "test_db"                      # acceptance runs under this resource
 
-    [resources]                                    # общие ресурсы: не больше capacity задач одновременно
-    test_db = { lock = "/tmp/webapp_test_db.lock" }   # lock — внешний flock-файл, общий с другими инструментами
+    [resources]                                    # shared resources: at most capacity tasks at once
+    test_db = { lock = "/tmp/webapp_test_db.lock" }   # lock — external flock file, shared with other tools
     gpu = { capacity = 1 }
 
     [hooks]                                        # shell; env: AHUB_TASK_ID, AHUB_WORKTREE, AHUB_PROJECT_ROOT
@@ -43,14 +43,14 @@
     task_cleanup = "venv/bin/python -m tools.task_db drop"
 
     [models]
-    deny = ["slow-model"]                          # снимает только человек
+    deny = ["slow-model"]                          # only a human can lift it
 
     [budget]
     go = 1.5
     usd = 0.0
 
     [secrets]
-    exclude = [".env", "*.pem"]                    # не попадают в копию проекта для работника
+    exclude = [".env", "*.pem"]                    # excluded from the worker project copy
 
     [timeouts]
     idle_s = 900
@@ -74,7 +74,7 @@ DEFAULT_SECRET_EXCLUDES = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed
 
 
 class ConfigError(ValueError):
-    """Конфиг не разобран; `errors` — все найденные проблемы."""
+    """Config not parsed; `errors` holds every problem found."""
 
     def __init__(self, source: str, errors: list[str]) -> None:
         self.source = source
@@ -83,7 +83,7 @@ class ConfigError(ValueError):
 
 
 def expand(value: str) -> str:
-    """Развернуть $VAR и ~ в пути."""
+    """Expand $VAR and ~ in a path."""
     return os.path.expandvars(os.path.expanduser(value))
 
 
@@ -91,7 +91,7 @@ def expand(value: str) -> str:
 class Resource:
     name: str
     capacity: int = 1
-    lock: str = ""  # внешний flock-файл (общий с инструментами вне хаба); пусто — только счётчик хаба
+    lock: str = ""  # external flock file (shared with tools outside the hub); empty — hub counter only
 
 
 @dataclass(frozen=True)
@@ -102,16 +102,16 @@ class Hooks:
 
 @dataclass(frozen=True)
 class Timeouts:
-    idle_s: int = 900  # тишина работника: нет событий N c
-    retry_max: int = 3  # повторов шага при сбое сети/сервера
-    retry_pause_s: float = 120.0  # пауза перед повтором, растёт ×2
+    idle_s: int = 900  # worker silence: no events for N s
+    retry_max: int = 3  # step retries on network/server failure
+    retry_pause_s: float = 120.0  # pause before retry, doubles each time
 
 
 @dataclass(frozen=True)
 class ProjectConfig:
     name: str
     root: str
-    source: str = ""  # путь к .hub.toml
+    source: str = ""  # path to .hub.toml
     schema_version: int = SCHEMA_VERSION
     worktrees: str = ""
     work_branch: str = "main"
@@ -139,25 +139,25 @@ class ProjectConfig:
 
 @dataclass(frozen=True)
 class HubConfig:
-    projects: tuple[str, ...] = ()  # пути к корням проектов (или к их .hub.toml)
+    projects: tuple[str, ...] = ()  # paths to project roots (or to their .hub.toml)
     source: str = ""
-    lang: str = ""  # lang = "en" | "ru"; пусто — по LANG/AHUB_LANG
-    tg_token: str = ""  # [telegram] token; пусто — бот выключен
-    tg_chat_id: int | None = None  # [telegram] chat_id; запасной чат для рассылки
-    tg_proxy: str = ""  # [telegram] proxy; пусто — системный HTTPS_PROXY
-    go_month_limit: float | None = None  # [usage] go_month_limit; None — не показывать
-    opencode: str = ""  # [paths] opencode; пусто — which/известное место
-    claude: str = ""  # [paths] claude; пусто — which/известное место
-    opencode_db: str = ""  # [paths] opencode_db; пусто — XDG/известное место
+    lang: str = ""  # lang = "en" | "ru"; empty — from LANG/AHUB_LANG
+    tg_token: str = ""  # [telegram] token; empty — bot off
+    tg_chat_id: int | None = None  # [telegram] chat_id; fallback broadcast chat
+    tg_proxy: str = ""  # [telegram] proxy; empty — system HTTPS_PROXY
+    go_month_limit: float | None = None  # [usage] go_month_limit; None — hide
+    opencode: str = ""  # [paths] opencode; empty — which/known location
+    claude: str = ""  # [paths] claude; empty — which/known location
+    opencode_db: str = ""  # [paths] opencode_db; empty — XDG/known location
 
     @property
     def telegram_enabled(self) -> bool:
-        """Включён ли бот: есть токен."""
+        """Bot enabled: token present."""
         return bool(self.tg_token)
 
 
 class _Reader:
-    """Типизированное чтение полей с накоплением ошибок."""
+    """Typed field reading with error accumulation."""
 
     def __init__(self) -> None:
         self.errors: list[str] = []
@@ -216,7 +216,7 @@ def _resources(r: _Reader, raw: dict) -> dict[str, Resource]:
     out: dict[str, Resource] = {}
     for name, spec in raw.items():
         where = f"resources.{name}."
-        if isinstance(spec, str):  # короткая форма: name = "/путь/к/lock"
+        if isinstance(spec, str):  # short form: name = "/path/to/lock"
             spec = {"lock": spec}
         if not isinstance(spec, dict):
             r.errors.append(_t("config.expect_resource", name=name))
@@ -230,7 +230,7 @@ def _resources(r: _Reader, raw: dict) -> dict[str, Resource]:
 
 
 def _from_v1(data: dict) -> dict:
-    """Поля .hub.toml v1 → форма v2 (без потерь того, что v2 понимает)."""
+    """v1 .hub.toml fields → v2 shape (keeping everything v2 understands)."""
     out = {k: data[k] for k in ("name", "root", "worktrees", "work_branch", "push", "python", "rules",
                                  "allowed_paths", "hooks")
            if k in data}
@@ -253,7 +253,7 @@ def _from_v1(data: dict) -> dict:
 
 
 def parse_project(data: dict, base_dir: str | Path, source: str = "") -> ProjectConfig:
-    """dict из TOML → ProjectConfig. Все проблемы разом — в ConfigError."""
+    """TOML dict → ProjectConfig. All problems at once — in ConfigError."""
     r = _Reader()
     version = data.get("schema_version", 1)
     if version == 1:
@@ -314,7 +314,7 @@ def parse_project(data: dict, base_dir: str | Path, source: str = "") -> Project
 
 
 def find_project_file(start: str | Path) -> Path | None:
-    """Ближайший .hub.toml от start вверх."""
+    """Nearest .hub.toml from start upward."""
     cur = Path(start).resolve()
     if cur.is_file():
         cur = cur.parent
@@ -335,7 +335,7 @@ def load_project_file(path: str | Path) -> ProjectConfig:
 
 
 def load_project(start: str | Path) -> ProjectConfig:
-    """Проект по каталогу (ищет .hub.toml вверх). Нет файла — FileNotFoundError."""
+    """Project by directory (searches .hub.toml upward). No file — FileNotFoundError."""
     f = find_project_file(start)
     if f is None:
         raise FileNotFoundError(_t("config.no_project_file", file=PROJECT_FILE, start=start))
@@ -343,7 +343,7 @@ def load_project(start: str | Path) -> ProjectConfig:
 
 
 def check_project(cfg: ProjectConfig) -> list[str]:
-    """Проблемы, видимые только на диске: нет корня, python, rules, каталога копий."""
+    """On-disk problems only: missing root, python, rules, worktree dir."""
     out: list[str] = []
     root = Path(cfg.root)
     if not root.is_dir():
@@ -367,7 +367,7 @@ def _legacy_global_path() -> Path:
 
 
 def _parse_hub_data(data: dict, source: str) -> HubConfig:
-    """dict из TOML → HubConfig. Все проблемы разом — в ConfigError."""
+    """TOML dict → HubConfig. All problems at once — in ConfigError."""
     r = _Reader()
     projects = r.strs(data, "projects")
     tg = r.table(data, "telegram")
@@ -431,9 +431,9 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
 
 
 def load_hub(path: str | Path | None = None) -> HubConfig:
-    """Глобальный конфиг. Нет своего — список проектов из конфига v1. Нет ничего — пустой.
+    """Global config. No own file — project list from the v1 config. Nothing at all — empty.
 
-    AHUB_TG_TOKEN и AHUB_TG_CHAT перекрывают файл (и работают без файла).
+    AHUB_TG_TOKEN and AHUB_TG_CHAT override the file (and work without one).
     """
     cands = [Path(path)] if path is not None else [paths.global_config_path(), _legacy_global_path()]
     for p in cands:
@@ -448,7 +448,7 @@ def load_hub(path: str | Path | None = None) -> HubConfig:
 
 
 def load_projects(hub: HubConfig | None = None) -> tuple[list[ProjectConfig], list[str]]:
-    """Все проекты хаба и проблемы загрузки (не глотаются — их покажет вызывающий)."""
+    """All hub projects and load problems (not swallowed — the caller shows them)."""
     hub = hub if hub is not None else load_hub()
     out: list[ProjectConfig] = []
     errors: list[str] = []
@@ -483,9 +483,9 @@ def _inside(path: Path, base: str) -> bool:
 
 
 def project_for(path: str | Path, projects: list[ProjectConfig]) -> ProjectConfig | None:
-    """Проект, к которому относится каталог: внутри корня или внутри каталога копий задач.
+    """Project owning a directory: inside the root or inside the task-copy dir.
 
-    Самый глубокий корень выигрывает (проект внутри проекта).
+    Deepest root wins (project inside a project).
     """
     p = Path(path).resolve()
     best: tuple[int, ProjectConfig] | None = None

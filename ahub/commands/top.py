@@ -1,4 +1,4 @@
-"""ahub top — экран для человека (просмотр; c — управление)."""
+"""ahub top — human screen (view; c for control)."""
 
 from __future__ import annotations
 

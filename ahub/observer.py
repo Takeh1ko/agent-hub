@@ -1,13 +1,13 @@
-"""Наблюдатель (V22–V23, architecture §8): следит за хабом, а не за проектами.
+"""Observer (V22–V23, architecture §8): watches the hub, not the projects.
 
-1. Каждые 5 мин — код, без модели: пульс активных задач, WARNING/ERROR в логах хаба за период, здоровье поставщиков,
-   сердцебиение сервиса, застой очереди, неразобранные события при отсутствии оркестратора. Чисто — ничего.
-   Подозрение → модель-наблюдатель (роль observer, по умолчанию Spark high) разбирает: ложная тревога → журнал;
-   настоящая → тревога. Одна и та же проблема (подпись) повторно не разбирается REPEAT_MS, пока не изменилась.
-2. Каждые 30 мин — модель в любом случае, по чек-листу (страховка от молчащих логов и врущего пульса).
-3. Тревога → событие alarm (будит Claude). TG-мост шлёт человеку: критичную — сразу, обычную — если за
-   ESCALATE_MS никто не подтвердил (comms.alarms_for_tg).
-4. Сервис знает время последней быстрой проверки; пропуск > WATCHDOG_MS — сервис сам поднимает тревогу.
+1. Every 5 min — code, no model: active-task pulse, WARNING/ERROR in hub logs for the window, provider health,
+   service heartbeat, queue stall, undelivered events with no orchestrator around. Clean — stay silent.
+   Suspicion → observer model (observer role, default Spark high) triages: false alarm → journal;
+   real one → alarm. The same problem (signature) is not re-triaged for REPEAT_MS unless it changed.
+2. Every 30 min — model regardless, checklist-driven (cover for silent logs and a lying pulse).
+3. Alarm → alarm event (wakes Claude). TG bridge sends to the human: critical — at once, normal — if nobody
+   acked within ESCALATE_MS (comms.alarms_for_tg).
+4. The service tracks the last quick check; a gap over WATCHDOG_MS — the service raises its own alarm.
 """
 
 from __future__ import annotations
@@ -38,13 +38,13 @@ HEARTBEAT_STALE_MS = 60_000
 LAST_QUICK = "observer_last_quick"
 LAST_DEEP = "observer_last_deep"
 SEEN_PREFIX = "observer_seen:"
-LOG_DIGEST_BYTES = 3 * 1024  # выжимка лога для модели — не больше ~3 КБ
+LOG_DIGEST_BYTES = 3 * 1024  # log excerpt for the model — at most ~3 KB
 _log = hublog.get("observer")
 
 
 @dataclass
 class Suspicion:
-    sig: str  # подпись для паузы на повтор
+    sig: str  # signature for the repeat pause
     text: str
     critical: bool = False
     data: dict = field(default_factory=dict)
@@ -67,7 +67,7 @@ def _log_suspicions(since: int) -> list[Suspicion]:
 
 def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = None, now: int | None = None,
                 since: int | None = None, health: bool = True) -> list[Suspicion]:
-    """Проверка кодом. Возвращает подозрения (пусто — всё чисто)."""
+    """Code-only check. Returns suspicions (empty — all clean)."""
     ts = now if now is not None else now_ms()
     if projects is None:
         projects, _ = config.load_projects()
@@ -78,7 +78,7 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
         if pl.state in ("silent", "dead"):
             t = store.get_task(tid)
             if pl.state == "dead" and ((t.lease_until or 0) + ORPHAN_GRACE_MS > ts or ts - t.updated_at < ORPHAN_GRACE_MS):
-                continue  # сервис ещё может подхватить (грейс сиротства) — не тревога
+                continue  # service may still pick it up (orphan grace) — not an alarm
             sus.append(Suspicion(f"pulse:{tid}:{pl.state}", _t("observer.pulse", tid=tid, mark=pl.mark,
                                                                                    reason=pl.reason,
                                                                                    state=t.state.value),
@@ -110,7 +110,7 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
         for name in providers.names():
             try:
                 h = providers.get(name).health()
-            except Exception as e:  # модуль поставщика не должен ронять наблюдателя
+            except Exception as e:  # a provider module must not crash the observer
                 sus.append(Suspicion(f"health:{name}:exc", _t("observer.health_exc", name=name, err=e)))
                 continue
             if not h.ok and name == "opencode":
@@ -122,7 +122,7 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
 
 
 def proxy_problem(env: dict | None = None, timeout: float = 3.0) -> str:
-    """Системный прокси принимает соединения? Пусто — да или прокси не задан."""
+    """System proxy accepting connections? Empty — yes or no proxy set."""
     import os
     import socket
     from urllib.parse import urlparse
@@ -141,13 +141,13 @@ def proxy_problem(env: dict | None = None, timeout: float = 3.0) -> str:
 
 
 def _fresh(store: Store, sus: list[Suspicion], now: int) -> list[Suspicion]:
-    """Подозрения, которые ещё не разбирали за REPEAT_MS (или которые изменились)."""
+    """Suspicions not triaged in the last REPEAT_MS (or changed since)."""
     out = []
     for s in sus:
         key = SEEN_PREFIX + s.sig
         seen = store.meta_get(key)
         if seen and now - int(seen.split("|", 1)[0]) < REPEAT_MS:
-            continue  # та же проблема (подпись) — не чаще раза в REPEAT_MS, счётчики в тексте не в счёт
+            continue  # same problem (signature) — at most once per REPEAT_MS, counters in text don't count
         out.append(s)
     return out
 
@@ -158,7 +158,7 @@ def _mark_seen(store: Store, sus: list[Suspicion], now: int) -> None:
 
 
 def _bot_pids(proc_root: str | Path = "/proc") -> list[int]:
-    """Живые pid бота: процессы с `bot run` в cmdline."""
+    """Live bot pids: processes with `bot run` in cmdline."""
     out = []
     for pid in procs.pids(proc_root):
         args = procs.cmdline(pid, proc_root)
@@ -168,7 +168,7 @@ def _bot_pids(proc_root: str | Path = "/proc") -> list[int]:
 
 
 def window_since(store: Store, *, deep: bool, now: int) -> int:
-    """Начало окна проверки: с прошлой проверки того же вида (плановой или быстрой), иначе — её период."""
+    """Check window start: since the last check of the same kind (scheduled or quick), else its period."""
     if deep:
         return int(store.meta_get(LAST_DEEP) or 0) or now - DEEP_MS
     return int(store.meta_get(LAST_QUICK) or 0) or now - QUICK_MS
@@ -176,7 +176,7 @@ def window_since(store: Store, *, deep: bool, now: int) -> int:
 
 def log_digest(since: int, *, now: int | None = None, limit_bytes: int = LOG_DIGEST_BYTES,
                proc_root: str | Path = "/proc") -> str:
-    """Выжимка WARNING/ERROR за окно: группы (подпись, счёт), pid и время последней записи. Не больше limit."""
+    """WARNING/ERROR excerpt for the window: groups (signature, count), pid and last-record time. At most limit."""
     ts_now = now if now is not None else now_ms()
     try:
         res = hublog.scan(since, until_ms=ts_now)
@@ -200,16 +200,16 @@ def log_digest(since: int, *, now: int | None = None, limit_bytes: int = LOG_DIG
         lines.append(_t("observer.broken_lines", n=res.broken_lines))
     text = "\n".join(lines)
     while len(text.encode("utf-8")) > limit_bytes and len(lines) > 1:
-        lines.pop()  # выбрасываем самые редкие группы, пока не влезет
+        lines.pop()  # drop rarest groups until it fits
         text = "\n".join(lines)
     raw = text.encode("utf-8")
-    if len(raw) > limit_bytes:  # одна группа всё равно большая — режем по байтам
+    if len(raw) > limit_bytes:  # one group still too big — cut by bytes
         text = raw[:limit_bytes].decode("utf-8", "ignore")
     return text
 
 
 def snapshot(store: Store, *, now: int, proc_root: str | Path = "/proc") -> str:
-    """Короткая картина хаба для модели-наблюдателя."""
+    """Short hub picture for the observer model."""
     from ahub import views
     from ahub.service import live_workers
 
@@ -261,7 +261,7 @@ DEEP_CHECKLIST = """## Scheduled check (every 30 min) — go through the checkli
 
 def triage(store: Store, sus: list[Suspicion], *, deep: bool = False, now: int | None = None,
            project: config.ProjectConfig | None = None, since: int | None = None) -> dict:
-    """Разбор моделью. Возвращает {"verdict", "summary", "action", "cost_go"}; сбой модели — verdict "unknown"."""
+    """Model triage. Returns {"verdict", "summary", "action", "cost_go"}; model failure — verdict "unknown"."""
     ts = now if now is not None else now_ms()
     try:
         entry = registry.pick(store, Role.OBSERVER, project)
@@ -300,11 +300,11 @@ def _report(store: Store, kind: str, verdict: str, summary: str, details: dict, 
 
 def cycle(store: Store, *, now: int | None = None, deep_due: bool | None = None, use_model: bool = True,
           projects: list[config.ProjectConfig] | None = None) -> str:
-    """Один проход наблюдателя. Возвращает вердикт: ok | false_alarm | alarm | critical | unknown."""
+    """One observer pass. Returns verdict: ok | false_alarm | alarm | critical | unknown."""
     ts = now if now is not None else now_ms()
     last_deep = int(store.meta_get(LAST_DEEP) or 0)
     deep = deep_due if deep_due is not None else ts - last_deep >= DEEP_MS
-    win = window_since(store, deep=deep, now=ts)  # до quick_check: он сдвигает LAST_QUICK
+    win = window_since(store, deep=deep, now=ts)  # before quick_check: it moves LAST_QUICK
     sus = quick_check(store, projects=projects, now=ts)
     fresh = _fresh(store, sus, ts)
     if not fresh and not deep:
@@ -317,7 +317,7 @@ def cycle(store: Store, *, now: int | None = None, deep_due: bool | None = None,
         res = {"verdict": verdict, "summary": "; ".join(s.text for s in fresh)[:300], "action": "", "cost_go": 0.0}
     else:
         res = triage(store, fresh, deep=deep, now=ts, since=win)
-        if res["verdict"] == "unknown" and crit_code:  # модель не ответила, а код видит критичное — не молчим
+        if res["verdict"] == "unknown" and crit_code:  # model silent but code sees critical — don't stay quiet
             res["verdict"] = "critical"
             res["summary"] = "; ".join(s.text for s in crit_code)[:300] + _t("observer.no_answer_suffix")
     if deep:
@@ -335,7 +335,7 @@ def cycle(store: Store, *, now: int | None = None, deep_due: bool | None = None,
 
 
 def watchdog(store: Store, *, now: int | None = None) -> bool:
-    """Для сервиса: наблюдатель пропустил проверку → тревога кодом. True — подняли."""
+    """For the service: observer missed its check → code-raised alarm. True — raised."""
     ts = now if now is not None else now_ms()
     last = store.meta_get(LAST_QUICK)
     if last is None or ts - int(last) <= WATCHDOG_MS:

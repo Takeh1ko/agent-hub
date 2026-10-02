@@ -1,4 +1,4 @@
-"""ahub mcp — MCP-сервер (stdio) для Codex и других агентов."""
+"""ahub mcp — MCP server (stdio) for Codex and other agents."""
 
 from __future__ import annotations
 

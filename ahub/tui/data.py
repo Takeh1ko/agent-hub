@@ -1,4 +1,4 @@
-"""Данные экрана `ahub top` — чистые функции (тестируются без textual). Всё словами, понятно не программисту."""
+"""`ahub top` screen data — pure functions (tested without textual). Plain words, clear to non-programmers."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from ahub.service import HEARTBEAT_KEY, PAUSE_KEY, live_workers
 from ahub.store import Store, Task
 from ahub.time import fmt_local, now_ms, to_local
 
-_UNSET: object = object()  # маркер «лимит не передан — взять из конфига»
+_UNSET: object = object()  # marker "limit not passed — take from config"
 PHASE = views.PHASE_WORDS
 EV_WORDS: Words = Words("tui.ev_", ("created", "retry", "silence", "orphan", "budget_soft", "budget_hard",
                                     "orch_edit", "paths_extended", "model_changed", "budget_extended"))
@@ -51,7 +51,7 @@ def _age(ms: int, now: int) -> str:
 
 
 def _go_limit(hub_limit: float | None | object) -> float | None:
-    """Лимит месяца: явный → он; _UNSET → из конфига; битого конфига — нет лимита."""
+    """Month limit: explicit → it; _UNSET → from config; broken config — no limit."""
     if hub_limit is not _UNSET:
         return hub_limit  # type: ignore[return-value]
     try:

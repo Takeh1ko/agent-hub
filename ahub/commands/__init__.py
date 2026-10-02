@@ -1,1 +1,1 @@
-"""Подкоманды ahub: каждый модуль с register(subparsers)."""
+"""ahub subcommands: each module exposes register(subparsers)."""

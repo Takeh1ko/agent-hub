@@ -1,4 +1,4 @@
-"""ahub projects — проекты хаба и проблемы их конфигов."""
+"""ahub projects — hub projects and their config problems."""
 
 from __future__ import annotations
 

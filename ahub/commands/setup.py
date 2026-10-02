@@ -1,8 +1,8 @@
-"""ahub setup — подключить проект к хабу одной командой (V30/V31a).
+"""ahub setup — attach a project to the hub in one command (V30/V31a).
 
-- нет .hub.toml → пишет шаблон v2; есть v1 → переводит в v2 (старый — в .hub.toml.v1);
-- вносит проект в ~/.config/ahub/config.toml;
-- --claude: навык ahub для Claude Code (~/.claude/skills/ahub/SKILL.md) и короткий блок в CLAUDE.md проекта.
+- no .hub.toml → writes the v2 template; v1 present → migrates to v2 (old copy → .hub.toml.v1);
+- registers the project in ~/.config/ahub/config.toml;
+- --claude: ahub skill for Claude Code (~/.claude/skills/ahub/SKILL.md) and a short block in the project CLAUDE.md.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def _branch(root: Path) -> str:
 
 
 def ensure_project_file(root: Path, *, name: str | None = None, deny: list[str] | None = None) -> tuple[str, Path]:
-    """(что сделали, путь .hub.toml)."""
+    """(what was done, .hub.toml path)."""
     from ahub.i18n import t
 
     f = root / config.PROJECT_FILE
@@ -88,7 +88,7 @@ def ensure_project_file(root: Path, *, name: str | None = None, deny: list[str] 
             cfg = dataclasses.replace(cfg, models_deny=tuple(dict.fromkeys(list(cfg.models_deny) + deny)))
         from ahub import archive
 
-        backup = archive.root(cfg) / "hub.toml.v1"  # архив хаба — вне git проекта
+        backup = archive.root(cfg) / "hub.toml.v1"  # hub archive — outside the project git
         backup.parent.mkdir(parents=True, exist_ok=True)
         archive._exclude(cfg)
         backup.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
@@ -102,7 +102,7 @@ def ensure_project_file(root: Path, *, name: str | None = None, deny: list[str] 
 
 
 def _render_projects(items: list[str]) -> str:
-    """Одна строка projects для глобального конфига."""
+    """Single projects line for the global config."""
     return "projects = [" + ", ".join(_toml_str(p) for p in items) + "]"
 
 
@@ -110,7 +110,7 @@ _PROJECTS_KEY = re.compile(r"^projects\s*=\s*\[[^\]]*\][^\n]*\n?", re.MULTILINE)
 
 
 def _replace_projects_line(text: str, items: list[str]) -> str:
-    """Заменить ключ projects, остальное (секции, комментарии) оставить как было; нет ключа — вставить первым."""
+    """Replace the projects key, keep the rest (sections, comments) as is; no key — insert first."""
     line = _render_projects(items) + "\n"
     m = _PROJECTS_KEY.search(text)
     new = text[:m.start()] + line + text[m.end():] if m else line + text
@@ -125,7 +125,7 @@ def register_project(root: Path) -> bool:
     gp = paths.global_config_path()
     hub = config.load_hub(gp) if gp.exists() else config.HubConfig()
     if not gp.exists():
-        legacy = config.load_hub()  # список проектов v1, если был
+        legacy = config.load_hub()  # v1 project list, if any
         hub = config.HubConfig(projects=legacy.projects)
     items = list(hub.projects)
     if any(Path(p).resolve() == root.resolve() for p in items):
