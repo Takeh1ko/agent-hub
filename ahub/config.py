@@ -140,6 +140,7 @@ class ProjectConfig:
 class HubConfig:
     projects: tuple[str, ...] = ()  # пути к корням проектов (или к их .hub.toml)
     source: str = ""
+    lang: str = ""  # lang = "en" | "ru"; пусто — по LANG/AHUB_LANG
     tg_token: str = ""  # [telegram] token; пусто — бот выключен
     tg_chat_id: int | None = None  # [telegram] chat_id; запасной чат для рассылки
     tg_proxy: str = ""  # [telegram] proxy; пусто — системный HTTPS_PROXY
@@ -403,11 +404,21 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
     opencode = expand(r.str_(pth, "opencode", "", "paths.").strip())
     claude = expand(r.str_(pth, "claude", "", "paths.").strip())
     opencode_db = expand(r.str_(pth, "opencode_db", "", "paths.").strip())
+    raw = data.get("lang", "")
+    norm = raw.strip().lower() if isinstance(raw, str) else ""
+    if isinstance(raw, str) and norm not in ("", "en", "ru"):
+        r.errors.append(f"lang: допустимо 'en' или 'ru', получено {raw!r}")
+        norm = ""
+    elif not isinstance(raw, str) and "lang" in data:
+        r.errors.append(f"lang: ожидается строка, получено {type(raw).__name__}")
+        norm = ""
+    raw_lang = norm
     if r.errors:
         raise ConfigError(source or "<dict>", r.errors)
     return HubConfig(
         projects=tuple(expand(x) for x in projects),
         source=source,
+        lang=raw_lang,
         tg_token=token.strip(),
         tg_chat_id=chat_id,
         tg_proxy=proxy.strip(),
