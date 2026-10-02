@@ -71,7 +71,7 @@ _ENV_KEYS = ("PATH", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "LANG
 
 
 def unit_text(name: str) -> str:
-    """Юнит: окружение сессии, которого systemd не видит, — явно (PATH: claude/ahub; прокси Koala)."""
+    """Юнит: окружение сессии, которого systemd не видит, — явно (PATH: claude/ahub; системный прокси)."""
     import os
     import sys
 

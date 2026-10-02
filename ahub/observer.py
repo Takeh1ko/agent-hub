@@ -110,7 +110,7 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
 
 
 def proxy_problem(env: dict | None = None, timeout: float = 3.0) -> str:
-    """Системный прокси (Koala) принимает соединения? Пусто — да или прокси не задан."""
+    """Системный прокси принимает соединения? Пусто — да или прокси не задан."""
     import os
     import socket
     from urllib.parse import urlparse
@@ -125,7 +125,7 @@ def proxy_problem(env: dict | None = None, timeout: float = 3.0) -> str:
         with socket.create_connection((host, port), timeout=timeout):
             return ""
     except OSError as e:
-        return f"прокси {host}:{port} не отвечает ({e.__class__.__name__}) — модели и Telegram без сети; проверь Koala"
+        return f"прокси {host}:{port} не отвечает ({e.__class__.__name__}) — модели и Telegram без сети; проверь системный прокси"
 
 
 def _fresh(store: Store, sus: list[Suspicion], now: int) -> list[Suspicion]:
