@@ -3,10 +3,10 @@ name = "midas-ai-hub"
 version = "2.0.0"
 description = "agent-hub v2: сервис, через который оркестратор (Claude Code) и человек раздают работу моделям-работникам"
 requires-python = ">=3.12"
-dependencies = ["textual>=0.80", "aiogram>=3.13", "aiohttp-socks>=0.9"]
+dependencies = ["textual>=0.80", "aiogram>=3.13", "aiohttp-socks>=0.9", "psutil>=5.9; sys_platform != 'linux'"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "psutil>=5.9"]
 
 [project.scripts]
 hub = "ahub.cli:main"
