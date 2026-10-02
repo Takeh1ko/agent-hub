@@ -28,6 +28,10 @@ DEFAULT_MODELS: dict[str, tuple[str, str, str, str]] = {
     "spark-free": ("opencode", "opencode/muse-spark-1.3-contributor-free", "xhigh", "free Spark (slower)"),
     "gemini": ("agy", "gemini-3.8-flash-high", "", "Gemini via agy (window quota)"),
     "gemini-low": ("agy", "gemini-3.8-flash-low", "", "Gemini via agy, fast (window quota)"),
+    # Codex CLI: a ChatGPT subscription, no prices; the sandbox limits writes to the copy.
+    # The ids come from the login catalog (`codex debug models`, `ahub models --all`).
+    "codex": ("codex", "gpt-5.6-terra", "", "Codex via codex CLI (subscription, OS sandbox)"),
+    "codex-fast": ("codex", "gpt-5.6-luna", "", "Codex via codex CLI, cheaper/faster (subscription)"),
 }
 
 # role → [(alias, is_default)] in display order

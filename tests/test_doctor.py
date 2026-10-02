@@ -163,6 +163,36 @@ def test_agy_health_and_missing(monkeypatch, tmp_path):
     assert doctor.check_agy().ok is None
 
 
+def test_codex_health_and_missing(monkeypatch, tmp_path):
+    """codex found — ok True/False per the provider's health(); not found — "no data" (None)."""
+    from ahub import providers
+    from ahub.providers.codex import CodexProvider
+    from tests.provider_contract import CODEX_DATA, fake_codex
+
+    def only_codex(path):
+        monkeypatch.setattr(shutil, "which", lambda name: str(path) if name == "codex" else None)
+
+    env = {"AHUB_CODEX_FAKE_DATA": str(CODEX_DATA)}
+    healthy = CodexProvider(binary=str(fake_codex(tmp_path)), env=env)
+    only_codex(healthy.binary)
+    monkeypatch.setitem(providers._cache, "codex", healthy)
+    c = doctor.check_codex()
+    assert c.ok is True and "0.153.4-fake" in c.detail and not c.fix
+
+    class _NoLogin(CodexProvider):
+        def login(self):
+            return False, "Not logged in"
+
+    broken = _NoLogin(binary=str(fake_codex(tmp_path / "b")), env=env)
+    only_codex(broken.binary)
+    monkeypatch.setitem(providers._cache, "codex", broken)
+    c = doctor.check_codex()
+    assert c.ok is False and "codex login" in c.fix and "codex login" in c.detail
+
+    only_codex(tmp_path / "void" / "codex")
+    assert doctor.check_codex().ok is None
+
+
 def test_models_go_and_free_fix():
     assert doctor.check_models(["opencode", "opencode-go"]).ok is True
     c = doctor.check_models(["opencode"])
@@ -261,7 +291,7 @@ def test_run_all_never_raises(monkeypatch):
         raise RuntimeError("boom")
     monkeypatch.setattr(doctor, "check_git", _boom)
     checks = doctor.run_all()
-    assert len(checks) == 13
+    assert len(checks) == 14
     git = next(c for c in checks if c.name == "git")
     assert git.ok is False and "boom" in git.detail
 
@@ -272,7 +302,7 @@ def test_cli_codes_and_json(capsys, monkeypatch):
     assert cli.main(["--json", "doctor"]) in (0, 1)
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert isinstance(data["checks"], list) and len(data["checks"]) == 13
+    assert isinstance(data["checks"], list) and len(data["checks"]) == 14
     assert secret not in out
     for c in data["checks"]:
         assert set(c) == {"name", "ok", "detail", "fix"}

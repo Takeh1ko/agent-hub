@@ -9,6 +9,7 @@ from ahub.providers.base import Provider
 _REGISTRY: dict[str, str] = {
     "opencode": "ahub.providers.opencode:OpencodeProvider",
     "agy": "ahub.providers.agy:AgyProvider",
+    "codex": "ahub.providers.codex:CodexProvider",
     "fake": "ahub.providers.fake:FakeProvider",
 }
 _cache: dict[str, Provider] = {}

@@ -238,6 +238,28 @@ def check_agy() -> Check:
     return Check("agy", False, _t("doctor.health_bad", problems=problems), fix)
 
 
+def check_codex() -> Check:
+    """codex (Codex CLI): found — ok True/False per the provider's health(); not found — None."""
+    from ahub import providers
+    from ahub.providers.codex import codex_bin
+
+    binary = codex_bin()
+    if not os.access(binary, os.X_OK):
+        return Check("codex", None, _t("doctor.codex_missing") + ": " + _t("doctor.codex_fix"), "")
+    h = providers.get("codex").health()
+    if h.ok:
+        ver = str(h.details.get("version", "")).strip()[:40]
+        suffix = _t("doctor.health_version", version=ver) if ver else ""
+        return Check("codex", True, _t("doctor.codex_found", binary=binary) + suffix, "")
+    problems = "; ".join(h.problems)[:500]
+    try:
+        logged_in = providers.get("codex").login()[0]
+    except Exception:
+        logged_in = False
+    fix = "" if logged_in else _t("doctor.codex_fix_login")
+    return Check("codex", False, _t("doctor.health_bad", problems=problems), fix)
+
+
 def _free_alias(store) -> str:
     try:
         from ahub import registry
@@ -373,6 +395,7 @@ def run_all() -> list[Check]:
         _safe("opencode_health", check_opencode_health),
         _safe("opencode_auth", lambda: _auth_check(providers)),
         _safe("agy", check_agy),
+        _safe("codex", check_codex),
         _safe("models", lambda: check_models(providers)),
         _safe("network", check_network),
         _safe("claude", check_claude),
@@ -384,5 +407,5 @@ def run_all() -> list[Check]:
 
 __all__ = ["Check", "TIMEOUT_S", "auth_providers", "auth_file_path", "has_go_login", "run_all",
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
-           "check_opencode_health", "check_opencode_auth", "check_agy", "check_models",
+           "check_opencode_health", "check_opencode_auth", "check_agy", "check_codex", "check_models",
            "check_network", "check_claude", "check_claude_skill", "check_telegram", "skill_path"]
