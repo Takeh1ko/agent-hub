@@ -221,10 +221,21 @@ def check_opencode_auth() -> Check:
 
 
 def check_agy() -> Check:
-    exe = shutil.which("agy")
-    if exe:
-        return Check("agy", None, _t("doctor.agy_found", binary=exe), "")
-    return Check("agy", None, _t("doctor.agy_missing"), "")
+    """agy (Gemini): нашёлся — ok True/False по health() поставщика; не нашёлся — не установлен (None)."""
+    from ahub import providers
+    from ahub.providers.agy import agy_bin, agy_state_file
+
+    binary = agy_bin()
+    if not os.access(binary, os.X_OK):
+        return Check("agy", None, _t("doctor.agy_missing"), "")
+    h = providers.get("agy").health()
+    if h.ok:
+        ver = str(h.details.get("version", "")).strip()[:40]
+        suffix = _t("doctor.health_version", version=ver) if ver else ""
+        return Check("agy", True, _t("doctor.agy_found", binary=binary) + suffix, "")
+    problems = "; ".join(h.problems)[:500]
+    fix = _t("doctor.agy_fix_login") if not agy_state_file().is_file() else ""
+    return Check("agy", False, _t("doctor.health_bad", problems=problems), fix)
 
 
 def _free_alias(store) -> str:

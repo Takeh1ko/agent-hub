@@ -134,13 +134,32 @@ def test_auth_list_colors_and_free_only(monkeypatch):
     assert c.ok is False and "auth login" in c.fix
 
 
-def test_agy_found_missing(monkeypatch, tmp_path):
-    fake = tmp_path / "agy"
-    fake.write_text("#!/bin/sh\n")
-    monkeypatch.setattr(shutil, "which", lambda name: str(fake) if name == "agy" else None)
+def test_agy_health_and_missing(monkeypatch, tmp_path):
+    """agy найден — ok True/False по health() поставщика; не найден — «нет данных» (None)."""
+    from ahub import providers
+    from ahub.providers.agy import AgyProvider
+    from tests.provider_contract import AGY_DATA, agy_state, fake_agy
+
+    def only_agy(path):
+        monkeypatch.setattr(shutil, "which", lambda name: str(path) if name == "agy" else None)
+
+    broken = tmp_path / "broken" / "agy"
+    broken.parent.mkdir(parents=True)
+    broken.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    broken.chmod(0o755)
+    only_agy(broken)
+    monkeypatch.setitem(providers._cache, "agy", AgyProvider(binary=str(broken)))
     c = doctor.check_agy()
-    assert c.ok is None and str(fake) in c.detail
-    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert c.ok is False and "agy" in c.detail and "agy" in c.fix  # нет входа — подсказка
+
+    healthy = AgyProvider(binary=str(fake_agy(tmp_path)), env={"AHUB_AGY_FAKE_DATA": str(AGY_DATA)})
+    agy_state(tmp_path)
+    only_agy(healthy.binary)
+    monkeypatch.setitem(providers._cache, "agy", healthy)
+    c = doctor.check_agy()
+    assert c.ok is True and "1.2.15-fake" in c.detail and not c.fix
+
+    only_agy(tmp_path / "void" / "agy")
     assert doctor.check_agy().ok is None
 
 

@@ -8,10 +8,36 @@ make_spec(kind, cwd) — поставщик-специфичное задани�
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from ahub.providers.base import Act, Cap, Outcome, Provider, RunSpec
 from ahub.providers.runner import run
+
+AGY_DATA = Path(__file__).parent / "data" / "agy"
+
+
+def fake_agy(root: Path, env: dict[str, str] | None = None) -> Path:
+    """Исполняемый файл agy: тело tests/data/agy/fake_agy.py под shebangом текущего питона.
+
+    Каталог с образцами передаётся в окружении (AGY_AGY_FAKE_DATA) — фейк лежит во временном каталоге.
+    """
+    fake = root / "agy"
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake.write_text(f"#!{sys.executable}\n" + (AGY_DATA / "fake_agy.py").read_text(encoding="utf-8"),
+                    encoding="utf-8")
+    fake.chmod(0o755)
+    return fake
+
+
+def agy_state(root: Path) -> Path:
+    """Файл состояния agy = «вход есть» (по нему health() понимает, что agy авторизован)."""
+    state = root / ".gemini" / "antigravity-cli"
+    state.mkdir(parents=True, exist_ok=True)
+    path = state / "jetski_state.pbtxt"
+    path.write_text("post_onboarding: {}\n", encoding="utf-8")
+    return path
 
 
 def check_catalog_and_health(p: Provider) -> None:
