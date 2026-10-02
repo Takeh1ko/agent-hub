@@ -1,4 +1,4 @@
-"""Общее для тестов движка: git-проект во временном каталоге, фейковый поставщик со сценариями по очереди."""
+"""Shared engine test kit: a git project in a temp dir, a fake provider with scenarios taken in order."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def make_project(tmp_path: Path, **extra) -> config.ProjectConfig:
 
 
 class ScriptedFake(FakeProvider):
-    """Каждый запуск берёт следующий сценарий из очереди; промпты и id продолжений — в calls."""
+    """Every run takes the next scenario from the queue; prompts and session ids land in calls."""
 
     def __init__(self, scenarios: list[dict]) -> None:
         super().__init__()

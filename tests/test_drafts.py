@@ -39,12 +39,12 @@ def test_ready_preview_start(store, tmp_path):
     text = drafts.preview(store, did)
     assert "Черновик" in text and "код" in text and "Проверка: tests/test_a.py::test_x" in text
     assert "хочу кнопку" in fake.calls[0]["prompt"]
-    assert fake.calls[0]["cwd"] != project.root  # отдельная копия
+    assert fake.calls[0]["cwd"] != project.root  # separate copy
     tid = drafts.start(store, project, did)
     t = store.get_task(tid)
     assert t.state is State.QUEUED and t.review == {"models": ["spark"], "rounds": 2}
-    assert t.limits["read"] == ["core/a.py"]  # несуществующее выброшено
-    assert drafts.start(store, project, did) == tid  # повтор — та же задача
+    assert t.limits["read"] == ["core/a.py"]  # the missing file was dropped
+    assert drafts.start(store, project, did) == tid  # repeat — the same task
     assert not drafts.cancel(store, did)
 
 

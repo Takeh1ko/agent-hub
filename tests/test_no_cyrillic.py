@@ -1,6 +1,6 @@
-"""i18n шаг 8: в строках ahub/ нет кириллицы вне ahub/i18n (кроме allow-листа).
+"""i18n step 8: no Cyrillic in ahub/ strings outside ahub/i18n (except the allow-list).
 
-Комментарии и докстринги — не проверяются (отдельная задача).
+Comments and docstrings are not checked (separate task).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 
 _CYR = re.compile(r"[а-яА-ЯёЁ]")
 
-# (суффикс файла, подстрока в токене, причина) — всё остальное с кириллицей запрещено.
+# (file suffix, substring in the token, reason) — any other Cyrillic is forbidden.
 ALLOW: list[tuple[str, str, str]] = [
     ("ahub/time.py", "", "разбор русского ввода времени (сегодня/вчера/единицы, оба языка всегда)"),
     ("ahub/views.py", "Суть", "регулярка русских заголовков отчёта (views._SUT понимает Суть/Summary)"),
@@ -28,7 +28,7 @@ ALLOW: list[tuple[str, str, str]] = [
 
 
 def _doc_lines(src: str) -> set[int]:
-    """Строки докстрингов: строковое выражение первым в модуле/классе/функции."""
+    """Docstring lines: a string expression first in a module/class/function."""
     try:
         tree = ast.parse(src)
     except SyntaxError:
@@ -77,7 +77,7 @@ def test_no_cyrillic_outside_i18n():
             continue
         src = path.read_text(encoding="utf-8")
         docs = _doc_lines(src)
-        # карта строк токенов → строки докстрингов пропускаем
+        # map token lines → skip the docstring lines
         try:
             tree = ast.parse(src)
         except SyntaxError:
@@ -86,8 +86,8 @@ def test_no_cyrillic_outside_i18n():
         for lineno, tok in _string_tokens(src):
             if not _CYR.search(tok):
                 continue
-            # токен целиком внутри докстринга — пропустить
-            # (грубо: начальная строка токена — строка докстринга)
+            # the whole token is inside a docstring — skip it
+            # (rough: the token's start line is a docstring line)
             if lineno in docs:
                 continue
             if _allowed(rel, tok):

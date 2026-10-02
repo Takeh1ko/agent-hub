@@ -1,4 +1,4 @@
-"""i18n шаг 2: каталог EN/RU, выбор языка, вывод CLI в обоих языках."""
+"""i18n step 2: the EN/RU catalog, language choice, CLI output in both languages."""
 
 from __future__ import annotations
 
@@ -42,14 +42,14 @@ def test_unknown_key():
 def test_lang_order(monkeypatch, tmp_path):
     from ahub import config
 
-    # AHUB_LANG выше конфига и LANG
+    # AHUB_LANG beats the config and LANG
     monkeypatch.setenv("AHUB_LANG", "en")
     paths.global_config_path().parent.mkdir(parents=True, exist_ok=True)
     paths.global_config_path().write_text('lang = "ru"\n', encoding="utf-8")
     monkeypatch.setenv("LANG", "ru_RU.UTF-8")
     _reset()
     assert lang() == "en"
-    # конфиг выше LANG
+    # config beats LANG
     monkeypatch.delenv("AHUB_LANG")
     _reset()
     assert lang() == "ru"
@@ -63,7 +63,7 @@ def test_lang_order(monkeypatch, tmp_path):
     monkeypatch.setenv("LC_MESSAGES", "ru_RU.UTF-8")
     _reset()
     assert lang() == "ru"
-    # по умолчанию en
+    # default is en
     monkeypatch.delenv("LC_MESSAGES")
     _reset()
     assert lang() == "en"
@@ -131,7 +131,7 @@ def test_locale_first_nonempty_wins(monkeypatch):
 
 
 def test_views_events_en(monkeypatch, tmp_path):
-    """Шаг 3: L1/L2 и строка DONE на английском (AHUB_LANG=en)."""
+    """Step 3: L1/L2 and the DONE line in English (AHUB_LANG=en)."""
     from ahub import events, transitions, views
     from ahub.model import State
     from ahub.store import Store
@@ -156,7 +156,7 @@ def test_views_events_en(monkeypatch, tmp_path):
     l1 = views.status_text(store, now=now)
     assert "studying" in l1 and "round 2" in l1
     assert "queued 1" in l1 and "unread events" in l1
-    assert "DONE T2" in l1  # коды не переводятся
+    assert "DONE T2" in l1  # codes are not translated
 
     done_ev = [e for e in store.events(task_id=waiting, needs_reaction=True) if e.kind == "done"][0]
     line = events.format_line(done_ev, store.get_task(waiting))
@@ -191,7 +191,7 @@ def test_words_is_a_real_mapping():
 
 
 def test_step5_tasks_config_en(monkeypatch):
-    """Шаг 5: ошибки задачи и конфига на английском (AHUB_LANG=en)."""
+    """Step 5: task and config errors in English (AHUB_LANG=en)."""
     import sys
 
     from ahub import config, registry, tasks
@@ -224,7 +224,7 @@ def test_step5_tasks_config_en(monkeypatch):
 
 
 def test_step5_transitions_drafts_en(monkeypatch, tmp_path):
-    """Шаг 5: переходы и черновики на английском (AHUB_LANG=en)."""
+    """Step 5: transitions and drafts in English (AHUB_LANG=en)."""
     from ahub import config, drafts, prepare, transitions
     from ahub.model import State
     from ahub.store import Store
@@ -254,7 +254,7 @@ def test_step5_transitions_drafts_en(monkeypatch, tmp_path):
 
 
 def test_step5_no_cyrillic_in_en_preview(monkeypatch, tmp_path):
-    """Шаг 5: предпросмотр черновика на английском без кириллицы."""
+    """Step 5: draft preview in English, no Cyrillic."""
     import json
     import re as _re
 
@@ -275,7 +275,7 @@ def test_step5_no_cyrillic_in_en_preview(monkeypatch, tmp_path):
 
 
 def test_step6_engine_gates_en(monkeypatch, tmp_path):
-    """Шаг 6: причины движка и ворот на английском (AHUB_LANG=en)."""
+    """Step 6: engine reasons and gates in English (AHUB_LANG=en)."""
     import re as _re
 
     from ahub import config, gates
@@ -300,7 +300,7 @@ def test_step6_engine_gates_en(monkeypatch, tmp_path):
 
 
 def test_step6_accept_service_en(monkeypatch, tmp_path):
-    """Шаг 6: ошибки принятия и причины очереди на английском (AHUB_LANG=en)."""
+    """Step 6: accept errors and queue reasons in English (AHUB_LANG=en)."""
     import re as _re
 
     import pytest
@@ -334,7 +334,7 @@ def test_step6_accept_service_en(monkeypatch, tmp_path):
 
 
 def test_step6_pulse_providers_en(monkeypatch, tmp_path):
-    """Шаг 6: причины пульса и поставщиков на английском (AHUB_LANG=en)."""
+    """Step 6: pulse and provider reasons in English (AHUB_LANG=en)."""
     import re as _re
 
     from ahub import config, pulse, transitions

@@ -14,7 +14,7 @@ from tests.enginekit import install_fake
 
 
 def _write_log(ts: int, msg: str, *, lvl: str = "ERROR", comp: str = "tg", pid: int = 1650) -> None:
-    """Строка лога с заданными ts/pid (для проверки окна и мёртвых pid)."""
+    """A log record with the given ts/pid (to test the window and dead pids)."""
     p = log.log_file()
     p.parent.mkdir(parents=True, exist_ok=True)
     rec = {"ts": ts, "lvl": lvl, "comp": comp, "msg": msg, "pid": pid}
@@ -40,7 +40,7 @@ def test_clean(store):
 def test_dead_task_and_logs(store):
     tid = store.create_task(project="P", kind="scout", title="x")
     transitions.move(store, tid, State.PREPARING)
-    with store.tx() as c:  # давно без процесса — грейс сиротства прошёл
+    with store.tx() as c:  # long without a process — the orphan grace is over
         c.execute("UPDATE task SET updated_at=0 WHERE id=?", (tid,))
     log.setup()
     log.get("engine").error("сбой шага T%d: 500", tid)
@@ -60,7 +60,7 @@ def test_queue_stuck_and_unacked(store):
     store.add_event("done", task_id=tid, now=now_ms() - 30 * 60_000)
     texts = " | ".join(s.text for s in qc(store))
     assert f"T{tid} в очереди" in texts and "ждут оркестратора" in texts
-    events.touch(store)  # Claude слушает — неразобранное не тревога
+    events.touch(store)  # Claude is listening — unread events are not a suspicion
     assert "ждут оркестратора" not in " | ".join(s.text for s in qc(store))
 
 
@@ -70,7 +70,7 @@ def test_cycle_without_model_raises_once(store):
     assert observer.cycle(store, use_model=False, projects=[]) == "critical"
     al = comms.alarms(store)
     assert len(al) == 1 and al[0].critical
-    assert observer.cycle(store, use_model=False, projects=[]) == "ok"  # та же проблема — пауза
+    assert observer.cycle(store, use_model=False, projects=[]) == "ok"  # the same problem — pause
     assert len(comms.alarms(store)) == 1
     assert observer.reports(store, 1)[0]["kind"] == "quick"
 
@@ -105,7 +105,7 @@ def test_triage_alarm(store):
 
 def test_deep_runs_even_when_clean(store):
     fake = _observer_fake(store, '{"verdict": "ok", "summary": "всё штатно"}')
-    assert observer.cycle(store, projects=[]) == "ok"  # LAST_DEEP нет → плановая
+    assert observer.cycle(store, projects=[]) == "ok"  # no LAST_DEEP — the scheduled run
     assert "checklist" in fake.calls[0]["prompt"]
     assert observer.reports(store, 1)[0]["kind"] == "deep"
 
@@ -121,7 +121,7 @@ def test_watchdog(store):
     assert not observer.watchdog(store)
     store.meta_set(observer.LAST_QUICK, str(now_ms() - 20 * 60_000))
     assert observer.watchdog(store)
-    assert not observer.watchdog(store)  # не повторяет
+    assert not observer.watchdog(store)  # does not repeat
     assert "наблюдатель не проверял" in comms.alarms(store)[0].payload["text"]
 
 
@@ -148,7 +148,7 @@ def test_pause_by_signature_ignores_counters(store):
 
 def test_dead_within_orphan_grace_not_suspicious(store):
     tid = store.create_task(project="P", kind="scout", title="x")
-    transitions.move(store, tid, State.PREPARING)  # только что — сервис ещё подхватит
+    transitions.move(store, tid, State.PREPARING)  # just now — the service will still pick it up
     assert not any(f"T{tid}" in s.text for s in qc(store))
 
 
@@ -168,10 +168,10 @@ def test_proxy_problem():
 
 def test_unit_carries_proxy(monkeypatch, capsys):
     from ahub import cli
-    monkeypatch.setattr(sys, "platform", "linux")  # прокси проверяем в юните systemd
-    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setattr(sys, "platform", "linux")  # check the proxy in a systemd unit
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8080")
     assert cli.main(["service", "install", "--print"]) == 0
-    assert 'Environment="HTTPS_PROXY=http://127.0.0.1:7897"' in capsys.readouterr().out
+    assert 'Environment="HTTPS_PROXY=http://127.0.0.1:8080"' in capsys.readouterr().out
 
 
 def test_deep_prompt_has_window_and_ignores_old(store):
@@ -192,7 +192,7 @@ def test_triage_suspicion_window_like_quick(store):
     fake = _observer_fake(store, '{"verdict": "ok", "summary": "чисто"}')
     now = now_ms()
     win = now - 4 * 60_000
-    store.meta_set(observer.LAST_DEEP, str(now))  # плановая не due — разбор подозрений
+    store.meta_set(observer.LAST_DEEP, str(now))  # scheduled run not due — triage suspicions
     store.meta_set(observer.LAST_QUICK, str(win))
     _write_log(win - 60_000, "сбой СТАРАЯ-ПОДОЗРЕНИЕ-111", pid=1650)
     _write_log(win + 60_000, "сбой НОВАЯ-ПОДОЗРЕНИЕ-222", pid=os.getpid())
@@ -216,7 +216,7 @@ def test_log_digest_size_limit(store):
 def test_dead_pid_marked_and_snapshot_live(store):
     now = now_ms()
     since = now - 5 * 60_000
-    dead_pid = 1_000_000_007  # такого процесса нет
+    dead_pid = 1_000_000_007  # no such process
     _write_log(now - 1000, "polling упал МЁРТВЫЙ-ТЕСТ-ПИД", pid=dead_pid)
     _write_log(now - 500, "polling упал ЖИВОЙ-ТЕСТ-ПИД", pid=os.getpid())
     d = observer.log_digest(since, now=now)

@@ -1,5 +1,5 @@
-"""Общие фикстуры: всё состояние — во временном каталоге. Настоящие ~/.local/share/opencode, ~/.local/share/ahub
-и ~/.config не трогаются (HOME подменяется); живые тесты (настоящие поставщики, деньги) — только при AHUB_LIVE=1."""
+"""Shared fixtures: all state lives in a temp dir. The real ~/.local/share/opencode, ~/.local/share/ahub
+and ~/.config are never touched (HOME is faked); live tests (real providers, real money) run only with AHUB_LIVE=1."""
 
 from __future__ import annotations
 
@@ -21,15 +21,15 @@ def _isolated_env(tmp_path, monkeypatch):
     from ahub import log
     from ahub.i18n import _reset
 
-    _reset()  # язык выбирается лениво — сбросить между тестами
-    log.setup()  # логгеры модулей созданы при импорте с настоящим HOME — перенаправить лог во временный каталог
+    _reset()  # language is picked lazily — reset it between tests
+    log.setup()  # module loggers were built at import with the real HOME — send the log to the temp dir
     yield
     _reset()
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _real_db_untouched():
-    """Страж набора: боевая база хаба не изменена тестами (задачи и сообщения)."""
+    """Suite guard: tests left the live hub database alone (tasks and messages)."""
     try:
         real = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local/share/ahub/ahub.db"
     except (KeyError, OSError):
@@ -54,8 +54,8 @@ def _real_db_untouched():
     yield
     after = counts()
     if before is not None and after is not None:
-        # живой хаб мог добавить свои строки во время прогона — тесты пишут только в tmp; сверяем, что
-        # тестовые заголовки не просочились (фиктивный проект «P»)
+        # the live hub may have added rows of its own while we ran — tests only write to tmp; make sure
+        # no test row leaked out (fake project "P")
         import sqlite3
 
         con = sqlite3.connect(f"file:{real}?mode=ro", uri=True, timeout=5)

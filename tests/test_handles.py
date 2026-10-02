@@ -1,4 +1,4 @@
-"""Ручки оркестратора через CLI: создать → (движок) → сводка/задача/результат → принять; связь; лимиты."""
+"""Orchestrator handles via CLI: create → (engine) → status/task/result → accept; dependency; limits."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def test_scout_cycle(env, capsys):
     assert out.startswith("DONE T1 «где утечка» — отчёт готов") and "непрочитано событий 1" in out
     rc, out, _ = ahub(capsys, "status", "T1")
     assert "итог работника: нашёл" in out and "утечка в core/a.py:1" in out and "Подробно" not in out
-    assert events.unacked(store) == []  # прочитал задачу — событие подтверждено
+    assert events.unacked(store) == []  # the task was read — the event is acked
     rc, out, _ = ahub(capsys, "result", "T1", "--full")
     assert "## Подробно" in out and '"summary"' in out
     rc, out, _ = ahub(capsys, "accept", "T1")

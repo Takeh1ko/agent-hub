@@ -19,7 +19,7 @@ test_resource = "test_db"
 
 [resources]
 test_db = { lock = "/tmp/demo.lock" }
-playerok = { capacity = 1 }
+payments = { capacity = 1 }
 short = "/tmp/short.lock"
 
 [hooks]
@@ -44,7 +44,7 @@ def test_parse_v2_full(tmp_path):
     f = write(tmp_path / "demo" / ".hub.toml", V2)
     cfg = config.load_project(tmp_path / "demo")
     assert cfg.name == "Demo"
-    assert cfg.root == str(tmp_path / "demo")  # по умолчанию — каталог файла
+    assert cfg.root == str(tmp_path / "demo")  # by default — the file's directory
     assert cfg.source == str(f)
     assert cfg.worktrees == os.path.expandvars("$HOME/demo-wt")
     assert cfg.work_branch == "market"
@@ -52,7 +52,7 @@ def test_parse_v2_full(tmp_path):
     assert cfg.allowed_paths == ("core/**", "tests/**")
     assert cfg.max_parallel == 3
     assert cfg.resources["test_db"].lock == "/tmp/demo.lock"
-    assert cfg.resources["playerok"].capacity == 1 and cfg.resources["playerok"].lock == ""
+    assert cfg.resources["payments"].capacity == 1 and cfg.resources["payments"].lock == ""
     assert cfg.resources["short"].lock == "/tmp/short.lock"
     assert cfg.test_resource == "test_db"
     assert cfg.hooks.task_setup == "make db"
@@ -60,7 +60,7 @@ def test_parse_v2_full(tmp_path):
     assert cfg.budget_go == 2.5 and cfg.budget_usd == 0.0
     assert "config/prod.toml" in cfg.secret_excludes and ".env" in cfg.secret_excludes
     assert cfg.timeouts.idle_s == 600
-    assert cfg.timeouts.retry_max == 10  # потолок
+    assert cfg.timeouts.retry_max == 10  # the cap
 
 
 def test_find_upward(tmp_path):
@@ -76,7 +76,7 @@ def test_all_errors_at_once():
     data = {
         "schema_version": 2,
         "max_parallel": 0,
-        "allowed_paths": "a/**, b/**",  # строка через запятую допустима
+        "allowed_paths": "a/**, b/**",  # a comma-separated string is fine
         "test_resource": "nope",
         "budget": {"go": -1},
         "resources": {"x": {"capacity": "два"}},
@@ -143,7 +143,7 @@ def test_hub_config_and_projects(tmp_path):
     a = tmp_path / "a"
     b = tmp_path / "b"
     write(a / ".hub.toml", 'schema_version = 2\nname = "A"\n')
-    write(b / ".hub.toml", 'schema_version = 2\nname = "A"\n')  # дубль имени
+    write(b / ".hub.toml", 'schema_version = 2\nname = "A"\n')  # duplicate name
     write(paths.global_config_path(),
           f'projects = ["{a}", "{b}", "{tmp_path / "missing"}"]\n')
     projects, errors = config.load_projects()
@@ -216,7 +216,7 @@ def test_hub_telegram_env_override(tmp_path, monkeypatch):
     monkeypatch.setenv("AHUB_TG_CHAT", "99")
     hub = config.load_hub()
     assert hub.tg_token == "env-token" and hub.tg_chat_id == 99
-    # прокси окружением не перекрывается
+    # not overridden by the environment
     assert hub.tg_proxy == "http://127.0.0.1:8080"
 
 

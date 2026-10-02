@@ -135,7 +135,7 @@ def test_auth_list_colors_and_free_only(monkeypatch):
 
 
 def test_agy_health_and_missing(monkeypatch, tmp_path):
-    """agy найден — ok True/False по health() поставщика; не найден — «нет данных» (None)."""
+    """agy found — ok True/False per the provider's health(); not found — "no data" (None)."""
     from ahub import providers
     from ahub.providers.agy import AgyProvider
     from tests.provider_contract import AGY_DATA, agy_state, fake_agy
@@ -150,7 +150,7 @@ def test_agy_health_and_missing(monkeypatch, tmp_path):
     only_agy(broken)
     monkeypatch.setitem(providers._cache, "agy", AgyProvider(binary=str(broken)))
     c = doctor.check_agy()
-    assert c.ok is False and "agy" in c.detail and "agy" in c.fix  # нет входа — подсказка
+    assert c.ok is False and "agy" in c.detail and "agy" in c.fix  # no login — a hint
 
     healthy = AgyProvider(binary=str(fake_agy(tmp_path)), env={"AHUB_AGY_FAKE_DATA": str(AGY_DATA)})
     agy_state(tmp_path)

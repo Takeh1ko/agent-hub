@@ -1,4 +1,4 @@
-"""Движок на разведке: этапы, итог по форме, repair, повторы, тишина, остановка, аренда, подхват сироты."""
+"""Engine on scout tasks: steps, result shape, repair, retries, silence, stop, lease, orphan pickup."""
 
 from __future__ import annotations
 
@@ -59,13 +59,13 @@ def test_happy_path(store, project, tmp_path):
 
 def test_repair_once(store, project):
     fake = install_fake(store, [
-        {"session": "ses_r", "steps": [{"event": {"type": "text", "text": "всё"}}]},  # не сдал итог
+        {"session": "ses_r", "steps": [{"event": {"type": "text", "text": "всё"}}]},  # no result written
         scout_ok("ses_r"),
     ])
     t = new_scout(store, project)
     assert run(store, project, t.id).state is State.DONE
     assert "Result is not in the required form" in fake.calls[1]["prompt"] and fake.calls[1]["session_id"] == "ses_r"
-    assert len(store.list_sessions(t.id)) == 1  # продолжение — та же сессия
+    assert len(store.list_sessions(t.id)) == 1  # the continuation is the same session
 
 
 def test_repair_fails(store, project):
