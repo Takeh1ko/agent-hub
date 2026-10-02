@@ -16,7 +16,7 @@ L2_LIMIT = 4000
 L3_DEFAULT = 20000
 PHASE_WORDS = {"studying": "изучает", "writing": "пишет", "testing": "тесты", "waiting": "ждёт"}
 DECISION_WORDS = {State.DONE: EVENT_CODES[Ev.DONE], State.NEEDS_DECISION: EVENT_CODES[Ev.NEEDS_DECISION],
-                  State.ERROR: EVENT_CODES[Ev.ERROR], State.STOPPED: "СТОП"}
+                  State.ERROR: EVENT_CODES[Ev.ERROR], State.STOPPED: "STOPPED"}
 
 
 def clip_bytes(text: str, limit: int) -> str:
