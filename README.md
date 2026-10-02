@@ -10,6 +10,8 @@ one line when there is something to decide: accept, send back with notes, or rej
 running the worker in its own copy of the repo, checking its work, review by other models, retries, budgets —
 the hub does without Claude.
 
+![agent-hub: a task goes from Claude to a cheap model, through gates and review, and is merged](docs/demo.gif)
+
 ```
 DONE T12 code «add retry to the payment client» — retry with backoff, 3 new tests; $0.04
 ```
