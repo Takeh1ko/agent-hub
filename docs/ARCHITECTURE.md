@@ -34,7 +34,7 @@ accept.py: ahub accept (разведка — принять; код — merge --
 | `model.py`, `transitions.py` | типы, состояния, переходы, события; move/acquire/renew/release/request_stop/once |
 | `tasks.py`, `drafts.py` | создание задачи с проверкой; черновик словами → модель → предпросмотр → запуск |
 | `registry.py` | модели (alias → поставщик/модель/вариант), меню ролей, запреты проекта |
-| `providers/` | `base.py` контракт; `runner.py` общий запуск (вывод в файл — opencode теряет хвост в пайп; тишина с учётом детей; стоп группой); `opencode.py`, `opencode_db.py`; `fake.py` для тестов |
+| `providers/` | `base.py` контракт; `runner.py` общий запуск (вывод в файл — opencode теряет хвост в пайп; тишина с учётом детей; стоп группой); `opencode.py`, `opencode_db.py`; `agy.py` (Antigravity/Gemini: `-p … --output-format stream-json`, session id из `init.conversation_id`, права `--dangerously-skip-permissions`, usage без денег — квота окном; нет export/find_session/цен); `fake.py` для тестов |
 | `workspace.py`, `prepare.py`, `gates.py`, `review.py`, `prompts.py` | копия/ветка, подготовка, ворота, панель ревью, промпты |
 | `engine.py`, `worker.py` | ход задачи, процесс задачи |
 | `service.py` | очередь, сироты, самообновление на новый код, сердцебиение, поток наблюдателя |

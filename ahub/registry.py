@@ -27,6 +27,7 @@ DEFAULT_MODELS: dict[str, tuple[str, str, str, str]] = {
     "deepseek-flash": ("opencode", "opencode-go/deepseek-v4.1-flash", "high", "DeepSeek v4.1 Flash (pricier than Spark)"),
     "spark-free": ("opencode", "opencode/muse-spark-1.3-contributor-free", "xhigh", "free Spark (slower)"),
     "gemini": ("agy", "gemini-3.8-flash-high", "", "Gemini via agy (window quota)"),
+    "gemini-low": ("agy", "gemini-3.8-flash-low", "", "Gemini via agy, fast (window quota)"),
 }
 
 # role → [(alias, is_default)] in display order
