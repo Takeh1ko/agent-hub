@@ -60,3 +60,35 @@ def t(key: str, **kw) -> str:
     """Шаблон текущего языка, подстановка через str.format(**kw)."""
     tpl = _CATALOGS[lang()].get(key) or _EN[key]  # нет нигде — KeyError: ошибка разработчика
     return tpl.format(**kw)
+
+
+class Words(dict):
+    """Ленивые слова каталога: вид — dict ради старых мест (.get(k, default), [k], `in`).
+
+    Значение — t(prefix + key) в момент чтения, т.е. на языке хаба. Неизвестный ключ —
+    default (get), KeyError ([]) или False (`in`).
+    """
+
+    def __init__(self, prefix: str, known: tuple[str, ...] | list[str]):
+        super().__init__()
+        self._prefix = prefix
+        self._known = frozenset(known)
+
+    def _word(self, key: str) -> str:
+        try:
+            return t(f"{self._prefix}{key}")
+        except KeyError:
+            return key
+
+    def __getitem__(self, key: str) -> str:
+        if key in self._known:
+            return self._word(key)
+        raise KeyError(key)
+
+    def get(self, key: str, default=None):
+        if key in self._known:
+            return self._word(key)
+        return default
+
+    def __contains__(self, key) -> bool:
+        return key in self._known
