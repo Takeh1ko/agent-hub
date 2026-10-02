@@ -66,6 +66,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ahub import paths
+from ahub.i18n import t as _t
 
 PROJECT_FILE = ".hub.toml"
 SCHEMA_VERSION = 2
@@ -166,27 +167,27 @@ class _Reader:
         if v is None:
             return default
         if not isinstance(v, str):
-            self.errors.append(f"{where}{key}: ожидается строка, получено {type(v).__name__}")
+            self.errors.append(_t("config.expect_str", where=where, field=key, got=type(v).__name__))
             return default
         return v
 
     def int_(self, data: dict, key: str, default: int, where: str = "", minimum: int | None = None) -> int:
         v = data.get(key, default)
         if isinstance(v, bool) or not isinstance(v, int):
-            self.errors.append(f"{where}{key}: ожидается целое, получено {v!r}")
+            self.errors.append(_t("config.expect_int", where=where, field=key, got=v))
             return default
         if minimum is not None and v < minimum:
-            self.errors.append(f"{where}{key}: не меньше {minimum}, получено {v}")
+            self.errors.append(_t("config.expect_min", where=where, field=key, minimum=minimum, got=v))
             return default
         return v
 
     def float_(self, data: dict, key: str, default: float, where: str = "") -> float:
         v = data.get(key, default)
         if isinstance(v, bool) or not isinstance(v, (int, float)):
-            self.errors.append(f"{where}{key}: ожидается число, получено {v!r}")
+            self.errors.append(_t("config.expect_num", where=where, field=key, got=v))
             return default
         if v < 0:
-            self.errors.append(f"{where}{key}: не может быть отрицательным ({v})")
+            self.errors.append(_t("config.expect_nonneg", where=where, field=key, got=v))
             return default
         return float(v)
 
@@ -197,7 +198,7 @@ class _Reader:
         if isinstance(v, str):
             return tuple(s.strip() for s in v.split(",") if s.strip())
         if not isinstance(v, list) or not all(isinstance(s, str) for s in v):
-            self.errors.append(f"{where}{key}: ожидается список строк")
+            self.errors.append(_t("config.expect_strs", where=where, field=key))
             return default
         return tuple(v)
 
@@ -206,7 +207,7 @@ class _Reader:
         if v is None:
             return {}
         if not isinstance(v, dict):
-            self.errors.append(f"[{key}]: ожидается таблица")
+            self.errors.append(_t("config.expect_table", field=key))
             return {}
         return v
 
@@ -218,7 +219,7 @@ def _resources(r: _Reader, raw: dict) -> dict[str, Resource]:
         if isinstance(spec, str):  # короткая форма: name = "/путь/к/lock"
             spec = {"lock": spec}
         if not isinstance(spec, dict):
-            r.errors.append(f"resources.{name}: ожидается таблица или строка")
+            r.errors.append(_t("config.expect_resource", name=name))
             continue
         out[name] = Resource(
             name=name,
@@ -258,16 +259,16 @@ def parse_project(data: dict, base_dir: str | Path, source: str = "") -> Project
     if version == 1:
         data = _from_v1(data)
     elif version != SCHEMA_VERSION:
-        raise ConfigError(source or "<dict>", [f"schema_version: неизвестная версия {version!r}"])
+        raise ConfigError(source or "<dict>", [_t("config.bad_version", version=version)])
 
     name = r.str_(data, "name").strip()
     if not name:
-        r.errors.append("name: обязательное поле")
+        r.errors.append(_t("config.need_name"))
     root = expand(r.str_(data, "root").strip()) or str(Path(base_dir))
     resources = _resources(r, r.table(data, "resources"))
     test_resource = r.str_(data, "test_resource").strip()
     if test_resource and test_resource not in resources:
-        r.errors.append(f"test_resource: нет ресурса {test_resource!r} в [resources]")
+        r.errors.append(_t("config.no_test_resource", name=test_resource))
     hooks = r.table(data, "hooks")
     models = r.table(data, "models")
     budget = r.table(data, "budget")
@@ -329,7 +330,7 @@ def load_project_file(path: str | Path) -> ProjectConfig:
     try:
         data = tomllib.loads(p.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
-        raise ConfigError(str(p), [f"TOML: {e}"]) from e
+        raise ConfigError(str(p), [_t("config.bad_toml", err=e)]) from e
     return parse_project(data, p.parent, str(p))
 
 
@@ -337,7 +338,7 @@ def load_project(start: str | Path) -> ProjectConfig:
     """Проект по каталогу (ищет .hub.toml вверх). Нет файла — FileNotFoundError."""
     f = find_project_file(start)
     if f is None:
-        raise FileNotFoundError(f"нет {PROJECT_FILE} выше {start}")
+        raise FileNotFoundError(_t("config.no_project_file", file=PROJECT_FILE, start=start))
     return load_project_file(f)
 
 
@@ -346,16 +347,16 @@ def check_project(cfg: ProjectConfig) -> list[str]:
     out: list[str] = []
     root = Path(cfg.root)
     if not root.is_dir():
-        out.append(f"root: нет каталога {cfg.root}")
+        out.append(_t("config.bad_root", root=cfg.root))
     if cfg.python and not os.access(cfg.python, os.X_OK):
-        out.append(f"python: не исполняемый файл {cfg.python}")
+        out.append(_t("config.bad_python", path=cfg.python))
     rp = cfg.rules_path()
     if rp is not None and not rp.is_file():
-        out.append(f"rules: нет файла {rp}")
+        out.append(_t("config.bad_rules", path=rp))
     if cfg.worktrees:
         wt = Path(cfg.worktrees)
         if not wt.is_dir() and not wt.parent.is_dir():
-            out.append(f"worktrees: нет ни каталога, ни родителя {cfg.worktrees}")
+            out.append(_t("config.bad_worktrees", path=cfg.worktrees))
     return out
 
 
@@ -375,20 +376,20 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
     if "chat_id" in tg:
         v = tg["chat_id"]
         if isinstance(v, bool) or not isinstance(v, int):
-            r.errors.append(f"telegram.chat_id: ожидается целое, получено {v!r}")
+            r.errors.append(_t("config.bad_chat_id", got=v))
         else:
             chat_id = v
     proxy = r.str_(tg, "proxy", "", "telegram.").strip()
     if proxy and not proxy.startswith(("http://", "https://")):
-        r.errors.append(f"telegram.proxy: нужен http:// или https://, получено {proxy!r}")
+        r.errors.append(_t("config.bad_proxy", got=proxy))
     usage = r.table(data, "usage")
     go_limit: float | None = None
     if "go_month_limit" in usage:
         v = usage["go_month_limit"]
         if isinstance(v, bool) or not isinstance(v, (int, float)):
-            r.errors.append(f"usage.go_month_limit: ожидается число, получено {v!r}")
+            r.errors.append(_t("config.bad_go_type", got=v))
         elif v <= 0:
-            r.errors.append(f"usage.go_month_limit: должен быть больше 0 ({v})")
+            r.errors.append(_t("config.bad_go_value", got=v))
         else:
             go_limit = float(v)
     env_token = os.environ.get("AHUB_TG_TOKEN")
@@ -399,7 +400,7 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
         try:
             chat_id = int(env_chat.strip())
         except ValueError:
-            r.errors.append(f"AHUB_TG_CHAT: ожидается целое, получено {env_chat!r}")
+            r.errors.append(_t("config.bad_env_chat", got=env_chat))
     pth = r.table(data, "paths")
     opencode = expand(r.str_(pth, "opencode", "", "paths.").strip())
     claude = expand(r.str_(pth, "claude", "", "paths.").strip())
@@ -407,10 +408,10 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
     raw = data.get("lang", "")
     norm = raw.strip().lower() if isinstance(raw, str) else ""
     if isinstance(raw, str) and norm not in ("", "en", "ru"):
-        r.errors.append(f"lang: допустимо 'en' или 'ru', получено {raw!r}")
+        r.errors.append(_t("config.bad_lang_value", got=raw))
         norm = ""
     elif not isinstance(raw, str) and "lang" in data:
-        r.errors.append(f"lang: ожидается строка, получено {type(raw).__name__}")
+        r.errors.append(_t("config.bad_lang_type", got=type(raw).__name__))
         norm = ""
     raw_lang = norm
     if r.errors:
@@ -441,7 +442,7 @@ def load_hub(path: str | Path | None = None) -> HubConfig:
         try:
             data = tomllib.loads(p.read_text(encoding="utf-8"))
         except tomllib.TOMLDecodeError as e:
-            raise ConfigError(str(p), [f"TOML: {e}"]) from e
+            raise ConfigError(str(p), [_t("config.bad_toml", err=e)]) from e
         return _parse_hub_data(data, str(p))
     return _parse_hub_data({}, "")
 
@@ -456,7 +457,7 @@ def load_projects(hub: HubConfig | None = None) -> tuple[list[ProjectConfig], li
             p = Path(entry)
             cfg = load_project_file(p) if p.is_file() else load_project_file(p / PROJECT_FILE)
         except FileNotFoundError:
-            errors.append(f"{entry}: нет {PROJECT_FILE}")
+            errors.append(_t("config.entry_no_file", entry=entry, file=PROJECT_FILE))
             continue
         except ConfigError as e:
             errors.append(str(e))
@@ -465,7 +466,7 @@ def load_projects(hub: HubConfig | None = None) -> tuple[list[ProjectConfig], li
             errors.append(f"{entry}: {e}")
             continue
         if any(c.name == cfg.name for c in out):
-            errors.append(f"{entry}: имя проекта {cfg.name!r} уже занято")
+            errors.append(_t("config.entry_dup", entry=entry, name=cfg.name))
             continue
         out.append(cfg)
     return out, errors

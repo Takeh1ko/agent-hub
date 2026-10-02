@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ahub.config import ProjectConfig
+from ahub.i18n import t as _t
 from ahub.model import Role
 from ahub.store import Store
 
@@ -84,7 +85,7 @@ def get(store: Store, alias: str) -> ModelEntry:
     with store.read() as c:
         row = c.execute("SELECT * FROM model WHERE alias=?", (alias,)).fetchone()
     if row is None:
-        raise RegistryError(f"нет модели {alias!r}")
+        raise RegistryError(_t("registry.no_model", alias=alias))
     return _entry(row)
 
 
@@ -112,11 +113,10 @@ def check(store: Store, alias: str, project: ProjectConfig | None) -> ModelEntry
     """Модель годится для задачи проекта: есть, включена, не запрещена проектом."""
     entry = get(store, alias)
     if not entry.enabled:
-        raise RegistryError(f"модель {alias} выключена")
+        raise RegistryError(_t("registry.disabled", alias=alias))
     rule = denied_by(entry, project)
     if rule is not None:
-        raise RegistryError(f"модель {alias} запрещена в проекте {project.name} (правило {rule!r};"
-                            f" снять может только человек в .hub.toml)")
+        raise RegistryError(_t("registry.denied", alias=alias, project=project.name, rule=rule))
     return entry
 
 
@@ -129,15 +129,15 @@ def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit
     reasons = []
     for e in ordered:
         if not e.enabled:
-            reasons.append(f"{e.alias}: выключена")
+            reasons.append(_t("registry.reason_disabled", alias=e.alias))
             continue
         rule = denied_by(e, project)
         if rule is not None:
-            reasons.append(f"{e.alias}: запрещена проектом")
+            reasons.append(_t("registry.reason_denied", alias=e.alias))
             continue
         return e
-    raise RegistryError(f"для роли {Role(role).value} нет доступной модели" + (f" ({'; '.join(reasons)})"
-                                                                              if reasons else ""))
+    suffix = f" ({'; '.join(reasons)})" if reasons else ""
+    raise RegistryError(_t("registry.no_role", role=Role(role).value, reasons=suffix))
 
 
 # --- изменения (человек в терминале / оркестратор) ---
@@ -145,10 +145,10 @@ def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit
 def add_model(store: Store, alias: str, provider: str, model_id: str, variant: str = "", note: str = "") -> None:
     seed(store)
     if not alias or not provider or not model_id:
-        raise RegistryError("нужны alias, provider и model_id")
+        raise RegistryError(_t("registry.need_fields"))
     with store.tx() as c:
         if c.execute("SELECT 1 FROM model WHERE alias=?", (alias,)).fetchone():
-            raise RegistryError(f"модель {alias} уже есть")
+            raise RegistryError(_t("registry.exists", alias=alias))
         c.execute("INSERT INTO model(alias, provider, model_id, variant, note) VALUES(?,?,?,?,?)",
                   (alias, provider, model_id, variant, note))
 
@@ -174,10 +174,10 @@ def remove_from_role(store: Store, role: Role | str, alias: str) -> None:
     with store.tx() as c:
         row = c.execute("SELECT is_default FROM role_model WHERE role=? AND alias=?", (r, alias)).fetchone()
         if row is None:
-            raise RegistryError(f"{alias} нет в меню роли {r}")
+            raise RegistryError(_t("registry.no_menu", alias=alias, role=r))
         left = c.execute("SELECT COUNT(*) FROM role_model WHERE role=?", (r,)).fetchone()[0]
         if left <= 1:
-            raise RegistryError(f"в меню роли {r} должна остаться хотя бы одна модель")
+            raise RegistryError(_t("registry.menu_last", role=r))
         c.execute("DELETE FROM role_model WHERE role=? AND alias=?", (r, alias))
         if row["is_default"]:
             c.execute("UPDATE role_model SET is_default=1 WHERE role=? AND alias="
@@ -188,5 +188,5 @@ def set_default(store: Store, role: Role | str, alias: str) -> None:
     r = Role(role).value
     with store.tx() as c:
         if not c.execute("SELECT 1 FROM role_model WHERE role=? AND alias=?", (r, alias)).fetchone():
-            raise RegistryError(f"{alias} нет в меню роли {r} — сначала добавьте")
+            raise RegistryError(_t("registry.menu_add_first", alias=alias, role=r))
         c.execute("UPDATE role_model SET is_default=(alias=?) WHERE role=?", (alias, r))

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ahub import registry
 from ahub.config import ProjectConfig
+from ahub.i18n import t as _t
 from ahub.model import ROLE_FOR_KIND, Kind, Role, State
 from ahub.store import Store, Task
 
@@ -117,18 +118,18 @@ def _collect(nodes: list[str], project: ProjectConfig) -> str | None:
     """pytest --collect-only в корне проекта; текст ошибки или None."""
     py = project.python or sys.executable
     if not Path(py).exists():
-        return f"питон проекта не найден: {py}"
+        return _t("tasks.no_python", py=py)
     try:
         r = subprocess.run([py, "-m", "pytest", "--collect-only", "-q", *nodes], cwd=project.root,
                            capture_output=True, text=True, timeout=180)
     except OSError as e:
-        return f"pytest не запустился: {e}"
+        return _t("tasks.pytest_start", err=e)
     except subprocess.TimeoutExpired:
-        return "pytest --collect-only: таймаут"
+        return _t("tasks.collect_timeout")
     if r.returncode != 0:
         tail = (r.stdout + "\n" + r.stderr).strip()
-        last = tail.splitlines()[-1] if tail else f"код {r.returncode}"
-        return f"приёмка не собирается ({', '.join(nodes)}): {last[-300:]}"
+        last = tail.splitlines()[-1] if tail else _t("err.exit_code", code=r.returncode)
+        return _t("tasks.collect_failed", nodes=", ".join(nodes), last=last[-300:])
     return None
 
 
@@ -137,14 +138,14 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
     errors: list[str] = []
     kind = Kind(spec.kind)
     if spec.project != project.name:
-        errors.append(f"задача проекта {spec.project!r}, а конфиг — {project.name!r}")
+        errors.append(_t("tasks.project_mismatch", spec=spec.project, name=project.name))
     title = spec.title.strip()
     if not title:
-        errors.append("нужна цель (title)")
+        errors.append(_t("tasks.need_title"))
     elif len(title) > MAX_TITLE:
-        errors.append(f"цель длиннее {MAX_TITLE} символов — подробности в описание")
+        errors.append(_t("tasks.title_long", max=MAX_TITLE))
     if len(spec.spec.encode("utf-8")) > MAX_SPEC_BYTES:
-        errors.append(f"описание больше {MAX_SPEC_BYTES // 1000} КБ")
+        errors.append(_t("tasks.spec_big", kb=MAX_SPEC_BYTES // 1000))
 
     # Модели
     role = ROLE_FOR_KIND[kind]
@@ -163,74 +164,75 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
         elif level in REVIEW_LEVELS:
             rmodels, rounds = list(REVIEW_LEVELS[level][0]), REVIEW_LEVELS[level][1]
         else:
-            errors.append(f"уровень ревью {level}: допустимо 0–4")
+            errors.append(_t("tasks.bad_level", level=level))
             rmodels, rounds = [], 0
         if spec.review_rounds is not None and rmodels:
             rounds = spec.review_rounds
     if rmodels and not 1 <= rounds <= MAX_ROUNDS:
-        errors.append(f"кругов ревью {rounds}: допустимо 1–{MAX_ROUNDS}")
+        errors.append(_t("tasks.bad_rounds", rounds=rounds, max=MAX_ROUNDS))
     for m in rmodels:
         try:
             registry.check(store, m, project)
         except registry.RegistryError as e:
-            errors.append(f"ревью: {e}")
+            errors.append(_t("tasks.review_prefix", err=e))
     if kind is Kind.REVIEW and rmodels:
-        errors.append("задача «ревью» сама не ревьюится (ревью = 0)")
+        errors.append(_t("tasks.review_self"))
 
     # Файлы и приёмка
     paths = [_norm(p) for p in spec.paths if p.strip()]
     if kind in (Kind.CODE, Kind.ROUTINE) and not paths:
-        errors.append("нужны разрешённые файлы (--paths) для задачи, меняющей файлы")
+        errors.append(_t("tasks.need_paths"))
     if kind in (Kind.SCOUT, Kind.REVIEW) and paths:
-        errors.append(f"задача «{kind.value}» файлы не меняет — --paths не нужен")
+        errors.append(_t("tasks.no_paths", kind=kind.value))
     for p in paths:
         if _path_escapes(p) or not _glob_allowed(p, project.allowed_paths):
-            errors.append(f"файлы «{p}» вне разрешённых проекту ({', '.join(project.allowed_paths) or '—'})")
+            errors.append(_t("tasks.path_outside", path=p,
+                             allowed=", ".join(project.allowed_paths) or "—"))
     root = Path(project.root)
     for p in spec.read:
         if _path_escapes(p) or not (root / p).exists():
-            errors.append(f"нет файла для чтения «{p}»")
+            errors.append(_t("tasks.no_read", path=p))
     accept = [a.strip() for a in spec.accept if a.strip()]
     if kind is Kind.CODE and not accept:
-        errors.append("нужна приёмка (--accept pytest-ноды) для задачи «код»")
+        errors.append(_t("tasks.need_accept"))
     existing = []
     for node in accept:
         file = node.split("::")[0]
         if _path_escapes(file):
-            errors.append(f"приёмка вне проекта: {node}")
+            errors.append(_t("tasks.accept_outside", node=node))
         elif (root / file).exists():
             existing.append(node)
         elif not _covered(file, paths):
-            errors.append(f"нет файла приёмки «{file}» и он не в разрешённых файлах")
+            errors.append(_t("tasks.no_accept_file", file=file))
     if collect and existing and not errors:
         err = _collect(existing, project)
         if err:
             errors.append(err)
     if kind is Kind.REVIEW and not spec.review_input.strip():
-        errors.append("для задачи «ревью» нужен вход (--input: ветка, sha, a..b или файлы)")
+        errors.append(_t("tasks.need_input"))
 
     # Зависимости, ресурсы, лимиты
     for a in spec.after:
         dep = store.get_task(a)
         if dep is None:
-            errors.append(f"нет задачи T{a} (после)")
+            errors.append(_t("tasks.no_dep", id=a))
         elif dep.project != project.name:
-            errors.append(f"T{a} из другого проекта ({dep.project})")
+            errors.append(_t("tasks.dep_other", id=a, project=dep.project))
         elif dep.state is State.REJECTED:
-            errors.append(f"T{a} отклонена — ждать нечего")
+            errors.append(_t("tasks.dep_rejected", id=a))
     for r in spec.resources:
         if r not in project.resources:
-            errors.append(f"ресурс {r!r} не объявлен в .hub.toml проекта")
+            errors.append(_t("tasks.no_resource", name=r))
     resources = list(dict.fromkeys(spec.resources))
     if kind is Kind.CODE and project.test_resource and project.test_resource not in resources:
         resources.append(project.test_resource)  # приёмка идёт под ресурсом тестов
     budget_go = project.budget_go if spec.budget_go is None else spec.budget_go
     budget_usd = project.budget_usd if spec.budget_usd is None else spec.budget_usd
     if budget_go < 0 or budget_usd < 0:
-        errors.append("бюджет не может быть отрицательным")
+        errors.append(_t("tasks.bad_budget"))
     tlim = time_default if spec.time_limit_min is None else spec.time_limit_min
     if tlim <= 0:
-        errors.append("лимит времени должен быть > 0")
+        errors.append(_t("tasks.bad_time"))
 
     if errors:
         raise TaskInvalid(errors)

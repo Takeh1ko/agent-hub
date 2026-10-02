@@ -14,6 +14,8 @@ from pathlib import Path
 from ahub import log as hublog
 from ahub import providers, registry, tasks, workspace
 from ahub.config import ProjectConfig
+from ahub.i18n import Words
+from ahub.i18n import t as _t
 from ahub.model import Kind, Role
 from ahub.prompts import rules_text
 from ahub.providers.base import RunSpec
@@ -23,6 +25,7 @@ from ahub.store import Store
 from ahub.time import now_ms
 
 _log = hublog.get("drafts")
+KIND_WORDS: Words = Words("draft.kind_", ("scout", "code", "routine", "review"))
 FIELDS = ("kind", "title", "spec", "result_format", "paths", "accept", "read", "review_level", "resources")
 
 PROMPT = """Ты помогаешь владельцу (не программисту) поставить задачу моделям-работникам agent-hub. Прочитай код проекта
@@ -103,7 +106,7 @@ def draft_with_model(store: Store, project: ProjectConfig, draft_id: int) -> dic
             log_path=str(Path(ws) / ".ahub" / f"draft_{attempt}.log"), timeout_s=15 * 60, idle_s=600))
         data = _read_draft(ws) or extract_json(r.final_text) or {}
         if not data:
-            errors = f"нет JSON черновика ({r.outcome.value}: {r.error[:200]})"
+            errors = _t("draft.no_json", outcome=r.outcome.value, err=r.error[:200])
             continue
         try:
             spec = to_spec(project, data)
@@ -150,20 +153,25 @@ def _read_draft(ws: str) -> dict:
 def preview(store: Store, draft_id: int, limit: int = 1500) -> str:
     row = _row(store, draft_id)
     if row is None:
-        return f"нет черновика #{draft_id}"
+        return _t("draft.no_draft", id=draft_id)
     if row["status"] != "ready":
-        return f"черновик #{draft_id}: {row['status']}" + (f" — {row['errors'][:500]}" if row["errors"] else "")
+        text = _t("draft.not_ready", id=draft_id, status=row["status"])
+        if row["errors"]:
+            text += _t("draft.not_ready_reason", err=row["errors"][:500])
+        return text
     d = json.loads(row["task_json"])
-    kinds = {"scout": "разведка", "code": "код", "routine": "рутина", "review": "ревью"}
-    lines = [f"Черновик #{draft_id} ({kinds.get(d['kind'], d['kind'])}): {d['title']}",
-             f"Что сделать: {d['spec'][:600]}"]
+    lines = [_t("draft.preview_head", id=draft_id, kind=KIND_WORDS.get(d["kind"], d["kind"]), title=d["title"]),
+             _t("draft.preview_spec", text=d["spec"][:600])]
     if d.get("paths"):
-        lines.append("Можно менять: " + ", ".join(d["paths"]))
+        lines.append(_t("draft.preview_paths", items=", ".join(d["paths"])))
     if d.get("accept"):
-        lines.append("Проверка: " + ", ".join(d["accept"]))
+        lines.append(_t("draft.preview_accept", items=", ".join(d["accept"])))
     if d.get("result_format"):
-        lines.append(f"Результат: {d['result_format'][:200]}")
-    lines.append("Ревью: " + ("нет" if not d.get("review_level") else f"уровень {d['review_level']}"))
+        lines.append(_t("draft.preview_format", text=d["result_format"][:200]))
+    if not d.get("review_level"):
+        lines.append(_t("draft.preview_no_review"))
+    else:
+        lines.append(_t("draft.preview_review", level=d["review_level"]))
     text = "\n".join(lines)
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -172,11 +180,11 @@ def start(store: Store, project: ProjectConfig, draft_id: int) -> int:
     """Явный запуск: черновик → задача в очереди. Повтор — та же задача."""
     row = _row(store, draft_id)
     if row is None:
-        raise ValueError(f"нет черновика #{draft_id}")
+        raise ValueError(_t("draft.no_draft", id=draft_id))
     if row["status"] == "started" and row["task_id"]:
         return int(row["task_id"])
     if row["status"] != "ready":
-        raise ValueError(f"черновик #{draft_id} не готов: {row['status']}")
+        raise ValueError(_t("draft.start_not_ready", id=draft_id, status=row["status"]))
     d = json.loads(row["task_json"])
     spec = tasks.TaskSpec(**{**d, "kind": Kind(d["kind"])})
     t = tasks.create(store, spec, project, key=f"draft-{draft_id}")

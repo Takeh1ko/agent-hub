@@ -188,3 +188,87 @@ def test_words_is_a_real_mapping():
     assert len(words) == len(archive.STATE_WORDS) > 0
     assert all(isinstance(v, str) and v for v in words.values())
     assert archive.STATE_WORDS.get("no-such-state", "x") == "x"
+
+
+def test_step5_tasks_config_en(monkeypatch):
+    """Шаг 5: ошибки задачи и конфига на английском (AHUB_LANG=en)."""
+    import sys
+
+    from ahub import config, registry, tasks
+    from ahub.model import Kind
+    from ahub.store import Store
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    assert lang() == "en"
+    store = Store()
+    project = config.parse_project(
+        {"schema_version": 2, "name": "P", "python": sys.executable, "allowed_paths": ["core/**"]}, "/tmp")
+    try:
+        tasks.resolve(store, tasks.TaskSpec(project="P", kind=Kind.CODE, title=""), project, collect=False)
+        raise AssertionError("must fail")
+    except tasks.TaskInvalid as e:
+        errs = " | ".join(e.errors)
+        assert "need a goal" in errs and "allowed files" in errs
+        assert "нужна цель" not in errs
+    try:
+        config.parse_project({"schema_version": 2}, "/tmp")
+        raise AssertionError("must fail")
+    except config.ConfigError as e:
+        assert "required field" in str(e) and "обязательное поле" not in str(e)
+    try:
+        registry.get(store, "nope")
+        raise AssertionError("must fail")
+    except registry.RegistryError as e:
+        assert "no model" in str(e)
+
+
+def test_step5_transitions_drafts_en(monkeypatch, tmp_path):
+    """Шаг 5: переходы и черновики на английском (AHUB_LANG=en)."""
+    from ahub import config, drafts, prepare, transitions
+    from ahub.model import State
+    from ahub.store import Store
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    assert lang() == "en"
+    store = Store()
+    try:
+        transitions.move(store, 999, State.QUEUED)
+        raise AssertionError("must fail")
+    except transitions.TransitionError as e:
+        assert "no task T999" in str(e)
+    q = store.create_task(project="P", kind="scout", title="x")
+    assert transitions.request_stop(store, q) == "stopped"
+    assert store.get_task(q).state_reason == "stopped by command"
+    assert drafts.preview(store, 999) == "no draft #999"
+    project = config.parse_project(
+        {"schema_version": 2, "name": "P", "hooks": {"task_setup": "exit 3"}}, str(tmp_path))
+    task = store.create_task(project="P", kind="scout", title="x")
+    full = store.get_task(task)
+    try:
+        prepare.run_hook(project, "task_setup", full, str(tmp_path))
+        raise AssertionError("must fail")
+    except prepare.PrepareError as e:
+        assert "hook task_setup: exit 3" in str(e) and "хук" not in str(e)
+
+
+def test_step5_no_cyrillic_in_en_preview(monkeypatch, tmp_path):
+    """Шаг 5: предпросмотр черновика на английском без кириллицы."""
+    import json
+    import re as _re
+
+    from ahub import config, drafts
+    from ahub.store import Store
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    store = Store()
+    project = config.parse_project({"schema_version": 2, "name": "P"}, str(tmp_path))
+    did = drafts.create(store, project, "button", run_model=False)
+    drafts._update(store, did, status="ready",
+                   task_json=json.dumps({"kind": "code", "title": "button", "spec": "do it",
+                                         "paths": ["core/**"], "accept": [], "review_level": 2}))
+    text = drafts.preview(store, did)
+    assert text.startswith("Draft #") and "Review: level 2" in text
+    assert not _re.search(r"[а-яА-ЯёЁ]", text)
