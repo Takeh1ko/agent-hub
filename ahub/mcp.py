@@ -75,7 +75,7 @@ def _decide(a: dict) -> list[str]:
     return argv + ["--by", "mcp"]
 
 
-@tool("wait", "Ждать событий для оркестратора (строки ГОТОВО/РЕШЕНИЕ/ОШИБКА/ВЛАДЕЛЕЦ/ТРЕВОГА).",
+@tool("wait", "Ждать событий для оркестратора (строки DONE/DECISION/ERROR/OWNER/ALARM).",
       {"timeout": S, "project": S})
 def _wait(a: dict) -> list[str]:
     return ["wait", "--timeout", a.get("timeout") or "10m", "--who", "mcp"] + (
@@ -92,7 +92,7 @@ def _say(a: dict) -> list[str]:
     return ["say", a["text"]]
 
 
-@tool("ask", "Вопрос владельцу с вариантами; ответ придёт событием ОТВЕТ.", {"text": S, "options": S, "task": S},
+@tool("ask", "Вопрос владельцу с вариантами; ответ придёт событием ANSWER.", {"text": S, "options": S, "task": S},
       ["text"])
 def _ask(a: dict) -> list[str]:
     argv = ["ask", a["text"]]

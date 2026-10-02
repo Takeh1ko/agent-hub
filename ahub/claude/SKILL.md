@@ -1,50 +1,53 @@
 ---
 name: ahub
-description: Работа с agent-hub (команда ahub) — поручить разведку, код, рутину или ревью дешёвым моделям-работникам (Spark и др.), ждать без опроса, читать результат кратко, принимать и сливать. Использовать, когда задачу выгоднее отдать работнику, или когда пришла строка события ahub (ГОТОВО/РЕШЕНИЕ/ОШИБКА/ВЛАДЕЛЕЦ/ОТВЕТ/ТРЕВОГА).
+description: Work with agent-hub (ahub CLI) — delegate scout, code, routine or review to cheap worker models (Spark etc.), wait without polling, read the result briefly, accept and merge. Use when a task is cheaper to delegate, or when an ahub event line arrives (DONE/DECISION/ERROR/OWNER/ANSWER/ALARM).
 ---
 
-# agent-hub: как работать экономно
+# agent-hub: how to work cheaply
 
-Хаб ведёт задачи сам (копия проекта, работник, ворота, ревью, повторы при сбоях). Твоё дело — поставить задачу,
-проснуться по событию, прочитать итог и решить. Не опрашивай хаб: он будит сам.
+The hub runs tasks itself (project copy, worker, gates, review, retries on failures). Your job — file a task,
+wake on an event, read the result and decide. Don't poll the hub: it wakes you.
 
-## 1. В начале сессии
-- Запусти Monitor на `ahub watch` (описание: «ahub: события для Claude»). Каждая строка — дело для тебя.
-  Monitor живёт ≤ 30 мин: при истечении перезапусти (события не теряются — позиция в базе хаба).
-- Что уже происходит: `ahub status` (≤ 1.5 КБ).
+## 1. Session start
+- Start a Monitor on `ahub watch` (description: "ahub: events for Claude"). Each line is work for you.
+  Monitor lives ≤ 30 min: restart on expiry (events are not lost — position is in the hub DB).
+- What's going on: `ahub status` (≤ 1.5 KB).
 
-## 2. Поставить задачу
+## 2. File a task
 ```
-ahub task new --kind scout   --title "цель" --spec "что узнать, где искать, что в отчёте"
-ahub task new --kind code    --title "цель" --spec-file постановка.md --paths "core/**,tests/**" \
+ahub task new --kind scout   --title "goal" --spec "what to find, where to look, what goes in the report"
+ahub task new --kind code    --title "goal" --spec-file spec.md --paths "core/**,tests/**" \
               --accept "tests/test_x.py::test_y" [--level 0..4] [--after T3] [--budget 1.5]
-ahub task new --kind routine --title "навести порядок в docs/" --paths "docs/**"
-ahub task new --kind review  --title "проверить ветку" --input "main..feature"
+ahub task new --kind routine --title "tidy up docs/" --paths "docs/**"
+ahub task new --kind review  --title "check the branch" --input "main..feature"
 ```
-- Уровень ревью: 0 — нет; 1 — документы/рутина; 2 — обычный код (по умолчанию для code); 3–4 — рядом с деньгами.
-- Постановка — самодостаточная: что сделать, какие файлы, как проверить, чего не трогать. Внешние факты (API, цены)
-  проверь живым вызовом ДО постановки. Задача не пройдёт проверку — ошибка придёт одной строкой, модель не зовётся.
-- Модели: `ahub models` (меню ролей; запреты проекта не обойти).
+- Review level: 0 — none; 1 — docs/routine; 2 — regular code (default for code); 3–4 — near money.
+- Spec is self-contained: what to do, which files, how to verify, what not to touch. External facts (API, prices)
+  verify with a live call BEFORE filing. A task that fails validation — error comes in one line, no model is called.
+- Models: `ahub models` (role menu; project bans cannot be bypassed).
 
-## 3. Проснулся по событию
-- `ГОТОВО T12 …` → `ahub status T12` (итог, суть отчёта, проверки, стоимость — ≤ 4 КБ; подтверждает событие).
-  Полный отчёт — `ahub result T12 --full`, дифф — `ahub diff T12`, сырые логи — `ahub log T12` (только если нужно).
-- Решение: `ahub accept T12` (разведка — принять; код/рутина — слить в рабочую ветку, приёмка повторится, при
-  красной — откат) · `ahub rework T12 --notes "что исправить"` (та же сессия, новый круг) · `ahub reject T12`.
-- Своя мелкая правка поверх результата: закоммить в копии задачи (`ahub status T12` покажет путь), затем
-  `ahub accept T12` — это законно («правка оркестратора»). Нужно больше файлов — `ahub extend T12 --paths "…"`.
-- `РЕШЕНИЕ T12 …` → прочитай причину (`ahub status T12`): круги кончились, бюджет (`ahub budget T12 --add 1` —
-  задача продолжится сама), файлы вне разрешённых, сбой. Продолжить — `ahub continue T12`, сменить модель —
-  `ahub model T12 mimo-flash`, новая постановка — `ahub task edit T12 --spec-file …`.
-- `ОШИБКА T12 …` → причина в строке; обычно `ahub continue` после исправления окружения или `ahub reject`.
+## 3. Woke on an event
+- `DONE T12 …` → `ahub status T12` (result, report essence, checks, cost — ≤ 4 KB; confirms the event).
+  Full report — `ahub result T12 --full`, diff — `ahub diff T12`, raw logs — `ahub log T12` (only if needed).
+- Decide: `ahub accept T12` (scout — accept; code/routine — merge into the working branch, acceptance reruns,
+  on red — rollback) · `ahub rework T12 --notes "what to fix"` (same session, new round) · `ahub reject T12`.
+- Your own small fix on top of the result: commit in the task copy (`ahub status T12` shows the path), then
+  `ahub accept T12` — this is legal ("orchestrator edit"). Need more files — `ahub extend T12 --paths "…"`.
+- `DECISION T12 …` → read the reason (`ahub status T12`): rounds over, budget (`ahub budget T12 --add 1` —
+  the task resumes itself), files outside allowed paths, failure. Resume — `ahub continue T12`, change model —
+  `ahub model T12 mimo-flash`, new spec — `ahub task edit T12 --spec-file …`.
+- `ERROR T12 …` → reason is in the line; usually `ahub continue` after fixing the environment or `ahub reject`.
 
-## 4. Владелец
-- `ВЛАДЕЛЕЦ «…»` → `ahub inbox` (прочитать), ответ — `ahub say "коротко по-русски"`.
-- Нужно согласие (слить, продлить, потратить) — `ahub ask "сливать T12?" --options "да,нет"`; ответ придёт строкой
-  `ОТВЕТ #N … → да`. Слияние кода — только с согласия владельца, если он так просил.
-- `ТРЕВОГА …` → наблюдатель нашёл проблему самого хаба: `ahub alarms`, `ahub service status`, `ahub observer reports`.
+Old events may start with Russian words ГОТОВО/РЕШЕНИЕ/ОШИБКА/ВЛАДЕЛЕЦ/ОТВЕТ/ТРЕВОГА instead of codes — same events.
 
-## 5. Экономия
-- Не читай L3 (полный отчёт, дифф, логи) без нужды — L2 обычно хватает для решения.
-- Разведка дешевле твоего чтения кода: отдавай поиск и обзор работнику, читай суть.
-- Параллельные задачи — одной пачкой; зависимые — `--after T3` (стартует после принятия T3, от кода с ней).
+## 4. Owner
+- `OWNER «…»` → `ahub inbox` (read), reply — `ahub say "short, in the owner's language"`.
+- Need approval (merge, extend, spend) — `ahub ask "merge T12?" --options "yes,no"`; the answer comes as
+  `ANSWER #N … → yes`. Merge code only with owner approval if they asked for it.
+- `ALARM …` → the observer found a problem with the hub itself: `ahub alarms`, `ahub service status`,
+  `ahub observer reports`.
+
+## 5. Economy
+- Don't read L3 (full report, diff, logs) without need — L2 is usually enough to decide.
+- Recon is cheaper than your code reading: give search and survey to the worker, read the essence.
+- Parallel tasks — in one batch; dependent — `--after T3` (starts after T3 is accepted, for code with it).

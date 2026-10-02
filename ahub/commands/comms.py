@@ -85,7 +85,7 @@ def cmd_ask(args) -> int:
         from ahub.model import parse_task_id
         tid = parse_task_id(args.task)
     qid = comms.ask(Store(), args.text, opts, task_id=tid)
-    emit(args, {"id": qid}, f"вопрос #{qid} владельцу (ответ придёт событием ОТВЕТ)")
+    emit(args, {"id": qid}, f"вопрос #{qid} владельцу (ответ придёт событием ANSWER)")
     return 0
 
 

@@ -37,7 +37,7 @@ def test_immediate_pulls_whole_batch(store):
 
 def test_critical_alarm_immediate(store):
     store.add_event(Ev.ALARM, critical=True, payload={"text": "opencode недоступен 12 мин"}, now=5)
-    assert events.lines(store, events.ready_batch(store, now=6)) == ["ТРЕВОГА! opencode недоступен 12 мин"]
+    assert events.lines(store, events.ready_batch(store, now=6)) == ["ALARM! opencode недоступен 12 мин"]
 
 
 def test_delivery_and_redelivery(store):
@@ -70,11 +70,11 @@ def test_lines_format(store):
     tid = done_task(store)
     ev = store.events(task_id=tid, needs_reaction=True)[0]
     line = events.format_line(ev, store.get_task(tid))
-    assert line.startswith(f"ГОТОВО T{tid} scout «найти утечку» — отчёт 2.1 КБ") and "$0.04" in line
+    assert line.startswith(f"DONE T{tid} scout «найти утечку» — отчёт 2.1 КБ") and "$0.04" in line
     tid2 = store.create_task(project="P", kind="code", title="кнопка", now=1)
     transitions.move(store, tid2, State.REJECTED)
     store.add_event(Ev.ANSWER, payload={"question_id": 5, "question": "сливать T12?", "answer": "да"})
-    assert events.lines(store, events.unacked(store))[-1] == "ОТВЕТ #5 «сливать T12?» → да"
+    assert events.lines(store, events.unacked(store))[-1] == "ANSWER #5 «сливать T12?» → да"
     long = store.add_event(Ev.OWNER_MESSAGE, payload={"text": "а" * 500})
     assert len(events.format_line(store.events(after_id=long - 1)[0], None)) <= events.LINE_LIMIT
 
@@ -93,7 +93,7 @@ def test_wait_returns_batch_and_marks(store):
     done_task(store, now=0)  # старое — окно давно прошло
     got = events.wait(store, timeout_s=5, sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
                       clock=lambda: clock["t"])
-    assert len(got) == 1 and got[0].startswith("ГОТОВО")
+    assert len(got) == 1 and got[0].startswith("DONE")
     assert events.present(store)
     assert events.wait(store, timeout_s=3, sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
                        clock=lambda: clock["t"]) == []  # уже доставлено — ждём до таймаута

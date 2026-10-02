@@ -105,6 +105,16 @@ def unacked(store: Store, project: str | None = None) -> list[Event]:
 
 # --- строки пробуждения (L0) ---
 
+# Стабильные английские коды начала строки (не переводятся никогда).
+EVENT_CODES: dict[Ev, str] = {
+    Ev.DONE: "DONE",
+    Ev.NEEDS_DECISION: "DECISION",
+    Ev.ERROR: "ERROR",
+    Ev.OWNER_MESSAGE: "OWNER",
+    Ev.ANSWER: "ANSWER",
+    Ev.ALARM: "ALARM",
+}
+
 def _clip(text: str, n: int) -> str:
     s = " ".join(str(text or "").split())
     return s if len(s) <= n else s[: n - 1] + "…"
@@ -136,17 +146,17 @@ def format_line(ev: Event, task: Task | None) -> str:
         m = _money(p)
         if m:
             extra.append(m)
-        line = f"ГОТОВО {head}" + (" — " + "; ".join(extra) if extra else "")
+        line = f"{EVENT_CODES[k]} {head}" + (" — " + "; ".join(extra) if extra else "")
     elif k is Ev.NEEDS_DECISION:
-        line = f"РЕШЕНИЕ {head} — {_clip(p.get('reason', ''), 100)}"
+        line = f"{EVENT_CODES[k]} {head} — {_clip(p.get('reason', ''), 100)}"
     elif k is Ev.ERROR:
-        line = f"ОШИБКА {head} — {_clip(p.get('reason', ''), 100)}"
+        line = f"{EVENT_CODES[k]} {head} — {_clip(p.get('reason', ''), 100)}"
     elif k is Ev.OWNER_MESSAGE:
-        line = f"ВЛАДЕЛЕЦ «{_clip(p.get('text', ''), 160)}»"
+        line = f"{EVENT_CODES[k]} «{_clip(p.get('text', ''), 160)}»"
     elif k is Ev.ANSWER:
-        line = f"ОТВЕТ #{p.get('question_id', '?')} «{_clip(p.get('question', ''), 60)}» → {_clip(p.get('answer', ''), 60)}"
+        line = f"{EVENT_CODES[k]} #{p.get('question_id', '?')} «{_clip(p.get('question', ''), 60)}» → {_clip(p.get('answer', ''), 60)}"
     elif k is Ev.ALARM:
-        line = ("ТРЕВОГА! " if ev.critical else "ТРЕВОГА ") + _clip(p.get("text", ""), 150)
+        line = (f"{EVENT_CODES[k]}! " if ev.critical else f"{EVENT_CODES[k]} ") + _clip(p.get("text", ""), 150)
     else:
         line = f"{k.value.upper()} {head}"
     return line[:LINE_LIMIT]

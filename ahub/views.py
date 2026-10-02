@@ -6,7 +6,8 @@ import re
 from pathlib import Path
 
 from ahub import archive, events, workspace
-from ahub.model import ACTIVE, State, WAITING_DECISION
+from ahub.events import EVENT_CODES
+from ahub.model import ACTIVE, Ev, State, WAITING_DECISION
 from ahub.store import Store, Task
 from ahub.time import now_ms
 
@@ -14,8 +15,8 @@ L1_LIMIT = 1500
 L2_LIMIT = 4000
 L3_DEFAULT = 20000
 PHASE_WORDS = {"studying": "изучает", "writing": "пишет", "testing": "тесты", "waiting": "ждёт"}
-DECISION_WORDS = {State.DONE: "ГОТОВО", State.NEEDS_DECISION: "РЕШЕНИЕ", State.ERROR: "ОШИБКА",
-                  State.STOPPED: "СТОП"}
+DECISION_WORDS = {State.DONE: EVENT_CODES[Ev.DONE], State.NEEDS_DECISION: EVENT_CODES[Ev.NEEDS_DECISION],
+                  State.ERROR: EVENT_CODES[Ev.ERROR], State.STOPPED: "STOPPED"}
 
 
 def clip_bytes(text: str, limit: int) -> str:
@@ -89,7 +90,7 @@ def status_text(store: Store, *, project: str | None = None, live: dict[int, int
     return "\n".join(out)
 
 
-_SUT = re.compile(r"^##\s*Суть\s*$(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
+_SUT = re.compile(r"^##\s*(?:Суть|Summary)\s*$(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
 
 
 def report_essence(report: str, max_lines: int = 12) -> str:
