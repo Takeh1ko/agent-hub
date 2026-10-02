@@ -16,4 +16,4 @@ go = 1.5
 usd = 0.0
 
 [secrets]
-exclude = ["ahub/secrets.py"]  # токен бота — не для работников
+exclude = []
