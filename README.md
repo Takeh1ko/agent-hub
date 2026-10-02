@@ -20,11 +20,28 @@ the hub does without Claude.
   request, never pushed.
 - **Cheap models are good enough when the work is checked.** A task is not "done" because the model says so:
   the commit exists, the diff stays inside the allowed files, the acceptance tests pass under a project lock,
-  and one or more reviewer models (in fresh sessions) agree. Typical costs on Muse Spark: recon $0.004–0.06,
-  code with review $0.02–0.13.
+  and one or more reviewer models (in fresh sessions) agree. See [the real numbers](#what-it-costs-real-tasks-from-this-repository) below.
 - **Nothing gets lost.** Events are stored until acknowledged, so a restarted Claude session, a restarted hub or a
   dead terminal does not drop a "done". Worker processes outlive service restarts; orphaned tasks are picked up
   again; an observer watches the hub itself.
+
+## What it costs: real tasks from this repository
+
+agent-hub was released using itself: the 30 tasks that took it from a private tool to this release (i18n,
+macOS, the setup wizard, the agy provider…) cost **$1.10**. The same tokens billed at Claude Opus 5.5 API
+prices would be **≈ $110**.
+
+| Task | Worker | Review | Paid | Same tokens at Opus 5.5 prices* |
+|---|---|---|---|---|
+| `ahub doctor`: 13 checks with fix hints + tests | Muse Spark 1.3 (xhigh) | Spark, 2 rounds | $0.094 | ≈ $6.30 |
+| i18n catalog (EN/RU) + whole CLI translated | Muse Spark 1.3 (xhigh) | Spark | $0.096 | ≈ $7.00 |
+| `ahub setup` wizard | Muse Spark 1.3 (xhigh) | Spark | $0.053 | ≈ $3.80 |
+| New provider: Google Antigravity (`agy`) | Space Bunny (free) | Spark, 2 rounds | $0.018 (review only) | ≈ $5.05 |
+| macOS CI: 6 failing tests fixed | Space Bunny (free) | Spark | $0.005 (review only) | ≈ $1.33 |
+
+\* Token counts recorded by the hub for each session (input, output incl. reasoning, cache reads) multiplied by
+Opus 5.5 list prices ($4 / $20 / $0.20 per million). Opus might finish the same work in fewer steps, so read it as
+an order of magnitude, not an exact bill. Claude itself spent a few KB of context per task deciding what to accept.
 
 ## What it does
 
