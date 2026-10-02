@@ -82,7 +82,7 @@ def collect(project: ProjectConfig, worktree: str, nodes: list[str]) -> None:
     existing = [n for n in nodes if (Path(worktree) / n.split("::")[0]).exists()]
     if not existing:
         return
-    py = project.python or "python3"
+    py = project.python_bin()
     try:
         r = subprocess.run([py, "-m", "pytest", "--collect-only", "-q", *existing], cwd=worktree,
                            capture_output=True, text=True, timeout=300,

@@ -127,7 +127,7 @@ def run_acceptance(project: ProjectConfig, cwd: str, nodes: list[str], *, task_l
                    on_wait: Callable[[], None] | None = None,
                    should_stop: Callable[[], bool] | None = None) -> tuple[bool, str, str]:
     """(green?, output tail, command). Under the project test resource."""
-    py = project.python or "python3"
+    py = project.python_bin()
     cmd = [py, "-m", "pytest", "-q", *nodes]
     env = scrub_env(dict(os.environ))
     env.update(task_env(task_label, cwd, project.root), PYTHONDONTWRITEBYTECODE="1")

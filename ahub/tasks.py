@@ -12,7 +12,6 @@ import fnmatch
 import hashlib
 import json
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -116,7 +115,7 @@ def _covered(file: str, globs: list[str]) -> bool:
 
 def _collect(nodes: list[str], project: ProjectConfig) -> str | None:
     """pytest --collect-only at the project root; error text or None."""
-    py = project.python or sys.executable
+    py = project.python_bin()
     if not Path(py).exists():
         return _t("tasks.no_python", py=py)
     try:

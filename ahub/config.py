@@ -130,6 +130,16 @@ class ProjectConfig:
     secret_excludes: tuple[str, ...] = DEFAULT_SECRET_EXCLUDES
     timeouts: Timeouts = field(default_factory=Timeouts)
 
+    def python_bin(self) -> str:
+        """Python for the project's tests: explicit `python` → the project venv (.venv, venv) → python3 on PATH."""
+        if self.python:
+            return self.python
+        for venv in (".venv", "venv"):
+            cand = Path(self.root) / venv / "bin" / "python"
+            if cand.exists():
+                return str(cand)
+        return "python3"
+
     def rules_path(self) -> Path | None:
         if not self.rules:
             return None

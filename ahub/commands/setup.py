@@ -96,9 +96,12 @@ def ensure_project_file(root: Path, *, name: str | None = None, deny: list[str] 
         backup.write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
         f.write_text(render_v2(cfg, raw_root=str(data.get("root", ""))), encoding="utf-8")
         return t("setup.converted", dir=archive.DIR, name=backup.name), f
-    cfg = config.parse_project({"schema_version": 2, "name": name or root.name,
-                                "worktrees": str(root.parent / f"{root.name}-wt"), "work_branch": _branch(root),
-                                "allowed_paths": ["**"], "models": {"deny": deny or []}}, root)
+    data = {"schema_version": 2, "name": name or root.name, "worktrees": str(root.parent / f"{root.name}-wt"),
+            "work_branch": _branch(root), "allowed_paths": ["**"], "models": {"deny": deny or []}}
+    venv_py = config.parse_project(dict(data), root).python_bin()
+    if venv_py != "python3":  # project venv found — write it down explicitly
+        data["python"] = venv_py
+    cfg = config.parse_project(data, root)
     f.write_text(render_v2(cfg), encoding="utf-8")
     return t("setup.created"), f
 
