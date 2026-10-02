@@ -20,7 +20,8 @@ from ahub.prompts import rules_text
 from ahub.store import Task
 
 VERDICTS = ("approve", "changes", "dispute")
-_ARBITER = re.compile(r"^#{1,6}\s*Решени[ея]\s+(арбитра|оркестратора).*?(?=^#{1,6}\s|\Z)", re.MULTILINE | re.DOTALL)
+_ARBITER = re.compile(r"^#{1,6}\s*(?:Решени[ея]\s+(арбитра|оркестратора)|(?:Arbiter|Orchestrator)\s+decision)"
+                        r".*?(?=^#{1,6}\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
 
 
 @dataclass
