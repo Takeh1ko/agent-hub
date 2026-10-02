@@ -252,3 +252,27 @@ def test_launcher_fast_death_keeps_messages(store, tmp_path):
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0 + 1000) == "finished"
     assert [m["text"] for m in comms.inbox(store, mark=False)] == ["срочно"]  # не потерялось
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0 + 2000) == "launched"
+
+
+def test_help_and_card_en(store, monkeypatch):
+    """Шаг 4: /help и карточка задачи бота на английском (AHUB_LANG=en)."""
+    import re as _re
+
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    help_en = core.help_text()
+    assert "/tasks" in help_en and "/status" in help_en
+    assert not _re.search(r"[а-яА-ЯёЁ]", help_en)
+    tid = store.create_task(project="P", kind="code", title="pay button")
+    for st in (State.PREPARING, State.WORKING, State.DONE):
+        transitions.move(store, tid, st)
+    rep = core.tasks_reply(store)
+    assert "working and waiting" in rep.text and "recent" in rep.text
+    card = core.task_detail(store, tid)
+    assert "pay button" in card.text and "created" in card.text
+    assert "state: done" in card.text
+    assert not _re.search(r"[а-яА-ЯёЁ]", rep.text + card.text)
+    assert card.buttons[0][0].data == "tasks"  # коды кнопок не переводятся
+    _reset()

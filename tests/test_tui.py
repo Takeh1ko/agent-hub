@@ -122,3 +122,25 @@ async def test_app_help(store):
         await pilot.pause(0.2)
         assert app.screen.__class__.__name__ == "Help"
         await pilot.press("escape")
+
+
+def test_screen_data_en(store, monkeypatch):
+    """Шаг 4: шапка и строка задачи TUI на английском (AHUB_LANG=en)."""
+    import re as _re
+
+    from ahub.i18n import _reset
+    from ahub.time import now_ms
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    a, b = fill(store)
+    comms.raise_alarm(store, "opencode down", critical=True)
+    screen, live, pulses = data.snapshot(store, projects=[])
+    assert "service is down" in screen.header and "alarms 1" in screen.header
+    assert "queued 1" in screen.header and "working" in screen.header
+    by_id = {r.task_id: r for r in screen.rows}
+    assert by_id[a].state == "queued" and by_id[b].state == "done"
+    assert not _re.search(r"[а-яА-ЯёЁ]", screen.header + by_id[a].state + by_id[b].state)
+    events.touch(store)
+    assert "Claude is here" in data.header(store, {}, now_ms())
+    _reset()
