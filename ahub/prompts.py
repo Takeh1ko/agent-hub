@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ahub.config import ProjectConfig
+from ahub.i18n import lang
 from ahub.model import Kind
 from ahub.store import Task
 
@@ -28,30 +29,22 @@ def rules_text(project: ProjectConfig) -> str:
 
 def reply_language_line() -> str:
     """One line for prompts where the model writes human-readable text."""
-    from ahub.i18n import lang
-
     language = "Russian" if lang() == "ru" else "English"
     return f"Write the report and all human-readable fields in {language}."
 
 
 def report_heading() -> str:
     """Essence heading in the hub language (views understands both)."""
-    from ahub.i18n import lang
-
     return "## Суть" if lang() == "ru" else "## Summary"
 
 
 def arbiter_heading() -> str:
     """Arbiter decision heading in the hub language (review understands both)."""
-    from ahub.i18n import lang
-
     return "## Решение арбитра" if lang() == "ru" else "## Arbiter decision"
 
 
 def orchestrator_heading(*, rework: bool = False) -> str:
     """Orchestrator notes heading in the hub language."""
-    from ahub.i18n import lang
-
     if lang() == "ru":
         return "## Указания оркестратора (доработка)" if rework else "## Указания оркестратора"
     return "## Orchestrator notes (rework)" if rework else "## Orchestrator notes"
@@ -59,8 +52,6 @@ def orchestrator_heading(*, rework: bool = False) -> str:
 
 def final_line() -> str:
     """Last-message requirement in the hub language."""
-    from ahub.i18n import lang
-
     if lang() == "ru":
         return "Last message — one line: «готово» or «заблокировано: причина»."
     return 'Last message — one line: "done" or "blocked: reason".'
@@ -133,8 +124,6 @@ def stop_prompt() -> str:
 
 
 def code_delivery(task: Task) -> str:
-    from ahub.i18n import lang
-
     paths = ", ".join(f"`{p}`" for p in task.limits.get("paths") or [])
     accept = task.limits.get("accept") or []
     tests = ("\n".join(f"   - `{a}`" for a in accept)) if accept else "   (no acceptance — routine)"
