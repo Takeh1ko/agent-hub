@@ -1,10 +1,10 @@
-"""TG-бот v2 — чистая логика без сети (architecture §11). Сеть и aiogram — в ahub.tg.run.
+"""TG bot v2 — pure logic, no network (architecture §11). Network and aiogram live in ahub.tg.run.
 
-TG — не пульт хаба: связь человека с Claude и просмотр задач.
-- Любой текст человека → сообщение для Claude (событие owner_message); если Claude нет — его поднимет launcher.
-- Claude → человек: `ahub say` (outbox), вопросы с кнопками (`ahub ask`), кнопка = ответ Claude.
-- Просмотр: /tasks — активные и недавние кнопками, нажал — подробно словами. Только чтение.
-- Напрямую хаб пишет человеку только тревоги наблюдателя (comms.alarms_for_tg).
+TG is not a hub console: it links the human to Claude and shows tasks.
+- Any human text → message for Claude (owner_message event); no Claude around — launcher starts one.
+- Claude → human: `ahub say` (outbox), button questions (`ahub ask`), a button press answers Claude.
+- View: /tasks — active and recent with buttons, tap for a plain-words detail. Read-only.
+- The hub writes to the human directly only for observer alarms (comms.alarms_for_tg).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ RECENT = 8
 @dataclass(frozen=True)
 class Button:
     label: str
-    data: str  # callback_data ≤ 64 байт
+    data: str  # callback_data, at most 64 bytes
 
 
 @dataclass
@@ -42,7 +42,7 @@ def remember_chat(store: Store, chat_id: int, *, now: int | None = None) -> None
 
 
 def chats(store: Store, hub: config.HubConfig | None = None) -> list[int]:
-    """Чаты для рассылки: живые из базы, иначе запасной chat_id из конфига, иначе []."""
+    """Broadcast chats: live ones from db, else fallback chat_id from config, else []."""
     if hub is None:
         try:
             hub = config.load_hub()
@@ -67,7 +67,7 @@ def clip(text: str, limit: int = MSG_LIMIT) -> str:
 
 
 def split_project(text: str, projects: list[str]) -> tuple[str | None, str]:
-    """«по agent-hub: …» / «agent-hub: …» → (проект, текст). Иначе (None, текст)."""
+    """"po <project>:" (Russian "po" = "for") / "<project>:" → (project, text). Else (None, text)."""
     s = text.strip()
     low = s.lower()
     for name in sorted(projects, key=len, reverse=True):
@@ -78,7 +78,7 @@ def split_project(text: str, projects: list[str]) -> tuple[str | None, str]:
 
 
 def on_text(store: Store, chat_id: int, text: str, *, projects: list[str], now: int | None = None) -> Reply:
-    """Свободный текст человека → сообщение для Claude."""
+    """Human free text → message for Claude."""
     remember_chat(store, chat_id, now=now)
     project, body = split_project(text, projects)
     if not body:
@@ -136,7 +136,7 @@ def question_reply(q: dict) -> Reply:
 
 
 def on_answer_button(store: Store, data: str, *, via: str = "tg") -> str:
-    """«ans:<qid>:<i>» → ответ на вопрос. Возвращает текст для правки сообщения."""
+    """`ans:<qid>:<i>` → question answer. Returns text for editing the message."""
     try:
         _, qid, idx = data.split(":")
         qid_i, idx_i = int(qid), int(idx)

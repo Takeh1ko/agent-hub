@@ -1,4 +1,4 @@
-"""Сессия aiogram с HTTP-прокси без aiohttp-socks (перенос из v1 hub/bot/run.py: на ПК Telegram — через VPN)."""
+"""aiogram session with HTTP proxy and no aiohttp-socks (ported from v1 hub/bot/run.py: PC Telegram goes via VPN)."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from aiogram.client.session.aiohttp import AiohttpSession
 
 
 class HttpProxySession(AiohttpSession):
-    """Aiohttp-сессия с HTTP-прокси без пакета aiohttp-socks.
+    """Aiohttp session with HTTP proxy and no aiohttp-socks package.
 
-    aiogram 3.31 при любом proxy= в конструкторе строит ProxyConnector,
-    которому нужен aiohttp-socks (нет в зависимостях — старт падал
-    с RuntimeError до цикла с повтором). Нативный aiohttp умеет
-    HTTP-прокси через параметр proxy= самого запроса — для HTTPS_PROXY
-    вида http://host:port этого достаточно.
+    aiogram 3.31 with any proxy= in the constructor builds a ProxyConnector
+    needing aiohttp-socks (not a dependency — startup crashed
+    with RuntimeError before the retry loop). Native aiohttp handles
+    HTTP proxies via the request's own proxy= param — for HTTPS_PROXY
+    of the http://host:port form that is enough.
     """
 
     def __init__(self, proxy_url: str, **kwargs) -> None:
@@ -23,11 +23,11 @@ class HttpProxySession(AiohttpSession):
 
     @property
     def proxy_url(self) -> str:
-        """Куда идут запросы."""
+        """Where requests go."""
         return self._proxy_url
 
     async def make_request(self, bot, method, timeout=None):
-        """Как базовая, но proxy= уходит в session.post."""
+        """Same as base, but proxy= goes into session.post."""
         from aiogram.exceptions import TelegramNetworkError
 
         session = await self.create_session()
@@ -44,7 +44,7 @@ class HttpProxySession(AiohttpSession):
         except asyncio.TimeoutError as e:
             raise TelegramNetworkError(
                 method=method, message="Request timeout error") from e
-        except Exception as e:  # noqa: BLE001 — как базовая ClientError-ветка
+        except Exception as e:  # noqa: BLE001 — same as the base ClientError branch
             from aiohttp import ClientError
 
             if not isinstance(e, ClientError):
@@ -61,7 +61,7 @@ class HttpProxySession(AiohttpSession):
 
     async def stream_content(self, url, headers=None, timeout=30,
                              chunk_size=65536, raise_for_status=True):
-        """Как базовая, но proxy= уходит в session.get."""
+        """Same as base, but proxy= goes into session.get."""
         if headers is None:
             headers = {}
         session = await self.create_session()

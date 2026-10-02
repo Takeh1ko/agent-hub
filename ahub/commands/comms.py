@@ -1,4 +1,4 @@
-"""Ожидание и связь: wait | watch | ack | inbox | say | ask | questions | alarms (contracts §6, §7)."""
+"""Waiting and messaging: wait | watch | ack | inbox | say | ask | questions | alarms (contracts §6, §7)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from ahub.time import parse_duration as _parse_duration
 
 
 def parse_duration(text: str) -> float:
-    """Обёртка: ValueError из ahub.time → CliError (одна строка «ошибка: …»)."""
+    """Wrap: ValueError from ahub.time becomes CliError (single-line error)."""
     try:
         return _parse_duration(text)
     except ValueError as e:
@@ -29,7 +29,7 @@ def cmd_wait(args) -> int:
 
 
 def cmd_watch(args) -> int:
-    """Бесконечный поток строк для Monitor: каждая строка — дело для оркестратора."""
+    """Endless line stream for Monitor: each line is work for the orchestrator."""
     from ahub.i18n import t
 
     store = Store()

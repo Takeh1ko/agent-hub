@@ -1,13 +1,13 @@
-"""Движок задачи: владелец ведёт задачу от очереди до «Готово / Нужно решение / Ошибка / Остановлена».
+"""Task engine: the owner drives a task from queue to "Done / Needs decision / Error / Stopped".
 
-Один экземпляр движка = один процесс задачи (ahub.worker). Он:
-- берёт аренду задачи и продлевает её в фоне; потерял аренду — немедленно прекращает работу без записи состояния;
-- ведёт этапы и пишет их в хранилище (владелец — единственный писатель активной задачи);
-- запускает сессии поставщика через общий раннер и решает, что делать с итогом хода (architecture §6.3):
-  сбой сети → повтор с паузой (та же сессия, если известна); тишина → одно продолжение той же сессией, потом
-  «Нужно решение»; квота/таймаут → «Нужно решение»; нет доступа/ошибка модели/падение → «Ошибка»;
-  остановка по просьбе → «Остановлена».
-V08: разведка. Код/рутина/ревью (ворота, панель, слияние) — M3.
+One engine instance = one task process (ahub.worker). It:
+- takes the task lease and renews it in the background; lease lost — stops at once without writing state;
+- tracks phases and records them in the store (the owner is the only writer of an active task);
+- runs provider sessions via the shared runner and decides what to do with each step result (architecture §6.3):
+  network failure → retry with pause (same session when known); silence → one same-session nudge, then
+  "Needs decision"; quota/timeout → "Needs decision"; no access/model error/crash → "Error";
+  requested stop → "Stopped".
+V08: scout. Code/routine/review (gates, panel, merge) — M3.
 """
 
 from __future__ import annotations
@@ -36,14 +36,14 @@ from ahub.time import now_ms
 LEASE_MS = 90_000
 STOP_POLL_S = 3.0
 BUDGET_POLL_S = 30.0
-REPORT_MAX_BYTES = 18_000  # 12 КБ по контракту + запас; больше — не отказ, а пометка
+REPORT_MAX_BYTES = 18_000  # 12 KB per contract plus margin; over that is flagged, not rejected
 
 _WRITE_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch"}
 _READ_TOOLS = {"read", "grep", "glob", "list", "webfetch", "websearch"}
 
 
 class LeaseLost(RuntimeError):
-    """Аренду забрали: прекратить работу, состояние не трогать."""
+    """Lease taken away: stop work, leave state alone."""
 
 
 def owner_token() -> str:
@@ -52,7 +52,7 @@ def owner_token() -> str:
 
 @dataclass
 class Settled:
-    """Чем кончился шаг движка (для тестов и логов)."""
+    """How an engine step ended (for tests and logs)."""
 
     state: State
     reason: str = ""
@@ -76,7 +76,7 @@ class Engine:
         self._soft_sent = False
         self.log = hublog.get("engine", task=self.task_id, project=project.name)
 
-    # --- аренда ---
+    # --- lease ---
 
     def _keeper(self, done: threading.Event) -> None:
         interval = max(1.0, self.lease_ms / 3000)
@@ -122,7 +122,7 @@ class Engine:
             except sqlite3.Error:
                 self.log.exception("release failed")
 
-    # --- помощники ---
+    # --- helpers ---
 
     def task(self) -> Task:
         t = self.store.get_task(self.task_id)
@@ -143,14 +143,14 @@ class Engine:
         if t.state is to:
             return Settled(to, reason)
         if t.state not in ACTIVE and t.state is not State.QUEUED:
-            return Settled(t.state, t.state_reason)  # уже решено (например, остановлена)
+            return Settled(t.state, t.state_reason)  # already decided (e.g. stopped)
         cost = self.task_cost()
         body = {"cost_go": round(cost[0], 4), "cost_usd": round(cost[1], 4)}
         body.update(payload or {})
         self.move(to, reason[:500], payload=body)
         self.log.info("settled: %s%s", to.value, f" ({reason[:200]})" if reason else "")
         lim = self.task().limits
-        if lim.get("orphans"):  # эпизод завершён — счётчик сиротства с нуля
+        if lim.get("orphans"):  # episode done — orphan counter restarts
             lim = dict(lim)
             lim.pop("orphans", None)
             self.store.update_task(self.task_id, limits=lim)
@@ -178,10 +178,10 @@ class Engine:
         return val
 
     def over_budget(self, *, live: bool = False) -> bool:
-        """Бюджет задачи (вся задача, вкл. ревью): 80 % — событие в журнал; 100 % — True."""
+        """Task budget (whole task incl. review): 80% — journal event; 100% — True."""
         t = self.task()
         go, usd = self.task_cost()
-        if live:  # все идущие сессии задачи (ревьюеры идут параллельно): учёт поставщика минус записанное
+        if live:  # all running task sessions (reviewers run in parallel): provider usage minus recorded
             for s in self.store.list_sessions(self.task_id, status="running"):
                 if not s.external_id:
                     continue
@@ -200,7 +200,7 @@ class Engine:
         return over
 
     def _pause(self, secs: float) -> bool:
-        """Прерываемая пауза. False — пока ждали, попросили остановиться."""
+        """Interruptible pause. False — a stop was requested while waiting."""
         end = time.monotonic() + secs
         while time.monotonic() < end:
             if self.stop_requested():
@@ -241,7 +241,7 @@ class Engine:
 
     def _session_row(self, provider: str, role: Role, alias: str, round_no: int, session_id: str | None,
                      log_path: str) -> int:
-        """Строка сессии: продолжение — та же строка (id поставщика уникален), новая — новая."""
+        """Session row: resume — same row (provider id is unique), new — new row."""
         if session_id:
             for s in self.store.list_sessions(self.task_id):
                 if s.provider == provider and s.external_id == session_id:
@@ -253,7 +253,7 @@ class Engine:
     def session(self, role: Role, alias: str, prompt: str, *, session_id: str | None = None,
                 keep_session_on_retry: bool = True, log_name: str = "", schema: dict | None = None,
                 cwd: str | None = None) -> RunResult:
-        """Один ход работника с повторами при сбое сети (architecture §6.3)."""
+        """One worker step with retries on network failure (architecture §6.3)."""
         entry = registry.get(self.store, alias)
         prov = providers.get(entry.provider)
         t = self.task()
@@ -308,7 +308,7 @@ class Engine:
                 continue
             return r
 
-    # --- ход задачи ---
+    # --- task step ---
 
     def _run(self) -> Settled:
         t = self.task()
@@ -336,7 +336,7 @@ class Engine:
         return t
 
     def _outcome_to_state(self, r: RunResult) -> tuple[State, str] | None:
-        """Итог хода, после которого продолжать нечего. None — ход успешен или нужна отдельная обработка."""
+        """Step result after which there is nothing to continue. None — step ok or handled separately."""
         if r.outcome is Outcome.KILLED:
             if self.lost.is_set():
                 raise LeaseLost()
@@ -355,7 +355,7 @@ class Engine:
 
     def _step_with_continue(self, role: Role, alias: str, prompt: str, *, session_id: str | None,
                             log_name: str) -> tuple[RunResult, tuple[State, str] | None]:
-        """Ход работника; тишина → одно продолжение той же сессией."""
+        """Worker step; silence → one same-session nudge."""
         r = self.session(role, alias, prompt, session_id=session_id, log_name=log_name)
         if r.outcome is Outcome.SILENCE:
             self.store.add_event("silence", task_id=self.task_id, project=self.project.name,
@@ -367,13 +367,13 @@ class Engine:
                 return r, (State.NEEDS_DECISION, _t("engine.silence_twice", secs=r.silence_s))
         return r, self._outcome_to_state(r)
 
-    # --- разведка ---
+    # --- scout ---
 
     def _scout(self, t: Task) -> Settled:
         t = self._prepare(t)
         self.set_phase(Phase.STUDYING)
         prev = [s for s in self.store.list_sessions(t.id) if s.role == Role.SCOUT.value and s.external_id]
-        resume_sid = prev[-1].external_id if prev and not t.limits.get("fresh_session") else None  # подхват
+        resume_sid = prev[-1].external_id if prev and not t.limits.get("fresh_session") else None  # resume
         self._clear_fresh(t)
         prompt = prompts.CONTINUE_PROMPT if resume_sid else prompts.scout_prompt(self.project, t)
         r, final = self._step_with_continue(Role.SCOUT, t.executor, prompt, session_id=resume_sid,
@@ -407,7 +407,7 @@ class Engine:
         return data if isinstance(data, dict) else {}
 
     def _check_scout(self, t: Task) -> str:
-        """Пусто — итог по форме. «!…» — неисправимо repair'ом (разведка изменила файлы)."""
+        """Empty — result matches the form. "!…" — unfixable via repair (scout touched files)."""
         changed = workspace.changed_files(t.worktree)
         if changed:
             return "!" + _t("engine.scout_files", files=", ".join(changed[:10]))
@@ -433,11 +433,11 @@ class Engine:
                 problems.append(_t("engine.no_report"))
         return "; ".join(problems)
 
-    # --- код и рутина ---
+    # --- code and routine ---
 
     def _budget_stop(self, role: Role, alias: str, sid: str | None) -> Settled:
-        """Бюджет исчерпан: работник сохраняет сделанное коротким ходом, задача — «Нужно решение»."""
-        self.budget_hit = False  # разрешить один короткий ход «сохрани и остановись»
+        """Budget spent: worker saves progress in one short step, task goes to "Needs decision"."""
+        self.budget_hit = False  # allow one short "save and stop" step
         if sid:
             self.session(role, alias, prompts.stop_prompt(), session_id=sid, log_name=role.value)
         go, usd = self.task_cost()
@@ -476,7 +476,7 @@ class Engine:
             lim = dict(t.limits)
             lim.pop("rework_notes", None)
             self.store.update_task(t.id, limits=lim)
-        if fresh:  # новая сессия (другая модель/постановка или первой не было): полная постановка + указания
+        if fresh:  # new session (different model/brief, or no session before): full brief + instructions
             prompt, sid = prompts.code_prompt(self.project, t), None
             if notes:
                 prompt += f"\n\n{prompts.orchestrator_heading(rework=True)}\n" + notes
@@ -586,7 +586,7 @@ class Engine:
             if rv is not None:
                 found[m] = rv
         missing = [m for m in models if m not in found and by_model[m].session_id]
-        if missing:  # несдавший вердикт — ровно один повтор в той же сессии
+        if missing:  # reviewer with no verdict gets exactly one same-session retry
             def retry_one(m: str):
                 return self.session(Role.REVIEWER, m, review.verdict_repair_prompt(round_no, m),
                                     session_id=by_model[m].session_id, keep_session_on_retry=False,
@@ -608,7 +608,7 @@ class Engine:
         return decision, reason, blocking
 
     def _review_interrupted(self, results: list) -> tuple[str, str, list] | None:
-        """Сессию ревьюера остановили: потеря аренды — исключение, бюджет или стоп — «нужно решение»."""
+        """Reviewer session stopped: lost lease — raise, budget or stop — "needs decision"."""
         if not any(r.outcome is Outcome.KILLED for r in results):
             return None
         if self.lost.is_set():
@@ -616,7 +616,7 @@ class Engine:
         return "decision", _t("engine.review_budget" if self.budget_hit else "engine.review_stopped"), []
 
     def _revert_reviewer(self, t: Task) -> None:
-        """Ревьюер не должен менять файлы — откатываем."""
+        """Reviewer must not touch files — revert."""
         changed = workspace.changed_files(t.worktree)
         if changed:
             self.log.warning("reviewer changed files, reverting: %s", changed[:5])

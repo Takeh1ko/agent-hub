@@ -1,7 +1,7 @@
-"""`ahub top` — экран для человека (architecture §10). Данные — ahub.tui.data; действия — ahub.accept/drafts.
+"""`ahub top` — human screen (architecture §10). Data — ahub.tui.data; actions — ahub.accept/drafts.
 
-Тумблер «Просмотр / Управление» (c): в просмотре действия недоступны. Обновление — каждые 2 с в фоне
-(поток; пока предыдущее не закончилось — новое не начинается).
+"View / Control" toggle (c): no actions in view mode. Refresh every 2 s in the background
+(thread; a new refresh never starts before the previous one finishes).
 """
 
 from __future__ import annotations
@@ -163,7 +163,7 @@ class TopApp(App):
     def on_data_table_row_highlighted(self, ev) -> None:
         self._show_detail()
 
-    # --- действия ---
+    # --- actions ---
 
     def action_help(self) -> None:
         self.push_screen(Help())
@@ -288,7 +288,7 @@ class TopApp(App):
             else:
                 drafts.cancel(self.store, did)
                 self.notify(_t("tui.draft_cancelled"))
-        # preview из drafts (пока русский): готовность — по коду статуса, не по тексту
+        # drafts preview text may be localized: readiness — by status code, not by text
         if ": failed" in preview or ": drafting" in preview or ": cancelled" in preview:
             self.notify(preview[:300], severity="error", timeout=10)
             return

@@ -1,4 +1,4 @@
-"""ahub observer run [--deep] [--no-model] | reports — наблюдатель вручную и его отчёты."""
+"""ahub observer run [--deep] [--no-model] | reports — manual observer run and its reports."""
 
 from __future__ import annotations
 

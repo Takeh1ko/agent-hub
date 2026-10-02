@@ -89,7 +89,7 @@ _ENV_KEYS = ("PATH", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "LANG
 
 
 def unit_text(name: str) -> str:
-    """Юнит: окружение сессии, которого systemd не видит, — явно (PATH: claude/ahub; системный прокси)."""
+    """Unit: session env invisible to systemd, spelled out explicitly (PATH for claude/ahub; system proxy)."""
     desc, command = UNITS[name]
     env = ["Environment=PYTHONUNBUFFERED=1"]
     for k, v in sorted(os.environ.items()):
@@ -99,7 +99,7 @@ def unit_text(name: str) -> str:
 
 
 def _env_dict() -> dict[str, str]:
-    """То же окружение словарём — для EnvironmentVariables plist."""
+    """Same env as a dict — for plist EnvironmentVariables."""
     env = {"PYTHONUNBUFFERED": "1"}
     for k, v in sorted(os.environ.items()):
         if k.upper() in _ENV_KEYS and k not in env:
@@ -113,7 +113,7 @@ def _log_names(name: str) -> tuple[str, str]:
 
 
 def plist_dict(name: str) -> dict:
-    """Словарь launchd-plist: те же запуск и окружение, что у юнита systemd."""
+    """launchd plist dict: same command and env as the systemd unit."""
     _desc, command = UNITS[name]
     out_name, err_name = _log_names(name)
     logd = paths.log_dir()
@@ -129,12 +129,12 @@ def plist_dict(name: str) -> dict:
 
 
 def plist_bytes(name: str) -> bytes:
-    """Plist XML — через стандартный plistlib."""
+    """Plist XML via stdlib plistlib."""
     return plistlib.dumps(plist_dict(name), fmt=plistlib.FMT_XML)
 
 
 def _want_units() -> list[str]:
-    """Сервис — всегда; бот — только если Telegram включён."""
+    """Service always; bot only when Telegram is enabled."""
     from ahub import config
 
     names = ["ahub.service"]
@@ -144,10 +144,10 @@ def _want_units() -> list[str]:
 
 
 def cmd_install(args) -> int:
-    """Служба ОС: systemd --user на Linux, launchd plist на macOS (автозапуск, KeepAlive/Restart).
+    """OS service: systemd --user on Linux, launchd plist on macOS (autostart, KeepAlive/Restart).
 
-    Юнит/plist бота — только если Telegram включён; процессы задач переживают
-    перезапуск сервиса (systemd: KillMode=process; launchd процессы не трогает)."""
+    Bot unit/plist only when Telegram is enabled; task processes survive
+    service restarts (systemd: KillMode=process; launchd leaves them alone)."""
     from pathlib import Path
 
     plat = sys.platform
@@ -160,7 +160,7 @@ def cmd_install(args) -> int:
 
         raise CliError(t("err.service_platform", plat=plat))
     if args.print:
-        # --print показывает оба (и бота тоже) — что именно встанет в службу, решает запись.
+        # --print shows both (bot included) — the record decides what actually gets installed.
         if os_kind == "darwin":
             text = "\n".join(f"# {PLIST_FILES[n]}\n{plist_bytes(n).decode('utf-8')}" for n in UNITS)
             emit(args, {"plists": [PLIST_FILES[n] for n in UNITS]}, text)
@@ -196,12 +196,12 @@ def cmd_install(args) -> int:
 
 
 def _run_argv() -> list[str]:
-    """Команда фонового сервиса (тесты подменяют на sleep — настоящий сервис не запускают)."""
+    """Background service command (tests stub it with sleep — never start the real service)."""
     return [sys.executable, "-m", "ahub", "service", "run"]
 
 
 def _read_pid() -> int | None:
-    """pid фонового сервиса из файла — только если это действительно наш `service run` (pid мог смениться)."""
+    """Background service pid from file — only if it is really our `service run` (pid may be reused)."""
     try:
         pid = int(paths.service_pid_path().read_text(encoding="utf-8").split()[0])
     except (OSError, ValueError, IndexError):
@@ -213,7 +213,7 @@ def _read_pid() -> int | None:
 
 
 def _heartbeat_age_s() -> int | None:
-    """Возраст тика сервиса (как в status); нет тика — None."""
+    """Service tick age (as in status); no tick — None."""
     try:
         hb = Store().meta_get(HEARTBEAT_KEY)
     except Exception:
@@ -227,10 +227,10 @@ def _heartbeat_age_s() -> int | None:
 
 
 def cmd_start(args) -> int:
-    """Фон без службы ОС: `service run` отдельным процессом, pid — в файле данных.
+    """Background without an OS service: `service run` as a detached process, pid in the data file.
 
-    Уже запущен (жив pid из файла) — ничего не делаю, код 0. Сервис уже жив по
-    сердцебиению (служба ОС или чужой запуск) — второй не запускаю."""
+    Already running (live pid from file) — do nothing, exit 0. Service already alive via
+    heartbeat (OS service or foreign start) — do not start a second one."""
     from ahub.i18n import t
 
     pid = _read_pid()
@@ -257,7 +257,7 @@ def cmd_start(args) -> int:
 
 
 def cmd_stop(args) -> int:
-    """Остановить фон `service start`: SIGTERM по pid из файла, ждать до 10 с, файл удалить."""
+    """Stop a `service start` background: SIGTERM to the pid from file, wait up to 10 s, remove the file."""
     from ahub.i18n import t
 
     pf = paths.service_pid_path()

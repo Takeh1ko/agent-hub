@@ -1,4 +1,4 @@
-"""ahub draft "текст" | draft start N | draft cancel N | draft list — задача словами, поля дописывает модель."""
+"""ahub draft "text" | draft start N | draft cancel N | draft list — task in words, model fills in fields."""
 
 from __future__ import annotations
 

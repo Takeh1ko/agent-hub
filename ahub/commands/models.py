@@ -1,4 +1,4 @@
-"""ahub models — реестр моделей и меню ролей (посмотреть / изменить). Запреты проекта не снимает."""
+"""ahub models — model registry and role menus (view / edit). Never lifts project denies."""
 
 from __future__ import annotations
 
