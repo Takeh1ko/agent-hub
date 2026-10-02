@@ -12,6 +12,7 @@ import sys
 
 from ahub import comms, config
 from ahub import log as hublog
+from ahub.i18n import t as _t
 from ahub.store import Store
 from ahub.tg import core
 from ahub.tg import launcher
@@ -173,11 +174,10 @@ def main() -> int:
     try:
         hub = config.load_hub()
     except config.ConfigError as e:
-        print(f"ошибка: {e}", file=sys.stderr)
+        print(_t("cli.error", msg=e), file=sys.stderr)
         return 2
     if not hub.tg_token:
-        print("ошибка: нет токена Telegram — задайте [telegram] token в ~/.config/ahub/config.toml"
-              " или AHUB_TG_TOKEN", file=sys.stderr)
+        print(_t("tg.err_no_token"), file=sys.stderr)
         return 2
     asyncio.run(amain(hub))
     return 0

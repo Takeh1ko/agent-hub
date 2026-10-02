@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ahub import archive, comms, config, events, pulse, views
+from ahub.i18n import Words
+from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION, Ev, State
 from ahub.providers import opencode_db
 from ahub.service import HEARTBEAT_KEY, PAUSE_KEY, live_workers
@@ -12,10 +14,9 @@ from ahub.store import Store, Task
 from ahub.time import fmt_local, now_ms, to_local
 
 _UNSET: object = object()  # маркер «лимит не передан — взять из конфига»
-PHASE = {"studying": "изучает", "writing": "пишет", "testing": "тесты", "waiting": "ждёт"}
-EV_WORDS = {"created": "создана", "retry": "повтор после сбоя", "silence": "работник молчал", "orphan": "потерян процесс",
-            "budget_soft": "потрачено 80 % бюджета", "budget_hard": "бюджет исчерпан", "orch_edit": "правка Claude",
-            "paths_extended": "расширены файлы", "model_changed": "сменена модель", "budget_extended": "бюджет продлён"}
+PHASE = views.PHASE_WORDS
+EV_WORDS: Words = Words("tui.ev_", ("created", "retry", "silence", "orphan", "budget_soft", "budget_hard",
+                                    "orch_edit", "paths_extended", "model_changed", "budget_extended"))
 
 
 @dataclass
@@ -42,7 +43,11 @@ class Screen:
 
 def _age(ms: int, now: int) -> str:
     m = max(0, (now - ms) // 60000)
-    return f"{m} мин" if m < 60 else (f"{m // 60} ч" if m < 1440 else f"{m // 1440} д")
+    if m < 60:
+        return _t("tui.age_min", m=m)
+    if m < 1440:
+        return _t("tui.age_h", h=m // 60)
+    return _t("tui.age_d", d=m // 1440)
 
 
 def _go_limit(hub_limit: float | None | object) -> float | None:
@@ -57,8 +62,8 @@ def _go_limit(hub_limit: float | None | object) -> float | None:
 
 def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | None | object = _UNSET) -> str:
     hb = store.meta_get(HEARTBEAT_KEY)
-    svc = "🟢 сервис" if hb and now - int(hb) < 30_000 else "🔴 сервис не отвечает"
-    claude = "🟢 Claude на связи" if events.present(store, now=now) else "⚪ Claude не в сессии"
+    svc = _t("tui.svc_on") if hb and now - int(hb) < 30_000 else _t("tui.svc_off")
+    claude = _t("tui.claude_on") if events.present(store, now=now) else _t("tui.claude_off")
     active = store.list_tasks(states=ACTIVE)
     waiting = store.list_tasks(states=WAITING_DECISION)
     queued = store.list_tasks(states={State.QUEUED})
@@ -71,20 +76,24 @@ def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | No
         today = opencode_db.totals(day0)
         month = opencode_db.totals(month0)
         go_m = month.cost_go or 0.0
+        day_go = today.cost_go or 0.0
         if limit is None:
-            money = f"сегодня ${today.cost_go or 0:.2f} · месяц ${go_m:.2f}"
+            money = _t("tui.money", day=f"{day_go:.2f}", month=f"{go_m:.2f}")
         else:
-            money = (f"сегодня ${today.cost_go or 0:.2f} · месяц ${go_m:.2f} из ${limit:.0f}"
-                     f" ({go_m / limit * 100:.0f} %)" + (" — лимит превышен!" if go_m > limit else ""))
+            money = _t("tui.money_limit", day=f"{day_go:.2f}", month=f"{go_m:.2f}",
+                       limit=f"{limit:.0f}", pct=f"{go_m / limit * 100:.0f}")
+            if go_m > limit:
+                money += _t("tui.money_over")
         if today.cost_usd or month.cost_usd:
-            money += f" · реальные ${month.cost_usd or 0:.2f}"
+            money += _t("tui.money_real", usd=f"{month.cost_usd or 0:.2f}")
     except Exception:
-        money = "траты: нет данных"
-    parts = [svc, claude, f"работают {len(active)}", f"ждут решения {len(waiting)}", f"в очереди {len(queued)}"]
+        money = _t("tui.money_none")
+    parts = [svc, claude, _t("tui.working", n=len(active)), _t("tui.waiting", n=len(waiting)),
+             _t("tui.queued", n=len(queued))]
     if store.meta_get(PAUSE_KEY) == "1":
-        parts.append("⏸ очередь на паузе")
+        parts.append(_t("tui.paused"))
     if alarms:
-        parts.append(f"🚨 тревог {alarms}")
+        parts.append(_t("tui.alarms", n=alarms))
     return " · ".join(parts) + "\n" + money
 
 
@@ -133,7 +142,7 @@ def detail(store: Store, task_id: int, live: dict[int, int], pulses: dict) -> st
     if t is None:
         return ""
     pl = pulses.get(t.id)
-    head = f"{pl.mark} {pl.reason or 'работает'}\n" if pl else ""
+    head = f"{pl.mark} {pl.reason or _t('tui.working_now')}\n" if pl else ""
     return head + views.task_text(store, t, live=live)
 
 
@@ -144,14 +153,3 @@ def snapshot(store: Store, projects: list[config.ProjectConfig] | None = None) -
         projects, _ = config.load_projects()
     pulses = pulse.all_pulses(store, live=live, projects=projects, now=now)
     return Screen(header(store, live, now), rows(store, live, pulses, now), feed(store)), live, pulses
-
-
-HELP = """Значки: 🟢 работает · 🟡 ждёт по делу (тесты, замок, инструмент) · 🔴 молчит дольше нормы · ⚫ процесс пропал ·
-⚪ нет данных · ⏳ в очереди · ✅ готово (ждёт решения Claude) · ❓ нужно решение · ❌ ошибка · ⏹ остановлена · ✔ принята
-
-Режимы: «Просмотр» — только смотреть. «Управление» (клавиша c) — можно действовать:
-  n — новая задача своими словами (модель дописывает, вы видите предпросмотр и запускаете)
-  s — остановить · a — принять (код — слить) · x — отклонить · r — доработать (указания)
-  m — сменить модель · b — продлить бюджет · p — пауза/запуск очереди
-Всегда: ↑/↓ — выбор задачи, ? — эта справка, q — выход.
-Обычно действовать не нужно: задачи ведёт Claude. Вмешивайтесь, если видите 🔴/⚫ или тревогу."""
