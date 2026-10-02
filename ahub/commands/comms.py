@@ -30,10 +30,13 @@ def cmd_wait(args) -> int:
 
 def cmd_watch(args) -> int:
     """Бесконечный поток строк для Monitor: каждая строка — дело для оркестратора."""
+    from ahub.i18n import t
+
     store = Store()
     pending = [e for e in events.unacked(store, args.project) if e.delivered_at is not None]
     if pending:
-        print(f"НЕПРОЧИТАНО {len(pending)}: " + "; ".join(events.lines(store, pending[:3]))[:180], flush=True)
+        tail = "; ".join(events.lines(store, pending[:3]))[:180]
+        print(t("comms.unread", n=len(pending), text=tail), flush=True)
     last_touch = 0.0
     try:
         while True:
@@ -59,22 +62,30 @@ def cmd_ack(args) -> int:
         try:
             ids = [int(x) for x in args.ids]
         except ValueError as e:
-            raise CliError("ack: номера событий или all") from e
+            from ahub.i18n import t
+
+            raise CliError(t("err.ack_usage")) from e
         n = events.ack(store, ids)
-    emit(args, {"acked": n}, f"подтверждено {n}")
+    from ahub.i18n import t
+
+    emit(args, {"acked": n}, t("comms.acked", n=n))
     return 0
 
 
 def cmd_inbox(args) -> int:
+    from ahub.i18n import t
+
     rows = comms.inbox(Store(), mark=not args.peek)
-    text = "\n".join(f"#{r['id']} {r['text']}" for r in rows) or "новых сообщений нет"
+    text = "\n".join(f"#{r['id']} {r['text']}" for r in rows) or t("comms.inbox_empty")
     emit(args, {"messages": rows}, text)
     return 0
 
 
 def cmd_say(args) -> int:
+    from ahub.i18n import t
+
     mid = comms.say(Store(), args.text, project=args.project or "")
-    emit(args, {"id": mid}, "отправлено владельцу" if mid else "")
+    emit(args, {"id": mid}, t("comms.sent") if mid else "")
     return 0
 
 
@@ -85,22 +96,28 @@ def cmd_ask(args) -> int:
         from ahub.model import parse_task_id
         tid = parse_task_id(args.task)
     qid = comms.ask(Store(), args.text, opts, task_id=tid)
-    emit(args, {"id": qid}, f"вопрос #{qid} владельцу (ответ придёт событием ANSWER)")
+    from ahub.i18n import t
+
+    emit(args, {"id": qid}, t("comms.asked", qid=qid))
     return 0
 
 
 def cmd_questions(args) -> int:
+    from ahub.i18n import t
+
     rows = comms.open_questions(Store())
     text = "\n".join(f"#{r['id']} {r['text']}" + (f" [{', '.join(r['options'])}]" if r['options'] else "")
-                     for r in rows) or "открытых вопросов нет"
+                     for r in rows) or t("comms.questions_empty")
     emit(args, {"questions": rows}, text)
     return 0
 
 
 def cmd_alarms(args) -> int:
+    from ahub.i18n import t
+
     store = Store()
     al = comms.alarms(store, unacked_only=not args.all)
-    lines = events.lines(store, al) or ["тревог нет"]
+    lines = events.lines(store, al) or [t("comms.alarms_empty")]
     if args.ack and al:
         events.ack(store, [e.id for e in al])
     emit(args, {"alarms": [e.payload | {"id": e.id, "critical": e.critical} for e in al]}, "\n".join(lines))
@@ -108,35 +125,37 @@ def cmd_alarms(args) -> int:
 
 
 def register(subparsers) -> None:
-    w = subparsers.add_parser("wait", help="ждать события для оркестратора")
+    from ahub.i18n import t
+
+    w = subparsers.add_parser("wait", help=t("help.wait"))
     w.add_argument("--timeout", default="30m")
     w.add_argument("--project")
     w.add_argument("--who", default=events.DEFAULT_WHO)
     w.set_defaults(func=cmd_wait)
-    wt = subparsers.add_parser("watch", help="поток событий для Monitor")
+    wt = subparsers.add_parser("watch", help=t("help.watch"))
     wt.add_argument("--project")
     wt.add_argument("--who", default=events.DEFAULT_WHO)
     wt.add_argument("--poll", type=float, default=3.0)
     wt.set_defaults(func=cmd_watch)
-    a = subparsers.add_parser("ack", help="подтвердить события")
+    a = subparsers.add_parser("ack", help=t("help.ack"))
     a.add_argument("ids", nargs="+")
     a.add_argument("--project")
     a.set_defaults(func=cmd_ack)
-    i = subparsers.add_parser("inbox", help="сообщения владельца")
-    i.add_argument("--peek", action="store_true", help="не помечать прочитанными")
+    i = subparsers.add_parser("inbox", help=t("help.inbox"))
+    i.add_argument("--peek", action="store_true", help=t("help.inbox_peek"))
     i.set_defaults(func=cmd_inbox)
-    s = subparsers.add_parser("say", help="написать владельцу в TG")
+    s = subparsers.add_parser("say", help=t("help.say"))
     s.add_argument("text")
     s.add_argument("--project")
     s.set_defaults(func=cmd_say)
-    q = subparsers.add_parser("ask", help="вопрос владельцу с вариантами")
+    q = subparsers.add_parser("ask", help=t("help.ask"))
     q.add_argument("text")
     q.add_argument("--options")
     q.add_argument("--task")
     q.set_defaults(func=cmd_ask)
-    qs = subparsers.add_parser("questions", help="открытые вопросы владельцу")
+    qs = subparsers.add_parser("questions", help=t("help.questions"))
     qs.set_defaults(func=cmd_questions)
-    al = subparsers.add_parser("alarms", help="тревоги наблюдателя")
+    al = subparsers.add_parser("alarms", help=t("help.alarms"))
     al.add_argument("--ack", action="store_true")
     al.add_argument("--all", action="store_true")
     al.set_defaults(func=cmd_alarms)

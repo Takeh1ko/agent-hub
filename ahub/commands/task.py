@@ -26,7 +26,9 @@ def _task(store: Store, ref: str) -> Task:
         raise CliError(str(e)) from e
     t = store.get_task(tid)
     if t is None:
-        raise CliError(f"нет задачи {ref}")
+        from ahub.i18n import t as _t
+
+        raise CliError(_t("err.no_task", ref=ref))
     return t
 
 
@@ -37,7 +39,9 @@ def cmd_new(args) -> int:
         try:
             spec_text = Path(args.spec_file).read_text(encoding="utf-8")
         except OSError as e:
-            raise CliError(f"--spec-file: {e}") from e
+            from ahub.i18n import t as _t
+
+            raise CliError(_t("err.spec_file", err=e)) from e
     review_models = None
     if args.no_review:
         review_models = []
@@ -54,11 +58,18 @@ def cmd_new(args) -> int:
     try:
         t = tasks.create(store, spec, project, key=args.key, draft=args.draft, collect=not args.no_collect)
     except tasks.TaskInvalid as e:
-        raise CliError("задача не создана: " + "; ".join(e.errors)) from e
-    word = "черновик" if t.state is State.DRAFT else "в очереди"
-    extra = f", ревью {'+'.join(t.review['models'])}×{t.review['rounds']}" if t.review else ""
+        from ahub.i18n import t as _t
+
+        raise CliError(_t("err.task_invalid", errors="; ".join(e.errors))) from e
+    from ahub.i18n import t as _t
+
+    word = _t("task.word_draft") if t.state is State.DRAFT else _t("task.word_queued")
+    if t.review:
+        extra = _t("task.review_extra", models="+".join(t.review["models"]), rounds=t.review["rounds"])
+    else:
+        extra = ""
     emit(args, {"id": t.id, "label": t.label, "state": t.state.value},
-         f"{t.label} {word} ({t.kind.value}, {t.executor}{extra})")
+         _t("task.created", label=t.label, word=word, kind=t.kind.value, executor=t.executor, extra=extra))
     return 0
 
 
@@ -104,12 +115,17 @@ def cmd_log(args) -> int:
 def cmd_stop(args) -> int:
     store = Store()
     t = _task(store, args.task)
+    from ahub.i18n import t as _t
+
     try:
         how = transitions.request_stop(store, t.id, reason=args.reason or "остановлена командой", by=args.by)
     except transitions.TransitionError as e:
         raise CliError(str(e)) from e
-    emit(args, {"id": t.id, "result": how},
-         f"{t.label}: " + ("остановлена" if how == "stopped" else "попросили процесс остановиться"))
+    if how == "stopped":
+        text = _t("task.stopped", label=t.label)
+    else:
+        text = _t("task.stop_requested", label=t.label)
+    emit(args, {"id": t.id, "result": how}, text)
     return 0
 
 
@@ -118,7 +134,9 @@ def _project_of(store: Store, t: Task):
 
     p = find_project(t.project)
     if p is None:
-        raise CliError(f"проект {t.project} не найден в конфиге хаба")
+        from ahub.i18n import t as _t
+
+        raise CliError(_t("err.project_missing", project=t.project))
     return p
 
 
@@ -181,17 +199,21 @@ def cmd_model(args) -> int:
 
 def cmd_diff(args) -> int:
     from ahub import gates
+    from ahub.i18n import t as _t
+
     store = Store()
     t = _task(store, args.task)
     if not t.worktree or not Path(t.worktree).is_dir():
-        raise CliError(f"{t.label}: копии нет (дифф принятой задачи — в архиве проекта)")
+        raise CliError(_t("err.no_worktree", label=t.label))
     base = gates.effective_base(_project_of(store, t), t)
     text = gates.diff_text(t.worktree, base, limit=args.max_bytes)
-    emit(args, {"base": base, "diff": text}, text or "дифф пуст")
+    emit(args, {"base": base, "diff": text}, text or _t("task.diff_empty"))
     return 0
 
 
 def cmd_history(args) -> int:
+    from ahub.i18n import t as _t
+
     store = Store()
     project = resolve_project(args).name if args.project else None
     done = [t for t in store.list_tasks(project=project, newest_first=True) if t.state.value in
@@ -201,72 +223,76 @@ def cmd_history(args) -> int:
         go, usd = archive.task_cost(store, t.id)
         dur = ""
         if t.finished_at:
-            dur = f" · {views._age(t.created_at, t.finished_at)}"
-        lines.append(f"{t.label} {t.kind.value} «{views._short(t.title, 45)}» · "
-                     f"{archive.STATE_WORDS.get(t.state.value, t.state.value)} · круг {t.round} · ${go + usd:.3f}{dur}")
-    emit(args, {"tasks": [asdict(t) for t in done]}, "\n".join(lines) or "истории нет")
+            dur = _t("task.history_dur", age=views._age(t.created_at, t.finished_at))
+        lines.append(_t("task.history_line", label=t.label, kind=t.kind.value,
+                        title=views._short(t.title, 45),
+                        state=archive.STATE_WORDS.get(t.state.value, t.state.value),
+                        round=t.round, cost=f"{go + usd:.3f}", dur=dur))
+    emit(args, {"tasks": [asdict(t) for t in done]}, "\n".join(lines) or _t("task.history_empty"))
     return 0
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("task", help="задачи")
+    from ahub.i18n import t
+
+    p = subparsers.add_parser("task", help=t("help.task"))
     sub = p.add_subparsers(dest="task_cmd", required=True)
-    n = sub.add_parser("new", help="новая задача")
+    n = sub.add_parser("new", help=t("help.task_new"))
     add_project_arg(n)
     n.add_argument("--kind", required=True, choices=[k.value for k in Kind])
-    n.add_argument("--title", required=True, help="цель, одна фраза")
+    n.add_argument("--title", required=True, help=t("help.task_new_title"))
     g = n.add_mutually_exclusive_group()
-    g.add_argument("--spec", help="описание")
-    g.add_argument("--spec-file", help="описание из файла")
-    n.add_argument("--format", help="какой нужен результат")
+    g.add_argument("--spec", help=t("help.task_new_spec"))
+    g.add_argument("--spec-file", help=t("help.task_new_spec_file"))
+    n.add_argument("--format", help=t("help.task_new_format"))
     n.add_argument("--model")
-    n.add_argument("--level", type=int, help="уровень ревью 0–4")
-    n.add_argument("--review", help="модели ревью через запятую")
+    n.add_argument("--level", type=int, help=t("help.task_new_level"))
+    n.add_argument("--review", help=t("help.task_new_review"))
     n.add_argument("--rounds", type=int)
     n.add_argument("--no-review", action="store_true")
-    n.add_argument("--paths", help="разрешённые файлы (glob через запятую)")
-    n.add_argument("--accept", help="pytest-ноды приёмки через запятую")
-    n.add_argument("--read", help="что прочитать первым")
-    n.add_argument("--input", help="вход для ревью: ветка, sha, a..b или файлы")
+    n.add_argument("--paths", help=t("help.task_new_paths"))
+    n.add_argument("--accept", help=t("help.task_new_accept"))
+    n.add_argument("--read", help=t("help.task_new_read"))
+    n.add_argument("--input", help=t("help.task_new_input"))
     n.add_argument("--resources")
-    n.add_argument("--after", help="T3,T4")
-    n.add_argument("--budget", type=float, help="бюджет Go, $")
-    n.add_argument("--budget-usd", type=float, help="бюджет реальных денег, $ (по умолчанию 0 — тратить нельзя)")
-    n.add_argument("--time-limit", type=int, help="минут")
-    n.add_argument("--key", help="ключ идемпотентности")
+    n.add_argument("--after", help=t("help.task_new_after"))
+    n.add_argument("--budget", type=float, help=t("help.task_new_budget"))
+    n.add_argument("--budget-usd", type=float, help=t("help.task_new_budget_usd"))
+    n.add_argument("--time-limit", type=int, help=t("help.task_new_time_limit"))
+    n.add_argument("--key", help=t("help.task_new_key"))
     n.add_argument("--draft", action="store_true")
-    n.add_argument("--no-collect", action="store_true", help="не проверять сбор приёмки pytest'ом")
+    n.add_argument("--no-collect", action="store_true", help=t("help.task_new_no_collect"))
     n.add_argument("--by", default="orchestrator")
     n.set_defaults(func=cmd_new)
 
-    s = subparsers.add_parser("status", help="сводка (L1) или задача (L2)")
+    s = subparsers.add_parser("status", help=t("help.status"))
     s.add_argument("task", nargs="?")
     add_project_arg(s)
     s.set_defaults(func=cmd_status)
-    r = subparsers.add_parser("result", help="результат задачи (L2; --full — L3)")
+    r = subparsers.add_parser("result", help=t("help.result"))
     r.add_argument("task")
     r.add_argument("--full", action="store_true")
     r.add_argument("--max-bytes", type=int, default=views.L3_DEFAULT)
     r.set_defaults(func=cmd_result)
-    lg = subparsers.add_parser("log", help="сырые логи сессий задачи (L3)")
+    lg = subparsers.add_parser("log", help=t("help.log"))
     lg.add_argument("task")
     lg.add_argument("--max-bytes", type=int, default=8000)
     lg.set_defaults(func=cmd_log)
-    for name, fn, helptext in (("stop", cmd_stop, "остановить"), ("continue", cmd_continue, "продолжить"),
-                               ("accept", cmd_accept, "принять (код — слить)"), ("reject", cmd_reject, "отклонить")):
-        x = subparsers.add_parser(name, help=helptext)
+    for name, fn, key in (("stop", cmd_stop, "help.stop"), ("continue", cmd_continue, "help.continue"),
+                          ("accept", cmd_accept, "help.accept"), ("reject", cmd_reject, "help.reject")):
+        x = subparsers.add_parser(name, help=t(key))
         x.add_argument("task")
         x.add_argument("--reason")
         x.add_argument("--by", default="orchestrator")
         if name == "reject":
-            x.add_argument("--keep", action="store_true", help="не удалять копию задачи")
+            x.add_argument("--keep", action="store_true", help=t("help.reject_keep"))
         x.set_defaults(func=fn)
-    rw = subparsers.add_parser("rework", help="вернуть на доработку с указаниями")
+    rw = subparsers.add_parser("rework", help=t("help.rework"))
     rw.add_argument("task")
     rw.add_argument("--notes", required=True)
     rw.add_argument("--by", default="orchestrator")
     rw.set_defaults(func=cmd_rework)
-    ed = sub.add_parser("edit", help="новая постановка (продолжение — новой сессией)")
+    ed = sub.add_parser("edit", help=t("help.task_edit"))
     ed.add_argument("task")
     ed.add_argument("--title")
     g2 = ed.add_mutually_exclusive_group()
@@ -274,29 +300,29 @@ def register(subparsers) -> None:
     g2.add_argument("--spec-file")
     ed.add_argument("--by", default="orchestrator")
     ed.set_defaults(func=cmd_edit)
-    ex = subparsers.add_parser("extend", help="расширить разрешённые файлы задачи")
+    ex = subparsers.add_parser("extend", help=t("help.extend"))
     ex.add_argument("task")
     ex.add_argument("--paths", required=True)
     ex.add_argument("--by", default="orchestrator")
     ex.set_defaults(func=cmd_extend)
-    bu = subparsers.add_parser("budget", help="продлить бюджет задачи (стоявшая из-за бюджета — продолжится)")
+    bu = subparsers.add_parser("budget", help=t("help.budget"))
     bu.add_argument("task")
     gb = bu.add_mutually_exclusive_group()
-    gb.add_argument("--add", type=float, help="к бюджету Go, $")
-    gb.add_argument("--set", type=float, help="бюджет Go, $")
-    bu.add_argument("--add-usd", type=float, help="к бюджету реальных денег, $")
+    gb.add_argument("--add", type=float, help=t("help.budget_add"))
+    gb.add_argument("--set", type=float, help=t("help.budget_set"))
+    bu.add_argument("--add-usd", type=float, help=t("help.budget_add_usd"))
     bu.add_argument("--by", default="orchestrator")
     bu.set_defaults(func=cmd_budget)
-    mo = subparsers.add_parser("model", help="сменить модель задачи")
+    mo = subparsers.add_parser("model", help=t("help.model"))
     mo.add_argument("task")
     mo.add_argument("alias")
     mo.add_argument("--by", default="orchestrator")
     mo.set_defaults(func=cmd_model)
-    df = subparsers.add_parser("diff", help="дифф задачи от базы (L3)")
+    df = subparsers.add_parser("diff", help=t("help.diff"))
     df.add_argument("task")
     df.add_argument("--max-bytes", type=int, default=views.L3_DEFAULT)
     df.set_defaults(func=cmd_diff)
-    hi = subparsers.add_parser("history", help="недавние задачи")
+    hi = subparsers.add_parser("history", help=t("help.history"))
     hi.add_argument("-n", type=int, default=20)
     add_project_arg(hi)
     hi.set_defaults(func=cmd_history)

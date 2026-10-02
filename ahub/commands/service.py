@@ -27,20 +27,24 @@ def cmd_run(args) -> int:
 
 
 def cmd_status(args) -> int:
+    from ahub.i18n import t
+
     store = Store()
     live = live_workers()
     hb = store.meta_get(HEARTBEAT_KEY)
     age = (now_ms() - int(hb)) // 1000 if hb else None
     paused = store.meta_get(PAUSE_KEY) == "1"
     queued = store.list_tasks(states={model.State.QUEUED})
-    lines = [f"сервис: {'жив' if age is not None and age < 30 else 'не отвечает'}"
-             + (f" (тик {age} с назад)" if age is not None else " (ни одного тика)")
-             + ("; очередь на паузе" if paused else "")]
+    state = t("service.alive") if age is not None and age < 30 else t("service.dead")
+    tick = t("service.tick", age=age) if age is not None else t("service.no_tick")
+    suffix = t("service.paused_suffix") if paused else ""
+    lines = [t("service.status", state=state, tick=tick, paused=suffix)]
     for tid, pid in sorted(live.items()):
-        t = store.get_task(tid)
-        lines.append(f"  T{tid} pid {pid} {t.state.value if t else '?'}")
-    for t in queued:
-        lines.append(f"  T{t.id} в очереди" + (f": {t.state_reason}" if t.state_reason else ""))
+        tsk = store.get_task(tid)
+        lines.append(t("service.live_line", tid=tid, pid=pid, state=tsk.state.value if tsk else "?"))
+    for tq in queued:
+        reason = t("service.queued_reason", reason=tq.state_reason) if tq.state_reason else ""
+        lines.append(t("service.queued_line", tid=tq.id, reason=reason))
     emit(args, {"heartbeat_age_s": age, "paused": paused, "live": live,
                 "queued": [{"id": t.id, "reason": t.state_reason} for t in queued],
                 "heartbeat": fmt_local(int(hb)) if hb else None}, "\n".join(lines))
@@ -48,12 +52,14 @@ def cmd_status(args) -> int:
 
 
 def cmd_pause(args, on: bool) -> int:
+    from ahub.i18n import t
+
     store = Store()
     if on:
         store.meta_set(PAUSE_KEY, "1")
     else:
         store.meta_del(PAUSE_KEY)
-    emit(args, {"paused": on}, "очередь на паузе" if on else "очередь снова работает")
+    emit(args, {"paused": on}, t("service.paused_on") if on else t("service.paused_off"))
     return 0
 
 
@@ -151,7 +157,9 @@ def cmd_install(args) -> int:
     elif plat == "darwin":
         os_kind = "darwin"
     else:
-        raise CliError(f"service install: платформа {plat} не поддерживается (нужны Linux или macOS)")
+        from ahub.i18n import t
+
+        raise CliError(t("err.service_platform", plat=plat))
     if args.print:
         # --print показывает оба (и бота тоже) — что именно встанет в службу, решает запись.
         if os_kind == "darwin":
@@ -161,8 +169,11 @@ def cmd_install(args) -> int:
             text = "\n".join(f"# {n}\n{unit_text(n)}" for n in UNITS)
             emit(args, {"units": list(UNITS)}, text)
         return 0
+    from ahub.i18n import t
+
     names = _want_units()
     bot_skip = len(names) == 1
+    skip = f"\n{t('service.bot_skip')}" if bot_skip else ""
     if os_kind == "darwin":
         d = Path.home() / "Library" / "LaunchAgents"
         d.mkdir(parents=True, exist_ok=True)
@@ -173,17 +184,15 @@ def cmd_install(args) -> int:
             p.write_bytes(plist_bytes(n))
             written.append(str(p))
         hint = " && ".join(f"launchctl bootstrap gui/$(id -u) {p}" for p in written)
-        text = f"записаны {', '.join(PLIST_FILES[n] for n in names)} в {d}\nвключить: {hint}"
-        emit(args, {"dir": str(d), "plists": [PLIST_FILES[n] for n in names]},
-             text + (f"\n{BOT_SKIP}" if bot_skip else ""))
+        text = t("service.installed_launchd", names=", ".join(PLIST_FILES[n] for n in names), dir=d, hint=hint)
+        emit(args, {"dir": str(d), "plists": [PLIST_FILES[n] for n in names]}, text + skip)
         return 0
     d = Path.home() / ".config" / "systemd" / "user"
     d.mkdir(parents=True, exist_ok=True)
     for n in names:
         (d / n).write_text(unit_text(n), encoding="utf-8")
-    text = (f"записаны {', '.join(names)} в {d}\nвключить: systemctl --user daemon-reload && "
-            f"systemctl --user enable --now {' '.join(names)}")
-    emit(args, {"dir": str(d), "units": names}, text + (f"\n{BOT_SKIP}" if bot_skip else ""))
+    text = t("service.installed_systemd", names_comma=", ".join(names), dir=d, names_space=" ".join(names))
+    emit(args, {"dir": str(d), "units": names}, text + skip)
     return 0
 
 
@@ -223,14 +232,15 @@ def cmd_start(args) -> int:
 
     Уже запущен (жив pid из файла) — ничего не делаю, код 0. Сервис уже жив по
     сердцебиению (служба ОС или чужой запуск) — второй не запускаю."""
+    from ahub.i18n import t
+
     pid = _read_pid()
     if pid is not None:
-        emit(args, {"pid": pid, "already": True}, f"сервис уже запущен (pid {pid})")
+        emit(args, {"pid": pid, "already": True}, t("service.already_pid", pid=pid))
         return 0
     age = _heartbeat_age_s()
     if age is not None and age < 30:
-        emit(args, {"heartbeat_age_s": age, "already": True},
-             f"сервис уже работает (тик {age} с назад) — второй не запускаю")
+        emit(args, {"heartbeat_age_s": age, "already": True}, t("service.already_heartbeat", age=age))
         return 0
     logd = paths.log_dir()
     logd.mkdir(parents=True, exist_ok=True)
@@ -243,49 +253,53 @@ def cmd_start(args) -> int:
     finally:
         out.close()
     paths.service_pid_path().write_text(str(p.pid), encoding="utf-8")
-    emit(args, {"pid": p.pid, "log": str(logf)}, f"сервис запущен (pid {p.pid}, лог {logf})")
+    emit(args, {"pid": p.pid, "log": str(logf)}, t("service.started", pid=p.pid, log=logf))
     return 0
 
 
 def cmd_stop(args) -> int:
     """Остановить фон `service start`: SIGTERM по pid из файла, ждать до 10 с, файл удалить."""
+    from ahub.i18n import t
+
     pf = paths.service_pid_path()
     pid = _read_pid()
     if pid is None:
         pf.unlink(missing_ok=True)
-        emit(args, {"running": False}, "сервис не запущен")
+        emit(args, {"running": False}, t("service.not_running"))
         return 0
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
     except PermissionError as e:
-        raise CliError(f"нет прав остановить процесс {pid}: {e}") from e
+        raise CliError(t("err.service_no_perm", pid=pid, err=e)) from e
     deadline = time.monotonic() + 10
     while procs.alive(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
     if procs.alive(pid):
-        raise CliError(f"сервис не остановился за 10 с (pid {pid})")
+        raise CliError(t("err.service_not_stopped", pid=pid))
     pf.unlink(missing_ok=True)
-    emit(args, {"pid": pid, "stopped": True}, f"сервис остановлен (pid {pid})")
+    emit(args, {"pid": pid, "stopped": True}, t("service.stopped", pid=pid))
     return 0
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("service", help="хаб-сервис: очередь и процессы задач")
+    from ahub.i18n import t
+
+    p = subparsers.add_parser("service", help=t("help.service"))
     sub = p.add_subparsers(dest="service_cmd", required=True)
-    r = sub.add_parser("run", help="запустить сервис (передний план; systemd/launchd)")
+    r = sub.add_parser("run", help=t("help.service_run"))
     r.add_argument("--poll", type=float, default=2.0)
     r.set_defaults(func=cmd_run)
-    i = sub.add_parser("install", help="служба ОС: systemd (Linux) или launchd plist (macOS)")
-    i.add_argument("--print", action="store_true", help="только показать")
+    i = sub.add_parser("install", help=t("help.service_install"))
+    i.add_argument("--print", action="store_true", help=t("help.service_install_print"))
     i.set_defaults(func=cmd_install)
-    s = sub.add_parser("status", help="жив ли сервис, процессы задач, очередь")
+    s = sub.add_parser("status", help=t("help.service_status"))
     s.set_defaults(func=cmd_status)
     for name, on in (("pause", True), ("resume", False)):
         x = sub.add_parser(name)
         x.set_defaults(func=lambda args, _on=on: cmd_pause(args, _on))
-    st = sub.add_parser("start", help="фон без службы ОС (pid-файл); уже жив — ничего не делаю")
+    st = sub.add_parser("start", help=t("help.service_start"))
     st.set_defaults(func=cmd_start)
-    sp = sub.add_parser("stop", help="остановить фон service start (SIGTERM, до 10 с)")
+    sp = sub.add_parser("stop", help=t("help.service_stop"))
     sp.set_defaults(func=cmd_stop)

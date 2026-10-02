@@ -41,14 +41,18 @@ def import_v1(project: config.ProjectConfig, db: Path | None = None) -> int:
 
 
 def cmd_import(args) -> int:
+    from ahub.i18n import t
+
     projects, _ = config.load_projects()
     out = {}
     for p in projects:
         out[p.name] = import_v1(p)
-    emit(args, out, "\n".join(f"{k}: {v} задач v1 → .agent-hub/v1-tasks.md" for k, v in out.items()) or "проектов нет")
+    emit(args, out, "\n".join(t("import.line", name=k, n=v) for k, v in out.items()) or t("import.empty"))
     return 0
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("import-v1", help="история задач старого хаба — в архив проектов")
+    from ahub.i18n import t
+
+    p = subparsers.add_parser("import-v1", help=t("help.import_v1"))
     p.set_defaults(func=cmd_import)

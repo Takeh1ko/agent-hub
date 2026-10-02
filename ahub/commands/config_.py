@@ -9,14 +9,18 @@ from ahub.cliutil import add_project_arg, emit, resolve_project
 
 
 def _text(cfg: config.ProjectConfig, problems: list[str]) -> str:
+    from ahub.i18n import t
+
     res = ", ".join(f"{r.name}×{r.capacity}" + (f"({r.lock})" if r.lock else "")
                     for r in cfg.resources.values()) or "—"
     lines = [
-        f"{cfg.name}  {cfg.root}",
-        f"  ветка {cfg.work_branch}, задачи {cfg.branch_prefix}<ID> в {cfg.worktrees or '—'}",
-        f"  параллельно {cfg.max_parallel}; ресурсы {res}; тесты под {cfg.test_resource or '—'}",
-        f"  бюджет go ${cfg.budget_go:g} usd ${cfg.budget_usd:g}; запрещены модели: {', '.join(cfg.models_deny) or '—'}",
-        f"  разрешённые пути: {', '.join(cfg.allowed_paths) or '—'}",
+        t("config.title", name=cfg.name, root=cfg.root),
+        t("config.line_branch", branch=cfg.work_branch, prefix=cfg.branch_prefix,
+          worktrees=cfg.worktrees or "—"),
+        t("config.line_parallel", max=cfg.max_parallel, res=res, test=cfg.test_resource or "—"),
+        t("config.line_budget", go=f"{cfg.budget_go:g}", usd=f"{cfg.budget_usd:g}",
+          deny=", ".join(cfg.models_deny) or "—"),
+        t("config.line_paths", paths=", ".join(cfg.allowed_paths) or "—"),
     ]
     lines.extend(f"! {p}" for p in problems)
     return "\n".join(lines)
@@ -30,6 +34,8 @@ def cmd_config(args) -> int:
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("config", help="конфиг проекта")
+    from ahub.i18n import t
+
+    p = subparsers.add_parser("config", help=t("help.config"))
     add_project_arg(p)
     p.set_defaults(func=cmd_config)

@@ -12,5 +12,7 @@ def cmd_version(args) -> int:
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("version", help="версия")
+    from ahub.i18n import t
+
+    p = subparsers.add_parser("version", help=t("help.version"))
     p.set_defaults(func=cmd_version)
