@@ -1,4 +1,4 @@
-"""Движок на задачах «код» и «рутина»: ворота, repair, приёмка, панель ревью, круги, бюджет, подготовка."""
+"""Engine on code and routine tasks: gates, repair, acceptance, review panel, rounds, budget, prepare."""
 
 from __future__ import annotations
 
@@ -217,13 +217,13 @@ def test_reviewer_no_retry_without_session(store, project):
     assert len(fake.calls) == 2
 
 
-# --- фазы по активности (инструменты opencode и agy) ---
+# --- phases by activity (opencode and agy tools) ---
 
 AGY_DATA = Path(__file__).parent / "data" / "agy"
 
 
 class Phases(Engine):
-    """Движок, который запоминает фазы: в задаче видна только последняя."""
+    """Engine that remembers phases: only the last one is visible in a task."""
 
     def __init__(self, *args, **kw) -> None:
         super().__init__(*args, **kw)
@@ -235,7 +235,7 @@ class Phases(Engine):
 
 
 def phases_of(eng: Phases) -> list[str]:
-    """Фазы подряд: повтор той же фазы (инструменты идут пачками) схлопывается."""
+    """Phases in a row: the same phase again (tools come in bursts) collapses."""
     out: list[str] = []
     for phase in eng.seen:
         if not out or out[-1] != phase:
@@ -249,7 +249,7 @@ def feed(eng: Phases, acts) -> None:
 
 
 def agy_tool(tool: str, params: dict | None = None):
-    """Активность agy по инструменту: параметры приходят в tool_info.parameters."""
+    """agy activity for a tool: the parameters arrive in tool_info.parameters."""
     line = json.dumps({"event": "step_update", "step_update": {
         "conversation_id": "c1", "step_index": 1, "state": "ACTIVE", "step_type": "tool",
         "tool_name": tool, "tool_info": {"name": tool, "parameters": params or {}}}})
@@ -257,7 +257,7 @@ def agy_tool(tool: str, params: dict | None = None):
 
 
 def test_opencode_tool_phases(store, project):
-    """Инструменты opencode: запись — пишет, чтение — изучает, bash с pytest — тесты."""
+    """opencode tools: write — writing, read — studying, bash with pytest — testing."""
     install_fake(store, [])
     t = code_task(store, project)
     eng = Phases(store, project, t.id, sleep=lambda s: None)
@@ -271,13 +271,13 @@ def test_opencode_tool_phases(store, project):
 
 
 def test_agy_write_and_read_tools(store, project):
-    """Инструменты agy: запись — пишет, чтение — изучает (живой образец + имена)."""
+    """agy tools: write — writing, read — studying (live sample plus tool names)."""
     install_fake(store, [])
     t = code_task(store, project)
     eng = Phases(store, project, t.id, sleep=lambda s: None)
     for line in (AGY_DATA / "tools.ndjson").read_text(encoding="utf-8").splitlines():
         feed(eng, AgyProvider(binary="agy").parse_line(line, 1))
-    assert phases_of(eng) == [Phase.WRITING.value]  # write_to_file из живого образца
+    assert phases_of(eng) == [Phase.WRITING.value]  # write_to_file from the live sample
     for tool in ("view_file", "list_dir", "grep_search", "find_by_name"):
         eng.seen.clear()
         feed(eng, agy_tool(tool, {"path": "core/a.py"}))
@@ -289,7 +289,7 @@ def test_agy_write_and_read_tools(store, project):
 
 
 def test_agy_command_tool(store, project):
-    """run_command: pytest в команде — тесты, прочая команда — изучение."""
+    """run_command: pytest in the command — testing, any other command — studying."""
     install_fake(store, [])
     t = code_task(store, project)
     eng = Phases(store, project, t.id, sleep=lambda s: None)
@@ -301,7 +301,7 @@ def test_agy_command_tool(store, project):
 
 
 def test_agy_tools_phases_end_to_end(store, project):
-    """agy в фейковом потоке: view_file → изучает, write_to_file → пишет, ворота → тесты."""
+    """agy in a fake stream: view_file → studying, write_to_file → writing, gate → testing."""
     scenario = {"session": "ses_x", "steps": [
         {"event": {"type": "tool_start", "tool": "view_file"}},
         {"event": {"type": "tool_start", "tool": "grep_search"}},

@@ -1,4 +1,4 @@
-"""История: длительность от created_at до finished_at — минуты, часы."""
+"""History: duration from created_at to finished_at — minutes, hours."""
 
 from __future__ import annotations
 

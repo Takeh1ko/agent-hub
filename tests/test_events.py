@@ -23,7 +23,7 @@ def done_task(store, title="найти утечку", now=1000, project="P", **p
 
 def test_grouping_window(store):
     tid = done_task(store, now=1000)
-    assert events.ready_batch(store, now=1000 + 60_000) == []  # окно ещё не прошло
+    assert events.ready_batch(store, now=1000 + 60_000) == []  # the window has not passed yet
     batch = events.ready_batch(store, now=1000 + events.GROUP_WINDOW_MS)
     assert [e.kind for e in batch] == ["done"] and batch[0].task_id == tid
 
@@ -45,8 +45,8 @@ def test_delivery_and_redelivery(store):
     t = 1000 + events.GROUP_WINDOW_MS
     batch = events.ready_batch(store, now=t)
     events.mark_delivered(store, [e.id for e in batch], now=t)
-    assert events.ready_batch(store, now=t + 1000) == []  # не будим тем же
-    assert len(events.ready_batch(store, now=t + events.REDELIVER_MS + 1)) == 1  # не взяли — напомним
+    assert events.ready_batch(store, now=t + 1000) == []  # do not wake it again
+    assert len(events.ready_batch(store, now=t + events.REDELIVER_MS + 1)) == 1  # not taken — remind
     assert events.ack(store) == 1
     assert events.ready_batch(store, now=t + 2 * events.REDELIVER_MS) == []
 
@@ -61,7 +61,7 @@ def test_ack_task_implicit(store):
 def test_project_filter(store):
     done_task(store, project="A")
     done_task(store, project="B")
-    store.add_event(Ev.ALARM, critical=True, payload={"text": "общая"})  # без проекта — всем
+    store.add_event(Ev.ALARM, critical=True, payload={"text": "общая"})  # no project — for everyone
     got = events.ready_batch(store, project="A", now=10**13)
     assert sorted(e.project for e in got) == ["", "A"]
 
@@ -84,19 +84,19 @@ def test_presence(store):
     events.touch(store, project="P", via="wait", now=1000)
     assert events.present(store, now=1000 + 60_000)
     assert not events.present(store, now=1000 + events.PRESENT_MS + 1)
-    events.touch(store, via="watch", now=2000)  # проект не затирается пустым
+    events.touch(store, via="watch", now=2000)  # an empty touch does not clear the project
     assert events.presence(store)["project"] == "P"
 
 
 def test_wait_returns_batch_and_marks(store):
     clock = {"t": 0.0}
-    done_task(store, now=0)  # старое — окно давно прошло
+    done_task(store, now=0)  # old — the window passed long ago
     got = events.wait(store, timeout_s=5, sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
                       clock=lambda: clock["t"])
     assert len(got) == 1 and got[0].startswith("DONE")
     assert events.present(store)
     assert events.wait(store, timeout_s=3, sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
-                       clock=lambda: clock["t"]) == []  # уже доставлено — ждём до таймаута
+                       clock=lambda: clock["t"]) == []  # already delivered — wait until the timeout
 
 
 def test_redelivery_capped(store):
@@ -107,5 +107,5 @@ def test_redelivery_capped(store):
         assert len(batch) == 1, i
         events.mark_delivered(store, [batch[0].id], now=t)
         t += events.REDELIVER_MS + 1
-    assert events.ready_batch(store, now=t) == []  # дальше — только «непрочитано» в status
+    assert events.ready_batch(store, now=t) == []  # from now on only "unread" in status
     assert len(events.unacked(store)) == 1

@@ -1,4 +1,4 @@
-"""Решения по результату: слияние, правка оркестратора, откаты, конфликт, доработка, файлы, бюджет, модель."""
+"""Accept decisions: merge, orchestrator edit, rollbacks, conflict, rework, allowed files, budget, model."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def test_root_on_other_branch(store, project):
     git(project.root, "checkout", "-q", "-b", "other")
     with pytest.raises(accept.DecisionError, match="на ветке other"):
         accept.accept(store, project, t.id)
-    assert store.get_task(t.id).state is State.DONE  # отказ до перехода — задача не тронута
+    assert store.get_task(t.id).state is State.DONE  # refusal before the transition — task untouched
 
 
 def test_conflict_aborts(store, project):
@@ -144,7 +144,7 @@ def test_model_change_fresh_session(store, project):
     registry.add_model(store, "fake2", "fake", "fake/model2")
     accept.change_model(store, project, t.id, "fake2")
     Engine(store, project, t.id, sleep=lambda s: None).run()
-    # новая модель — новая сессия с полной постановкой и указаниями доработки
+    # new model — new session with the full brief and the rework notes
     assert fake.calls[1]["session_id"] is None
     assert "ещё раз" in fake.calls[1]["prompt"] and "Allowed files" in fake.calls[1]["prompt"]
 
@@ -152,7 +152,7 @@ def test_model_change_fresh_session(store, project):
 def test_edit_spec_new_session(store, project):
     from ahub import transitions
     t, _, fake = done_code(store, project, scenarios=[work(), work(session="ses_2", text="Y = 9\n")])
-    transitions.move(store, t.id, State.QUEUED)  # «продолжить» готовую — через доработку/очередь
+    transitions.move(store, t.id, State.QUEUED)  # "continue" on a finished task goes through rework/queue
     msg = accept.edit(store, project, t.id, spec="совсем другое")
     assert "новая сессия" in msg
     Engine(store, project, t.id, sleep=lambda s: None).run()
@@ -165,7 +165,7 @@ def test_usd_budget_extend(store, project):
     transitions.move(store, t.id, State.QUEUED)
     for st in (State.PREPARING, State.WORKING):
         transitions.move(store, t.id, st)
-    store.add_event("budget_hard", task_id=t.id, project=t.project, payload={})  # как движок при остановке
+    store.add_event("budget_hard", task_id=t.id, project=t.project, payload={})  # as the engine does on stop
     transitions.move(store, t.id, State.NEEDS_DECISION, reason="бюджет исчерпан ($0.000 из $1.5)")
     msg = accept.extend_budget(store, t.id, add_usd=0.5)
     assert "реальные $0 → $0.5" in msg and "продолжена" in msg
@@ -190,7 +190,7 @@ def test_red_after_merge_root_moved_not_reset(store, project, monkeypatch):
     monkeypatch.setattr(g, "run_acceptance", red_and_foreign_commit)
     with pytest.raises(accept.DecisionError, match="корень уехал"):
         accept.accept(store, project, t.id)
-    assert (Path(project.root) / "foreign.txt").exists()  # чужое не тронуто
+    assert (Path(project.root) / "foreign.txt").exists()  # the foreign commit is left alone
 
 
 def test_budget_extend_does_not_resume_other_decision(store, project):
@@ -199,6 +199,6 @@ def test_budget_extend_does_not_resume_other_decision(store, project):
     transitions.move(store, t.id, State.QUEUED)
     for st in (State.PREPARING, State.WORKING):
         transitions.move(store, t.id, st)
-    transitions.move(store, t.id, State.NEEDS_DECISION, reason="бюджет и круги ревью кончились")  # текст не важен
+    transitions.move(store, t.id, State.NEEDS_DECISION, reason="бюджет и круги ревью кончились")  # text does not matter
     accept.extend_budget(store, t.id, add=1.0)
     assert store.get_task(t.id).state is State.NEEDS_DECISION

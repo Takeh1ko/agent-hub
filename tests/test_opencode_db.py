@@ -1,4 +1,4 @@
-"""Фейковая opencode.db: учёт go/usd, контекст, пульс, поиск, итоги, чужая схема."""
+"""Fake opencode.db: go/usd accounting, context, pulse, session lookup, totals, foreign schema."""
 
 from __future__ import annotations
 
@@ -153,9 +153,9 @@ def test_session_state_pulse_tool_finished_usage(tmp_path):
     con.commit()
     con.close()
     st = odb.session_state("s", db)
-    assert st.last_activity_ms == NOW - 20_000  # максимум: todo новее всего
+    assert st.last_activity_ms == NOW - 20_000  # maximum: the todo is the newest
     assert st.active_tool == "bash"
-    assert st.tool_started_ms == NOW - 25_000  # из state.time.start
+    assert st.tool_started_ms == NOW - 25_000  # from state.time.start
     assert st.finished is True
     assert (st.usage.tokens_in, st.usage.cost_go) == (100, 0.5)
     assert st.usage.context == 200 + 800
@@ -166,7 +166,7 @@ def test_session_state_tool_time_fallback_and_not_finished(tmp_path):
     con = _mkdb(db)
     _ses(con, "s", t_updated=NOW - 50_000)
     _msg(con, "m1", "s", _assist(total=10, inp=5, read=5), NOW - 40_000)
-    # running без state.time.start → время из part.time_created
+    # running without state.time.start → the time comes from part.time_created
     _part(con, "p", "m1", "s",
           {"type": "tool", "tool": "edit",
            "state": {"status": "running", "input": {}}},
@@ -176,7 +176,7 @@ def test_session_state_tool_time_fallback_and_not_finished(tmp_path):
     st = odb.session_state("s", db)
     assert st.active_tool == "edit"
     assert st.tool_started_ms == NOW - 33_000
-    assert st.finished is False  # нет time.completed + finish
+    assert st.finished is False  # no time.completed + finish
 
 
 def test_session_state_idle_no_tool_no_assistant(tmp_path):
@@ -203,10 +203,10 @@ def test_find_session(tmp_path):
     _ses(con, "other", directory="/wt/X", t_created=NOW - 5_000, t_updated=NOW - 5_000)
     con.commit()
     con.close()
-    assert odb.find_session("/wt/T", NOW - 60_000, db) == "new"  # child с parent_id мимо
+    assert odb.find_session("/wt/T", NOW - 60_000, db) == "new"  # child with parent_id skipped
     assert odb.find_session("/wt/X", NOW - 60_000, db) == "other"
-    assert odb.find_session("/wt/T", NOW - 15_000, db) == "new"  # окно -5000
-    assert odb.find_session("/wt/T", NOW - 4_000, db) is None  # new старше окна, child с parent мимо
+    assert odb.find_session("/wt/T", NOW - 15_000, db) == "new"  # window is -5000
+    assert odb.find_session("/wt/T", NOW - 4_000, db) is None  # new is older than the window, child with a parent is skipped
     assert odb.find_session("/wt/нет", 0, db) is None
 
 
@@ -248,7 +248,7 @@ def test_totals_bounds_and_empty(tmp_path):
     assert (got.cost_go, got.cost_usd) == (0.5, 0.25)
     assert (got.tokens_in, got.tokens_out, got.tokens_reasoning) == (110, 55, 5)
     assert (got.cache_read, got.cache_write) == (10, 20)
-    got2 = odb.totals(NOW - 50_000, db)  # без until — берёт и будущее
+    got2 = odb.totals(NOW - 50_000, db)  # no until — future rows count too
     assert got2.tokens_in == 110 + 999
     empty = odb.totals(NOW + 200_000, db)
     assert (empty.tokens_in, empty.cost_go, empty.cost_usd) == (0, 0.0, 0.0)
@@ -270,7 +270,7 @@ def test_unknown_schema_and_missing_file(tmp_path):
     st = odb.check_schema(missing)
     assert st.ok is False and any("нет базы" in p for p in st.problems)
 
-    # Нет таблицы
+    # no table
     db2 = tmp_path / "без-таблицы.db"
     c2 = sqlite3.connect(str(db2))
     c2.executescript("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT);")
@@ -279,7 +279,7 @@ def test_unknown_schema_and_missing_file(tmp_path):
     assert odb.session_usage("s", db2) is None
     assert odb.check_schema(db2).ok is False
 
-    # Таблицы свои, колонки чужие (нет time_updated у session)
+    # own tables, foreign columns (session has no time_updated)
     db3 = tmp_path / "чужие-колонки.db"
     c3 = sqlite3.connect(str(db3))
     c3.execute("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT,"
@@ -307,6 +307,6 @@ def test_check_schema_ok(tmp_path):
 
 
 def test_real_home_not_touched():
-    # Тесты ходят только по явному пути; дефолт — под HOME из conftest.
+    # Tests only touch an explicit path; the default is the HOME from conftest.
     home = Path(os.environ["HOME"])
     assert odb.default_db().is_relative_to(home)

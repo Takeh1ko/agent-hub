@@ -62,7 +62,7 @@ def test_rotation_keeps_scanning(monkeypatch):
     t0 = int(time.time() * 1000)
     log.get("a").warning("до ротации")
     assert log.rotate_if_needed(max_bytes=1)
-    log.get("a").warning("после ротации")  # обработчик переоткрыл новый файл
+    log.get("a").warning("после ротации")  # the handler reopened a new file
     assert log.log_file().with_name("ahub.log.1").exists()
     assert [r["msg"] for r in log.scan(t0 - 1).records] == ["до ротации", "после ротации"]
     assert not log.rotate_if_needed(max_bytes=10**9)

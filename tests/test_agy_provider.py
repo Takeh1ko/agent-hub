@@ -1,5 +1,5 @@
-"""Поставщик agy: разбор сохранённых живых образцов, классификация ошибок, команда, каталог,
-контракт на фейковом исполняемом файле. Живой — с пометкой live."""
+"""agy provider: parsing saved live samples, error classification, command, catalog,
+contract on a fake executable. Live runs are marked live."""
 
 from __future__ import annotations
 
@@ -39,13 +39,13 @@ def test_parse_hello_sample(agy):
     assert acts[0].kind is Act.SESSION and acts[0].text == SID
     kinds = [a.kind for a in acts]
     assert kinds == [Act.SESSION, Act.STEP, Act.TEXT, Act.TEXT, Act.STEP, Act.USAGE, Act.TEXT, Act.USAGE]
-    assert [a.text for a in acts if a.kind is Act.TEXT] == ["OK", "OK\n", "OK\n"]  # дельты и итог
+    assert [a.text for a in acts if a.kind is Act.TEXT] == ["OK", "OK\n", "OK\n"]  # deltas and the final text
     step = acts[1]
     assert step.data == {"edge": "done", "type": "user_input"}
     assert agy.final_text(acts) == "OK\n"
     u = agy.stream_usage(acts)
-    assert (u.tokens_in, u.tokens_out, u.context) == (12508, 1, 12508)  # итог result, не сумма шагов
-    assert u.cost_go is None and u.cost_usd is None and u.quota is None  # квота окном — денег нет
+    assert (u.tokens_in, u.tokens_out, u.context) == (12508, 1, 12508)  # the result record, not the sum of steps
+    assert u.cost_go is None and u.cost_usd is None and u.quota is None  # quota window, no money
 
 
 def test_parse_tools_sample(agy):
@@ -55,20 +55,20 @@ def test_parse_tools_sample(agy):
                                                  (Act.TOOL_END, "write_to_file")]
     assert tools[0].data["input"] == {"TargetFile": "/tmp/opencode/agytest/out.txt"}
     texts = [a.text for a in acts if a.kind is Act.TEXT]
-    assert texts[0] == "Created" and "out.txt" in texts[-1]  # дельты склеены в буфер шага
+    assert texts[0] == "Created" and "out.txt" in texts[-1]  # deltas glued into the step buffer
     assert agy.final_text(acts).startswith("Created")
 
 
 def test_parse_resume_sample(agy):
     acts = acts_of(agy, "resume.ndjson")
-    assert acts[0].kind is Act.SESSION and acts[0].text == SID  # тот же разговор
+    assert acts[0].kind is Act.SESSION and acts[0].text == SID  # the same conversation
     assert any(a.kind is Act.STEP and a.data.get("type") == "system_message" for a in acts)
     assert agy.final_text(acts) == "PONG2\n"
     assert agy.stream_usage(acts).tokens_out == 7
 
 
 def test_parallel_turns_keep_own_deltas(agy):
-    """Ревьюеры идут параллельно в одном процессе: буферы текста не должны мешать друг другу."""
+    """Reviewers run in parallel inside one process: text buffers must not mix."""
     def line(cid: str, index: int, delta: str, state: str = "ACTIVE") -> str:
         return json.dumps({"event": "step_update", "step_update": {"conversation_id": cid, "step_index": index,
                                                                  "state": state, "step_type": "agent_response",
@@ -94,7 +94,7 @@ def test_outcomes_of_real_samples(agy):
     assert outcome_of(agy, "structured.ndjson", 0)[0] is Outcome.OK
     assert outcome_of(agy, "model_error.ndjson", 1)[0] is Outcome.MODEL_ERROR
     assert outcome_of(agy, "network_error.ndjson", 1)[0] is Outcome.TRANSIENT
-    # с --print-timeout agy вышел с кодом 0 при status ERROR — решает событие, не код
+    # with --print-timeout agy exited 0 while status was ERROR — the event decides, not the code
     rc, acts = outcome_of(agy, "network_error.ndjson", 0,
                           (DATA / "print_timeout.stderr.txt").read_text(encoding="utf-8"))
     assert rc is Outcome.TRANSIENT
@@ -107,7 +107,7 @@ def test_denied_action_is_not_success(agy):
     out, text = agy.classify(exit_code=0, activities=acts_of(agy, "denied_command.ndjson"),
                              session_id=SID, stderr_tail=stderr)
     assert out is Outcome.MODEL_ERROR
-    assert "RunCommand" in text and "auto-denied" in text  # из stderr — что делать
+    assert "RunCommand" in text and "auto-denied" in text  # taken from stderr — what to do
 
 
 def test_print_timeout_outcome(agy):
@@ -120,7 +120,7 @@ def test_print_timeout_outcome(agy):
 def test_unknown_conversation_still_ok(agy):
     out, _ = agy.classify(exit_code=0, activities=acts_of(agy, "hello.ndjson"), session_id="new",
                           stderr_tail='warning: conversation "old-id" not found\n')
-    assert out is Outcome.OK  # agy открыл новую сессию вместо продолжения — ход состоялся
+    assert out is Outcome.OK  # agy opened a new session instead of resuming — the turn happened
 
 
 @pytest.mark.parametrize("text,flag", [
@@ -181,7 +181,7 @@ def test_long_prompt_goes_to_file(tmp_path):
 
 def test_capabilities_and_missing_binary(agy):
     assert agy.has(Cap.RESUME) and agy.has(Cap.STREAM) and agy.has(Cap.STRUCTURED) and agy.has(Cap.TOKENS)
-    assert not agy.has(Cap.COST_MONEY) and not agy.has(Cap.COST_QUOTA)  # квота окном, цен нет
+    assert not agy.has(Cap.COST_MONEY) and not agy.has(Cap.COST_QUOTA)  # quota window, no costs
     assert not agy.has(Cap.EXPORT) and not agy.has(Cap.FIND_SESSION)
     h = agy.health()
     assert not h.ok and "нет исполняемого agy" in h.problems[0]
@@ -196,19 +196,19 @@ def test_parse_models():
 
 
 def _fake_agy(tmp_path: Path) -> Path:
-    """Исполняемый файл agy: тело tests/data/agy/fake_agy.py под shebangом текущего питона."""
+    """Fake agy executable: the body of tests/data/agy/fake_agy.py under this interpreter's shebang."""
     from tests.provider_contract import fake_agy
 
     return fake_agy(tmp_path)
 
 
 def test_contract_on_fake_binary(tmp_path):
-    """Общий набор контракта на фейковом исполняемом файле: сети нет, ответы — живые образцы."""
+    """The shared contract set on a fake executable: no network, answers are live samples."""
     from tests import provider_contract as contract
 
     fake = _fake_agy(tmp_path)
     env = {"AHUB_AGY_FAKE_DATA": str(DATA)}
-    contract.agy_state(tmp_path)  # вход есть — health() должен быть зелёным
+    contract.agy_state(tmp_path)  # logged in — health() must pass
     prov = AgyProvider(binary=str(fake), env=env)
 
     def make(kind: str, cwd: str) -> RunSpec:
@@ -223,19 +223,19 @@ def test_contract_on_fake_binary(tmp_path):
 def test_health_reports_login_and_models(tmp_path):
     fake = _fake_agy(tmp_path)
     prov = AgyProvider(binary=str(fake), env={"AHUB_AGY_FAKE_DATA": str(DATA)})
-    h = prov.health()  # ни входа, ни файла состояния — обе проблемы видны
+    h = prov.health()  # neither login nor state file — both problems visible
     assert not h.ok and len(h.problems) == 1 and "о входе" in h.problems[0]
     assert h.details["models"] == 14 and h.details["version"] == "1.2.15-fake"
 
 
 @pytest.mark.live
 def test_live_contract(tmp_path):
-    """Живой ход Gemini (квота окном): AHUB_LIVE=1 pytest -m live tests/test_agy_provider.py"""
+    """Live Gemini turn (quota window): AHUB_LIVE=1 pytest -m live tests/test_agy_provider.py"""
     import pwd
 
     from tests import provider_contract as contract
 
-    home = pwd.getpwuid(os.getuid()).pw_dir  # conftest подменил HOME — agy нужен настоящий (вход, настройки)
+    home = pwd.getpwuid(os.getuid()).pw_dir  # conftest faked HOME — agy needs the real one (login, settings)
     real_env = {"HOME": home}
     prov = AgyProvider(env=real_env)
 

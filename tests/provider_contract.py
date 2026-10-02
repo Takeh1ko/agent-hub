@@ -1,9 +1,9 @@
-"""Общий набор проверок контракта поставщика. Используется для фейка (всегда) и живых поставщиков
-(тесты с пометкой live, запуск: AHUB_LIVE=1 pytest -m live).
+"""Shared provider contract checks. Used for the fake (always) and for live providers
+(tests marked live, run: AHUB_LIVE=1 pytest -m live).
 
-make_spec(kind, cwd) — поставщик-специфичное задание:
-  kind="hello"  — короткий ответ, модель должна вернуть текст со словом PONG;
-  kind="resume" — продолжение той же сессии, ответ со словом PONG2.
+make_spec(kind, cwd) — the provider-specific request:
+  kind="hello"  — short answer, the model must return text with the word PONG;
+  kind="resume" — continue the same session, answer with the word PONG2.
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ AGY_DATA = Path(__file__).parent / "data" / "agy"
 
 
 def fake_agy(root: Path, env: dict[str, str] | None = None) -> Path:
-    """Исполняемый файл agy: тело tests/data/agy/fake_agy.py под shebangом текущего питона.
+    """Fake agy executable: the body of tests/data/agy/fake_agy.py under this interpreter's shebang.
 
-    Каталог с образцами передаётся в окружении (AGY_AGY_FAKE_DATA) — фейк лежит во временном каталоге.
+    The sample directory is passed in the environment (AGY_AGY_FAKE_DATA) — the fake lives in a temp dir.
     """
     fake = root / "agy"
     fake.parent.mkdir(parents=True, exist_ok=True)
@@ -32,7 +32,7 @@ def fake_agy(root: Path, env: dict[str, str] | None = None) -> Path:
 
 
 def agy_state(root: Path) -> Path:
-    """Файл состояния agy = «вход есть» (по нему health() понимает, что agy авторизован)."""
+    """agy state file = "logged in" (health() reads it to know agy is authorized)."""
     state = root / ".gemini" / "antigravity-cli"
     state.mkdir(parents=True, exist_ok=True)
     path = state / "jetski_state.pbtxt"
