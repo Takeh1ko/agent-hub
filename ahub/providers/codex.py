@@ -18,7 +18,8 @@ include the prompt cache, so the context is input_tokens); money is None: a Chat
 reports no prices and no quota numbers.
 
 Non-interactive: `-c approval_policy="never"` (the flag that keeps exec from waiting for a human) plus
-stdin=DEVNULL, which the shared runner already gives the process. `-s workspace-write` is the OS sandbox
+stdin=DEVNULL, which the shared runner already gives the process; `--skip-git-repo-check` is added when
+the working copy is not a git repo (codex stops to ask about the trust otherwise — on resume too). `-s workspace-write` is the OS sandbox
 (Landlock inside bubblewrap on Linux, Seatbelt on macOS): the tools may read everything but write only
 the working copy, and they never ask. The sandbox is worth probing on the host (`codex sandbox <mode>
 -- true` — no model, no network): when it cannot initialize, codex fails every command silently (the
@@ -220,19 +221,17 @@ class CodexProvider(Provider):
             cmd += ["-c", f"model_reasoning_effort={json.dumps(spec.variant)}"]
         if self.approvals:
             cmd += ["-c", f"approval_policy={json.dumps(self.approvals)}"]
-        if resume:
-            # `exec resume` has no -s/-C: the sandbox comes from -c, the cwd from the process
-            if self.sandbox:
-                cmd += ["-c", f"sandbox_mode={json.dumps(self.sandbox)}"]
-            cmd.append(spec.session_id or "")
-        else:
-            if self.sandbox:
-                cmd += ["-s", self.sandbox]
+        if self.sandbox:
+            # `exec resume` has no -s/-C: there the sandbox comes from -c, the cwd from the process
+            cmd += ["-c", f"sandbox_mode={json.dumps(self.sandbox)}"] if resume else ["-s", self.sandbox]
+        if not resume:
             cmd += ["-C", spec.cwd]
-            if not _in_git_repo(spec.cwd):
-                cmd.append("--skip-git-repo-check")
+        if not _in_git_repo(spec.cwd):
+            cmd.append("--skip-git-repo-check")  # outside a repo codex stops to ask about the trust
         if spec.schema is not None:
             cmd += ["--output-schema", _schema_file(spec.schema, spec.cwd)]
+        if resume:
+            cmd.append(spec.session_id or "")  # session id, then the prompt
         cmd.append(prompt_arg(spec.prompt, spec.cwd))
         return cmd
 

@@ -334,7 +334,8 @@ Heavy session transcripts live in the hub's storage; the archive holds a link or
   2026-10-03: inside a container without user namespaces bubblewrap cannot set a uid map —
   `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`; on a normal host the probe passes). Non-interactive
   mode is `-c approval_policy="never"` (the worker never waits for a human) plus `stdin=/dev/null`, which the shared
-  runner already gives the process; `--skip-git-repo-check` is added only when the working copy is not a git repo.
+  runner already gives the process; `--skip-git-repo-check` is added when the working copy is not a git repo
+  (codex otherwise stops to ask about the trust — on `exec resume` too).
 
 ## 14. v1 lessons (mandatory requirements — a checklist)
 

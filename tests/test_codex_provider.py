@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -165,7 +166,11 @@ def test_build_command(codex, tmp_path):
     assert rcmd[:4] == ["/usr/bin/codex-fake", "exec", "resume", "--json"]
     assert 'sandbox_mode="workspace-write"' in rcmd  # `exec resume` has no -s/-C
     assert "-s" not in rcmd and "-C" not in rcmd
+    assert "--skip-git-repo-check" not in rcmd
     assert rcmd[rcmd.index(SID) + 1] == "привет"  # session id then prompt
+    (tmp_path / ".git").rmdir()
+    # outside a repo codex stops to ask about the trust — on resume too (checked live 2026-10-03)
+    assert "--skip-git-repo-check" in codex.build_command(spec)
 
     spec.schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
     scmd = codex.build_command(spec)
@@ -276,15 +281,19 @@ def test_long_prompt_goes_to_file(tmp_path):
     assert len(files) == 1 and files[0].read_text() == long
 
 
+def _real_home() -> dict[str, str]:
+    """conftest fakes HOME — codex reads the login from the real ~/.codex."""
+    import pwd
+
+    return {"HOME": pwd.getpwuid(os.getuid()).pw_dir}
+
+
 @pytest.mark.live
 def test_live_contract(tmp_path):
     """Live Codex turn (ChatGPT subscription): AHUB_LIVE=1 pytest -m live tests/test_codex_provider.py"""
-    import pwd
-
     from tests import provider_contract as contract
 
-    home = pwd.getpwuid(os.getuid()).pw_dir  # conftest faked HOME — codex needs the real one (the login)
-    real_env = {"HOME": home}
+    real_env = _real_home()
     prov = CodexProvider(env=real_env)
 
     def make(kind: str, cwd: str) -> RunSpec:
@@ -298,16 +307,22 @@ def test_live_contract(tmp_path):
 
 
 @pytest.mark.live
-def test_live_sandbox_and_login():
-    """The OS sandbox and the login, checked live (the sandbox is the reason for this provider)."""
-    from ahub.providers.codex import CodexProvider
+def test_live_sandbox_probe(tmp_path):
+    """The OS sandbox itself, checked live: the main advantage of this provider.
 
-    prov = CodexProvider()
+    On a host where it does not start (a container without user namespaces) the probe fails and
+    health() says so — codex would fail every command silently.
+    """
+    prov = CodexProvider(env=_real_home())
     logged_in, said = prov.login()
     assert logged_in, said
     ok, why = prov.sandbox_ok()
-    if not ok:  # a host without a working sandbox: codex cannot run commands — health() says so
+    assert ok or why, "the probe must explain itself"
+    if not ok:
         pytest.skip(f"the OS sandbox does not start here: {why}")
-    r = subprocess.run(["codex", "sandbox", "workspace-write", "--", "touch", "sandbox_probe.txt"],
-                       cwd=os.environ.get("PWD", "/tmp"), capture_output=True, text=True, timeout=60)
+    r = subprocess.run([shutil.which("codex") or "codex", "sandbox", "workspace-write", "--",
+                        "touch", "sandbox_probe.txt"],
+                       cwd=str(tmp_path), capture_output=True, text=True, timeout=60,
+                       env={**os.environ, **_real_home()})
     assert r.returncode == 0, r.stderr
+    assert (tmp_path / "sandbox_probe.txt").is_file()  # a write inside the workspace is allowed
