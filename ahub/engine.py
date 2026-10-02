@@ -576,12 +576,8 @@ class Engine:
 
         with ThreadPoolExecutor(max_workers=len(models)) as ex:
             results = list(ex.map(one, models))
-        if any(r.outcome is Outcome.KILLED for r in results):
-            if self.lost.is_set():
-                raise LeaseLost()
-            if self.budget_hit:
-                return "decision", _t("engine.review_budget"), []
-            return "decision", _t("engine.review_stopped"), []
+        if (stop := self._review_interrupted(results)) is not None:
+            return stop
         self._revert_reviewer(t)
         by_model = dict(zip(models, results))
         found: dict[str, review.Review] = {}
@@ -598,12 +594,8 @@ class Engine:
 
             with ThreadPoolExecutor(max_workers=len(missing)) as ex:
                 retries = list(ex.map(retry_one, missing))
-            if any(r.outcome is Outcome.KILLED for r in retries):
-                if self.lost.is_set():
-                    raise LeaseLost()
-                if self.budget_hit:
-                    return "decision", _t("engine.review_budget"), []
-                return "decision", _t("engine.review_stopped"), []
+            if (stop := self._review_interrupted(retries)) is not None:
+                return stop
             self._revert_reviewer(t)
             for m in missing:
                 rv = review.parse(review.review_path(t.worktree, round_no, m), m)
@@ -614,6 +606,14 @@ class Engine:
         blocking = review.dedup([f for rv in reviews if rv.effective != "approve" for f in rv.findings
                                  if f.severity != "low"])
         return decision, reason, blocking
+
+    def _review_interrupted(self, results: list) -> tuple[str, str, list] | None:
+        """Сессию ревьюера остановили: потеря аренды — исключение, бюджет или стоп — «нужно решение»."""
+        if not any(r.outcome is Outcome.KILLED for r in results):
+            return None
+        if self.lost.is_set():
+            raise LeaseLost()
+        return "decision", _t("engine.review_budget" if self.budget_hit else "engine.review_stopped"), []
 
     def _revert_reviewer(self, t: Task) -> None:
         """Ревьюер не должен менять файлы — откатываем."""
