@@ -143,12 +143,45 @@ def _want_units() -> list[str]:
     return names
 
 
+def install_service_files() -> tuple[str, list[str], list[str], str]:
+    """Write unit/plist files. Returns (os_kind, unit names, written paths, enable hint)."""
+    from pathlib import Path
+
+    plat = sys.platform
+    if plat.startswith("linux"):
+        os_kind = "linux"
+    elif plat == "darwin":
+        os_kind = "darwin"
+    else:
+        from ahub.i18n import t
+
+        raise CliError(t("err.service_platform", plat=plat))
+    names = _want_units()
+    if os_kind == "darwin":
+        d = Path.home() / "Library" / "LaunchAgents"
+        d.mkdir(parents=True, exist_ok=True)
+        paths.log_dir().mkdir(parents=True, exist_ok=True)
+        written = []
+        for n in names:
+            p = d / PLIST_FILES[n]
+            p.write_bytes(plist_bytes(n))
+            written.append(str(p))
+        hint = " && ".join(f"launchctl bootstrap gui/$(id -u) {p}" for p in written)
+    else:
+        d = Path.home() / ".config" / "systemd" / "user"
+        d.mkdir(parents=True, exist_ok=True)
+        for n in names:
+            (d / n).write_text(unit_text(n), encoding="utf-8")
+        written = [str(d / n) for n in names]
+        hint = f"systemctl --user daemon-reload && systemctl --user enable --now {' '.join(names)}"
+    return os_kind, names, written, hint
+
+
 def cmd_install(args) -> int:
     """OS service: systemd --user on Linux, launchd plist on macOS (autostart, KeepAlive/Restart).
 
     Bot unit/plist only when Telegram is enabled; task processes survive
     service restarts (systemd: KillMode=process; launchd leaves them alone)."""
-    from pathlib import Path
 
     plat = sys.platform
     if plat.startswith("linux"):
@@ -168,28 +201,19 @@ def cmd_install(args) -> int:
             text = "\n".join(f"# {n}\n{unit_text(n)}" for n in UNITS)
             emit(args, {"units": list(UNITS)}, text)
         return 0
+    from pathlib import Path
+
     from ahub.i18n import t
 
-    names = _want_units()
+    os_kind, names, written, hint = install_service_files()
     bot_skip = len(names) == 1
     skip = f"\n{t('service.bot_skip')}" if bot_skip else ""
     if os_kind == "darwin":
-        d = Path.home() / "Library" / "LaunchAgents"
-        d.mkdir(parents=True, exist_ok=True)
-        paths.log_dir().mkdir(parents=True, exist_ok=True)
-        written = []
-        for n in names:
-            p = d / PLIST_FILES[n]
-            p.write_bytes(plist_bytes(n))
-            written.append(str(p))
-        hint = " && ".join(f"launchctl bootstrap gui/$(id -u) {p}" for p in written)
+        d = Path(written[0]).parent if written else Path.home() / "Library" / "LaunchAgents"
         text = t("service.installed_launchd", names=", ".join(PLIST_FILES[n] for n in names), dir=d, hint=hint)
         emit(args, {"dir": str(d), "plists": [PLIST_FILES[n] for n in names]}, text + skip)
         return 0
-    d = Path.home() / ".config" / "systemd" / "user"
-    d.mkdir(parents=True, exist_ok=True)
-    for n in names:
-        (d / n).write_text(unit_text(n), encoding="utf-8")
+    d = Path(written[0]).parent if written else Path.home() / ".config" / "systemd" / "user"
     text = t("service.installed_systemd", names_comma=", ".join(names), dir=d, names_space=" ".join(names))
     emit(args, {"dir": str(d), "units": names}, text + skip)
     return 0
