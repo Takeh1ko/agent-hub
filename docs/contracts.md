@@ -18,6 +18,7 @@ the gates check that the copy is clean. The service directory in the copy is `.a
 | `.ahub/logs/<name>.log` | hub | the raw output of a session (`scout.log`, `executor.log`, `reviewer_r<N>_<model>.log`) |
 | `.ahub/home/` | hub | an isolated hub storage inside the worker's session |
 | `.ahub/prompt_*.md` | hub | a long prompt (> 60 KB) — the worker gets a reference to the file instead |
+| `.ahub/schema_*.json` | hub | a JSON schema for `--output-schema` (codex) — the final answer must match it |
 
 ## 2. The worker's result — `.ahub/result.json`
 
@@ -143,4 +144,6 @@ is the phase `waiting` with a reason, not an alarm.
 | spark-free | opencode / opencode/muse-spark-1.3-contributor-free / xhigh | (outside the menu, available explicitly) |
 | gemini | agy / gemini-3.8-flash-high / — | (outside the menu — chosen explicitly; window quota) |
 | gemini-low | agy / gemini-3.8-flash-low / — | (outside the menu — chosen explicitly; window quota) |
+| codex | codex / gpt-5.6-terra / — | (outside the menu — chosen explicitly; subscription + OS sandbox) |
+| codex-fast | codex / gpt-5.6-luna / — | (outside the menu — chosen explicitly; subscription, cheaper/faster) |
 ★ — the default in the role.
