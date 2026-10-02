@@ -1,18 +1,18 @@
-"""Контракт поставщика моделей (architecture §3).
+"""Model provider contract (architecture §3).
 
-Поставщик — модуль, который умеет работать с одним источником моделей (opencode, agy, позже Codex…).
-Общую механику процесса (поток, тишина, таймаут, остановка, лог) делает ahub.providers.runner — одинаково
-для всех. Модуль поставщика отвечает только за своё:
+A provider handles one model source (opencode, agy, later Codex…).
+Shared process mechanics (stream, silence, timeout, stop, log) live in
+ahub.providers.runner — same for all. Each provider module only owns its part:
 
-- build_command / env — как запустить или продолжить сессию;
-- parse_line — строка вывода → нормализованная активность (Activity), в т.ч. id сессии и ошибки;
-- classify — итог процесса → Outcome (поставщик классифицирует, решает ядро);
-- final_text / structured — последний ответ и структурированный итог;
-- usage / session_state / find_session / export — данные поставщика о сессии (учёт, пульс, запасной id, журнал);
-- catalog / health — модели и здоровье.
+- build_command / env — how to start or resume a session;
+- parse_line — output line → normalized activity (Activity), incl. session id and errors;
+- classify — finished process → Outcome (provider classifies, core decides);
+- final_text / structured — last reply and structured result;
+- usage / session_state / find_session / export — provider-side session data (usage, pulse, fallback id, log);
+- catalog / health — models and health.
 
-Каждый модуль объявляет `capabilities`. Чего нет — метод возвращает None, а ядро честно показывает
-«нет данных», а не падает.
+Each module declares `capabilities`. Whatever is missing returns None, and the core
+reports "no data" instead of failing.
 """
 
 from __future__ import annotations
@@ -26,51 +26,51 @@ from ahub.i18n import t as _t
 
 
 class Cap(StrEnum):
-    RESUME = "resume"  # продолжить ту же сессию
-    STREAM = "stream"  # поток активности по ходу работы
-    STRUCTURED = "structured"  # структурированный итог по схеме
-    TOKENS = "tokens"  # токены по сессии
-    COST_MONEY = "cost_money"  # деньги по сессии (go/usd)
-    COST_QUOTA = "cost_quota"  # расход квоты (окно)
-    ACTIVE_TOOL = "active_tool"  # какой инструмент идёт сейчас (из данных поставщика)
-    EXPORT = "export"  # полный журнал сессии
-    CATALOG = "catalog"  # список моделей/вариантов
-    HEALTH = "health"  # проверка доступности
-    FIND_SESSION = "find_session"  # найти сессию, если id не пойман
+    RESUME = "resume"  # resume the same session
+    STREAM = "stream"  # activity stream as work progresses
+    STRUCTURED = "structured"  # structured result against a schema
+    TOKENS = "tokens"  # per-session tokens
+    COST_MONEY = "cost_money"  # money per session (go/usd)
+    COST_QUOTA = "cost_quota"  # quota spend (window)
+    ACTIVE_TOOL = "active_tool"  # which tool is running now (from provider data)
+    EXPORT = "export"  # full session log
+    CATALOG = "catalog"  # model/variant list
+    HEALTH = "health"  # availability check
+    FIND_SESSION = "find_session"  # find the session if the id was missed
 
 
 class Outcome(StrEnum):
-    OK = "ok"  # модель закончила ход
-    MODEL_ERROR = "model_error"  # ошибка модели/запроса (не повторять вслепую)
-    TRANSIENT = "transient"  # сбой сети/сервера — повтор имеет смысл
-    SILENCE = "silence"  # нет активности дольше порога и нечем объяснить — прервали
-    TIMEOUT = "timeout"  # общий лимит времени шага
-    QUOTA = "quota"  # квота/лимит исчерпан — ждать окна
-    NO_ACCESS = "no_access"  # не авторизован / нет доступа к модели
-    CRASH = "crash"  # процесс умер без результата
-    KILLED = "killed"  # остановлен по просьбе ядра
-    NOT_STARTED = "not_started"  # не запустился (нет бинаря и т.п.)
+    OK = "ok"  # model finished its turn
+    MODEL_ERROR = "model_error"  # model/request error (don't blindly retry)
+    TRANSIENT = "transient"  # network/server failure — retry makes sense
+    SILENCE = "silence"  # no activity past the threshold, nothing explains it — interrupted
+    TIMEOUT = "timeout"  # overall step time limit
+    QUOTA = "quota"  # quota/limit exhausted — wait for the window
+    NO_ACCESS = "no_access"  # not authorized / no access to the model
+    CRASH = "crash"  # process died with no result
+    KILLED = "killed"  # stopped at the core's request
+    NOT_STARTED = "not_started"  # never started (no binary, etc.)
 
 
 RETRYABLE = frozenset({Outcome.TRANSIENT})
 
 
 class Act(StrEnum):
-    SESSION = "session"  # стал известен id сессии (text = id)
-    STEP = "step"  # начало/конец шага модели
+    SESSION = "session"  # session id became known (text = id)
+    STEP = "step"  # model step start/end
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
-    TEXT = "text"  # текст ответа (финальный — последний)
+    TEXT = "text"  # reply text (final — the last one)
     REASONING = "reasoning"
-    USAGE = "usage"  # токены/деньги шага (в data)
-    ERROR = "error"  # ошибка (data.transient, data.quota, data.no_access — классификация поставщика)
+    USAGE = "usage"  # step tokens/money (in data)
+    ERROR = "error"  # error (data.transient, data.quota, data.no_access — provider classification)
     OTHER = "other"
 
 
 @dataclass(frozen=True)
 class Activity:
     kind: Act
-    ts: int  # мс; когда увидели (или время события у поставщика)
+    ts: int  # ms; when seen (or provider event time)
     text: str = ""
     tool: str = ""
     data: dict = field(default_factory=dict)
@@ -83,10 +83,10 @@ class Usage:
     tokens_reasoning: int | None = None
     cache_read: int | None = None
     cache_write: int | None = None
-    cost_go: float | None = None  # «по прайсу» против подписки
-    cost_usd: float | None = None  # реальные деньги
-    quota: float | None = None  # расход квоты (единицы поставщика)
-    context: int | None = None  # размер контекста последнего хода
+    cost_go: float | None = None  # "list price" vs subscription
+    cost_usd: float | None = None  # real money
+    quota: float | None = None  # quota spend (provider units)
+    context: int | None = None  # last turn context size
 
     def add(self, other: "Usage") -> "Usage":
         def s(a, b):
@@ -105,12 +105,12 @@ class RunSpec:
     cwd: str
     model_id: str
     variant: str = ""
-    session_id: str | None = None  # продолжить эту сессию
-    log_path: str = ""  # сырой вывод пишется сюда по ходу
+    session_id: str | None = None  # resume this session
+    log_path: str = ""  # raw output goes here as it arrives
     timeout_s: int = 90 * 60
-    idle_s: int = 900  # 0 — сторож тишины выключен
-    schema: dict | None = None  # структурированный итог, если поставщик умеет
-    env: dict[str, str] = field(default_factory=dict)  # добавить к окружению процесса
+    idle_s: int = 900  # 0 — silence watchdog off
+    schema: dict | None = None  # structured result, if the provider supports it
+    env: dict[str, str] = field(default_factory=dict)  # added to the process environment
 
 
 @dataclass
@@ -120,14 +120,14 @@ class RunResult:
     final_text: str = ""
     structured: dict | None = None
     usage: Usage | None = None
-    error: str = ""  # текст ошибки/причины для людей (≤ 2000)
+    error: str = ""  # human-readable error/reason (≤ 2000)
     exit_code: int | None = None
     started_ms: int = 0
     ended_ms: int = 0
     log_path: str = ""
     activities: int = 0
     last_activity_ms: int = 0
-    silence_s: int = 0  # для SILENCE — сколько молчал
+    silence_s: int = 0  # for SILENCE — how long it stayed silent
 
     @property
     def ok(self) -> bool:
@@ -139,8 +139,8 @@ class ModelInfo:
     model_id: str
     variants: tuple[str, ...] = ()
     counter: str = "go"  # go | usd | quota | free
-    price_in: float | None = None  # $ за 1M входных
-    price_out: float | None = None  # $ за 1M выходных
+    price_in: float | None = None  # $ per 1M input
+    price_out: float | None = None  # $ per 1M output
     note: str = ""
 
 
@@ -153,7 +153,7 @@ class Health:
 
 @dataclass(frozen=True)
 class SessionState:
-    """Что поставщик знает о сессии из своих данных (не из потока): для пульса и учёта."""
+    """What the provider knows about a session from its own data (not the stream): for pulse and usage."""
 
     last_activity_ms: int | None = None
     active_tool: str = ""
@@ -169,25 +169,25 @@ class Provider(ABC):
     def has(self, cap: Cap) -> bool:
         return cap in self.capabilities
 
-    # --- запуск ---
+    # --- start ---
 
     @abstractmethod
     def build_command(self, spec: RunSpec) -> list[str]:
-        """Команда процесса (старт или продолжение, если spec.session_id)."""
+        """Process command (start or resume when spec.session_id is set)."""
 
     def env(self, spec: RunSpec) -> dict[str, str]:
-        """Добавки к окружению процесса (изоляция). По умолчанию — только spec.env."""
+        """Extra process environment (isolation). By default — spec.env only."""
         return dict(spec.env)
 
     @abstractmethod
     def parse_line(self, line: str, now: int) -> list[Activity]:
-        """Одна строка stdout → активности (может быть пусто). Не бросает."""
+        """One stdout line → activities (may be empty). Never raises."""
 
     def classify(self, *, exit_code: int | None, activities: list[Activity], session_id: str | None,
                  stderr_tail: str) -> tuple[Outcome, str]:
-        """Итог завершившегося процесса. По умолчанию — по событиям ERROR с классификацией в data.
+        """Result of a finished process. By default — from ERROR events with classification in data.
 
-        Правило v1: сбой сети при rc=0 и полученном id — промежуточный, шаг успешен.
+        v1 rule: a network failure at rc=0 with a known id is transient, the step counts as done.
         """
         errors = [a for a in activities if a.kind is Act.ERROR]
         for flag, outcome in (("no_access", Outcome.NO_ACCESS), ("quota", Outcome.QUOTA)):
@@ -213,14 +213,14 @@ class Provider(ABC):
         return None
 
     def stream_usage(self, activities: list[Activity]) -> Usage | None:
-        """Учёт по событиям потока (если поставщик их шлёт)."""
+        """Usage from stream events (if the provider sends them)."""
         acc: Usage | None = None
         for a in activities:
             if a.kind is Act.USAGE and isinstance(a.data.get("usage"), Usage):
                 acc = a.data["usage"] if acc is None else acc.add(a.data["usage"])
         return acc
 
-    # --- данные поставщика ---
+    # --- provider data ---
 
     def usage(self, session_id: str) -> Usage | None:
         return None

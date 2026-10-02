@@ -1,4 +1,4 @@
-"""Поставщики моделей. Модуль поставщика подключается по имени; ядро знает только контракт (base.Provider)."""
+"""Model providers. A provider module plugs in by name; the core only knows the contract (base.Provider)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def names() -> list[str]:
 
 
 def get(name: str) -> Provider:
-    """Экземпляр поставщика по имени (один на процесс)."""
+    """Provider instance by name (one per process)."""
     if name not in _cache:
         spec = _REGISTRY.get(name)
         if spec is None:
@@ -30,5 +30,5 @@ def get(name: str) -> Provider:
 
 
 def register(name: str, provider: Provider) -> None:
-    """Подменить/добавить поставщика (тесты, внешние модули)."""
+    """Swap in / add a provider (tests, external modules)."""
     _cache[name] = provider

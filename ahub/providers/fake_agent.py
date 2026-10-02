@@ -1,19 +1,19 @@
-"""Фейковый агент для тестов: настоящий процесс, который играет сценарий из JSON.
+"""Fake agent for tests: a real process that plays a scenario from JSON.
 
-Запуск: python -m ahub.providers.fake_agent <файл-сценария> [--session ID]
+Run: python -m ahub.providers.fake_agent <scenario-file> [--session ID]
 
-Сценарий: {"session": "ses_x", "steps": [...], "exit": 0}
-Шаги:
-  {"event": {...}}                   — напечатать JSON-строку события (type: text|tool_start|tool_end|step|error|usage)
-  {"sleep": 0.3}                     — пауза
-  {"child": 1.5}                     — запустить дочерний процесс на N секунд и ждать его (молчание с ребёнком)
-  {"bg": 30, "detach": false}        — бросить фоновый процесс и выйти (detach — ещё и setsid)
-  {"write": {"path": "a.txt", "text": "..."}}  — записать файл в cwd
-  {"git_commit": "сообщение"}        — git add -A && git commit в cwd
-  {"result": {...}}                  — .ahub/result.json с commit = текущий HEAD
-  {"stderr": "текст"}                — строка в stderr
-  {"crash": true}                    — завершиться сразу без результата (код 137)
-Если передан --session, id сессии = он (продолжение), иначе session из сценария.
+Scenario: {"session": "ses_x", "steps": [...], "exit": 0}
+Steps:
+  {"event": {...}}                   — print a JSON event line (type: text|tool_start|tool_end|step|error|usage)
+  {"sleep": 0.3}                     — pause
+  {"child": 1.5}                     — run a child process for N seconds and wait for it (silence with a child)
+  {"bg": 30, "detach": false}        — drop a background process and exit (detach — also leave the group via setsid)
+  {"write": {"path": "a.txt", "text": "..."}}  — write a file into cwd
+  {"git_commit": "message"}          — git add -A && git commit in cwd
+  {"result": {...}}                  — .ahub/result.json with commit = current HEAD
+  {"stderr": "text"}                 — a line to stderr
+  {"crash": true}                    — exit at once with no result (code 137)
+With --session, the session id = it (resume), otherwise session from the scenario.
 """
 
 from __future__ import annotations
@@ -40,10 +40,10 @@ def main(argv: list[str]) -> int:
         elif "sleep" in step:
             time.sleep(float(step["sleep"]))
         elif "bg" in step:
-            # Брошенный фоновый процесс (как `yes > /dev/null &` агента); detach — ещё и уйти из группы (setsid).
+            # Abandoned background process (like an agent's `yes > /dev/null &`); detach — also leave the group (setsid).
             subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({float(step['bg'])})"],
                              start_new_session=bool(step.get("detach")), stdout=subprocess.DEVNULL)
-            time.sleep(float(step.get("settle", 2.5)))  # чтобы сторож успел заметить потомка
+            time.sleep(float(step.get("settle", 2.5)))  # let the watchdog notice the descendant
         elif "child" in step:
             subprocess.run([sys.executable, "-c", f"import time; time.sleep({float(step['child'])})"])
         elif "write" in step:
@@ -54,7 +54,7 @@ def main(argv: list[str]) -> int:
             subprocess.run(["git", "add", "-A"], check=True, capture_output=True)
             subprocess.run(["git", "commit", "-q", "-m", step["git_commit"]], check=True, capture_output=True)
         elif "result" in step:
-            # Итог работника с настоящим HEAD (как сделал бы работник): commit подставляется сам.
+            # Worker result with the real HEAD (as a worker would): commit fills itself in.
             res = dict(step["result"])
             head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
             res.setdefault("commit", head)
