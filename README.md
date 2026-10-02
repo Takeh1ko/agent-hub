@@ -10,14 +10,12 @@
 
 ## Установка
 ```
-python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-ln -s "$PWD/.venv/bin/ahub" ~/.local/bin/ahub      # команда ahub в PATH
-ahub setup ~/путь/к/проекту --claude [--deny deepseek] # .hub.toml v2, реестр проектов, навык для Claude Code
-ahub service install && systemctl --user daemon-reload && systemctl --user enable --now ahub ahub-bot
-loginctl enable-linger $USER                          # сервис и бот живут без входа в систему
+pipx install ahub
+ahub setup
+ahub doctor
 ```
-Нужны: `opencode` (вход в opencode-go), `claude` (для запуска из Telegram), системный прокси при необходимости
-(`HTTPS_PROXY` попадает в юниты при `ahub service install`).
+Мастер `ahub setup` спросит язык, проект, модели, службу, навык Claude и Telegram
+(без вопросов — `ahub setup --yes`). Проверка — `ahub doctor`.
 
 ## Пользование
 | Кто | Как |
