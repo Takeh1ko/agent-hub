@@ -272,3 +272,90 @@ def test_step5_no_cyrillic_in_en_preview(monkeypatch, tmp_path):
     text = drafts.preview(store, did)
     assert text.startswith("Draft #") and "Review: level 2" in text
     assert not _re.search(r"[а-яА-ЯёЁ]", text)
+
+
+def test_step6_engine_gates_en(monkeypatch, tmp_path):
+    """Шаг 6: причины движка и ворот на английском (AHUB_LANG=en)."""
+    import re as _re
+
+    from ahub import config, gates
+    from ahub.engine import Engine
+    from ahub.model import State
+    from ahub.providers.base import Outcome, RunResult
+    from ahub.store import Store
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    assert lang() == "en"
+    store = Store()
+    project = config.parse_project({"schema_version": 2, "name": "P"}, str(tmp_path))
+    eng = Engine(store, project, 999)
+    st, reason = eng._outcome_to_state(RunResult(Outcome.QUOTA, None, error="boom"))
+    assert st is State.NEEDS_DECISION and reason == "provider quota: boom"
+    st, reason = eng._outcome_to_state(RunResult(Outcome.TIMEOUT, None, error="60"))
+    assert "task time limit" in reason
+    g = gates.GateResult(base="b", head="h", tests_ok=False, diffstat="")
+    assert "acceptance is red" in g.summary()
+    assert not _re.search(r"[а-яА-ЯёЁ]", reason + g.summary())
+
+
+def test_step6_accept_service_en(monkeypatch, tmp_path):
+    """Шаг 6: ошибки принятия и причины очереди на английском (AHUB_LANG=en)."""
+    import re as _re
+
+    import pytest
+
+    from ahub import accept, config, service, tasks, transitions
+    from ahub.model import Kind, State
+    from ahub.store import Store
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    store = Store()
+    project = config.parse_project({"schema_version": 2, "name": "P", "max_parallel": 1,
+                                    "worktrees": str(tmp_path / "wt")}, str(tmp_path))
+    with pytest.raises(accept.DecisionError, match="no task T999"):
+        accept.reject(store, project, 999)
+    from tests.enginekit import install_fake
+
+    install_fake(store, [])
+    a = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.SCOUT, title="a",
+                                           model="fake"), project, collect=False)
+    transitions.move(store, a.id, State.STOPPED)
+    b = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.SCOUT, title="b",
+                                           model="fake", after=[a.id]), project, collect=False)
+    svc = service.Service(store, [project], spawn=lambda tid: 9999, proc_root=tmp_path / "proc",
+                          lock_busy=lambda p: False)
+    (tmp_path / "proc").mkdir(exist_ok=True)
+    svc.tick()
+    dep_reason = store.get_task(b.id).state_reason
+    assert dep_reason.startswith("waiting for T") and "to be accepted" in dep_reason
+    assert not _re.search(r"[а-яА-ЯёЁ]", dep_reason)
+
+
+def test_step6_pulse_providers_en(monkeypatch, tmp_path):
+    """Шаг 6: причины пульса и поставщиков на английском (AHUB_LANG=en)."""
+    import re as _re
+
+    from ahub import config, pulse, transitions
+    from ahub.model import State
+    from ahub.providers import opencode_db as odb
+    from ahub.providers.fake import FakeProvider
+    from ahub.providers.opencode import OpencodeProvider
+    from ahub.store import Store
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    store = Store()
+    tid = store.create_task(project="P", kind="code", title="x", now=0)
+    transitions.move(store, tid, State.PREPARING, now=0)
+    transitions.move(store, tid, State.WORKING, now=0)
+    p = pulse.task_pulse(store, store.get_task(tid), live={}, now=10)
+    assert p.state == "dead" and p.reason == "no task process"
+    _outcome, err = FakeProvider().classify(exit_code=0, activities=[], session_id=None, stderr_tail="")
+    assert "no session id" in err
+    st = odb.check_schema(tmp_path / "missing.db")
+    assert not st.ok and any("no database at" in x for x in st.problems)
+    h = OpencodeProvider(db_path=str(tmp_path / "no.db"), binary="/nonexistent-xyz").health()
+    assert not h.ok and "no opencode executable" in h.problems[0]
+    assert not _re.search(r"[а-яА-ЯёЁ]", p.reason + err + h.problems[0])
