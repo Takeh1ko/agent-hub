@@ -40,7 +40,7 @@ def test_errors():
                                                                            "arguments": {"task": "T99"}}},
              {"jsonrpc": "2.0", "id": 8, "method": "bogus"}])
     assert r[0]["error"]["code"] == -32602
-    assert r[1]["result"]["isError"] and "нет параметров" in r[1]["result"]["content"][0]["text"]
+    assert r[1]["result"]["isError"] and "missing params" in r[1]["result"]["content"][0]["text"]
     assert r[2]["result"]["isError"] and "нет задачи" in r[2]["result"]["content"][0]["text"]
     assert r[3]["error"]["code"] == -32601
 

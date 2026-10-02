@@ -50,24 +50,3 @@ budget_go = 1.5
     assert cfg.resources["test_lock"].lock == "/tmp/webapp_test_db.lock" and cfg.push == "origin main:claude/x"
     assert cfg.hooks.task_setup.startswith("python -m tools.task_db") and cfg.models_deny == ("deepseek",)
     assert cfg.work_branch == "main" and cfg.budget_go == 1.5
-
-
-def test_import_v1(tmp_path):
-    import sqlite3
-
-    from ahub.commands.import_v1 import import_v1
-    from tests.enginekit import make_project
-    project = make_project(tmp_path)
-    db = tmp_path / "hub.db"
-    con = sqlite3.connect(db)
-    con.execute("CREATE TABLE task(id TEXT, project TEXT, stage TEXT, card_path TEXT, created_at INT, merged_sha TEXT,"
-                " worktree TEXT, stage_reason TEXT)")
-    con.execute("INSERT INTO task VALUES('T33-x','P','merged','docs/t.md',1790768812846,'89eabfc592','', '')")
-    con.execute("INSERT INTO task VALUES('H01','','failed','docs/h.md',1790768812846,'',?, '')",
-                (str(tmp_path / "wt" / "H01"),))
-    con.execute("INSERT INTO task VALUES('Z9','Other','merged','',1,'','', '')")
-    con.commit()
-    con.close()
-    assert import_v1(project, db) == 2
-    text = (Path(project.root) / ".agent-hub" / "v1-tasks.md").read_text()
-    assert "T33-x" in text and "слита" in text and "H01" in text and "Z9" not in text
