@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ahub.config import ProjectConfig
+from ahub.i18n import t as _t
 
 AHUB_DIR = ".ahub"
 EXCLUDES = (f"{AHUB_DIR}/", "__pycache__/", ".pytest_cache/")  # служебное — мимо git копии
@@ -64,7 +65,7 @@ def ensure(project: ProjectConfig, task_id: int, *, base_ref: str | None = None)
     if path.is_dir() and (path / ".git").exists():
         cur = git(path, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         if cur != branch:
-            raise WorkspaceError(f"копия {path} на ветке {cur}, ожидалась {branch}")
+            raise WorkspaceError(_t("workspace.wrong_branch", path=path, cur=cur, branch=branch))
         base = git(root, "merge-base", project.work_branch, branch, check=False).stdout.strip()
         _exclude_ahub(path)
         (path / AHUB_DIR).mkdir(exist_ok=True)

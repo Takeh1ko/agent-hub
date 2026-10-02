@@ -17,6 +17,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ahub.model import ACTIVE, FINAL, STATE_EVENT, WAITING_DECISION, Ev, State, can_move
+from ahub.i18n import t as _t
 from ahub.store import Store, Task, _dumps
 from ahub.time import now_ms
 
@@ -51,17 +52,16 @@ def move(store: Store, task_id: int, to: State | str, *, reason: str = "", by: s
     def _do(c: sqlite3.Connection) -> Task:
         task = store.get_task(task_id, con=c)
         if task is None:
-            raise TransitionError(f"нет задачи T{task_id}")
+            raise TransitionError(_t("trans.no_task", id=task_id))
         if task.state is dst:
             return task  # идемпотентный повтор
         if expect_from is not None and task.state not in expect_from:
-            raise ConflictError(f"{task.label}: ожидалось {sorted(s.value for s in expect_from)},"
-                                f" сейчас {task.state.value}")
+            raise ConflictError(_t("trans.expect_from", label=task.label,
+                                   expected=sorted(s.value for s in expect_from), actual=task.state.value))
         if not can_move(task.state, dst):
-            raise TransitionError(f"{task.label}: переход {task.state.value} → {dst.value} запрещён")
+            raise TransitionError(_t("trans.forbidden", label=task.label, src=task.state.value, dst=dst.value))
         if task.state in ACTIVE and _lease_alive(task, ts) and owner != task.owner:
-            raise ConflictError(f"{task.label}: задачей владеет процесс pid={task.owner_pid};"
-                                f" изменить может только он (попросите остановку)")
+            raise ConflictError(_t("trans.owned", label=task.label, pid=task.owner_pid))
         if fields:
             store.update_task(task_id, now=ts, con=c, **fields)
         releasing = dst not in ACTIVE
@@ -96,15 +96,17 @@ def move(store: Store, task_id: int, to: State | str, *, reason: str = "", by: s
 
 def _cascade(store: Store, c: sqlite3.Connection, task: Task, dst: State, ts: int) -> None:
     """Зависимые, ещё не начатые задачи → «Нужно решение»: их основа не будет принята."""
-    word = "отклонена" if dst is State.REJECTED else "в ошибке"
     for (dep_id,) in c.execute("SELECT task_id FROM task_dep WHERE after_id=?", (task.id,)).fetchall():
         dep = store.get_task(dep_id, con=c)
         if dep is None or dep.state not in (State.QUEUED, State.DRAFT):
             continue
         if dep.state is State.DRAFT:
             continue  # черновик ещё не запущен — решит человек при запуске
-        move(store, dep_id, State.NEEDS_DECISION, reason=f"зависимость {task.label} {word}", by="hub",
-             now=ts, con=c)
+        if dst is State.REJECTED:
+            reason = _t("trans.cascade_rejected", label=task.label)
+        else:
+            reason = _t("trans.cascade_error", label=task.label)
+        move(store, dep_id, State.NEEDS_DECISION, reason=reason, by="hub", now=ts, con=c)
 
 
 # --- владение ---
@@ -150,14 +152,16 @@ def is_orphan(task: Task, now: int) -> bool:
 
 # --- просьбы владельцу ---
 
-def request_stop(store: Store, task_id: int, *, reason: str = "остановлена командой", by: str = "",
+def request_stop(store: Store, task_id: int, *, reason: str | None = None, by: str = "",
                  now: int | None = None) -> str:
     """Остановить задачу. Возвращает 'stopped' (сразу) или 'requested' (попросили владельца)."""
     ts = now if now is not None else now_ms()
+    if reason is None:
+        reason = _t("trans.stop_default")
     with store.tx() as c:
         task = store.get_task(task_id, con=c)
         if task is None:
-            raise TransitionError(f"нет задачи T{task_id}")
+            raise TransitionError(_t("trans.no_task", id=task_id))
         if task.state is State.STOPPED:
             return "stopped"
         if task.state in ACTIVE and _lease_alive(task, ts):
@@ -166,7 +170,7 @@ def request_stop(store: Store, task_id: int, *, reason: str = "остановл�
                             payload={"request": "stop", "reason": reason, "by": by}, now=ts, con=c)
             return "requested"
         if task.state in FINAL or task.state in WAITING_DECISION - {State.NEEDS_DECISION}:
-            raise TransitionError(f"{task.label}: {task.state.value} — останавливать нечего")
+            raise TransitionError(_t("trans.nothing_to_stop", label=task.label, state=task.state.value))
         move(store, task_id, State.STOPPED, reason=reason, by=by, now=ts, con=c)
         return "stopped"
 

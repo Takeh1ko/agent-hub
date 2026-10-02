@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ahub import workspace
 from ahub.config import ProjectConfig
+from ahub.i18n import t as _t
 from ahub.store import Task
 
 HOOK_TIMEOUT_S = 600
@@ -70,10 +71,10 @@ def run_hook(project: ProjectConfig, name: str, task: Task, worktree: str) -> No
         r = subprocess.run(cmd, shell=True, cwd=worktree, env=env, capture_output=True, text=True,
                            timeout=HOOK_TIMEOUT_S)
     except subprocess.TimeoutExpired as e:
-        raise PrepareError(f"хук {name}: таймаут {HOOK_TIMEOUT_S} с") from e
+        raise PrepareError(_t("prepare.hook_timeout", name=name, timeout=HOOK_TIMEOUT_S)) from e
     if r.returncode != 0:
         tail = (r.stdout + "\n" + r.stderr).strip()[-600:]
-        raise PrepareError(f"хук {name}: код {r.returncode}: {tail}")
+        raise PrepareError(_t("prepare.hook_failed", name=name, code=r.returncode, tail=tail))
 
 
 def collect(project: ProjectConfig, worktree: str, nodes: list[str]) -> None:
@@ -87,10 +88,10 @@ def collect(project: ProjectConfig, worktree: str, nodes: list[str]) -> None:
                            capture_output=True, text=True, timeout=300,
                            env={**scrub_env(dict(os.environ)), "PYTHONDONTWRITEBYTECODE": "1"})
     except (OSError, subprocess.TimeoutExpired) as e:
-        raise PrepareError(f"приёмка не собирается: {e}") from e
+        raise PrepareError(_t("prepare.collect_error", err=e)) from e
     if r.returncode != 0:
-        last = (r.stdout + "\n" + r.stderr).strip().splitlines()[-1:] or [f"код {r.returncode}"]
-        raise PrepareError(f"приёмка не собирается: {last[0][-300:]}")
+        last = (r.stdout + "\n" + r.stderr).strip().splitlines()[-1:] or [_t("err.exit_code", code=r.returncode)]
+        raise PrepareError(_t("prepare.collect_error", err=last[0][-300:]))
 
 
 @dataclass(frozen=True)
