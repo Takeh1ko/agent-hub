@@ -1,4 +1,4 @@
-"""Сервис: живые процессы из /proc, очередь, места, ресурсы, зависимости, пауза; сквозной запуск процесса задачи."""
+"""Service: live processes from /proc, queue, slots, resources, dependencies, pause; an end-to-end task process run."""
 
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ def fake_proc(root: Path, pid: int, args: list[str], state: str = "S") -> None:
 def test_live_workers(tmp_path):
     root = tmp_path / "proc"
     fake_proc(root, 100, ["/usr/bin/python3", "-m", "ahub.worker", "T7"])
-    fake_proc(root, 101, ["python", "-m", "ahub.worker", "8"], state="Z")  # зомби — не жив
-    fake_proc(root, 102, ["python", "-m", "hub.commands.queue", "--run-one", "T9"])  # v1 — не наш
+    fake_proc(root, 101, ["python", "-m", "ahub.worker", "8"], state="Z")  # zombie — not alive
+    fake_proc(root, 102, ["python", "-m", "hub.commands.queue", "--run-one", "T9"])  # v1 — not ours
     fake_proc(root, 103, ["bash"])
     (root / "self").mkdir()
     assert service.live_workers(root) == {7: 100}
@@ -65,7 +65,7 @@ def test_slots_and_grace(store, tmp_path):
     r = s.tick()
     assert rec.spawned == ids[:2] and r.load["P"].waiting == {ids[2]: "ждёт места (2/2)"}
     assert store.get_task(ids[2]).state_reason == "ждёт места (2/2)"
-    s.tick()  # запущенные ещё не видны в /proc — не запускать повторно
+    s.tick()  # the spawned ones are not in /proc yet — do not start them again
     assert rec.spawned == ids[:2]
 
 
@@ -86,7 +86,7 @@ def test_dependencies(store, tmp_path):
     project = make_project(tmp_path)
     install_fake(store, [])
     a = scout(store, project)
-    transitions.move(store, a.id, State.STOPPED)  # не принята
+    transitions.move(store, a.id, State.STOPPED)  # not accepted
     b = scout(store, project, after=[a.id])
     s, rec = svc(store, project, tmp_path)
     s.tick()
@@ -134,7 +134,7 @@ def test_external_lock_busy(tmp_path):
     import fcntl
     import os
     p = tmp_path / "x.lock"
-    assert not service.external_lock_busy(str(p))  # нет файла — свободен
+    assert not service.external_lock_busy(str(p))  # no file — free
     p.write_text("")
     assert not service.external_lock_busy(str(p))
     fd = os.open(p, os.O_RDONLY)
@@ -151,7 +151,7 @@ def test_external_lock_busy(tmp_path):
 
 
 def test_end_to_end_real_worker(store, tmp_path, monkeypatch):
-    """Сервис запускает настоящий процесс задачи; тот ведёт разведку на фейковом поставщике до «Готово»."""
+    """The service spawns a real task process; it runs a scout on the fake provider until «Готово»."""
     project = make_project(tmp_path)
     (Path(project.root) / ".hub.toml").write_text(
         f'schema_version = 2\nname = "P"\nworktrees = "{tmp_path / "wt"}"\n'
@@ -162,7 +162,7 @@ def test_end_to_end_real_worker(store, tmp_path, monkeypatch):
     q.mkdir()
     (q / "001.json").write_text(json.dumps(scout_ok("ses_e2e")), encoding="utf-8")
     monkeypatch.setenv("AHUB_FAKE_QUEUE", str(q))
-    install_fake(store, [])  # модель «fake» в реестре общей базы
+    install_fake(store, [])  # the "fake" model in the shared registry
     t = scout(store, project)
     s = service.Service(store)
     r = s.tick()
@@ -199,9 +199,9 @@ def test_orphan_requeued_once_then_decision(store, tmp_path):
     s, rec = svc(store, project, tmp_path)
     s.tick()
     t = store.get_task(tid)
-    assert rec.spawned == [tid] and t.limits["orphans"] == 1  # вернули в очередь и сразу запустили
+    assert rec.spawned == [tid] and t.limits["orphans"] == 1  # requeued and started right away
     assert "orphan" in [e.kind for e in store.events(task_id=tid)]
-    # процесс снова пропал, задача опять активна без аренды
+    # the process vanished again, the task is active without a lease once more
     s.recent.clear()
     with store.tx() as c:
         c.execute("UPDATE task SET state='working', owner='', lease_until=NULL, updated_at=0 WHERE id=?", (tid,))
@@ -212,7 +212,7 @@ def test_orphan_requeued_once_then_decision(store, tmp_path):
 def test_orphan_live_lease_untouched(store, tmp_path):
     project = make_project(tmp_path)
     install_fake(store, [])
-    tid = _orphan_task(store, project, lease_age_ms=-60_000)  # аренда ещё жива (CLI-владелец)
+    tid = _orphan_task(store, project, lease_age_ms=-60_000)  # the lease is still alive (a CLI owner)
     s, rec = svc(store, project, tmp_path)
     s.tick()
     assert store.get_task(tid).state is State.WORKING and rec.spawned == []
@@ -262,7 +262,7 @@ def test_self_update_skips_broken_code(store, tmp_path, monkeypatch):
 
 def test_install_unit_print(capsys, monkeypatch):
     from ahub import cli
-    monkeypatch.setattr(sys, "platform", "linux")  # этот тест — про systemd; plist в test_service_cmd.py
+    monkeypatch.setattr(sys, "platform", "linux")  # this test is about systemd; the plist is in test_service_cmd.py
     assert cli.main(["service", "install", "--print"]) == 0
     out = capsys.readouterr().out
     assert "Restart=always" in out and "StartLimitBurst" in out and "KillMode=process" in out
@@ -276,7 +276,7 @@ def test_orphan_counter_resets_after_episode(store, tmp_path):
     install_fake(store, [scout_ok()])
     tid = _orphan_task(store, project)
     s, rec = svc(store, project, tmp_path)
-    s.tick()  # сирота → в очередь (orphans=1)
+    s.tick()  # orphan → queue (orphans=1)
     assert store.get_task(tid).limits["orphans"] == 1
     assert Engine(store, project, tid, sleep=lambda x: None).run().state is State.DONE
     assert "orphans" not in store.get_task(tid).limits

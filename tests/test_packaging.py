@@ -1,4 +1,4 @@
-"""Упаковка 3.0.0: Telegram как extra, отказ на Windows, скрипт только ahub."""
+"""Packaging of 3.0.0: Telegram as an extra, refusal on Windows, only the ahub script."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_bot_run_without_aiogram(monkeypatch, capsys):
-    """Без extra telegram: код 2 и подсказка одной строкой."""
+    """Without the telegram extra: exit code 2 and a one-line hint."""
     import importlib.util
 
     from ahub import cli
@@ -25,7 +25,7 @@ def test_bot_run_without_aiogram(monkeypatch, capsys):
 
 
 def test_main_refuses_windows(monkeypatch, capsys):
-    """На win32 main() отказывает до разбора команд: код 2, одна строка."""
+    """On win32 main() refuses before parsing commands: code 2, one line."""
     from ahub import cli
 
     monkeypatch.setattr(sys, "platform", "win32")
@@ -36,7 +36,7 @@ def test_main_refuses_windows(monkeypatch, capsys):
 
 
 def test_tg_core_launcher_import_without_aiogram():
-    """import ahub.tg.core/launcher работает без aiogram (подпроцесс с запретом импорта)."""
+    """import ahub.tg.core/launcher works without aiogram (subprocess that blocks the import)."""
     code = ("import sys; sys.modules['aiogram'] = None; "
             "import ahub.tg.core, ahub.tg.launcher; "
             "print('ok')")
@@ -47,7 +47,7 @@ def test_tg_core_launcher_import_without_aiogram():
 
 
 def test_pyproject_layout():
-    """Пакет ahub 3.0.0: скрипт только ahub, aiogram только в extra."""
+    """ahub package 3.0.0: only the ahub script, aiogram only in an extra."""
     import tomllib
 
     proj = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]

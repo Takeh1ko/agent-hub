@@ -1,4 +1,4 @@
-"""parse_since/to_local/fmt_local: все форматы, пояс через AHUB_TZ или системный."""
+"""parse_since/to_local/fmt_local: all formats, the zone from AHUB_TZ or the system one."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def berlin(monkeypatch):
 
 @pytest.fixture
 def system_berlin(monkeypatch):
-    """Системный пояс — Europe/Berlin (через TZ + tzset, с восстановлением)."""
+    """The system zone is Europe/Berlin (via TZ + tzset, with restore)."""
     monkeypatch.delenv("AHUB_TZ", raising=False)
     old_tz = os.environ.get("TZ")
     os.environ["TZ"] = "Europe/Berlin"
@@ -73,7 +73,7 @@ def test_local_tz_none_without_env(monkeypatch):
 
 def test_local_tz_none_when_invalid(monkeypatch):
     monkeypatch.setenv("AHUB_TZ", "Не_пояс/xx")
-    assert local_tz() is None  # без падения
+    assert local_tz() is None  # no crash
 
 
 def test_to_local_override(tokyo):
@@ -93,7 +93,7 @@ def test_to_local_invalid_fallback(monkeypatch):
     monkeypatch.setenv("AHUB_TZ", "bad/Name_xx")
     ms = _ms_utc(2026, 9, 28, 12, 0)
     exp = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone()
-    assert to_local(ms) == exp  # неверное имя — системный пояс, без падения
+    assert to_local(ms) == exp  # a bad name — the system zone, no crash
 
 
 def test_to_local_dst_berlin(berlin):
@@ -151,7 +151,7 @@ def test_parse_relative(tokyo):
 
 
 def test_parse_local_not_utc(tokyo):
-    # Токио +9: 20:00 локального ≠ 20:00 UTC.
+    # Tokyo +9: 20:00 local ≠ 20:00 UTC.
     now = _ms_tokyo(2026, 9, 28, 23, 41)
     got = parse_since("2026-09-28 20:00", now)
     assert got == int(datetime(2026, 9, 28, 20, 0, tzinfo=TOKYO).timestamp() * 1000)
@@ -181,7 +181,7 @@ def test_parse_system_uses_system_tz(monkeypatch):
 def test_parse_invalid_tz_uses_system(monkeypatch):
     monkeypatch.setenv("AHUB_TZ", "bad/Name_xx")
     now = int(datetime(2026, 9, 28, 23, 41).astimezone().timestamp() * 1000)
-    got = parse_since("сегодня 20:00", now)  # без падения
+    got = parse_since("сегодня 20:00", now)  # no crash
     assert got == int(datetime(2026, 9, 28, 20, 0).astimezone().timestamp() * 1000)
 
 
@@ -216,7 +216,7 @@ def test_parse_duration_errors(bad):
 
 @pytest.mark.parametrize("lang", ["ru", "en"])
 def test_parse_since_bilingual_any_lang(monkeypatch, tokyo, lang):
-    """Разбор понимает оба языка при любом языке вывода (план §2)."""
+    """Parsing understands both languages whatever the output language is (plan §2)."""
     from ahub.i18n import _reset
 
     monkeypatch.setenv("AHUB_LANG", lang)
@@ -237,7 +237,7 @@ def test_parse_since_bilingual_any_lang(monkeypatch, tokyo, lang):
 
 @pytest.mark.parametrize("lang", ["ru", "en"])
 def test_parse_duration_bilingual_any_lang(monkeypatch, lang):
-    """Длительности на обоих языках при любом языке вывода."""
+    """Durations in both languages whatever the output language is."""
     from ahub.i18n import _reset
 
     monkeypatch.setenv("AHUB_LANG", lang)

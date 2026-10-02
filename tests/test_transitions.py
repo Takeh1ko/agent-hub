@@ -47,7 +47,7 @@ def test_forbidden_and_idempotent(store):
     with pytest.raises(tr.TransitionError):
         tr.move(store, tid, State.DONE)
     before = len(store.events())
-    tr.move(store, tid, State.QUEUED)  # уже там — без изменений
+    tr.move(store, tid, State.QUEUED)  # already there — no changes
     assert len(store.events()) == before
     with pytest.raises(tr.TransitionError):
         tr.move(store, 999, State.QUEUED)
@@ -72,14 +72,14 @@ def test_owner_protects_active_task(store):
     tid = _task(store)
     tr.move(store, tid, State.PREPARING)
     assert tr.acquire(store, tid, "A", pid=11, now=1000, lease_ms=500)
-    assert not tr.acquire(store, tid, "B", pid=22, now=1100)  # живая аренда
+    assert not tr.acquire(store, tid, "B", pid=22, now=1100)  # a live lease
     with pytest.raises(tr.ConflictError, match="pid=11"):
-        tr.move(store, tid, State.STOPPED, now=1100)  # клиент без владения
+        tr.move(store, tid, State.STOPPED, now=1100)  # a client without ownership
     with pytest.raises(tr.ConflictError):
         tr.move(store, tid, State.STOPPED, owner="B", now=1100)
-    assert tr.renew(store, tid, "A", now=1400, lease_ms=500)  # до 1900
+    assert tr.renew(store, tid, "A", now=1400, lease_ms=500)  # until 1900
     assert not tr.acquire(store, tid, "B", pid=22, now=1800)
-    # аренда истекла — сервис забирает, старый владелец это узнаёт при продлении
+    # the lease expired — the service takes it, the old owner learns on the next renew
     assert tr.acquire(store, tid, "svc", pid=33, now=2000)
     assert not tr.renew(store, tid, "A", now=2001)
     t = tr.move(store, tid, State.QUEUED, owner="svc", reason="сирота", now=2002)
@@ -108,7 +108,7 @@ def test_request_stop(store):
     q = _task(store)
     assert tr.request_stop(store, q) == "stopped"
     assert store.get_task(q).state is State.STOPPED
-    assert tr.request_stop(store, q) == "stopped"  # повтор
+    assert tr.request_stop(store, q) == "stopped"  # a repeat
 
     a = _task(store)
     tr.move(store, a, State.PREPARING)
@@ -157,7 +157,7 @@ def test_once_rolls_back_with_action(store):
     with pytest.raises(RuntimeError):
         tr.once(store, "k", boom)
     assert store.list_tasks() == []
-    assert tr.once(store, "k", lambda c: 5) == 5  # ключ не занят сбоем
+    assert tr.once(store, "k", lambda c: 5) == 5  # the key is not busy after a failure
 
 
 def _race(path, tid, token, q):

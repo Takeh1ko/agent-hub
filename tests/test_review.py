@@ -1,4 +1,4 @@
-"""Вырезание решений-эталона из постановки для ревьюера (RU и EN)."""
+"""Stripping the reference decision out of the task spec for the reviewer (RU and EN)."""
 
 from __future__ import annotations
 

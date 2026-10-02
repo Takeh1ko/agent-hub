@@ -1,6 +1,6 @@
-"""Порядок поиска бинарников и базы opencode: конфиг [paths] → which/XDG → известное место.
+"""Where the opencode binaries and database are looked up: config [paths] → which/XDG → known location.
 
-Конфиг читается при вызове (HOME подменён conftest), битый конфиг не роняет поиск.
+The config is read on every call (conftest fakes HOME); a broken config does not break the search.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ def test_claude_which_then_known_then_none(tmp_path, monkeypatch):
     assert launcher.claude_bin() == "/usr/bin/claude"
     monkeypatch.setattr(shutil, "which", lambda name: None)
     known = Path.home() / ".claude" / "local" / "claude"
-    assert launcher.claude_bin() is None  # известного места нет
+    assert launcher.claude_bin() is None  # no known location
     known.parent.mkdir(parents=True, exist_ok=True)
     known.write_text("#!/bin/sh\n")
     assert launcher.claude_bin() == str(known)

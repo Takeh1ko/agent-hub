@@ -48,7 +48,7 @@ def test_code_defaults_and_resource(store, project):
     t = tasks.create(store, spec(kind=Kind.CODE, title="починить", paths=["core/**", "tests/test_a.py"],
                                  accept=["tests/test_a.py::test_x"]), project)
     assert t.review == {"models": ["spark"], "rounds": 2}
-    assert t.limits["resources"] == ["test_db"]  # приёмка — под ресурсом тестов
+    assert t.limits["resources"] == ["test_db"]  # the acceptance run goes under the test resource
     assert t.limits["time_limit_min"] == 180
 
 
@@ -124,5 +124,5 @@ def test_idempotent_key_and_draft(store, project):
 
 def test_spec_hash_changes_with_spec():
     a = tasks.spec_hash(spec(spec="один"))
-    assert a == tasks.spec_hash(spec(spec="один", model="mimo-flash"))  # модель — не постановка
+    assert a == tasks.spec_hash(spec(spec="один", model="mimo-flash"))  # the model is not part of the spec
     assert a != tasks.spec_hash(spec(spec="два"))

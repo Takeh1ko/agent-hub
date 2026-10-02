@@ -1,4 +1,4 @@
-"""Общий раннер поставщика на фейковом поставщике: поток, id, тишина, дети, таймаут, остановка, сбои."""
+"""The shared provider runner against the fake provider: stream, id, silence, children, timeout, stop, failures."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def test_structured(fake, tmp_path):
 
 
 def test_resume_keeps_session(fake, tmp_path):
-    # id в потоке не виден (hide_session) — запасной путь: продолжали ses_old, значит это она
+    # the id is not visible in the stream (hide_session) — fallback path: it kept ses_old, so that is it
     r = run(fake, spec(tmp_path, {"hide_session": True, "steps": [{"event": {"type": "text", "text": "x"}}]},
                        session_id="ses_old"))
     assert r.ok and r.session_id == "ses_old"
@@ -86,7 +86,7 @@ def test_merge_usage_takes_larger():
 def test_garbage_output_does_not_reset_silence(fake, tmp_path):
     steps = [{"sleep": 0.3}, {"event": {"type": "noise"}}] * 10
     r = run(fake, spec(tmp_path, {"hide_session": True, "steps": steps}, idle_s=1))
-    assert r.outcome is Outcome.SILENCE  # строки идут каждые 0.3 с, но нераспознанные — не жизнь
+    assert r.outcome is Outcome.SILENCE  # lines arrive every 0.3 s, but unrecognized ones are not life
 
 
 def test_silence_without_children(fake, tmp_path):
@@ -94,7 +94,7 @@ def test_silence_without_children(fake, tmp_path):
     r = run(fake, spec(tmp_path, {"session": "s", "steps": [{"sleep": 10}]}, idle_s=1))
     assert r.outcome is Outcome.SILENCE and r.silence_s >= 1
     assert time.monotonic() - t0 < 8
-    assert r.session_id == "s"  # id, пойманный до тишины, — для продолжения
+    assert r.session_id == "s"  # the id caught before the silence — for resuming
 
 
 def test_silence_explained_by_child(fake, tmp_path):
@@ -167,7 +167,7 @@ def test_model_error_and_crash(fake, tmp_path):
     c = run(fake, spec(tmp_path, {"session": "s", "steps": [{"stderr": "segfault"}, {"crash": True}]}))
     assert c.outcome is Outcome.CRASH and "segfault" in c.error
     n = run(fake, spec(tmp_path, {"hide_session": True, "steps": [{"event": {"type": "text", "text": "x"}}]}))
-    assert n.outcome is Outcome.CRASH and "нет id" in n.error  # id не пойман и не найден — честно
+    assert n.outcome is Outcome.CRASH and "нет id" in n.error  # the id was neither caught nor found — honest
 
 
 def test_not_started(tmp_path):
@@ -197,14 +197,14 @@ def test_registry():
 
 
 def _sleepers(marker: str) -> list[int]:
-    """Живые процессы с меткой в cmdline — через procs (на macOS psutil, без /proc)."""
+    """Live processes with a marker in the cmdline — via procs (psutil on macOS, no /proc)."""
     from ahub import procs
     return [pid for pid in procs.pids() if procs.alive(pid) and any(marker in a for a in procs.cmdline(pid))]
 
 
 @pytest.mark.parametrize("detach", [False, True])
 def test_leftover_processes_reaped_after_normal_exit(fake, tmp_path, detach):
-    secs = 97.123 if detach else 96.321  # метка в cmdline брошенного процесса
+    secs = 97.123 if detach else 96.321  # marker in the cmdline of an abandoned process
     r = run(fake, spec(tmp_path, {"session": "s", "steps": [
         {"bg": secs, "detach": detach}, {"event": {"type": "text", "text": "готово"}}]}, idle_s=0))
     assert r.ok

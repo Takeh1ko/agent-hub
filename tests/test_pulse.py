@@ -21,7 +21,7 @@ def store() -> Store:
 
 
 needs_locks = pytest.mark.skipif(sys.platform != "linux", reason="держатель замка читается только из /proc/locks")
-NOPROC = "/nonexistent"  # нет такого каталога — «нет данных» о держателе (как на macOS)
+NOPROC = "/nonexistent"  # no such dir — "no data" about the holder (as on macOS)
 
 
 class StatefulFake(FakeProvider):
@@ -131,7 +131,7 @@ def test_waiting_phase_names_lock_holder(store, tmp_path):
 
 
 def test_waiting_without_locks_names_no_holder(store, tmp_path):
-    """Без /proc/locks (на macOS) замок занят, а данных о держателе нет — пульс не врёт (тест на любой ОС)."""
+    """Without /proc/locks (on macOS) the lock is busy but there is no holder data — the pulse does not lie (any OS)."""
     from ahub import config
     lk = tmp_path / "db.lock"
     lk.write_text("")

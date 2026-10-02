@@ -1,4 +1,4 @@
-"""procs через psutil (нет /proc): дети, живость, cmdline, время старта на живых процессах."""
+"""procs through psutil (no /proc): children, liveness, cmdline, start time on live processes."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import time
 
 from ahub import procs, pulse, service
 
-NOPROC = "/nonexistent"  # нет такого каталога — ветка psutil
+NOPROC = "/nonexistent"  # no such dir — the psutil branch
 
 
 def _sleep(args: list[str] | None = None) -> subprocess.Popen:
@@ -27,10 +27,10 @@ def test_psutil_children_alive_cmdline_start_time():
         assert any("time.sleep" in a for a in args)
         st = procs.start_time(s.pid, NOPROC)
         assert isinstance(st, int)
-        assert procs.start_time(s.pid, NOPROC) == st  # равен самому себе
+        assert procs.start_time(s.pid, NOPROC) == st  # equal to itself
         assert s.pid in procs.children(os.getpid(), NOPROC)
         assert s.pid in procs.descendants(os.getpid(), NOPROC)
-        assert not procs.has_children(s.pid, NOPROC)  # у сна детей нет
+        assert not procs.has_children(s.pid, NOPROC)  # the sleeper has no children
         assert s.pid in procs.pids(NOPROC)
         assert os.getpid() in procs.pids(NOPROC)
         assert not procs.alive(999999, NOPROC)
@@ -45,9 +45,9 @@ def test_psutil_zombie_not_alive():
     z = subprocess.Popen([sys.executable, "-c", "pass"])
     try:
         time.sleep(0.5)
-        # ещё не забрали — зомби (запись в /proc есть, состояния нет в psutil)
+        # not reaped yet — a zombie (the /proc entry is there, psutil has no state)
         assert not procs.alive(z.pid, NOPROC)
-        assert not procs.alive(z.pid)  # и через /proc — тоже не жив
+        assert not procs.alive(z.pid)  # and via /proc it is not alive either
     finally:
         z.wait()
     assert not procs.alive(z.pid, NOPROC)
@@ -92,7 +92,7 @@ def test_psutil_lock_wait_without_holder(tmp_path):
     fd = os.open(lk, os.O_RDONLY)
     fcntl.flock(fd, fcntl.LOCK_EX)
     try:
-        assert pulse.lock_holder(str(lk), NOPROC) is None  # замок занят, но держателя без /proc нет
+        assert pulse.lock_holder(str(lk), NOPROC) is None  # the lock is busy, but without /proc there is no holder
         from ahub import config
 
         proj = config.parse_project({"schema_version": 2, "name": "P",
@@ -105,6 +105,6 @@ def test_psutil_lock_wait_without_holder(tmp_path):
         t = store.get_task(tid)
         p = pulse.task_pulse(store, t, live={tid: os.getpid()}, project=proj,
                              now=60 * 60_000, proc_root=NOPROC)
-        assert p.state == "waiting" and "держит" not in p.reason  # честно — без имени держателя
+        assert p.state == "waiting" and "держит" not in p.reason  # honest — no holder name
     finally:
         os.close(fd)

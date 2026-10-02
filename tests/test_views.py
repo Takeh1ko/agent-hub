@@ -1,4 +1,4 @@
-"""Тесты _age: минуты, часы, дни, граница 24 ч."""
+"""Tests for _age: minutes, hours, days, the 24 h boundary."""
 
 from __future__ import annotations
 

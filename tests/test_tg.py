@@ -1,4 +1,4 @@
-"""TG v2: логика бота (без сети) и запуск Claude при отсутствии живой сессии."""
+"""TG v2: bot logic (no network) and launching Claude when there is no live session."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def store() -> Store:
 
 
 def test_text_goes_to_claude(store):
-    rep = core.on_text(store, 42, "как там оплата?", projects=["PlayerUP", "agent-hub"])
+    rep = core.on_text(store, 42, "как там оплата?", projects=["webapp", "agent-hub"])
     assert "поднимаю" in rep.text
     assert events.lines(store, events.unacked(store)) == ["OWNER «как там оплата?»"]
     assert core.chats(store) == [42]
@@ -32,8 +32,8 @@ def test_text_goes_to_claude(store):
 
 
 def test_project_prefix(store):
-    assert core.split_project("по agent-hub: почини бота", ["agent-hub", "PlayerUP"]) == ("agent-hub", "почини бота")
-    assert core.split_project("PlayerUP: статус", ["agent-hub", "PlayerUP"]) == ("PlayerUP", "статус")
+    assert core.split_project("по agent-hub: почини бота", ["agent-hub", "webapp"]) == ("agent-hub", "почини бота")
+    assert core.split_project("webapp: статус", ["agent-hub", "webapp"]) == ("webapp", "статус")
     assert core.split_project("просто текст", ["agent-hub"]) == (None, "просто текст")
     core.on_text(store, 1, "по agent-hub: x", projects=["agent-hub"])
     with store.read() as c:
@@ -73,7 +73,7 @@ def test_alarm_text():
     assert core.alarm_text(E()).startswith("🚨 Хаб: opencode лёг")
 
 
-# --- запуск Claude ---
+# --- launching Claude ---
 
 class Spawner:
     def __init__(self, session="sess-1"):
@@ -100,14 +100,14 @@ def test_launcher_flow(store, tmp_path):
     assert cwd == project.root and "--dangerously-skip-permissions" in cmd and "--resume" not in cmd
     assert "привет" in cmd[cmd.index("-p") + 1] and "ahub say" in cmd[cmd.index("-p") + 1]
     core.on_text(store, 1, "ещё вопрос", projects=["P"])
-    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "running"  # второй не поднимаем
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "running"  # no second launch
     sp.procs[0].kill()
     sp.procs[0].wait()
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "finished"
     assert json.loads(store.meta_get(launcher.SESSION_KEY))["id"] == "sess-1"
-    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["ещё вопрос"]  # первое передано (сессия была)
-    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "launched"  # накопленное
-    assert sp.calls[1][0][sp.calls[1][0].index("--resume") + 1] == "sess-1"  # та же TG-сессия
+    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["ещё вопрос"]  # the first was passed on (a session existed)
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "launched"  # the backlog
+    assert sp.calls[1][0][sp.calls[1][0].index("--resume") + 1] == "sess-1"  # the same TG session
     for p in sp.procs:
         p.kill()
 
@@ -117,7 +117,7 @@ def test_launcher_respects_presence_and_limit(store, tmp_path):
     sp = Spawner()
     core.on_text(store, 1, "x", projects=[])
     events.touch(store)
-    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "idle"  # живой Claude есть
+    assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "idle"  # a live Claude exists
     with store.tx() as c:
         c.execute("DELETE FROM presence")
         for _ in range(launcher.MAX_PER_HOUR):
@@ -142,11 +142,11 @@ def test_project_choice(store, tmp_path):
     b = dataclasses.replace(make_project(tmp_path / "b"), name="B")
     events.touch(store, project="B")
     with store.tx() as c:
-        c.execute("UPDATE presence SET last_seen=0")  # был, но давно — не «присутствует»
+        c.execute("UPDATE presence SET last_seen=0")  # was there, but long ago — not "present"
     core.on_text(store, 1, "x", projects=["P", "B"])
     sp = Spawner()
     launcher.tick(store, projects=[a, b], spawn=sp, binary="claude")
-    assert sp.calls[0][1] == b.root  # последний проект Claude
+    assert sp.calls[0][1] == b.root  # the last project of Claude
     sp.procs[0].kill()
 
 
@@ -181,7 +181,7 @@ async def test_background_one_pass(store, monkeypatch):
         await tgrun.background(bot, store)
     texts = [t for _, t, _ in bot.sent]
     assert texts[0] == "T12 готова" and "сливать?" in texts[1] and texts[2].startswith("🚨")
-    assert bot.sent[1][2] is not None  # кнопки вариантов
+    assert bot.sent[1][2] is not None  # the answer buttons
     assert comms.outbox(store) == [] and core.pending_questions(store) == [] and comms.alarms_for_tg(store) == []
 
 
@@ -202,7 +202,7 @@ def test_chats_empty_and_fallback(store, tmp_path, monkeypatch):
     assert core.chats(store, hub=config.HubConfig()) == []
     assert core.chats(store, hub=config.HubConfig(tg_chat_id=78)) == [78]
     core.remember_chat(store, 42)
-    assert core.chats(store) == [42]  # живые чаты важнее запаса
+    assert core.chats(store) == [42]  # live chats beat the fallback
 
 
 def test_bot_main_no_token(tmp_path, monkeypatch, capsys):
@@ -239,7 +239,7 @@ def test_launcher_fast_death_keeps_messages(store, tmp_path):
 
     class Dead(Spawner):
         def __call__(self, cmd, cwd, log):
-            open(log, "w").close()  # ни сессии, ни вывода
+            open(log, "w").close()  # neither a session nor output
             p = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
             p.wait()
             self.procs.append(p)
@@ -250,12 +250,12 @@ def test_launcher_fast_death_keeps_messages(store, tmp_path):
     t0 = now_ms()
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0) == "launched"
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0 + 1000) == "finished"
-    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["срочно"]  # не потерялось
+    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["срочно"]  # nothing lost
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0 + 2000) == "launched"
 
 
 def test_help_and_card_en(store, monkeypatch):
-    """Шаг 4: /help и карточка задачи бота на английском (AHUB_LANG=en)."""
+    """Step 4: the bot's /help and task card in English (AHUB_LANG=en)."""
     import re as _re
 
     from ahub.i18n import _reset
@@ -274,5 +274,5 @@ def test_help_and_card_en(store, monkeypatch):
     assert "pay button" in card.text and "created" in card.text
     assert "state: done" in card.text
     assert not _re.search(r"[а-яА-ЯёЁ]", rep.text + card.text)
-    assert card.buttons[0][0].data == "tasks"  # коды кнопок не переводятся
+    assert card.buttons[0][0].data == "tasks"  # button codes are not translated
     _reset()
