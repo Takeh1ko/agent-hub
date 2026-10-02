@@ -126,3 +126,31 @@ def test_json_status(env, capsys):
     rc, out, _ = ahub(capsys, "--json", "status")
     data = json.loads(out)
     assert data["active"] == [] and data["waiting"] == []
+
+
+def test_watch_summary_once_new_and_ack(env, capsys, monkeypatch):
+    import time
+
+    store, _ = env
+    monkeypatch.setattr(time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+    comms.owner_message(store, "первое")
+    batch = events.ready_batch(store)
+    events.mark_delivered(store, [e.id for e in batch])
+    rc, out, _ = ahub(capsys, "watch", "--poll", "0")
+    assert rc == 0 and "НЕПРОЧИТАНО 1" in out and "первое" in out
+    rc, out, _ = ahub(capsys, "watch", "--poll", "0")
+    assert rc == 0 and out == ""  # restart stays silent
+    assert len(events.unacked(store)) == 1  # old stays unread
+    rc, out, _ = ahub(capsys, "status")
+    assert "непрочитано событий 1" in out
+    comms.owner_message(store, "второе")
+    batch = events.ready_batch(store)
+    assert len(batch) == 1 and "второе" in batch[0].payload.get("text", "")
+    events.mark_delivered(store, [e.id for e in batch])
+    rc, out, _ = ahub(capsys, "watch", "--poll", "0")
+    assert rc == 0 and "НЕПРОЧИТАНО 1" in out and "второе" in out and "первое" not in out
+    assert len(events.unacked(store)) == 2  # both stay unread
+    rc, out, _ = ahub(capsys, "inbox")
+    assert "второе" in out and events.unacked(store) == []  # ack still works
+    rc, out, _ = ahub(capsys, "watch", "--poll", "0")
+    assert rc == 0 and out == ""

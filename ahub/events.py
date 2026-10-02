@@ -104,6 +104,31 @@ def unacked(store: Store, project: str | None = None) -> list[Event]:
         return [Event.from_row(r) for r in c.execute(sql + " ORDER BY id", args)]
 
 
+def _watch_mark_key(who: str, project: str | None) -> str:
+    return f"watch_summary:{who}:{project or ''}"
+
+
+def watch_start_summary(store: Store, *, who: str = DEFAULT_WHO,
+                        project: str | None = None) -> list[Event]:
+    """Start summary for watch: delivered-but-unacked events not summarised before.
+
+    Remembers the highest summarised id per consumer (who + project) in store meta,
+    so a restart does not re-announce the same old unread lines. Old events stay
+    unread (inbox/status still list them), they are just not announced again.
+    Returns the new events to summarise (empty means stay silent).
+    """
+    raw = store.meta_get(_watch_mark_key(who, project))
+    try:
+        mark = int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        mark = 0
+    fresh = [e for e in unacked(store, project) if e.delivered_at is not None and e.id > mark]
+    if not fresh:
+        return []
+    store.meta_set(_watch_mark_key(who, project), str(max(e.id for e in fresh)))
+    return fresh
+
+
 # --- wakeup lines (L0) ---
 
 # Stable English codes at line start (never translated).
