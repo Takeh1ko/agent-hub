@@ -7,6 +7,7 @@ AHUB_LANG → lang в конфиге хаба → LANG/LC_ALL/LC_MESSAGES (ru*) 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable, Iterator, Mapping
 
 from ahub.i18n.en import MESSAGES as _EN
 from ahub.i18n.ru import MESSAGES as _RU
@@ -62,33 +63,20 @@ def t(key: str, **kw) -> str:
     return tpl.format(**kw)
 
 
-class Words(dict):
-    """Ленивые слова каталога: вид — dict ради старых мест (.get(k, default), [k], `in`).
+class Words(Mapping[str, str]):
+    """Слова каталога по ключам (состояния, фазы): значение — t(prefix + key) при чтении, на текущем языке."""
 
-    Значение — t(prefix + key) в момент чтения, т.е. на языке хаба. Неизвестный ключ —
-    default (get), KeyError ([]) или False (`in`).
-    """
-
-    def __init__(self, prefix: str, known: tuple[str, ...] | list[str]):
-        super().__init__()
+    def __init__(self, prefix: str, keys: Iterable[str]):
         self._prefix = prefix
-        self._known = frozenset(known)
-
-    def _word(self, key: str) -> str:
-        try:
-            return t(f"{self._prefix}{key}")
-        except KeyError:
-            return key
+        self._keys = tuple(keys)
 
     def __getitem__(self, key: str) -> str:
-        if key in self._known:
-            return self._word(key)
-        raise KeyError(key)
+        if key not in self._keys:
+            raise KeyError(key)
+        return t(self._prefix + key)
 
-    def get(self, key: str, default=None):
-        if key in self._known:
-            return self._word(key)
-        return default
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._keys)
 
-    def __contains__(self, key) -> bool:
-        return key in self._known
+    def __len__(self) -> int:
+        return len(self._keys)

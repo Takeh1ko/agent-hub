@@ -178,3 +178,13 @@ def test_views_events_en(monkeypatch, tmp_path):
     import re as _re
 
     assert not _re.search(r"[а-яА-ЯёЁ]", l1) and not _re.search(r"[а-яА-ЯёЁ]", l2 + line)
+
+
+def test_words_is_a_real_mapping():
+    from ahub import archive
+
+    set_lang("en")
+    words = dict(archive.STATE_WORDS)
+    assert len(words) == len(archive.STATE_WORDS) > 0
+    assert all(isinstance(v, str) and v for v in words.values())
+    assert archive.STATE_WORDS.get("no-such-state", "x") == "x"
