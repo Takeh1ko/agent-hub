@@ -28,7 +28,7 @@ accept.py: hub accept (разведка — принять; код — merge --n
 | Модуль | Роль |
 |---|---|
 | `cli.py`, `cliutil.py`, `commands/*.py` | CLI: автообнаружение `register()`; `--json`; ошибки — одна строка, код 2 |
-| `config.py`, `paths.py` | `.hub.toml` v2 (v1 читается с переводом), `~/.config/ahub/config.toml` ([telegram] токен/чат/прокси, [usage] лимит Go); данные `~/.local/share/ahub/ahub.db`, логи `~/.local/state/ahub/logs` (`AHUB_HOME` — всё в одном каталоге) |
+| `config.py`, `paths.py` | `.hub.toml` v2 (v1 читается с переводом), `~/.config/ahub/config.toml` ([telegram] токен/чат/прокси, [usage] лимит Go, [paths] opencode/claude/opencode_db); данные `~/.local/share/ahub/ahub.db`, логи `~/.local/state/ahub/logs` (`AHUB_HOME` — всё в одном каталоге) |
 | `store.py` + `migrations/` | SQLite WAL: task, task_dep, session, event (доставка/подтверждение), question, message, draft, model/role_model, presence, claude_launch, observer_report, op |
 | `model.py`, `transitions.py` | типы, состояния, переходы, события; move/acquire/renew/release/request_stop/once |
 | `tasks.py`, `drafts.py` | создание задачи с проверкой; черновик словами → модель → предпросмотр → запуск |

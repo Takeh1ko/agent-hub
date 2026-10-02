@@ -16,6 +16,11 @@
     [usage]
     go_month_limit = 60.0               # нет — лимит не показывается
 
+    [paths]                             # всё необязательно; переопределение путей
+    opencode = "$HOME/bin/opencode"
+    claude = "~/.claude/local/claude"
+    opencode_db = "$HOME/.local/share/opencode/opencode.db"
+
 Пример .hub.toml v2:
 
     schema_version = 2
@@ -139,6 +144,9 @@ class HubConfig:
     tg_chat_id: int | None = None  # [telegram] chat_id; запасной чат для рассылки
     tg_proxy: str = ""  # [telegram] proxy; пусто — системный HTTPS_PROXY
     go_month_limit: float | None = None  # [usage] go_month_limit; None — не показывать
+    opencode: str = ""  # [paths] opencode; пусто — which/известное место
+    claude: str = ""  # [paths] claude; пусто — which/известное место
+    opencode_db: str = ""  # [paths] opencode_db; пусто — XDG/известное место
 
     @property
     def telegram_enabled(self) -> bool:
@@ -391,6 +399,10 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
             chat_id = int(env_chat.strip())
         except ValueError:
             r.errors.append(f"AHUB_TG_CHAT: ожидается целое, получено {env_chat!r}")
+    pth = r.table(data, "paths")
+    opencode = expand(r.str_(pth, "opencode", "", "paths.").strip())
+    claude = expand(r.str_(pth, "claude", "", "paths.").strip())
+    opencode_db = expand(r.str_(pth, "opencode_db", "", "paths.").strip())
     if r.errors:
         raise ConfigError(source or "<dict>", r.errors)
     return HubConfig(
@@ -400,6 +412,9 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
         tg_chat_id=chat_id,
         tg_proxy=proxy.strip(),
         go_month_limit=go_limit,
+        opencode=opencode,
+        claude=claude,
+        opencode_db=opencode_db,
     )
 
 

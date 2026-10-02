@@ -50,6 +50,13 @@ PROMPT = """Ты — Claude, ведущий разработку через agen
 
 
 def claude_bin() -> str | None:
+    """Бинарь claude: [paths].claude → which → ~/.claude/local/claude."""
+    try:
+        override = config.load_hub().claude
+        if override:
+            return override
+    except config.ConfigError:
+        pass
     return shutil.which("claude") or (str(Path.home() / ".claude/local/claude")
                                       if (Path.home() / ".claude/local/claude").exists() else None)
 

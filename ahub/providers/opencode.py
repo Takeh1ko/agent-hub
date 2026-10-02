@@ -34,6 +34,15 @@ _STATUS = re.compile(r"\bstatus(?:code)?\D{0,3}(\d{3})\b", re.IGNORECASE)
 
 
 def opencode_bin() -> str:
+    """Бинарь opencode: [paths].opencode → which → ~/.opencode/bin/opencode."""
+    try:
+        from ahub import config
+
+        override = config.load_hub().opencode
+        if override:
+            return override
+    except config.ConfigError:
+        pass
     return shutil.which("opencode") or str(Path.home() / ".opencode" / "bin" / "opencode")
 
 
