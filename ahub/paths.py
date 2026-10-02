@@ -33,6 +33,10 @@ def state_dir() -> Path:
 
 
 def config_dir() -> Path:
+    """Global config. Under AHUB_HOME it lives there too: an isolated instance never reads the real config."""
+    raw = os.environ.get(ENV_HOME)
+    if raw:
+        return Path(raw) / "config"
     return _xdg("XDG_CONFIG_HOME", ".config") / "ahub"
 
 

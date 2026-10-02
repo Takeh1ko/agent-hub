@@ -174,7 +174,9 @@ def test_project_for_root_and_worktrees(tmp_path):
 def test_paths_follow_env(tmp_path, monkeypatch):
     assert paths.db_path() == tmp_path / "ahub-home" / "ahub.db"
     assert paths.log_dir() == tmp_path / "ahub-home" / "state" / "logs"
+    assert paths.global_config_path() == tmp_path / "ahub-home" / "config" / "config.toml"
     monkeypatch.delenv("AHUB_HOME")
+    assert paths.global_config_path() == tmp_path / ".config" / "ahub" / "config.toml"
     assert paths.db_path() == tmp_path / ".local/share/ahub/ahub.db"
     assert paths.log_dir() == tmp_path / ".local/state/ahub/logs"
 
