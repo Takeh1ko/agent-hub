@@ -46,3 +46,8 @@ def log_dir() -> Path:
 
 def global_config_path() -> Path:
     return config_dir() / "config.toml"
+
+
+def service_pid_path() -> Path:
+    """Pid-файл фонового `service start` (запуск без службы ОС)."""
+    return data_dir() / "service.pid"
