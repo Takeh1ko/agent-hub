@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 
 from ahub import comms, config
 from ahub import log as hublog
@@ -31,8 +32,17 @@ def _markup(rows):
                                                   for b in row] for row in rows])
 
 
-def build_session():
-    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+def build_session(hub: config.HubConfig | None = None):
+    """Сессия бота: прокси из [telegram] вместо системного; без прокси — None."""
+    cfg_proxy = ""
+    if hub is None:
+        try:
+            hub = config.load_hub()
+        except config.ConfigError:
+            hub = None
+    if hub is not None:
+        cfg_proxy = (hub.tg_proxy or "").strip()
+    proxy = cfg_proxy or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     if not proxy:
         return None
     from ahub.tg.proxy import HttpProxySession
@@ -135,13 +145,13 @@ def build_dispatcher(store: Store):
     return dp
 
 
-async def amain() -> None:
+async def amain(hub: config.HubConfig | None = None) -> None:
     from aiogram import Bot
 
-    from ahub.secrets import TELEGRAM_BOT_TOKEN
-
+    if hub is None:
+        hub = config.load_hub()
     store = Store()
-    bot = Bot(TELEGRAM_BOT_TOKEN, session=build_session())
+    bot = Bot(hub.tg_token, session=build_session(hub))
     dp = build_dispatcher(store)
     task = asyncio.create_task(background(bot, store))
     try:
@@ -160,5 +170,14 @@ async def amain() -> None:
 def main() -> int:
     hublog.setup()
     hublog.install_excepthook("tg")
-    asyncio.run(amain())
+    try:
+        hub = config.load_hub()
+    except config.ConfigError as e:
+        print(f"ошибка: {e}", file=sys.stderr)
+        return 2
+    if not hub.tg_token:
+        print("ошибка: нет токена Telegram — задайте [telegram] token в ~/.config/ahub/config.toml"
+              " или AHUB_TG_TOKEN", file=sys.stderr)
+        return 2
+    asyncio.run(amain(hub))
     return 0

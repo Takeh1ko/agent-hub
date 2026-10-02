@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from ahub import archive, comms, events, views
+from ahub import archive, comms, config, events, views
 from ahub.model import ACTIVE, WAITING_DECISION
 from ahub.store import Store
 from ahub.time import fmt_local, now_ms
@@ -40,12 +40,20 @@ def remember_chat(store: Store, chat_id: int, *, now: int | None = None) -> None
                   " SET last_ts=excluded.last_ts, dead=0", (chat_id, ts, ts))
 
 
-def chats(store: Store) -> list[int]:
-    from ahub.secrets import OWNER_CHAT_ID
-
+def chats(store: Store, hub: config.HubConfig | None = None) -> list[int]:
+    """Чаты для рассылки: живые из базы, иначе запасной chat_id из конфига, иначе []."""
+    if hub is None:
+        try:
+            hub = config.load_hub()
+        except config.ConfigError:
+            hub = None
     with store.read() as c:
         ids = [r[0] for r in c.execute("SELECT chat_id FROM tg_chat WHERE dead=0 ORDER BY first_ts")]
-    return ids or [OWNER_CHAT_ID]
+    if ids:
+        return ids
+    if hub is not None and hub.tg_chat_id is not None:
+        return [hub.tg_chat_id]
+    return []
 
 
 def mark_dead(store: Store, chat_id: int) -> None:
