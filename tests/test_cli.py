@@ -8,9 +8,9 @@ from tests.conftest import write
 
 def test_version_text_and_json(capsys):
     assert cli.main(["version"]) == 0
-    assert capsys.readouterr().out.startswith("ahub 2.")
+    assert capsys.readouterr().out.startswith("ahub 3.")
     assert cli.main(["--json", "version"]) == 0
-    assert json.loads(capsys.readouterr().out)["version"].startswith("2.")
+    assert json.loads(capsys.readouterr().out)["version"].startswith("3.")
 
 
 def test_config_by_cwd(tmp_path, monkeypatch, capsys):

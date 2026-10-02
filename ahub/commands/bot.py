@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import importlib.util
+
+from ahub.cliutil import CliError
+
 
 def cmd_run(args) -> int:
+    if importlib.util.find_spec("aiogram") is None:
+        raise CliError("Telegram не установлен: pip install 'ahub[telegram]'")
     from ahub.tg.run import main
 
     return main()

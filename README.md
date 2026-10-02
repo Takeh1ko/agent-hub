@@ -11,25 +11,25 @@
 ## Установка
 ```
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-ln -s "$PWD/.venv/bin/hub" ~/.local/bin/hub          # команда hub (= ahub) в PATH
-hub setup ~/путь/к/проекту --claude [--deny deepseek] # .hub.toml v2, реестр проектов, навык для Claude Code
-hub service install && systemctl --user daemon-reload && systemctl --user enable --now ahub ahub-bot
+ln -s "$PWD/.venv/bin/ahub" ~/.local/bin/ahub      # команда ahub в PATH
+ahub setup ~/путь/к/проекту --claude [--deny deepseek] # .hub.toml v2, реестр проектов, навык для Claude Code
+ahub service install && systemctl --user daemon-reload && systemctl --user enable --now ahub ahub-bot
 loginctl enable-linger $USER                          # сервис и бот живут без входа в систему
 ```
 Нужны: `opencode` (вход в opencode-go), `claude` (для запуска из Telegram), системный прокси при необходимости
-(`HTTPS_PROXY` попадает в юниты при `hub service install`).
+(`HTTPS_PROXY` попадает в юниты при `ahub service install`).
 
 ## Пользование
 | Кто | Как |
 |---|---|
-| Человек, терминал | `hub top` (экран; `c` — управление, `?` — справка), `hub status`, `hub history`, `hub draft new "задача словами" -P проект` → `hub draft start N` |
+| Человек, терминал | `ahub top` (экран; `c` — управление, `?` — справка), `ahub status`, `ahub history`, `ahub draft new "задача словами" -P проект` → `ahub draft start N` |
 | Человек, Telegram | текст боту — сообщение Claude (нет живой сессии — хаб поднимет Claude); `/tasks`, `/status`, `/help` |
-| Claude Code | навык `ahub`: Monitor на `hub watch`; `hub task new …`; по событию `hub status T12` → `hub accept / rework / reject` |
-| Другие агенты | MCP-сервер `hub mcp` (stdio) — те же ручки |
+| Claude Code | навык `ahub`: Monitor на `ahub watch`; `ahub task new …`; по событию `ahub status T12` → `ahub accept / rework / reject` |
+| Другие агенты | MCP-сервер `ahub mcp` (stdio) — те же ручки |
 
-Главные команды: `hub task new --kind scout|code|routine|review --title … --spec …`, `hub status [T12]`,
-`hub result T12 [--full]`, `hub accept|reject|rework|continue|stop T12`, `hub budget T12 --add 1`,
-`hub models`, `hub service status|pause|resume`, `hub observer reports`. Всё — `hub --help`.
+Главные команды: `ahub task new --kind scout|code|routine|review --title … --spec …`, `ahub status [T12]`,
+`ahub result T12 [--full]`, `ahub accept|reject|rework|continue|stop T12`, `ahub budget T12 --add 1`,
+`ahub models`, `ahub service status|pause|resume`, `ahub observer reports`. Всё — `ahub --help`.
 
 ## Документация
 - `docs/ARCHITECTURE.md` — карта кода (с неё начинать);

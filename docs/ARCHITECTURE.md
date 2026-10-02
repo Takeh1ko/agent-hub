@@ -4,22 +4,22 @@
 интерфейсы между частями — `docs/v2/contracts.md`, история стройки — `docs/v2/progress.md`, v1 — `docs/v1/`.
 
 ## Что это
-Сервис, через который оркестратор (Claude Code; любой CLI-агент — через CLI или MCP) и человек (терминал `hub top`,
+Сервис, через который оркестратор (Claude Code; любой CLI-агент — через CLI или MCP) и человек (терминал `ahub top`,
 Telegram) раздают работу дешёвым моделям-работникам (opencode: Spark 1.3 и др.), следят за ней и принимают
-результат. Команды `hub` и `ahub` — одно и то же (`ahub/cli.py`).
+результат. Команда `ahub` (пакет ahub; скрипт `hub` убран из пакета — конфликт с GitHub CLI `hub`).
 
 ## Как течёт задача
 ```
-hub task new (tasks.py: проверка полей, умолчания по типу)  → task: queued
-hub service (service.py, systemd ahub.service): очередь, места, ресурсы, «после X» → spawn `python -m ahub.worker T12`
+ahub task new (tasks.py: проверка полей, умолчания по типу)  → task: queued
+ahub service (service.py, systemd ahub.service): очередь, места, ресурсы, «после X» → spawn `python -m ahub.worker T12`
 worker.py → engine.py (владелец задачи, аренда):
   разведка:  prepare(копия) → working → итог по форме (.ahub/result.json + report.md) → done
   код/рутина: prepare.py (копия без секретов, хук, сбор приёмки) → working → checking (gates.py: коммит, дифф ⊆ paths,
              result.json, приёмка под замком) → reviewing (review.py: панель в новых сессиях) → fixing → … → done
   итоги хода (providers/runner.py → Outcome): сбой сети → повтор; тишина → одно продолжение; квота/таймаут/бюджет →
   needs_decision; ошибка → error; стоп → stopped
-events.py: done/needs_decision/error/owner_message/answer/alarm → Claude будит `hub watch` (Monitor) / `hub wait`
-accept.py: hub accept (разведка — принять; код — merge --no-ff в рабочую ветку, приёмка, откат при красной, push,
+events.py: done/needs_decision/error/owner_message/answer/alarm → Claude будит `ahub watch` (Monitor) / `ahub wait`
+accept.py: ahub accept (разведка — принять; код — merge --no-ff в рабочую ветку, приёмка, откат при красной, push,
   уборка копии, архив), rework / reject / continue / task edit / extend / budget / model
 ```
 Состояния и переходы — `ahub/model.py` (единственный источник имён); переходы и аренда — `ahub/transitions.py`.
@@ -40,25 +40,25 @@ accept.py: hub accept (разведка — принять; код — merge --n
 | `events.py`, `comms.py`, `views.py`, `archive.py` | доставка/присутствие; сообщения/вопросы/тревоги; L1–L3 с лимитами; архив `<проект>/.agent-hub/` |
 | `pulse.py`, `observer.py` | пульс 🟢🟡🔴⚫⚪; наблюдатель (5 мин код, 30 мин модель, прокси Koala, эскалация) |
 | `tg/` | бот (`core.py` логика, `run.py` aiogram, `launcher.py` запуск Claude без живой сессии, `proxy.py`) |
-| `tui/` | `hub top` (`data.py` данные, `app.py` textual) |
+| `tui/` | `ahub top` (`data.py` данные, `app.py` textual) |
 | `mcp.py` | MCP-сервер (stdio) поверх тех же ручек |
-| `claude/SKILL.md` | навык для Claude Code (ставит `hub setup --claude`) |
+| `claude/SKILL.md` | навык для Claude Code (ставит `ahub setup --claude`) |
 
 ## Процессы
-- Служба ОС (`hub service install`): Linux — юниты systemd --user `ahub.service` + `ahub-bot.service`
+- Служба ОС (`ahub service install`): Linux — юниты systemd --user `ahub.service` + `ahub-bot.service`
   (`commands/service.py`: `ExecStart=<python> -m ahub service|bot run`, `Restart=always`, `KillMode=process`);
   macOS — plist launchd `dev.ahub.service.plist` + `dev.ahub.bot.plist` в `~/Library/LaunchAgents`
   (`Label`, `ProgramArguments`, `RunAtLoad` + `KeepAlive`, то же окружение, логи в `state/logs`;
   включение — `launchctl bootstrap gui/$(id -u) <путь>`). Юнит/plist бота — только если включён Telegram
   (`[telegram] token`), иначе строка «бот не установлен: нет [telegram] token».
-- Без службы ОС: `hub service start` — `service run` фоном (`start_new_session`, лог `state/logs/service.log`,
+- Без службы ОС: `ahub service start` — `service run` фоном (`start_new_session`, лог `state/logs/service.log`,
   pid в `service_pid_path()` каталога данных); уже жив pid или тик сердцебиения < 30 с — второй не запускается.
-  `hub service stop` — SIGTERM по pid-файлу, ждать до 10 с, файл удалить.
+  `ahub service stop` — SIGTERM по pid-файлу, ждать до 10 с, файл удалить.
 - Процессы задач — отдельные (`python -m ahub.worker T<id>`), переживают перезапуск сервиса.
 - `ahub/procs.py` — дети, живость, cmdline, время старта: Linux через /proc, иначе psutil.
-- Claude: Monitor на `hub watch`; `hub status`; решения — `hub accept|rework|reject`.
+- Claude: Monitor на `ahub watch`; `ahub status`; решения — `ahub accept|rework|reject`.
 
 ## Работа с кодом
 - Тесты: `.venv/bin/python -m pytest -q` (~2.5 мин; HOME подменяется, сети нет); живые: `AHUB_LIVE=1 … -m live`.
-- Стиль: py3.12, `from __future__ import annotations`, dataclasses, stdlib sqlite3, время параметром, по-русски.
+- Стиль: py3.11+, `from __future__ import annotations`, dataclasses, stdlib sqlite3, время параметром, по-русски.
 - Задачи для самого agent-hub тоже можно гонять через хаб (`.hub.toml`: рабочая ветка `main`).
