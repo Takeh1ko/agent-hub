@@ -33,8 +33,7 @@ loginctl enable-linger $USER                          # сервис и бот �
 
 ## Документация
 - `docs/ARCHITECTURE.md` — карта кода (с неё начинать);
-- `docs/v2/architecture.md` — согласованная архитектура; `docs/v2/contracts.md` — интерфейсы между частями;
-- `docs/v2/plan.md`, `docs/v2/progress.md` — план и ход стройки; `docs/v1/` — старый хаб (история).
+- `docs/architecture.md` — архитектура; `docs/contracts.md` — интерфейсы между частями.
 
 ## Разработка
 `.venv/bin/python -m pytest -q` (≈2.5 мин, без сети; HOME подменяется). Живые тесты с настоящим поставщиком:

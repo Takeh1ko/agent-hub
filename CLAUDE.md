@@ -3,8 +3,8 @@
 Карта кода — читать первой, вместо изучения кода с нуля:
 @docs/ARCHITECTURE.md
 
-Согласованная архитектура — `docs/v2/architecture.md`, контракты — `docs/v2/contracts.md`, ход стройки и траты
-Spark — `docs/v2/progress.md`. Старый хаб v1 — только история: `docs/v1/`.
+Архитектура — `docs/architecture.md`, контракты — `docs/contracts.md`. Текущая работа — выпуск на GitHub:
+`docs/v3/plan.md`. История v1/v2 и личные заметки — вне репозитория: `~/Projects/Python/agent-hub-notes/`.
 
 После заметных изменений структуры (модуль, состояние, таблица, процесс) — обновить `docs/ARCHITECTURE.md`.
 
