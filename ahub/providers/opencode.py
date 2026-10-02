@@ -1,11 +1,11 @@
-"""Поставщик opencode: `opencode run --format json` + данные из opencode.db (учёт, пульс, поиск сессии).
+"""opencode provider: `opencode run --format json` + data from opencode.db (usage, pulse, session search).
 
-События stdout (проверено на живых логах 2026-09-30), у каждого есть sessionID:
-  step_start / step_finish (part.tokens, part.cost) / tool_use (только завершённые: state.status completed|error) /
-  text (part.text) / reasoning / error (error: строка или {name, data: {message, statusCode, isRetryable}}).
-Идущий инструмент в потоке не виден — его даёт opencode.db (session_state).
-Ошибки (перенос правил v1 H13 + реальные формы): 5xx, isRetryable, «Unexpected server error», сетевые — сбой сети;
-401/403 — нет доступа; «quota/limit exceeded/insufficient» — квота; остальное — ошибка модели.
+stdout events (verified against live logs 2026-09-30), each carries sessionID:
+  step_start / step_finish (part.tokens, part.cost) / tool_use (finished only: state.status completed|error) /
+  text (part.text) / reasoning / error (error: string or {name, data: {message, statusCode, isRetryable}}).
+The running tool is not visible in the stream — opencode.db provides it (session_state).
+Errors (ported v1 H13 rules + real forms): 5xx, isRetryable, "Unexpected server error", network ones — transient;
+401/403 — no access; "quota/limit exceeded/insufficient" — quota; the rest — model error.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from ahub import log as hublog
 from ahub.i18n import t as _t
 from ahub.providers.base import (Act, Activity, Cap, Health, ModelInfo, Provider, RunSpec, SessionState, Usage)
 
-PROMPT_ARG_LIMIT = 60_000  # байт; лимит одного аргумента Linux — 128 КБ
+PROMPT_ARG_LIMIT = 60_000  # bytes; one Linux argument caps at 128 KB
 _log = hublog.get("opencode")
 
 TRANSIENT_MARKERS = ("unexpected server error", "cannot connect to api", "unable to connect", "econnrefused",
@@ -35,7 +35,7 @@ _STATUS = re.compile(r"\bstatus(?:code)?\D{0,3}(\d{3})\b", re.IGNORECASE)
 
 
 def opencode_bin() -> str:
-    """Бинарь opencode: [paths].opencode → which → ~/.opencode/bin/opencode."""
+    """opencode binary: [paths].opencode → which → ~/.opencode/bin/opencode."""
     try:
         from ahub import config
 
@@ -48,7 +48,7 @@ def opencode_bin() -> str:
 
 
 def run_capture(cmd: list[str], timeout: int = 120, env: dict[str, str] | None = None) -> tuple[int, str, str]:
-    """Запустить и забрать вывод через файл: в пайп opencode теряет хвост вывода при выходе."""
+    """Run and collect output via a file: opencode drops the tail output to a pipe on exit."""
     full_env = {**os.environ, **env} if env else None
     with tempfile.TemporaryFile("w+", encoding="utf-8") as out:
         r = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, text=True, timeout=timeout, env=full_env)
@@ -75,7 +75,7 @@ def _error_texts(err) -> list[str]:
 
 
 def classify_error(ev: dict) -> tuple[str, dict]:
-    """Событие {"type":"error"} → (текст, флаги transient/quota/no_access)."""
+    """{"type":"error"} event → (text, transient/quota/no_access flags)."""
     err = ev.get("error", ev.get("message", ev.get("text", "")))
     texts = _error_texts(err)
     for k in ("message", "text", "details"):
@@ -101,7 +101,7 @@ def classify_error(ev: dict) -> tuple[str, dict]:
 
 
 def prompt_arg(prompt: str, cwd: str) -> str:
-    """Короткий промпт — как есть; длинный — в файл (уникальное имя: параллельные сессии не затирают)."""
+    """Short prompt — as is; long one — to a file (unique name: parallel sessions don't clobber)."""
     if len(prompt.encode("utf-8")) <= PROMPT_ARG_LIMIT:
         return prompt
     d = Path(cwd) / ".ahub"
@@ -129,14 +129,14 @@ class OpencodeProvider(Provider):
 
     def __init__(self, db_path: str | None = None, binary: str | None = None,
                  env: dict[str, str] | None = None) -> None:
-        self.db_path = db_path  # None — opencode_db.default_db() при каждом вызове
+        self.db_path = db_path  # None — opencode_db.default_db() on each call
         self.binary = binary
-        self.extra_env = dict(env or {})  # окружение служебных команд (export/models/--version)
+        self.extra_env = dict(env or {})  # helper-command environment (export/models/--version)
 
     def _bin(self) -> str:
         return self.binary or opencode_bin()
 
-    # --- запуск ---
+    # --- start ---
 
     def build_command(self, spec: RunSpec) -> list[str]:
         cmd = [self._bin(), "run", "--format", "json", "--model", spec.model_id, "--dir", spec.cwd]
@@ -148,7 +148,7 @@ class OpencodeProvider(Provider):
         return cmd
 
     def env(self, spec: RunSpec) -> dict[str, str]:
-        """Изоляция: хаб внутри сессии работника пишет в свой каталог, не в боевое хранилище."""
+        """Isolation: the hub inside a worker session writes to its own dir, not the live storage."""
         home = Path(spec.cwd) / ".ahub" / "home"
         home.mkdir(parents=True, exist_ok=True)
         env = {"AHUB_HOME": str(home), "AGENT_HUB_HOME": str(home / "v1")}
@@ -196,10 +196,10 @@ class OpencodeProvider(Provider):
         return out
 
     def structured(self, final_text: str, activities: list[Activity], schema: dict | None) -> dict | None:
-        """opencode не умеет схему — ищем JSON в последнем ответе (блок ```json или весь текст)."""
+        """opencode has no schema support — look for JSON in the last reply (```json block or whole text)."""
         return extract_json(final_text)
 
-    # --- данные поставщика (opencode.db) ---
+    # --- provider data (opencode.db) ---
 
     def usage(self, session_id: str) -> Usage | None:
         from ahub.providers import opencode_db
@@ -280,7 +280,7 @@ _FENCE = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.DOTALL)
 
 
 def extract_json(text: str) -> dict | None:
-    """Последний JSON-объект из ответа модели: блок ```json … ``` или весь текст."""
+    """Last JSON object from the model reply: ```json … ``` block or whole text."""
     cands = _FENCE.findall(text or "")
     cands = list(reversed(cands)) + [(text or "").strip()]
     for c in cands:
@@ -297,7 +297,7 @@ _MODEL_LINE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.:/@-]+$")
 
 
 def parse_models_verbose(out: str) -> list[ModelInfo]:
-    """Вывод `opencode models --verbose`: строка «провайдер/модель», за ней JSON-объект."""
+    """`opencode models --verbose` output: a "provider/model" line followed by a JSON object."""
     models: list[ModelInfo] = []
     lines = out.splitlines()
     i = 0

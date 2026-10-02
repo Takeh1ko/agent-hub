@@ -1,7 +1,7 @@
-"""Чтение чужой базы opencode (SQLite) строго только на чтение.
+"""Read someone else's opencode database (SQLite) strictly read-only.
 
-Учёт, состояние сессии и поиск сессии для провайдера opencode.
-Соединение — только ``mode=ro`` на время запроса, без глобального состояния.
+Usage, session state, and session search for the opencode provider.
+Connections are ``mode=ro`` for the query duration only, no global state.
 """
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ from ahub import log
 from ahub.i18n import t as _t
 from ahub.providers.base import SessionState, Usage
 
-# Кусок списка id для одного IN (...): ниже SQLITE_LIMIT_VARIABLE_NUMBER.
+# Id-list chunk for one IN (...): below SQLITE_LIMIT_VARIABLE_NUMBER.
 _ID_CHUNK = 500
 
 _REQUIRED_TABLES = ("session", "message", "part", "todo")
-# Минимум колонок, которые реально читаем (живая схема шире).
+# Minimum columns actually read (the live schema is wider).
 _REQ_COLS: dict[str, tuple[str, ...]] = {
     "session": ("id", "parent_id", "directory", "model", "cost",
                 "tokens_input", "tokens_output", "tokens_reasoning",
@@ -33,7 +33,7 @@ _REQ_COLS: dict[str, tuple[str, ...]] = {
 
 
 def default_db() -> Path:
-    """Путь к чужой базе opencode: [paths].opencode_db → $XDG_DATA_HOME/… → ~/.local/share/…."""
+    """Path to someone else's opencode database: [paths].opencode_db → $XDG_DATA_HOME/… → ~/.local/share/…."""
     try:
         from ahub import config
 
@@ -63,7 +63,7 @@ def _warn(msg: str, *args: object) -> None:
 
 
 def _open(path: str) -> sqlite3.Connection:
-    # Только чтение чужого файла; timeout — не висеть на чужом локе.
+    # Read-only access to someone else's file; timeout — don't hang on their lock.
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
     con.row_factory = sqlite3.Row
     return con
@@ -78,7 +78,7 @@ def _close(con: sqlite3.Connection | None) -> None:
 
 
 def _problems(con: sqlite3.Connection) -> list[str]:
-    """Чего не хватает в схеме (пусто — всё нужное есть)."""
+    """What's missing from the schema (empty — everything needed is there)."""
     out: list[str] = []
     tables = {r[0] for r in con.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
@@ -96,7 +96,7 @@ def _problems(con: sqlite3.Connection) -> list[str]:
 
 
 def check_schema(db_path: str | Path | None = None) -> SchemaStatus:
-    """Есть ли файл и нужные таблицы/колонки. Не бросает."""
+    """Whether the file and the needed tables/columns exist. Never raises."""
     path = _resolve(db_path)
     if not Path(path).exists():
         return SchemaStatus(ok=False, problems=[_t("odb.no_db", path=path)])
@@ -134,7 +134,7 @@ def _to_float(v: object, default: float = 0.0) -> float:
 
 
 def _provider_id(model_raw: object) -> str:
-    # session.model — JSON {"id": ..., "providerID": ...}; битый — как чужой.
+    # session.model — JSON {"id": ..., "providerID": ...}; broken — treat as foreign.
     try:
         info = json.loads(str(model_raw or "{}"))
     except json.JSONDecodeError:
@@ -145,7 +145,7 @@ def _provider_id(model_raw: object) -> str:
 
 
 def _split_cost(cost: float, provider: str) -> tuple[float, float]:
-    # go — подписка (деньги «по прайсу»), остальное — реальные деньги.
+    # go — subscription (money at "list price"), everything else — real money.
     if provider == "opencode-go":
         return cost, 0.0
     return 0.0, cost
@@ -171,7 +171,7 @@ def _usage_from_row(row: sqlite3.Row, context: int | None) -> Usage:
 
 
 def _live_context(msgs: list[sqlite3.Row]) -> int:
-    """input + cache.read новейшего живого assistant (total > 0, без error)."""
+    """input + cache.read of the newest live assistant (total > 0, no error)."""
     for (raw,) in msgs:
         try:
             m = json.loads(raw)
@@ -188,7 +188,7 @@ def _live_context(msgs: list[sqlite3.Row]) -> int:
             continue
         total_raw = toks.get("total")
         if total_raw is not None:
-            # Новый формат: требуем total > 0.
+            # New format: require total > 0.
             try:
                 if int(total_raw or 0) <= 0:
                     continue
@@ -202,14 +202,14 @@ def _live_context(msgs: list[sqlite3.Row]) -> int:
         except (TypeError, ValueError):
             continue
         if total_raw is None and contrib <= 0:
-            # Старый формат без total: нулевой вклад — оборванный повтор.
+            # Old format without total: zero contribution — a truncated retry.
             continue
         return contrib
     return 0
 
 
 def session_usage(session_id: str, db_path: str | Path | None = None) -> Usage | None:
-    """Учёт сессии из агрегатов строки session + контекст из сообщений."""
+    """Session usage from session-row aggregates + context from messages."""
     if not session_id:
         return None
     path = _resolve(db_path)
@@ -254,7 +254,7 @@ def session_usage(session_id: str, db_path: str | Path | None = None) -> Usage |
 def sessions_usage(
     session_ids: list[str], db_path: str | Path | None = None,
 ) -> dict[str, Usage]:
-    """Учёт пачкой (IN по 500 id), без контекста; чужих id нет в словаре."""
+    """Batch usage (IN of 500 ids), no context; unknown ids are absent from the dict."""
     want = [str(x) for x in session_ids if str(x)]
     if not want:
         return {}
@@ -300,7 +300,7 @@ def sessions_usage(
 
 
 def session_state(session_id: str, db_path: str | Path | None = None) -> SessionState | None:
-    """Пульс, активный инструмент, finished и учёт сессии."""
+    """Pulse, active tool, finished flag, and session usage."""
     if not session_id:
         return None
     path = _resolve(db_path)
@@ -327,7 +327,7 @@ def session_state(session_id: str, db_path: str | Path | None = None) -> Session
         if srow is None:
             return None
         try:
-            # Пульс — максимум по всем таблицам этой сессии.
+            # Pulse — max across all tables of this session.
             last = _to_int(srow["time_updated"]) or _to_int(srow["time_created"])
             for table in ("message", "part", "todo"):
                 r = con.execute(
@@ -349,7 +349,7 @@ def session_state(session_id: str, db_path: str | Path | None = None) -> Session
         except sqlite3.Error as e:
             _warn("opencode.db %s: read details: %s", path, e)
             return None
-        # Активный инструмент — свежайший tool со статусом running.
+        # Active tool — the newest tool with running status.
         active_tool = ""
         tool_started: int | None = None
         for prow in parts:
@@ -372,7 +372,7 @@ def session_state(session_id: str, db_path: str | Path | None = None) -> Session
             except (TypeError, ValueError):
                 tool_started = _to_int(prow["time_created"])
             break
-        # Finished — у последнего assistant есть time.completed и finish.
+        # Finished — the last assistant has time.completed and finish.
         finished = False
         for (raw,) in msgs:
             try:
@@ -402,7 +402,7 @@ def session_state(session_id: str, db_path: str | Path | None = None) -> Session
 def find_session(
     directory: str, started_after_ms: int, db_path: str | Path | None = None,
 ) -> str | None:
-    """Новейшая сессия без parent_id в каталоге не старше окна (допуск 5 с)."""
+    """Newest session without parent_id in the directory within the window (5 s tolerance)."""
     path = _resolve(db_path)
     con: sqlite3.Connection | None = None
     try:
@@ -435,7 +435,7 @@ def find_session(
 def totals(
     since_ms: int, db_path: str | Path | None = None, until_ms: int | None = None,
 ) -> Usage:
-    """Суммы по сессиям с time_updated в [since, until): go/usd раздельно."""
+    """Totals over sessions with time_updated in [since, until): go/usd separately."""
     zeros = Usage(tokens_in=0, tokens_out=0, tokens_reasoning=0,
                   cache_read=0, cache_write=0, cost_go=0.0, cost_usd=0.0)
     path = _resolve(db_path)

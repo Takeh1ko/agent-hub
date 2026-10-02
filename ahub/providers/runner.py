@@ -1,18 +1,19 @@
-"""Общий запуск сессии поставщика: процесс, поток активности, сторож тишины, таймаут, остановка, лог.
+"""Shared provider session run: process, activity stream, silence watchdog, timeout, stop, log.
 
-Одинаково для всех поставщиков — модуль поставщика только собирает команду и разбирает строки.
+Same for all providers — the provider module only builds the command and parses lines.
 
-- Процесс стартует в своей группе (start_new_session): остановка убивает и его детей (тесты, замки).
-- stdout процесса пишется прямо в файл лога (не в пайп: opencode теряет хвост вывода в пайп при выходе —
-  проверено 2026-09-30), поток читает файл следом; каждая строка разбирается поставщиком в Activity →
-  on_activity; первый id сессии → on_session (вызывающий линкует его в базу сразу). stderr — в `<лог>.stderr`.
-- Сторож тишины: нет строк вывода idle_s секунд и нет дочерних процессов → прервать, Outcome.SILENCE.
-  Есть дети (тесты, ожидание замка) — молчание объяснено, ждём дальше.
-- should_stop() — ядро просит остановиться (бюджет, команда): прервать, Outcome.KILLED.
-- Если до тишины/таймаута/остановки в потоке был сбой сети — итог TRANSIENT (повтор уместнее).
-- После любого завершения хода (и штатного) остатки агента добиваются: вся его группа процессов и потомки,
-  замеченные во время хода и ушедшие из группы (setsid). Иначе брошенные фоновые процессы живут вечно
-  (случай 30.09: 12 × `yes` от агента задачи T28 сутки грузили все ядра).
+- The process starts in its own group (start_new_session): stopping kills it and its children (tests, locks).
+- Process stdout goes straight to the log file (not a pipe: opencode drops the tail output to a pipe on exit —
+  verified 2026-09-30), the stream tails the file; each line is parsed by the provider into Activity →
+  on_activity; the first session id → on_session (the caller links it into the DB immediately).
+  stderr goes to `<log>.stderr`.
+- Silence watchdog: no output lines for idle_s seconds and no child processes → interrupt, Outcome.SILENCE.
+  Children around (tests, lock wait) — silence is explained, keep waiting.
+- should_stop() — the core asks to stop (budget, command): interrupt, Outcome.KILLED.
+- A network failure seen in the stream before silence/timeout/stop → TRANSIENT (retry fits better).
+- After any turn end (including clean ones) leftover agent processes are reaped: the whole process group plus
+  descendants seen during the turn that escaped the group (setsid). Otherwise abandoned background processes
+  live forever (09-30 case: 12 × `yes` from the T28 task agent loaded all cores for a day).
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from ahub.time import now_ms
 
 POLL_S = 0.2
 TAIL_POLL_S = 0.05
-MAX_LINE = 1_000_000  # байт на строку вывода; длиннее — обрезается
+MAX_LINE = 1_000_000  # bytes per output line; longer lines are cut
 KILL_GRACE_S = 5.0
 _log = hublog.get("runner")
 
@@ -59,7 +60,7 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 
 def merge_usage(a: Usage | None, b: Usage | None) -> Usage | None:
-    """Учёт из данных поставщика и из потока: по каждому полю — большее (данные поставщика могут запаздывать)."""
+    """Usage from provider data and from the stream: per-field max (provider data may lag)."""
     if a is None or b is None:
         return a if b is None else b
 
@@ -72,7 +73,7 @@ def merge_usage(a: Usage | None, b: Usage | None) -> Usage | None:
 
 
 def reap(pgid: int | None, tracked: dict[int, int | None]) -> list[int]:
-    """Добить группу процессов агента и замеченных потомков (сверка времени старта). Возвращает добитые pid."""
+    """Kill the agent process group and tracked descendants (start-time check). Returns killed pids."""
     killed: list[int] = []
     if pgid is not None:
         try:
@@ -103,7 +104,7 @@ def reap(pgid: int | None, tracked: dict[int, int | None]) -> list[int]:
     return killed
 
 
-TRACK_S = 2.0  # как часто запоминать потомков агента
+TRACK_S = 2.0  # how often to snapshot agent descendants
 
 
 def run(provider: Provider, spec: RunSpec, *,
@@ -117,7 +118,7 @@ def run(provider: Provider, spec: RunSpec, *,
     cmd = provider.build_command(spec)
     from ahub.prepare import scrub_env
 
-    env = scrub_env(dict(os.environ))  # работнику — без токенов/паролей хаба (ключи моделей остаются)
+    env = scrub_env(dict(os.environ))  # worker gets no hub tokens/passwords (model keys stay)
     env.update(provider.env(spec))
     ctx = {"provider": provider.name, "model": spec.model_id, "cwd": spec.cwd}
 
@@ -134,12 +135,12 @@ def run(provider: Provider, spec: RunSpec, *,
         _log.error("failed to start: %s", e, extra=ctx)
         return RunResult(Outcome.NOT_STARTED, spec.session_id, error=clip(f"{cmd[0]}: {e}"),
                          started_ms=started, ended_ms=now_ms(), log_path=log_path)
-    out_f.close()  # дескрипторы унаследовал процесс
+    out_f.close()  # the process inherited the descriptors
     err_f.close()
     if on_start is not None:
         try:
             on_start(proc.pid)
-        except Exception:  # колбэк не должен ронять шаг
+        except Exception:  # a callback must not fail the step
             _log.exception("on_start failed", extra=ctx)
 
     activities: list[Activity] = []
@@ -173,13 +174,13 @@ def run(provider: Provider, spec: RunSpec, *,
         except Exception:
             _log.exception("parse_line failed", extra=ctx)
             acts = []
-        if acts:  # сторож тишины сбрасывается только распознанной активностью, не любым мусором
+        if acts:  # the silence watchdog resets only on recognized activity, not any noise
             last_line[0] = time.monotonic()
         for a in acts:
             _emit(a)
 
     def _tail() -> None:
-        """Читать лог следом за процессом; после выхода — дочитать остаток."""
+        """Tail the log behind the process; after exit — read the remainder."""
         buf = b""
         with open(log_path, "rb") as f:
             f.seek(start_off)
@@ -188,7 +189,7 @@ def run(provider: Provider, spec: RunSpec, *,
                 if chunk:
                     buf += chunk
                     if len(buf) > MAX_LINE * 4 and b"\n" not in buf:
-                        buf = buf[:MAX_LINE]  # строка без конца — не копить без предела
+                        buf = buf[:MAX_LINE]  # unterminated line — don't buffer unboundedly
                     *lines, buf = buf.split(b"\n")
                     for ln in lines:
                         _handle(ln)
@@ -212,7 +213,7 @@ def run(provider: Provider, spec: RunSpec, *,
     forced: Outcome | None = None
     silence_s = 0
     deadline = time.monotonic() + max(1, int(spec.timeout_s))
-    tracked: dict[int, int | None] = {}  # потомки агента (pid → время старта) — добить после хода
+    tracked: dict[int, int | None] = {}  # agent descendants (pid → start time) — reap after the turn
     last_track = 0.0
     try:
         while True:
@@ -242,7 +243,7 @@ def run(provider: Provider, spec: RunSpec, *,
                 _kill_group(proc)
                 break
             if spec.idle_s and procs.has_children(proc.pid):
-                last_line[0] = now  # дети (тесты, замок) — молчание объяснено; отсчёт тишины — с их ухода
+                last_line[0] = now  # children (tests, lock) — silence is explained; silence counts from when they leave
             elif spec.idle_s and now - last_line[0] >= spec.idle_s:
                 silence_s = int(now - last_line[0])
                 forced = Outcome.SILENCE
@@ -252,7 +253,7 @@ def run(provider: Provider, spec: RunSpec, *,
         exited.set()
         t_out.join(timeout=30)
         try:
-            left = reap(proc.pid, tracked)  # pgid = pid лидера (start_new_session)
+            left = reap(proc.pid, tracked)  # pgid = leader pid (start_new_session)
             if left:
                 _log.warning("reaped stray agent processes: %s", left[:10], extra=ctx)
         except Exception:

@@ -1,7 +1,7 @@
-"""Фейковый поставщик: полный контракт поверх fake_agent (настоящий подпроцесс, без сети).
+"""Fake provider: full contract over fake_agent (a real subprocess, no network).
 
-Промпт — это JSON-сценарий fake_agent (или путь к файлу сценария). Учёт — из событий usage потока,
-журнал и состояние сессии — из записанного лога. Используется в тестах раннера, движка и ворот.
+The prompt is a fake_agent JSON scenario (or a path to a scenario file). Usage comes from stream
+usage events, the session log and state — from the recorded log. Used in runner, engine, and gate tests.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class FakeProvider(Provider):
         src = spec.prompt.strip()
         queue = os.environ.get("AHUB_FAKE_QUEUE")
         if not src.startswith("{") and queue:
-            # Сквозные тесты между процессами: следующий сценарий из каталога-очереди (имя по порядку).
+            # Cross-process e2e tests: next scenario from the queue dir (in order).
             files = sorted(Path(queue).glob("*.json"))
             if files:
                 src = files[0].read_text(encoding="utf-8")
@@ -97,7 +97,7 @@ class FakeProvider(Provider):
         return data if isinstance(data, dict) else None
 
     def find_session(self, cwd: str, started_after_ms: int) -> str | None:
-        return None  # в сценарии hide_session — id не узнать (проверка честной деградации)
+        return None  # with hide_session in the scenario — the id stays unknown (honest degradation check)
 
     def export(self, session_id: str) -> dict | None:
         return {"session": session_id, "note": "fake"}

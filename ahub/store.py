@@ -1,10 +1,10 @@
-"""Хранилище хаба: SQLite (WAL), короткие соединения, миграции по PRAGMA user_version.
+"""Hub storage: SQLite (WAL), short connections, migrations via PRAGMA user_version.
 
-Правила:
-- Каждый метод открывает и закрывает своё соединение (процессы задач, сервис и клиенты пишут одновременно).
-- Запись — в транзакции BEGIN IMMEDIATE (`tx()`), чтобы проверка и изменение были атомарны.
-- Состояние задачи здесь НЕ меняется напрямую — только через ahub.transitions (V02b), с журналом.
-- Время приходит параметром `now` (мс) там, где важно для тестов; иначе — ahub.time.now_ms().
+Rules:
+- Each method opens and closes its own connection (task processes, service, and clients write concurrently).
+- Writes go in a BEGIN IMMEDIATE transaction (`tx()`), so check-and-change stays atomic.
+- Task state never changes here directly — only via ahub.transitions (V02b), with a log entry.
+- Time comes in as a `now` parameter (ms) where tests care; otherwise — ahub.time.now_ms().
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class Task:
     owner_pid: int | None = None
     lease_until: int | None = None
     version: int = 0
-    request: str = ""  # просьба владельцу: '' | stop
+    request: str = ""  # owner request: '' | stop
     after: list[int] = field(default_factory=list)
 
     @property
@@ -86,7 +86,7 @@ class Task:
         return cls(**d)
 
 
-# Поля задачи, которые можно менять обычным обновлением (не состояние и не владение).
+# Task fields allowed in a plain update (not state, not ownership).
 _TASK_PLAIN_FIELDS = frozenset({
     "title", "spec", "spec_hash", "result_format", "executor", "budget_go", "budget_usd", "phase",
     "round", "branch", "worktree", "base_sha", "accepted_sha", "state_reason",
@@ -151,7 +151,7 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
 
-    # --- соединения ---
+    # --- connections ---
 
     def _open(self) -> sqlite3.Connection:
         con = sqlite3.connect(str(self.path), timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None)
@@ -170,7 +170,7 @@ class Store:
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
-        """Транзакция записи: BEGIN IMMEDIATE … COMMIT, при исключении — ROLLBACK."""
+        """Write transaction: BEGIN IMMEDIATE … COMMIT, ROLLBACK on exception."""
         con = self._open()
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -226,7 +226,7 @@ class Store:
         with self.tx() as con:
             con.execute("DELETE FROM meta WHERE key=?", (key,))
 
-    # --- задачи ---
+    # --- tasks ---
 
     def create_task(self, *, project: str, kind: Kind | str, title: str, spec: str = "",
                     spec_hash: str = "", result_format: str = "", executor: str = "",
@@ -235,7 +235,7 @@ class Store:
                     state: State | str = State.QUEUED, created_by: str = "",
                     after: list[int] | None = None, now: int | None = None,
                     con: sqlite3.Connection | None = None) -> int:
-        """Создать задачу + событие created (в одной транзакции). Возвращает id."""
+        """Create a task + created event (in one transaction). Returns the id."""
         ts = now if now is not None else now_ms()
         kind = Kind(kind)
         state = State(state)
@@ -309,7 +309,7 @@ class Store:
 
     def update_task(self, task_id: int, *, now: int | None = None,
                     con: sqlite3.Connection | None = None, **fields: Any) -> None:
-        """Обычные поля задачи (не состояние, не владение). Неизвестное поле — ошибка."""
+        """Plain task fields (not state, not ownership). Unknown field — error."""
         bad = set(fields) - _TASK_PLAIN_FIELDS - set(_TASK_JSON_FIELDS)
         if bad:
             raise ValueError(f"cannot change fields update_task: {sorted(bad)}")
@@ -338,12 +338,12 @@ class Store:
             return [r[0] for r in c.execute(
                 "SELECT task_id FROM task_dep WHERE after_id=? ORDER BY task_id", (int(task_id),))]
 
-    # --- события ---
+    # --- events ---
 
     def add_event(self, kind: Ev | str, *, task_id: int | None = None, project: str = "",
                   payload: dict | None = None, critical: bool = False, now: int | None = None,
                   con: sqlite3.Connection | None = None) -> int:
-        """Событие журнала. needs_reaction — по виду (model.NEEDS_REACTION)."""
+        """Log event. needs_reaction — by kind (model.NEEDS_REACTION)."""
         k = Ev(kind)
         row = (now if now is not None else now_ms(), task_id, project, k.value, _dumps(payload or {}),
                1 if k in NEEDS_REACTION else 0, 1 if critical else 0)
@@ -379,7 +379,7 @@ class Store:
             row = c.execute("SELECT MAX(id) FROM event").fetchone()
         return int(row[0] or 0)
 
-    # --- сессии ---
+    # --- sessions ---
 
     def add_session(self, *, task_id: int | None, provider: str, role: str, model: str = "",
                     round: int = 0, pid: int | None = None, external_id: str = "",
@@ -431,7 +431,7 @@ class Store:
 
 
 def _split_sql(script: str) -> list[str]:
-    """Разбить миграцию на операторы (без триггеров с ; внутри — их в схеме нет)."""
+    """Split a migration into statements (no triggers with inner ; — the schema has none)."""
     out, buf = [], []
     for line in script.splitlines():
         stripped = line.split("--", 1)[0]

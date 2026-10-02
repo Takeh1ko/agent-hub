@@ -1,7 +1,7 @@
-"""Модель задачи: типы, состояния, допустимые переходы, виды событий, роли.
+"""Task model: kinds, states, allowed transitions, event kinds, roles.
 
-Единственный источник этих имён для всех частей хаба (хранилище, движок, ручки, экраны).
-Слова для человека — в ahub/human.py (позже), здесь только машинные имена и смысл.
+Single source of these names for all hub parts (store, engine, handles, screens).
+Human words live in ahub/human.py (later); only machine names and meaning here.
 """
 
 from __future__ import annotations
@@ -10,40 +10,40 @@ from enum import StrEnum
 
 
 class Kind(StrEnum):
-    SCOUT = "scout"  # разведка: читает, пишет отчёт, файлы не меняет
-    CODE = "code"  # код: своя копия и ветка, строгие ворота, слияние
-    REVIEW = "review"  # ревью явно указанного входа: замечания
-    ROUTINE = "routine"  # рутина: изменения файлов с облегчёнными воротами, слияние
+    SCOUT = "scout"  # scout: reads, writes a report, never changes files
+    CODE = "code"  # code: own copy and branch, strict gates, merge
+    REVIEW = "review"  # review of the given input: findings
+    ROUTINE = "routine"  # routine: file changes with light gates, merge
 
 
 CHANGES_FILES = frozenset({Kind.CODE, Kind.ROUTINE})
 
 
 class State(StrEnum):
-    DRAFT = "draft"  # черновик: ждёт явного «Запустить»
-    QUEUED = "queued"  # ждёт места/ресурса/зависимости
-    PREPARING = "preparing"  # копия проекта, ветка, окружение
-    WORKING = "working"  # работник делает задачу (фаза уточняет: изучает/пишет)
-    CHECKING = "checking"  # ворота
-    REVIEWING = "reviewing"  # панель ревью
-    FIXING = "fixing"  # доработка по замечаниям (та же сессия исполнителя)
-    DONE = "done"  # готово — ждёт решения оркестратора/человека
-    NEEDS_DECISION = "needs_decision"  # круги кончились, бюджет, спорное — нужно решение
-    ERROR = "error"  # сбой, который хаб сам не исправит
-    STOPPED = "stopped"  # остановлена командой
-    ACCEPTING = "accepting"  # идёт принятие (слияние + повтор приёмки)
-    ACCEPTED = "accepted"  # принята: слита / отчёт принят
-    REJECTED = "rejected"  # отклонена / отменена
+    DRAFT = "draft"  # draft: waits for an explicit "Start"
+    QUEUED = "queued"  # waits for room/resource/dependency
+    PREPARING = "preparing"  # project copy, branch, environment
+    WORKING = "working"  # worker does the task (phase says: studying/writing)
+    CHECKING = "checking"  # gates
+    REVIEWING = "reviewing"  # review panel
+    FIXING = "fixing"  # rework on findings (same executor session)
+    DONE = "done"  # done — waits for the orchestrator/human decision
+    NEEDS_DECISION = "needs_decision"  # rounds over, budget, disputed — needs a decision
+    ERROR = "error"  # failure the hub can't fix itself
+    STOPPED = "stopped"  # stopped by command
+    ACCEPTING = "accepting"  # accepting in progress (merge + acceptance rerun)
+    ACCEPTED = "accepted"  # accepted: merged / report accepted
+    REJECTED = "rejected"  # rejected / cancelled
 
 
-# Задача в работе у процесса задачи (у неё есть владелец и пульс).
+# Task owned by a task process (has an owner and a pulse).
 ACTIVE = frozenset({State.PREPARING, State.WORKING, State.CHECKING, State.REVIEWING, State.FIXING,
                     State.ACCEPTING})
-# Ждёт человека/оркестратора; можно продолжить или решить.
+# Waits for a human/orchestrator; can be resumed or decided.
 WAITING_DECISION = frozenset({State.DONE, State.NEEDS_DECISION, State.ERROR, State.STOPPED})
 FINAL = frozenset({State.ACCEPTED, State.REJECTED})
 
-_ORPHAN = State.QUEUED  # возврат сироты в очередь (из любого активного, кроме принятия)
+_ORPHAN = State.QUEUED  # orphan back to queue (from any active state except accepting)
 
 TRANSITIONS: dict[State, frozenset[State]] = {
     State.DRAFT: frozenset({State.QUEUED, State.REJECTED}),
@@ -73,13 +73,13 @@ def can_move(src: State | str, dst: State | str) -> bool:
 
 
 class Phase(StrEnum):
-    """Что видно в активной задаче (по активности работника и этапу движка)."""
+    """What an active task shows (from worker activity and engine stage)."""
 
     NONE = ""
-    STUDYING = "studying"  # читает, ищет
-    WRITING = "writing"  # пишет код/отчёт
-    TESTING = "testing"  # тесты
-    WAITING = "waiting"  # ждёт по делу: замок, ресурс, окно квоты, пауза перед повтором
+    STUDYING = "studying"  # reads, searches
+    WRITING = "writing"  # writes code/report
+    TESTING = "testing"  # tests
+    WAITING = "waiting"  # waits for cause: lock, resource, quota window, pause before retry
 
 
 class Role(StrEnum):
@@ -88,7 +88,7 @@ class Role(StrEnum):
     SCOUT = "scout"
     ROUTINE = "routine"
     OBSERVER = "observer"
-    DRAFTER = "drafter"  # пишет черновик задачи из текста человека
+    DRAFTER = "drafter"  # drafts a task from human text
 
 
 ROLE_FOR_KIND: dict[Kind, Role] = {
@@ -100,33 +100,33 @@ ROLE_FOR_KIND: dict[Kind, Role] = {
 
 
 class Ev(StrEnum):
-    """Виды событий журнала. Требующие реакции оркестратора — в NEEDS_REACTION."""
+    """Log event kinds. The ones needing an orchestrator live in NEEDS_REACTION."""
 
     CREATED = "created"
-    STATE = "state"  # смена состояния: payload {from, to, reason}
+    STATE = "state"  # state change: payload {from, to, reason}
     PHASE = "phase"
-    SESSION = "session"  # сессия работника начата/продолжена: {role, model, session_id}
-    RETRY = "retry"  # повтор после сбоя поставщика: {reason, attempt, pause_s}
-    SILENCE = "silence"  # работник молчал: {secs, action}
-    BUDGET_SOFT = "budget_soft"  # 80 %: в журнал, не будит
+    SESSION = "session"  # worker session started/resumed: {role, model, session_id}
+    RETRY = "retry"  # retry after a provider failure: {reason, attempt, pause_s}
+    SILENCE = "silence"  # worker stayed silent: {secs, action}
+    BUDGET_SOFT = "budget_soft"  # 80 %: to the log, doesn't wake
     BUDGET_HARD = "budget_hard"
-    ORPHAN = "orphan"  # задача без процесса возвращена в очередь
-    ORCH_EDIT = "orch_edit"  # правка оркестратора поверх результата
-    PATHS_EXTENDED = "paths_extended"  # оркестратор расширил разрешённые файлы
+    ORPHAN = "orphan"  # task without a process returned to queue
+    ORCH_EDIT = "orch_edit"  # orchestrator edit over the result
+    PATHS_EXTENDED = "paths_extended"  # orchestrator widened the allowed files
     MODEL_CHANGED = "model_changed"
     BUDGET_EXTENDED = "budget_extended"
-    # требуют реакции оркестратора:
+    # need an orchestrator reaction:
     DONE = "done"
     NEEDS_DECISION = "needs_decision"
     ERROR = "error"
-    OWNER_MESSAGE = "owner_message"  # человек написал (TG)
-    ANSWER = "answer"  # человек ответил на вопрос
-    ALARM = "alarm"  # тревога наблюдателя
+    OWNER_MESSAGE = "owner_message"  # human wrote (TG)
+    ANSWER = "answer"  # human answered a question
+    ALARM = "alarm"  # observer alarm
 
 
 NEEDS_REACTION = frozenset({Ev.DONE, Ev.NEEDS_DECISION, Ev.ERROR, Ev.OWNER_MESSAGE, Ev.ANSWER, Ev.ALARM})
 
-# Событие, которое хаб пишет при переходе в состояние (кроме общего STATE).
+# Event the hub writes on entering a state (besides the generic STATE).
 STATE_EVENT: dict[State, Ev] = {
     State.DONE: Ev.DONE,
     State.NEEDS_DECISION: Ev.NEEDS_DECISION,
@@ -135,12 +135,12 @@ STATE_EVENT: dict[State, Ev] = {
 
 
 def task_label(task_id: int) -> str:
-    """Короткое имя задачи для людей и оркестратора: T12."""
+    """Short task name for humans and the orchestrator: T12."""
     return f"T{task_id}"
 
 
 def parse_task_id(text: str | int) -> int:
-    """«T12», «t12», «12», 12 → 12."""
+    """"T12", "t12", "12", 12 → 12."""
     if isinstance(text, int):
         return text
     s = str(text).strip()

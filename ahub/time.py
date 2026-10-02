@@ -1,4 +1,4 @@
-"""Время: хранение — UTC ms, экран — системный локальный пояс (перекрытие AHUB_TZ)."""
+"""Time: storage — UTC ms, display — system local zone (AHUB_TZ override)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from ahub.i18n import t
 
 
 def local_tz() -> ZoneInfo | None:
-    """Пояс экрана: ZoneInfo(AHUB_TZ) или None (системный). Неверное имя — None."""
+    """Display zone: ZoneInfo(AHUB_TZ) or None (system). Bad name — None."""
     name = os.environ.get("AHUB_TZ", "").strip()
     if not name:
         return None
@@ -23,26 +23,26 @@ def local_tz() -> ZoneInfo | None:
 
 
 def now_ms() -> int:
-    """Сейчас, мс UTC."""
+    """Now, ms UTC."""
     return int(time.time() * 1000)
 
 
 def to_local(ms: int) -> datetime:
-    """Мс UTC → локальное время (AHUB_TZ или системный, по правилам даты)."""
+    """Ms UTC → local time (AHUB_TZ or system, date rules apply)."""
     dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
     tz = local_tz()
     return dt.astimezone(tz) if tz is not None else dt.astimezone()
 
 
 def _local_dt(y: int, mo: int, d: int, hh: int = 0, mm: int = 0, tz: ZoneInfo | None = None) -> datetime:
-    """Локальная стена → aware (AHUB_TZ или системный, по правилам даты)."""
+    """Local wall time → aware (AHUB_TZ or system, date rules apply)."""
     if tz is not None:
         return datetime(y, mo, d, hh, mm, tzinfo=tz)
     return datetime(y, mo, d, hh, mm).astimezone()
 
 
 def fmt_local(ms: int, now: int | None = None) -> str:
-    """«23:41» если сегодня, иначе «28.09 23:41» (локальная зона)."""
+    """"23:41" if today, else "28.09 23:41" (local zone)."""
     dt = to_local(ms)
     cur = to_local(now if now is not None else now_ms())
     if dt.date() == cur.date():
@@ -63,7 +63,7 @@ def _unit_ms(unit: str | None) -> int | None:
     if u.startswith("ч") or u.startswith("h"):
         return 3_600_000
     if u.startswith("м") or u.startswith("m"):
-        # «мин»/«м» — минуты (миллисекунды в parse_since не используются)
+        # "min"/"m" — minutes (parse_since never uses milliseconds)
         return 60_000
     if u.startswith("д") or u.startswith("d"):
         return 86_400_000
@@ -75,11 +75,11 @@ def _unit_ms(unit: str | None) -> int | None:
 
 
 def parse_since(text: str, now: int) -> int:
-    """Строка → мс UTC. Пояс экрана (AHUB_TZ или системный).
+    """String → ms UTC. Display zone (AHUB_TZ or system).
 
-    Понимает «2026-09-28 20:00» (локальное), «сегодня/today 20:00», «вчера/yesterday»,
-    «2ч/2h», «30м/30m», «1д/1d» — оба языка всегда, независимо от языка вывода.
-    Возвращает мс для сравнения с now_ms().
+    Understands "2026-09-28 20:00" (local), "today 20:00", "yesterday",
+    "2h", "30m", "1d" — both languages always, regardless of output language.
+    Returns ms for comparison with now_ms().
     """
     tz = local_tz()
     s = text.strip()
@@ -113,7 +113,7 @@ _DUR = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-zа-яё]*)\s*$", re.IGNORECASE)
 
 
 def parse_duration(text: str) -> float:
-    """«90», «30s», «30m», «4h», «1д/1d», «2ч», «15м» → секунды. Оба языка всегда."""
+    """"90", "30s", "30m", "4h", "1d" and RU equivalents → seconds. Both languages always."""
     m = _DUR.match(str(text))
     if not m:
         raise ValueError(t("time.bad_duration", text=text))

@@ -1,22 +1,22 @@
--- agent-hub v2: начальная схема. Время — мс UTC. JSON — TEXT.
+-- agent-hub v2: initial schema. Time — ms UTC. JSON — TEXT.
 
 CREATE TABLE meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
 
--- Задача. id — число, для людей «T<id>».
+-- Task. id — number, for humans "T<id>".
 CREATE TABLE task (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project TEXT NOT NULL,
   kind TEXT NOT NULL,                       -- model.Kind
-  title TEXT NOT NULL,                      -- цель, одна фраза
-  spec TEXT NOT NULL DEFAULT '',            -- описание
-  spec_hash TEXT NOT NULL DEFAULT '',       -- отпечаток постановки (смена → новая сессия при продолжении)
-  result_format TEXT NOT NULL DEFAULT '',   -- ожидаемая форма результата
-  executor TEXT NOT NULL DEFAULT '',        -- модель (короткое имя)
-  review_json TEXT NOT NULL DEFAULT '{}',   -- {models: [..], rounds: N} или {} — без ревью
-  limits_json TEXT NOT NULL DEFAULT '{}',   -- разрешённые файлы, приёмка, время, ресурсы, вход ревью…
+  title TEXT NOT NULL,                      -- goal, one phrase
+  spec TEXT NOT NULL DEFAULT '',            -- description
+  spec_hash TEXT NOT NULL DEFAULT '',       -- statement fingerprint (change → new session on resume)
+  result_format TEXT NOT NULL DEFAULT '',   -- expected result shape
+  executor TEXT NOT NULL DEFAULT '',        -- model (short name)
+  review_json TEXT NOT NULL DEFAULT '{}',   -- {models: [..], rounds: N} or {} — no review
+  limits_json TEXT NOT NULL DEFAULT '{}',   -- allowed files, acceptance, time, resources, review input…
   budget_go REAL NOT NULL DEFAULT 0,
   budget_usd REAL NOT NULL DEFAULT 0,
   state TEXT NOT NULL DEFAULT 'queued',     -- model.State
@@ -31,34 +31,34 @@ CREATE TABLE task (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   finished_at INTEGER,
-  -- владение задачей (V02b): у активной задачи один владелец с арендой
-  owner TEXT NOT NULL DEFAULT '',           -- токен владельца
+  -- task ownership (V02b): an active task has one owner with a lease
+  owner TEXT NOT NULL DEFAULT '',           -- owner token
   owner_pid INTEGER,
   lease_until INTEGER,
-  version INTEGER NOT NULL DEFAULT 0        -- оптимистичная блокировка переходов
+  version INTEGER NOT NULL DEFAULT 0        -- optimistic transition lock
 );
 CREATE INDEX idx_task_state ON task(state, project);
 CREATE INDEX idx_task_project ON task(project, id);
 
--- «после X»: задача ждёт, пока X не станет accepted.
+-- "after X": task waits until X becomes accepted.
 CREATE TABLE task_dep (
   task_id INTEGER NOT NULL REFERENCES task(id) ON DELETE CASCADE,
   after_id INTEGER NOT NULL REFERENCES task(id),
   PRIMARY KEY (task_id, after_id)
 );
 
--- Сессия работника у поставщика.
+-- Worker session at the provider.
 CREATE TABLE session (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id INTEGER REFERENCES task(id) ON DELETE CASCADE,
   provider TEXT NOT NULL,                   -- opencode | agy | …
-  external_id TEXT NOT NULL DEFAULT '',     -- id сессии у поставщика (может появиться позже старта)
+  external_id TEXT NOT NULL DEFAULT '',     -- provider-side session id (may appear after start)
   role TEXT NOT NULL,                       -- model.Role
   round INTEGER NOT NULL DEFAULT 0,
-  model TEXT NOT NULL DEFAULT '',           -- короткое имя модели
+  model TEXT NOT NULL DEFAULT '',           -- model short name
   pid INTEGER,
   status TEXT NOT NULL DEFAULT 'running',   -- running | ok | failed | killed
-  outcome TEXT NOT NULL DEFAULT '',         -- классификация итога поставщиком
+  outcome TEXT NOT NULL DEFAULT '',         -- provider outcome classification
   started_at INTEGER NOT NULL,
   ended_at INTEGER,
   cost_go REAL NOT NULL DEFAULT 0,
@@ -70,7 +70,7 @@ CREATE TABLE session (
 CREATE INDEX idx_session_task ON session(task_id, id);
 CREATE UNIQUE INDEX idx_session_ext ON session(provider, external_id) WHERE external_id != '';
 
--- Журнал событий. needs_reaction — будит оркестратора; delivered/acked — доставка без потерь.
+-- Event log. needs_reaction — wakes the orchestrator; delivered/acked — lossless delivery.
 CREATE TABLE event (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
@@ -80,14 +80,14 @@ CREATE TABLE event (
   payload_json TEXT NOT NULL DEFAULT '{}',
   needs_reaction INTEGER NOT NULL DEFAULT 0,
   critical INTEGER NOT NULL DEFAULT 0,
-  delivered_at INTEGER,                     -- отдано в поток/wait
-  acked_at INTEGER,                         -- оркестратор подтвердил
-  tg_sent_at INTEGER                        -- отправлено человеку в TG (тревоги)
+  delivered_at INTEGER,                     -- handed to stream/wait
+  acked_at INTEGER,                         -- orchestrator confirmed
+  tg_sent_at INTEGER                        -- sent to the human in TG (alarms)
 );
 CREATE INDEX idx_event_task ON event(task_id, id);
 CREATE INDEX idx_event_unacked ON event(needs_reaction, acked_at, id);
 
--- Вопрос человеку (от оркестратора или хаба) с вариантами.
+-- Question to the human (from the orchestrator or the hub) with options.
 CREATE TABLE question (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
@@ -102,7 +102,7 @@ CREATE TABLE question (
   tg_sent_at INTEGER
 );
 
--- Сообщения человек ↔ Claude (TG). direction: in — от человека, out — от Claude.
+-- Human ↔ Claude messages (TG). direction: in — from human, out — from Claude.
 CREATE TABLE message (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
@@ -110,23 +110,23 @@ CREATE TABLE message (
   text TEXT NOT NULL,
   project TEXT NOT NULL DEFAULT '',
   chat_id INTEGER,
-  delivered_at INTEGER                      -- in: отдано Claude; out: отправлено в TG
+  delivered_at INTEGER                      -- in: handed to Claude; out: sent to TG
 );
 
--- Черновик задачи: текст человека → модель дописывает → предпросмотр → запуск.
+-- Task draft: human text → model completes → preview → start.
 CREATE TABLE draft (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
   project TEXT NOT NULL,
   text TEXT NOT NULL,
-  task_json TEXT NOT NULL DEFAULT '{}',     -- предложенные поля задачи
+  task_json TEXT NOT NULL DEFAULT '{}',     -- proposed task fields
   errors TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'drafting',  -- drafting | ready | failed | started | cancelled
   source TEXT NOT NULL DEFAULT '',          -- top | cli | orchestrator
   task_id INTEGER
 );
 
--- Модели хаба: короткое имя → поставщик + модель + вариант.
+-- Hub models: short name → provider + model + variant.
 CREATE TABLE model (
   alias TEXT PRIMARY KEY,
   provider TEXT NOT NULL,
@@ -136,7 +136,7 @@ CREATE TABLE model (
   note TEXT NOT NULL DEFAULT ''
 );
 
--- Меню ролей: какие модели допустимы в роли, какая по умолчанию.
+-- Role menu: which models fit a role, which is default.
 CREATE TABLE role_model (
   role TEXT NOT NULL,
   alias TEXT NOT NULL REFERENCES model(alias) ON DELETE CASCADE,
@@ -145,16 +145,16 @@ CREATE TABLE role_model (
   PRIMARY KEY (role, alias)
 );
 
--- Присутствие оркестратора: свежая отметка ожидания/потока.
+-- Orchestrator presence: fresh wait/stream mark.
 CREATE TABLE presence (
-  who TEXT PRIMARY KEY,                     -- claude | <другой оркестратор>
+  who TEXT PRIMARY KEY,                     -- claude | <other orchestrator>
   project TEXT NOT NULL DEFAULT '',
   last_seen INTEGER NOT NULL,
   session_id TEXT NOT NULL DEFAULT '',
   via TEXT NOT NULL DEFAULT ''              -- wait | stream | launched
 );
 
--- Запуски Claude хабом (из TG, когда живого нет).
+-- Claude launches by the hub (from TG, when none is live).
 CREATE TABLE claude_launch (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
@@ -166,18 +166,18 @@ CREATE TABLE claude_launch (
   ended_at INTEGER
 );
 
--- Отчёты наблюдателя.
+-- Observer reports.
 CREATE TABLE observer_report (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
-  kind TEXT NOT NULL,                       -- quick (5 мин, код) | triage (модель по подозрению) | deep (30 мин)
+  kind TEXT NOT NULL,                       -- quick (5 min, code) | triage (model on suspicion) | deep (30 min)
   verdict TEXT NOT NULL,                    -- ok | false_alarm | alarm | critical
   summary TEXT NOT NULL DEFAULT '',
   details_json TEXT NOT NULL DEFAULT '{}',
   cost_go REAL NOT NULL DEFAULT 0
 );
 
--- Чаты TG, писавшие боту.
+-- TG chats that wrote to the bot.
 CREATE TABLE tg_chat (
   chat_id INTEGER PRIMARY KEY,
   first_ts INTEGER NOT NULL,
@@ -185,7 +185,7 @@ CREATE TABLE tg_chat (
   dead INTEGER NOT NULL DEFAULT 0
 );
 
--- Идемпотентность команд: повтор с тем же ключом возвращает прежний результат.
+-- Command idempotency: retry with the same key returns the previous result.
 CREATE TABLE op (
   key TEXT PRIMARY KEY,
   ts INTEGER NOT NULL,
