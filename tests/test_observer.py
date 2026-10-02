@@ -89,7 +89,7 @@ def test_triage_false_alarm_no_alarm(store):
     store.meta_set(observer.LAST_DEEP, str(now_ms()))
     assert observer.cycle(store, projects=[]) == "false_alarm"
     assert comms.alarms(store) == []
-    assert "Подозрения кода" in fake.calls[0]["prompt"] and f"T{tid}" in fake.calls[0]["prompt"]
+    assert "Code suspicions" in fake.calls[0]["prompt"] and f"T{tid}" in fake.calls[0]["prompt"]
     assert observer.reports(store, 1)[0]["cost_go"] == pytest.approx(0.002)
 
 
@@ -105,7 +105,7 @@ def test_triage_alarm(store):
 def test_deep_runs_even_when_clean(store):
     fake = _observer_fake(store, '{"verdict": "ok", "summary": "всё штатно"}')
     assert observer.cycle(store, projects=[]) == "ok"  # LAST_DEEP нет → плановая
-    assert "чек-лист" in fake.calls[0]["prompt"]
+    assert "checklist" in fake.calls[0]["prompt"]
     assert observer.reports(store, 1)[0]["kind"] == "deep"
 
 
@@ -181,7 +181,7 @@ def test_deep_prompt_has_window_and_ignores_old(store):
     _write_log(win + 60_000, "polling упал НОВАЯ-УНИКАЛЬНАЯ-67890", pid=os.getpid())
     assert observer.triage(store, [], deep=True, now=now)["verdict"] == "ok"
     prompt = fake.calls[0]["prompt"]
-    assert str(win) in prompt and "смотри только записи" in prompt
+    assert str(win) in prompt and "look only at log records" in prompt
     assert "НОВАЯ-УНИКАЛЬНАЯ-67890" in prompt
     assert "СТАРАЯ-УНИКАЛЬНАЯ-12345" not in prompt
 
