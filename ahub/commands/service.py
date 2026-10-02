@@ -193,14 +193,15 @@ def _run_argv() -> list[str]:
 
 
 def _read_pid() -> int | None:
+    """pid фонового сервиса из файла — только если это действительно наш `service run` (pid мог смениться)."""
     try:
-        txt = paths.service_pid_path().read_text(encoding="utf-8")
-    except OSError:
+        pid = int(paths.service_pid_path().read_text(encoding="utf-8").split()[0])
+    except (OSError, ValueError, IndexError):
         return None
-    try:
-        return int(txt.strip().split()[0])
-    except (ValueError, IndexError):
+    args = procs.cmdline(pid)
+    if not procs.alive(pid) or "service" not in args or "run" not in args:
         return None
+    return pid
 
 
 def _heartbeat_age_s() -> int | None:
@@ -223,7 +224,7 @@ def cmd_start(args) -> int:
     Уже запущен (жив pid из файла) — ничего не делаю, код 0. Сервис уже жив по
     сердцебиению (служба ОС или чужой запуск) — второй не запускаю."""
     pid = _read_pid()
-    if pid is not None and procs.alive(pid):
+    if pid is not None:
         emit(args, {"pid": pid, "already": True}, f"сервис уже запущен (pid {pid})")
         return 0
     age = _heartbeat_age_s()
@@ -251,18 +252,8 @@ def cmd_stop(args) -> int:
     pf = paths.service_pid_path()
     pid = _read_pid()
     if pid is None:
-        try:
-            pf.unlink()
-        except OSError:
-            pass
+        pf.unlink(missing_ok=True)
         emit(args, {"running": False}, "сервис не запущен")
-        return 0
-    if not procs.alive(pid):
-        try:
-            pf.unlink()
-        except OSError:
-            pass
-        emit(args, {"pid": pid, "running": False}, f"сервис уже не работает (pid {pid})")
         return 0
     try:
         os.kill(pid, signal.SIGTERM)
@@ -273,15 +264,10 @@ def cmd_stop(args) -> int:
     deadline = time.monotonic() + 10
     while procs.alive(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
-    try:
-        pf.unlink()
-    except OSError:
-        pass
     if procs.alive(pid):
-        emit(args, {"pid": pid, "stopped": False},
-             f"сервис не остановился за 10 с (pid {pid}) — pid-файл удалён")
-    else:
-        emit(args, {"pid": pid, "stopped": True}, f"сервис остановлен (pid {pid})")
+        raise CliError(f"сервис не остановился за 10 с (pid {pid})")
+    pf.unlink(missing_ok=True)
+    emit(args, {"pid": pid, "stopped": True}, f"сервис остановлен (pid {pid})")
     return 0
 
 

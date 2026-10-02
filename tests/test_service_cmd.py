@@ -94,7 +94,8 @@ def test_install_other_os_fails(monkeypatch):
 
 
 def _fake_sleep(monkeypatch):
-    monkeypatch.setattr(svccmd, "_run_argv", lambda: ["sleep", "30"])
+    monkeypatch.setattr(svccmd, "_run_argv",
+                        lambda: [sys.executable, "-c", "import time; time.sleep(30)", "service", "run"])
 
 
 def test_start_stop_fake(monkeypatch, capsys):
