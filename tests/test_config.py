@@ -152,12 +152,9 @@ def test_hub_config_and_projects(tmp_path):
     assert any("missing" in e for e in errors)
 
 
-def test_hub_config_legacy_fallback(tmp_path):
-    a = tmp_path / "a"
-    write(a / ".hub.toml", 'schema_version = 2\nname = "A"\n')
-    write(tmp_path / ".config" / "agent-hub" / "config.toml", f'projects = ["{a}"]\n')
-    hub = config.load_hub()
-    assert hub.projects == (str(a),)
+def test_hub_config_ignores_v1_location(tmp_path):
+    write(tmp_path / ".config" / "agent-hub" / "config.toml", 'projects = ["/somewhere"]\n')
+    assert config.load_hub().projects == ()
 
 
 def test_project_for_root_and_worktrees(tmp_path):

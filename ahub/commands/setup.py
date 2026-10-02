@@ -192,9 +192,6 @@ def _replace_projects_line(text: str, items: list[str]) -> str:
 def register_project(root: Path) -> bool:
     gp = paths.global_config_path()
     hub = config.load_hub(gp) if gp.exists() else config.HubConfig()
-    if not gp.exists():
-        legacy = config.load_hub()  # v1 project list, if any
-        hub = config.HubConfig(projects=legacy.projects)
     items = list(hub.projects)
     if any(Path(p).resolve() == root.resolve() for p in items):
         changed = not gp.exists()

@@ -360,12 +360,6 @@ def check_project(cfg: ProjectConfig) -> list[str]:
     return out
 
 
-def _legacy_global_path() -> Path:
-    raw = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(raw) if raw else Path.home() / ".config"
-    return base / "agent-hub" / "config.toml"
-
-
 def _parse_hub_data(data: dict, source: str) -> HubConfig:
     """TOML dict → HubConfig. All problems at once — in ConfigError."""
     r = _Reader()
@@ -431,11 +425,11 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
 
 
 def load_hub(path: str | Path | None = None) -> HubConfig:
-    """Global config. No own file — project list from the v1 config. Nothing at all — empty.
+    """Global config; no file — empty.
 
     AHUB_TG_TOKEN and AHUB_TG_CHAT override the file (and work without one).
     """
-    cands = [Path(path)] if path is not None else [paths.global_config_path(), _legacy_global_path()]
+    cands = [Path(path) if path is not None else paths.global_config_path()]
     for p in cands:
         if not p.is_file():
             continue
