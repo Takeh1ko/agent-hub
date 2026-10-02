@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -9,6 +10,15 @@ from ahub.model import Role, State
 from ahub.store import Store
 from ahub.time import now_ms
 from tests.enginekit import install_fake
+
+
+def _write_log(ts: int, msg: str, *, lvl: str = "ERROR", comp: str = "tg", pid: int = 1650) -> None:
+    """Строка лога с заданными ts/pid (для проверки окна и мёртвых pid)."""
+    p = log.log_file()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"ts": ts, "lvl": lvl, "comp": comp, "msg": msg, "pid": pid}
+    with p.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
 @pytest.fixture
@@ -160,3 +170,57 @@ def test_unit_carries_proxy(monkeypatch, capsys):
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
     assert cli.main(["service", "install", "--print"]) == 0
     assert 'Environment="HTTPS_PROXY=http://127.0.0.1:7897"' in capsys.readouterr().out
+
+
+def test_deep_prompt_has_window_and_ignores_old(store):
+    fake = _observer_fake(store, '{"verdict": "ok", "summary": "чисто"}')
+    now = now_ms()
+    win = now - 10 * 60_000
+    store.meta_set(observer.LAST_DEEP, str(win))
+    _write_log(win - 60_000, "polling упал СТАРАЯ-УНИКАЛЬНАЯ-12345", pid=1650)
+    _write_log(win + 60_000, "polling упал НОВАЯ-УНИКАЛЬНАЯ-67890", pid=os.getpid())
+    assert observer.triage(store, [], deep=True, now=now)["verdict"] == "ok"
+    prompt = fake.calls[0]["prompt"]
+    assert str(win) in prompt and "смотри только записи" in prompt
+    assert "НОВАЯ-УНИКАЛЬНАЯ-67890" in prompt
+    assert "СТАРАЯ-УНИКАЛЬНАЯ-12345" not in prompt
+
+
+def test_triage_suspicion_window_like_quick(store):
+    fake = _observer_fake(store, '{"verdict": "ok", "summary": "чисто"}')
+    now = now_ms()
+    win = now - 4 * 60_000
+    store.meta_set(observer.LAST_DEEP, str(now))  # плановая не due — разбор подозрений
+    store.meta_set(observer.LAST_QUICK, str(win))
+    _write_log(win - 60_000, "сбой СТАРАЯ-ПОДОЗРЕНИЕ-111", pid=1650)
+    _write_log(win + 60_000, "сбой НОВАЯ-ПОДОЗРЕНИЕ-222", pid=os.getpid())
+    sus = [observer.Suspicion("test:win", "тестовое подозрение")]
+    observer.triage(store, sus, deep=False, now=now, since=win)
+    prompt = fake.calls[0]["prompt"]
+    assert str(win) in prompt
+    assert "НОВАЯ-ПОДОЗРЕНИЕ-222" in prompt
+    assert "СТАРАЯ-ПОДОЗРЕНИЕ-111" not in prompt
+
+
+def test_log_digest_size_limit(store):
+    now = now_ms()
+    since = now - 30 * 60_000
+    for i in range(50):
+        _write_log(now - 1000 + i, "длинная ошибка " + "Ы" * 200, comp=f"cmp{i}", pid=1_000_000 + i)
+    d = observer.log_digest(since, now=now)
+    assert len(d.encode("utf-8")) <= observer.LOG_DIGEST_BYTES
+
+
+def test_dead_pid_marked_and_snapshot_live(store):
+    now = now_ms()
+    since = now - 5 * 60_000
+    dead_pid = 1_000_000_007  # такого процесса нет
+    _write_log(now - 1000, "polling упал МЁРТВЫЙ-ТЕСТ-ПИД", pid=dead_pid)
+    _write_log(now - 500, "polling упал ЖИВОЙ-ТЕСТ-ПИД", pid=os.getpid())
+    d = observer.log_digest(since, now=now)
+    assert "МЁРТВЫЙ-ТЕСТ-ПИД" in d and "мёртвый pid" in d
+    for line in d.splitlines():
+        if "ЖИВОЙ-ТЕСТ-ПИД" in line:
+            assert "мёртвый" not in line
+    snap = observer.snapshot(store, now=now)
+    assert f"сервис {os.getpid()}" in snap
