@@ -12,7 +12,6 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
-  "License :: OSI Approved :: MIT License",
 ]
 dependencies = ["textual>=0.80", "psutil>=5.9; sys_platform != 'linux'"]
 
@@ -24,11 +23,14 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24", "psutil>=5.9", "aiogram>=3.13"]
 ahub = "ahub.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["ahub*"]
+
+[tool.setuptools.package-data]
+ahub = ["migrations/*.sql", "claude/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
