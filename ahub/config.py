@@ -11,7 +11,7 @@
     [telegram]                          # всё необязательно; бот включён, если есть token
     token = "..."
     chat_id = 123
-    proxy = "socks5://127.0.0.1:1080"
+    proxy = "http://127.0.0.1:8080"
 
     [usage]
     go_month_limit = 60.0               # нет — лимит не показывается
@@ -369,15 +369,17 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
             r.errors.append(f"telegram.chat_id: ожидается целое, получено {v!r}")
         else:
             chat_id = v
-    proxy = r.str_(tg, "proxy", "", "telegram.")
+    proxy = r.str_(tg, "proxy", "", "telegram.").strip()
+    if proxy and not proxy.startswith(("http://", "https://")):
+        r.errors.append(f"telegram.proxy: нужен http:// или https://, получено {proxy!r}")
     usage = r.table(data, "usage")
     go_limit: float | None = None
     if "go_month_limit" in usage:
         v = usage["go_month_limit"]
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             r.errors.append(f"usage.go_month_limit: ожидается число, получено {v!r}")
-        elif v < 0:
-            r.errors.append(f"usage.go_month_limit: не может быть отрицательным ({v})")
+        elif v <= 0:
+            r.errors.append(f"usage.go_month_limit: должен быть больше 0 ({v})")
         else:
             go_limit = float(v)
     env_token = os.environ.get("AHUB_TG_TOKEN")

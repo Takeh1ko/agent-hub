@@ -227,11 +227,11 @@ def test_build_session_proxy_pref(tmp_path, monkeypatch):
     monkeypatch.setenv("HTTPS_PROXY", "http://sys:8080")
     s = tgrun.build_session(config.HubConfig())
     assert s is not None and s.proxy_url == "http://sys:8080"
-    hub = config.HubConfig(tg_proxy="socks5://127.0.0.1:1080")
-    assert tgrun.build_session(hub).proxy_url == "socks5://127.0.0.1:1080"
+    hub = config.HubConfig(tg_proxy="http://127.0.0.1:8080")
+    assert tgrun.build_session(hub).proxy_url == "http://127.0.0.1:8080"
     monkeypatch.delenv("HTTPS_PROXY", raising=False)
     monkeypatch.delenv("https_proxy", raising=False)
-    assert tgrun.build_session(hub).proxy_url == "socks5://127.0.0.1:1080"
+    assert tgrun.build_session(hub).proxy_url == "http://127.0.0.1:8080"
 
 
 def test_launcher_fast_death_keeps_messages(store, tmp_path):

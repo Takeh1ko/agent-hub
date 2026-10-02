@@ -188,7 +188,7 @@ projects = []
 [telegram]
 token = "bot123"
 chat_id = 42
-proxy = "socks5://127.0.0.1:1080"
+proxy = "http://127.0.0.1:8080"
 
 [usage]
 go_month_limit = 60.0
@@ -196,7 +196,7 @@ go_month_limit = 60.0
     hub = config.load_hub()
     assert hub.tg_token == "bot123"
     assert hub.tg_chat_id == 42
-    assert hub.tg_proxy == "socks5://127.0.0.1:1080"
+    assert hub.tg_proxy == "http://127.0.0.1:8080"
     assert hub.go_month_limit == 60.0
     assert hub.telegram_enabled
 
@@ -211,13 +211,31 @@ def test_hub_telegram_defaults(tmp_path, monkeypatch):
 
 
 def test_hub_telegram_env_override(tmp_path, monkeypatch):
-    write(paths.global_config_path(), '[telegram]\ntoken = "file"\nchat_id = 1\nproxy = "socks5://file:1080"\n')
+    write(paths.global_config_path(),
+          '[telegram]\ntoken = "file"\nchat_id = 1\nproxy = "http://127.0.0.1:8080"\n')
     monkeypatch.setenv("AHUB_TG_TOKEN", "env-token")
     monkeypatch.setenv("AHUB_TG_CHAT", "99")
     hub = config.load_hub()
     assert hub.tg_token == "env-token" and hub.tg_chat_id == 99
     # прокси окружением не перекрывается
-    assert hub.tg_proxy == "socks5://file:1080"
+    assert hub.tg_proxy == "http://127.0.0.1:8080"
+
+
+def test_hub_proxy_bad_scheme(tmp_path, monkeypatch):
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    write(paths.global_config_path(), '[telegram]\nproxy = "socks5://127.0.0.1:1080"\n')
+    with pytest.raises(config.ConfigError, match="telegram.proxy"):
+        config.load_hub()
+
+
+def test_hub_go_limit_zero_bad(tmp_path, monkeypatch):
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    for bad in ("0", "-5"):
+        write(paths.global_config_path(), f"[usage]\ngo_month_limit = {bad}\n")
+        with pytest.raises(config.ConfigError, match="go_month_limit"):
+            config.load_hub()
 
 
 def test_hub_telegram_env_without_file(tmp_path, monkeypatch):
