@@ -576,22 +576,52 @@ class Engine:
 
         with ThreadPoolExecutor(max_workers=len(models)) as ex:
             results = list(ex.map(one, models))
-        if any(r.outcome is Outcome.KILLED for r in results):
-            if self.lost.is_set():
-                raise LeaseLost()
-            if self.budget_hit:
-                return "decision", _t("engine.review_budget"), []
-            return "decision", _t("engine.review_stopped"), []
-        changed = workspace.changed_files(t.worktree)
-        if changed:  # ревьюер не должен менять файлы — откатываем
-            self.log.warning("ревьюер изменил файлы, откат: %s", changed[:5])
-            workspace.git(t.worktree, "checkout", "--", ".", check=False)
-            workspace.git(t.worktree, "clean", "-fd", "-e", workspace.AHUB_DIR, check=False)
-        reviews = [rv for m in models if (rv := review.parse(review.review_path(t.worktree, round_no, m), m))]
+        if (stop := self._review_interrupted(results)) is not None:
+            return stop
+        self._revert_reviewer(t)
+        by_model = dict(zip(models, results))
+        found: dict[str, review.Review] = {}
+        for m in models:
+            rv = review.parse(review.review_path(t.worktree, round_no, m), m)
+            if rv is not None:
+                found[m] = rv
+        missing = [m for m in models if m not in found and by_model[m].session_id]
+        if missing:  # несдавший вердикт — ровно один повтор в той же сессии
+            def retry_one(m: str):
+                return self.session(Role.REVIEWER, m, review.verdict_repair_prompt(round_no, m),
+                                    session_id=by_model[m].session_id, keep_session_on_retry=False,
+                                    log_name=f"reviewer_r{round_no}_{m}")
+
+            with ThreadPoolExecutor(max_workers=len(missing)) as ex:
+                retries = list(ex.map(retry_one, missing))
+            if (stop := self._review_interrupted(retries)) is not None:
+                return stop
+            self._revert_reviewer(t)
+            for m in missing:
+                rv = review.parse(review.review_path(t.worktree, round_no, m), m)
+                if rv is not None:
+                    found[m] = rv
+        reviews = [found[m] for m in models if m in found]
         decision, reason = review.panel(reviews, models, round_no, max_rounds)
         blocking = review.dedup([f for rv in reviews if rv.effective != "approve" for f in rv.findings
                                  if f.severity != "low"])
         return decision, reason, blocking
+
+    def _review_interrupted(self, results: list) -> tuple[str, str, list] | None:
+        """Сессию ревьюера остановили: потеря аренды — исключение, бюджет или стоп — «нужно решение»."""
+        if not any(r.outcome is Outcome.KILLED for r in results):
+            return None
+        if self.lost.is_set():
+            raise LeaseLost()
+        return "decision", _t("engine.review_budget" if self.budget_hit else "engine.review_stopped"), []
+
+    def _revert_reviewer(self, t: Task) -> None:
+        """Ревьюер не должен менять файлы — откатываем."""
+        changed = workspace.changed_files(t.worktree)
+        if changed:
+            self.log.warning("ревьюер изменил файлы, откат: %s", changed[:5])
+            workspace.git(t.worktree, "checkout", "--", ".", check=False)
+            workspace.git(t.worktree, "clean", "-fd", "-e", workspace.AHUB_DIR, check=False)
 
 
 class _Settle(Exception):

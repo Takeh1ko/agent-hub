@@ -178,3 +178,38 @@ def test_reviewer_changes_reverted(store, project):
     t = code_task(store, project, review_models=["fake"])
     assert run(store, project, t.id).state is State.DONE
     assert (Path(store.get_task(t.id).worktree) / "core" / "b.py").read_text() == "Y = 2\n"
+
+
+def silent_review(session="ses_rev", text="разбор текстом без файла"):
+    return {"session": session, "steps": [{"event": {"type": "text", "text": text}}]}
+
+
+def test_reviewer_retry_same_session(store, project):
+    fake = install_fake(store, [work(), silent_review(), verdict(session="ses_other")])
+    t = code_task(store, project, review_models=["fake"], review_rounds=1)
+    res = run(store, project, t.id)
+    assert res.state is State.DONE, res.reason
+    assert len(fake.calls) == 3
+    assert fake.calls[1]["session_id"] is None
+    assert fake.calls[2]["session_id"] == "ses_rev"
+    prompt = fake.calls[2]["prompt"]
+    assert ".ahub/review_r1_fake.json" in prompt and "You did not write" in prompt
+    assert "Do not change any other files" in prompt
+
+
+def test_reviewer_missing_twice_is_decision(store, project):
+    fake = install_fake(store, [work(), silent_review(), silent_review(session="ses_rev2")])
+    t = code_task(store, project, review_models=["fake"], review_rounds=1)
+    res = run(store, project, t.id)
+    assert res.state is State.NEEDS_DECISION and "не сдали вердикт" in res.reason
+    assert len(fake.calls) == 3
+    assert fake.calls[2]["session_id"] == "ses_rev"
+
+
+def test_reviewer_no_retry_without_session(store, project):
+    hidden = {"session": "", "steps": [{"event": {"type": "text", "text": "тихо"}}]}
+    fake = install_fake(store, [work(), hidden])
+    t = code_task(store, project, review_models=["fake"], review_rounds=1)
+    res = run(store, project, t.id)
+    assert res.state is State.NEEDS_DECISION and "не сдали вердикт" in res.reason
+    assert len(fake.calls) == 2
