@@ -1,13 +1,33 @@
-"""Время: хранение — UTC ms, экран — Asia/Yekaterinburg (перенос из v1 hub/time.py)."""
+"""Время: хранение — UTC ms, экран — системный локальный пояс (перекрытие AHUB_TZ)."""
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-TZ = ZoneInfo("Asia/Yekaterinburg")
+
+def _system_tz():
+    """Системный локальный пояс; нет — UTC (без падения)."""
+    tz = datetime.now().astimezone().tzinfo
+    return tz if tz is not None else timezone.utc
+
+
+def local_tz():
+    """Пояс экрана: AHUB_TZ (имя IANA) или системный; неверное имя — системный."""
+    name = os.environ.get("AHUB_TZ", "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    return _system_tz()
+
+
+# Снимок на момент импорта (совместимость); актуальный — local_tz().
+TZ = local_tz()
 
 
 def now_ms() -> int:
@@ -16,8 +36,8 @@ def now_ms() -> int:
 
 
 def to_local(ms: int) -> datetime:
-    """Мс UTC → локальное время (Asia/Yekaterinburg)."""
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(TZ)
+    """Мс UTC → локальное время (системный пояс или AHUB_TZ)."""
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(local_tz())
 
 
 def fmt_local(ms: int, now: int | None = None) -> str:
@@ -54,18 +74,19 @@ def _unit_ms(unit: str | None) -> int | None:
 
 
 def parse_since(text: str, now: int) -> int:
-    """Строка → мс UTC. Локальная зона.
+    """Строка → мс UTC. Пояс экрана (системный или AHUB_TZ).
 
     Понимает «2026-09-28 20:00» (локальное), «сегодня 20:00»,
     «2ч», «30м», «1д». Возвращает мс для сравнения с now_ms().
     """
+    tz = local_tz()
     s = text.strip()
     m = _FULL.match(s)
     if m:
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
         hh = int(m.group(4)) if m.group(4) is not None else 0
         mm = int(m.group(5)) if m.group(5) is not None else 0
-        dt = datetime(y, mo, d, hh, mm, tzinfo=TZ)
+        dt = datetime(y, mo, d, hh, mm, tzinfo=tz)
         return int(dt.timestamp() * 1000)
     m = _TODAY.match(s)
     if m:
