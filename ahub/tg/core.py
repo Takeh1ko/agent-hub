@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass
 
 from ahub import archive, comms, config, events, views
+from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION
 from ahub.store import Store
 from ahub.time import fmt_local, now_ms
@@ -70,7 +71,7 @@ def split_project(text: str, projects: list[str]) -> tuple[str | None, str]:
     s = text.strip()
     low = s.lower()
     for name in sorted(projects, key=len, reverse=True):
-        for prefix in (f"по {name.lower()}:", f"{name.lower()}:"):
+        for prefix in (f"по {name.lower()}:", f"{name.lower()}:", f"for {name.lower()}:"):
             if low.startswith(prefix):
                 return name, s[len(prefix):].strip()
     return None, s
@@ -81,20 +82,15 @@ def on_text(store: Store, chat_id: int, text: str, *, projects: list[str], now: 
     remember_chat(store, chat_id, now=now)
     project, body = split_project(text, projects)
     if not body:
-        return Reply("пустое сообщение — не отправлено")
+        return Reply(_t("tg.empty"))
     comms.owner_message(store, body, project=project or "", chat_id=chat_id, now=now)
     if events.present(store, now=now):
-        return Reply("передал Claude — он на связи")
-    return Reply("Claude сейчас не в сессии — поднимаю его, ответ придёт сюда")
+        return Reply(_t("tg.sent"))
+    return Reply(_t("tg.launching"))
 
 
 def help_text() -> str:
-    return ("Я связываю тебя с Claude, который ведёт задачи в agent-hub.\n"
-            "• Пиши обычным текстом — сообщение уйдёт Claude (если его нет в сессии, я его подниму).\n"
-            "• «по agent-hub: …» — если речь о конкретном проекте.\n"
-            "• /tasks — задачи: активные и недавние, нажми на задачу — подробности.\n"
-            "• /status — коротко, что происходит.\n"
-            "Управлять задачами отсюда нельзя — только через Claude.")
+    return _t("tg.help")
 
 
 def status_text(store: Store) -> str:
@@ -112,15 +108,15 @@ def tasks_reply(store: Store) -> Reply:
               if t not in active and t.state.value in ("accepted", "rejected")][:RECENT]
     rows = [[Button(_task_label(t), f"task:{t.id}")] for t in active + recent]
     if not rows:
-        return Reply("задач нет")
-    head = f"в работе и ждут решения: {len(active)}; недавние: {len(recent)}"
+        return Reply(_t("tg.no_tasks"))
+    head = _t("tg.tasks_head", active=len(active), recent=len(recent))
     return Reply(head, rows)
 
 
 def task_detail(store: Store, task_id: int) -> Reply:
     t = store.get_task(task_id)
     if t is None:
-        return Reply(f"нет задачи T{task_id}")
+        return Reply(_t("tg.no_task", tid=task_id))
     from ahub import pulse
     from ahub.service import live_workers
 
@@ -128,16 +124,15 @@ def task_detail(store: Store, task_id: int) -> Reply:
     text = views.task_text(store, t, live=live)
     if t.state in ACTIVE:
         pl = pulse.task_pulse(store, t, live=live)
-        text = f"{pl.mark} {pl.reason or 'работает'}\n" + text
-    text += f"\nсоздана {fmt_local(t.created_at)}"
-    return Reply(clip(text), [[Button("← к списку", "tasks")]])
+        text = f"{pl.mark} {pl.reason or _t('tui.working_now')}\n" + text
+    text += "\n" + _t("tg.created", when=fmt_local(t.created_at))
+    return Reply(clip(text), [[Button(_t("tg.to_list"), "tasks")]])
 
 
 def question_reply(q: dict) -> Reply:
     opts = q.get("options") or json.loads(q.get("options_json") or "[]")
     rows = [[Button(o[:40], f"ans:{q['id']}:{i}")] for i, o in enumerate(opts)]
-    return Reply(f"❓ Вопрос от Claude (#{q['id']}):\n{q['text']}\n\n(можно ответить текстом — реплаем на это сообщение)",
-                 rows or None)
+    return Reply(_t("tg.question", qid=q["id"], text=q["text"]), rows or None)
 
 
 def on_answer_button(store: Store, data: str, *, via: str = "tg") -> str:
@@ -146,23 +141,23 @@ def on_answer_button(store: Store, data: str, *, via: str = "tg") -> str:
         _, qid, idx = data.split(":")
         qid_i, idx_i = int(qid), int(idx)
     except ValueError:
-        return "не понял кнопку"
+        return _t("tg.btn_unknown")
     with store.read() as c:
         row = c.execute("SELECT * FROM question WHERE id=?", (qid_i,)).fetchone()
     if row is None:
-        return "вопрос не найден"
+        return _t("tg.q_missing")
     opts = json.loads(row["options_json"] or "[]")
     if not 0 <= idx_i < len(opts):
-        return "нет такого варианта"
+        return _t("tg.q_bad_option")
     if not comms.answer(store, qid_i, opts[idx_i], via=via):
-        return f"#{qid_i}: уже отвечено ({row['answer']})"
-    return f"#{qid_i}: {row['text']}\n→ {opts[idx_i]} (передал Claude)"
+        return _t("tg.q_answered", qid=qid_i, answer=row["answer"])
+    return _t("tg.q_sent", qid=qid_i, text=row["text"], opt=opts[idx_i])
 
 
 def on_reply_to_question(store: Store, qid: int, text: str) -> str:
     if comms.answer(store, qid, text, via="tg"):
-        return f"ответ на #{qid} передал Claude"
-    return f"#{qid}: уже отвечено или закрыт"
+        return _t("tg.reply_sent", qid=qid)
+    return _t("tg.reply_closed", qid=qid)
 
 
 def pending_questions(store: Store) -> list[dict]:
@@ -177,4 +172,4 @@ def mark_question_sent(store: Store, qid: int) -> None:
 
 
 def alarm_text(e) -> str:
-    return ("🚨 " if e.critical else "⚠️ ") + "Хаб: " + str(e.payload.get("text", ""))[:1000]
+    return ("🚨 " if e.critical else "⚠️ ") + _t("tg.alarm_prefix") + str(e.payload.get("text", ""))[:1000]
