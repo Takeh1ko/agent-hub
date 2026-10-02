@@ -212,3 +212,62 @@ def test_parse_duration_spaces():
 def test_parse_duration_errors(bad):
     with pytest.raises(ValueError, match="непонятная длительность"):
         parse_duration(bad)
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_parse_since_bilingual_any_lang(monkeypatch, tokyo, lang):
+    """Разбор понимает оба языка при любом языке вывода (план §2)."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", lang)
+    _reset()
+    now = _ms_tokyo(2026, 9, 28, 23, 41)
+    assert parse_since("today 20:00", now) == _ms_tokyo(2026, 9, 28, 20, 0)
+    assert parse_since("TODAY", now) == _ms_tokyo(2026, 9, 28, 0, 0)
+    assert parse_since("yesterday 20:00", now) == _ms_tokyo(2026, 9, 27, 20, 0)
+    assert parse_since("yesterday", now) == _ms_tokyo(2026, 9, 27, 0, 0)
+    assert parse_since("сегодня 20:00", now) == _ms_tokyo(2026, 9, 28, 20, 0)
+    assert parse_since("вчера", now) == _ms_tokyo(2026, 9, 27, 0, 0)
+    assert parse_since("2h", now) == now - 2 * 3_600_000
+    assert parse_since("30m", now) == now - 30 * 60_000
+    assert parse_since("1d", now) == now - 86_400_000
+    assert parse_since("2ч", now) == now - 2 * 3_600_000
+    assert parse_since("1д", now) == now - 86_400_000
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_parse_duration_bilingual_any_lang(monkeypatch, lang):
+    """Длительности на обоих языках при любом языке вывода."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", lang)
+    _reset()
+    assert parse_duration("2h") == 2 * 3600
+    assert parse_duration("30m") == 30 * 60
+    assert parse_duration("1d") == 86400
+    assert parse_duration("1w") == 7 * 86400
+    assert parse_duration("2ч") == 2 * 3600
+    assert parse_duration("30м") == 30 * 60
+    assert parse_duration("1д") == 86400
+    assert parse_duration("1 day") == 86400
+    assert parse_duration("2 hours") == 2 * 3600
+
+
+@pytest.mark.parametrize("code,word", [("ru", "непонятная длительность"), ("en", "unknown duration")])
+def test_parse_duration_error_lang(monkeypatch, code, word):
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", code)
+    _reset()
+    with pytest.raises(ValueError, match=word):
+        parse_duration("10x")
+
+
+@pytest.mark.parametrize("code,word", [("ru", "непонятное время"), ("en", "unknown time")])
+def test_parse_since_error_lang(monkeypatch, tokyo, code, word):
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", code)
+    _reset()
+    with pytest.raises(ValueError, match=word):
+        parse_since("когда-нибудь", _ms_tokyo(2026, 9, 28, 23, 41))
