@@ -28,29 +28,29 @@ _log = hublog.get("drafts")
 KIND_WORDS: Words = Words("draft.kind_", ("scout", "code", "routine", "review"))
 FIELDS = ("kind", "title", "spec", "result_format", "paths", "accept", "read", "review_level", "resources")
 
-PROMPT = """Ты помогаешь владельцу (не программисту) поставить задачу моделям-работникам agent-hub. Прочитай код проекта
-(ничего не меняй) и составь задачу по его словам.
+PROMPT = """You help the owner (not a programmer) file a task for agent-hub worker models. Read the project code
+(change nothing) and build a task from their words.
 
-## Слова владельца
+## Owner words
 {text}
 
-## Как выбрать тип
-- scout — разобраться/найти/объяснить, код не меняется;
-- code — изменить код (обязательно тесты приёмки: pytest-ноды, можно новые файлы тестов);
-- routine — навести порядок в файлах/документах без логики (без тестов);
-- review — проверить уже написанный код (нужен вход: ветка/коммит/файлы — укажи в spec).
+## How to choose the type
+- scout — investigate/find/explain, code does not change;
+- code — change code (acceptance tests required: pytest nodes, new test files allowed);
+- routine — tidy files/docs without logic (no tests);
+- review — check already written code (needs input: branch/commit/files — put in spec).
 
-## Разрешённые проекту файлы
+## Project allowed files
 {allowed}
 
-## Ответ
-Запиши `.ahub/draft.json` и продублируй его последним сообщением:
-{{"kind": "scout|code|routine|review", "title": "цель одной фразой (≤ 120 симв.)",
-  "spec": "подробно: что сделать, где, как проверить, чего не трогать",
-  "result_format": "какой нужен результат (для разведки — что должно быть в отчёте)",
-  "paths": ["glob разрешённых файлов (для code/routine)"], "accept": ["pytest-ноды (для code)"],
-  "read": ["что работнику прочитать первым"], "review_level": 0}}
-review_level: 0 — без ревью, 1 — обычные документы/рутина, 2 — обычный код, 3–4 — код рядом с деньгами.
+## Answer
+Write `.ahub/draft.json` and repeat it as your last message:
+{{"kind": "scout|code|routine|review", "title": "goal in one phrase (<= 120 chars)",
+  "spec": "details: what to do, where, how to verify, what not to touch",
+  "result_format": "what result is needed (for scout — what the report must contain)",
+  "paths": ["globs of allowed files (for code/routine)"], "accept": ["pytest nodes (for code)"],
+  "read": ["what the worker should read first"], "review_level": 0}}
+review_level: 0 — no review, 1 — plain docs/routine, 2 — plain code, 3-4 — code near money.
 {errors}"""
 
 
@@ -67,7 +67,10 @@ def _update(store: Store, draft_id: int, **fields) -> None:
 
 
 def to_spec(project: ProjectConfig, data: dict, created_by: str = "human") -> tasks.TaskSpec:
-    kind = Kind(str(data.get("kind", "scout")))
+    raw_kind = str(data.get("kind", "scout")).strip().lower()
+    kind_alias = {"разведка": "scout", "scout": "scout", "код": "code", "code": "code",
+                  "рутина": "routine", "routine": "routine", "ревью": "review", "review": "review"}
+    kind = Kind(kind_alias.get(raw_kind, raw_kind))
     level = data.get("review_level")
     return tasks.TaskSpec(project=project.name, kind=kind, title=str(data.get("title", "")).strip()[:200],
                           spec=str(data.get("spec", "")), result_format=str(data.get("result_format", "")),
@@ -96,11 +99,14 @@ def draft_with_model(store: Store, project: ProjectConfig, draft_id: int) -> dic
         _update(store, draft_id, status="failed", errors=str(e))
         return _row(store, draft_id) or {}
     ws = _draft_copy(project, draft_id)
+    from ahub.prompts import reply_language_line
+
     errors = ""
     for attempt in (1, 2):
         prompt = "\n\n".join([rules_text(project).strip(), PROMPT.format(
-            text=row["text"], allowed=", ".join(project.allowed_paths) or "любые",
-            errors=f"\n## Прошлая попытка не прошла проверку\n{errors}\nИсправь." if errors else "")])
+            text=row["text"], allowed=", ".join(project.allowed_paths) or "any",
+            errors=f"\n## Previous attempt failed validation\n{errors}\nFix it." if errors else ""),
+            reply_language_line()])
         r = run_session(providers.get(entry.provider), RunSpec(
             prompt=prompt, cwd=ws, model_id=entry.model_id, variant=entry.variant,
             log_path=str(Path(ws) / ".ahub" / f"draft_{attempt}.log"), timeout_s=15 * 60, idle_s=600))

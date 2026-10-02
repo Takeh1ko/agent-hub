@@ -439,7 +439,7 @@ class Engine:
         """Бюджет исчерпан: работник сохраняет сделанное коротким ходом, задача — «Нужно решение»."""
         self.budget_hit = False  # разрешить один короткий ход «сохрани и остановись»
         if sid:
-            self.session(role, alias, prompts.STOP_PROMPT, session_id=sid, log_name=role.value)
+            self.session(role, alias, prompts.stop_prompt(), session_id=sid, log_name=role.value)
         go, usd = self.task_cost()
         self.store.add_event("budget_hard", task_id=self.task_id, project=self.project.name,
                              payload={"go": round(go, 4), "usd": round(usd, 4)})
@@ -479,7 +479,7 @@ class Engine:
         if fresh:  # новая сессия (другая модель/постановка или первой не было): полная постановка + указания
             prompt, sid = prompts.code_prompt(self.project, t), None
             if notes:
-                prompt += "\n\n## Указания оркестратора (доработка)\n" + notes
+                prompt += f"\n\n{prompts.orchestrator_heading(rework=True)}\n" + notes
         elif notes:
             prompt = review.fix_prompt([], notes=notes)
         else:

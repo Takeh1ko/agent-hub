@@ -30,22 +30,30 @@ MAX_PER_HOUR = 6
 MIN_ALIVE_MS = 20_000  # прожил меньше и без сессии — сообщения не считаются переданными (перезапуск их заберёт)
 _log = hublog.get("launcher")
 
-PROMPT = """Ты — Claude, ведущий разработку через agent-hub (команда `ahub`). Владелец сейчас не за компьютером и
-пишет тебе из Telegram, как сеньору в офисе. Твоей живой сессии не было — тебя поднял хаб.
 
-Сообщения владельца:
+def _owner_lang_line() -> str:
+    from ahub.i18n import lang
+
+    language = "Russian" if lang() == "ru" else "English"
+    return f"Write all messages to the owner in {language}."
+
+PROMPT = """You are Claude, running development via agent-hub (`ahub` CLI). The owner is away from the computer
+and writes to you from Telegram, like to a senior in the office. You have no live session — the hub started you.
+
+Owner messages:
 {messages}
 
-Сводка хаба (ahub status):
+Hub summary (ahub status):
 {status}
 
-Как работать:
-- Отвечай владельцу только через `ahub say "текст"` (коротко, по-русски, без разметки). Вопрос с вариантами —
-  `ahub ask "вопрос" --options "да,нет"`; ответ придёт событием (проверь `ahub wait --timeout 10m`).
-- Задачи ставь и веди через `ahub` (`ahub --help`, `ahub task new --help`); подробности задачи — `ahub status T<id>`,
-  результат — `ahub result T<id>`. Сам код не пиши, если это не мелкая правка поверх результата задачи.
-- Сливать код — только с согласия владельца (спроси через `ahub ask`).
-- Перед тем как закончить, проверь `ahub inbox` — могли прийти новые сообщения.
+How to work:
+- Reply to the owner only via `ahub say "text"` (short, no markup). A question with options —
+  `ahub ask "question" --options "yes,no"`; the answer arrives as an event (check `ahub wait --timeout 10m`).
+- File and run tasks via `ahub` (`ahub --help`, `ahub task new --help`); task details — `ahub status T<id>`,
+  result — `ahub result T<id>`. Do not write code yourself, unless it is a tiny fix on top of a task result.
+- Merging code — only with the owner's consent (ask via `ahub ask`).
+- Before finishing, check `ahub inbox` — new messages may have arrived.
+{lang_line}
 """
 
 
@@ -195,7 +203,8 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
         _log.error("не могу поднять Claude: %s", "нет проекта" if project is None else "нет бинаря claude")
         return "idle"
     prompt = PROMPT.format(messages="\n".join(f"- {m['text']}" for m in msgs)[:6000],
-                           status=views.status_text(store, now=ts))
+                           status=views.status_text(store, now=ts),
+                           lang_line=_owner_lang_line())
     resume = _session(store, ts)
     with store.tx() as c:
         lid = int(c.execute("INSERT INTO claude_launch(ts, project, session_id, reason) VALUES(?,?,?,?)",
