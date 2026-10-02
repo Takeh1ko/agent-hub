@@ -13,11 +13,12 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ahub import comms, config, events, paths, providers, pulse, registry
+from ahub import comms, config, events, paths, procs, providers, pulse, registry
 from ahub import log as hublog
 from ahub.model import ACTIVE, Role, State
 from ahub.providers.base import RunSpec
@@ -36,6 +37,7 @@ HEARTBEAT_STALE_MS = 60_000
 LAST_QUICK = "observer_last_quick"
 LAST_DEEP = "observer_last_deep"
 SEEN_PREFIX = "observer_seen:"
+LOG_DIGEST_BYTES = 3 * 1024  # выжимка лога для модели — не больше ~3 КБ
 _log = hublog.get("observer")
 
 
@@ -145,7 +147,77 @@ def _mark_seen(store: Store, sus: list[Suspicion], now: int) -> None:
         store.meta_set(SEEN_PREFIX + s.sig, f"{now}|{s.text[:80]}")
 
 
-def snapshot(store: Store, *, now: int) -> str:
+def _bot_pids(proc_root: str | Path = "/proc") -> list[int]:
+    """Живые pid бота: процессы с парой `bot run` в cmdline."""
+    out: list[int] = []
+    try:
+        pids = procs.pids(proc_root)
+    except Exception:
+        return []
+    for pid in pids:
+        try:
+            args = procs.cmdline(pid, proc_root)
+        except Exception:
+            continue
+        for i in range(len(args) - 1):
+            if args[i] == "bot" and args[i + 1] == "run":
+                try:
+                    if procs.alive(pid, proc_root):
+                        out.append(pid)
+                except Exception:
+                    pass
+                break
+    return out
+
+
+def window_since(store: Store, *, deep: bool, now: int) -> int:
+    """Начало окна проверки: плановая — с прошлой плановой (или 30 мин), разбор — как у быстрой."""
+    if deep:
+        return int(store.meta_get(LAST_DEEP) or 0) or now - DEEP_MS
+    return now - QUICK_MS
+
+
+def log_digest(since: int, *, now: int | None = None, limit_bytes: int = LOG_DIGEST_BYTES,
+               proc_root: str | Path = "/proc") -> str:
+    """Выжимка WARNING/ERROR за окно: группы (подпись, счёт), pid и время последней записи. Не больше limit."""
+    ts_now = now if now is not None else now_ms()
+    try:
+        res = hublog.scan(since, until_ms=ts_now)
+    except OSError:
+        return "лог недоступен"
+    recs = [r for r in res.records if r.get("comp") != "observer"]
+    if not recs:
+        return "нет WARNING/ERROR за окно"
+    lines: list[str] = []
+    for sig, n in hublog.summarize(recs, limit=10):
+        grp = [r for r in recs if hublog.signature(r) == sig]
+        last = max(grp, key=lambda r: int(r.get("ts") or 0))
+        try:
+            ts = int(last.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        pid = last.get("pid")
+        try:
+            alive = procs.alive(pid, proc_root) if isinstance(pid, int) else False
+        except Exception:
+            alive = False
+        mark = "" if alive else " — мёртвый pid"
+        msg = str(last.get("msg") or "")[:160].replace("\n", " ")
+        lines.append(f"{n}× {last.get('lvl')} {last.get('comp')}: {msg}"
+                     f" (последняя {fmt_local(ts, now=ts_now) if ts else '?'} ts={ts}, pid={pid}{mark})")
+    if res.broken_lines:
+        lines.append(f"битых строк: {res.broken_lines}")
+    text = "\n".join(lines)
+    while len(text.encode("utf-8")) > limit_bytes and len(lines) > 1:
+        lines.pop()  # выбрасываем самые редкие группы, пока не влезет
+        text = "\n".join(lines)
+    raw = text.encode("utf-8")
+    if len(raw) > limit_bytes:  # одна группа всё равно большая — режем по байтам
+        text = raw[:limit_bytes].decode("utf-8", "ignore")
+    return text
+
+
+def snapshot(store: Store, *, now: int, proc_root: str | Path = "/proc") -> str:
     """Короткая картина хаба для модели-наблюдателя."""
     from ahub import views
     from ahub.service import live_workers
@@ -157,17 +229,25 @@ def snapshot(store: Store, *, now: int) -> str:
     lines += [f"{fmt_local(e.ts)} {e.kind} T{e.task_id or '-'} {json.dumps(e.payload, ensure_ascii=False)[:140]}"
               for e in evs[-25:]]
     lines.append(f"## Процессы задач: {live or 'нет'}")
+    bots = _bot_pids(proc_root)
+    lines.append(f"## Живые pid: сервис {os.getpid()}, бот {bots[0] if bots else 'нет'},"
+                 f" задачи {live or 'нет'} — ошибки с других pid от мёртвых процессов (история)")
     return "\n".join(lines)
 
 
 TRIAGE_PROMPT = """Ты — наблюдатель хаба agent-hub (оркестратор моделей-работников). Твоя задача — понять, работает ли
 сам хаб как нужно: процессы задач живы, модели отвечают, очередь движется, логи без настоящих ошибок. Проекты и их
-код тебя не касаются. Ничего не меняй и не запускай; читать можешь логи: {log}.
+код тебя не касаются. Ничего не меняй и не запускай.
+Сейчас {now_str} (ts={now_ms}); смотри только записи лога с ts ≥ {since} ({since_str}); старые записи — история,
+не текущие проблемы. Подробности при нужде читай в файле {log}, но только записи с ts ≥ {since}.
 
 {kind}
 
 ## Подозрения кода
 {suspicions}
+
+## Выжимка лога за окно (WARNING/ERROR, сгруппировано)
+{log_digest}
 
 {snapshot}
 
@@ -188,19 +268,22 @@ DEEP_CHECKLIST = """## Плановая проверка (раз в 30 мин) �
 
 
 def triage(store: Store, sus: list[Suspicion], *, deep: bool = False, now: int | None = None,
-           project: config.ProjectConfig | None = None) -> dict:
+           project: config.ProjectConfig | None = None, since: int | None = None) -> dict:
     """Разбор моделью. Возвращает {"verdict", "summary", "action", "cost_go"}; сбой модели — verdict "unknown"."""
     ts = now if now is not None else now_ms()
     try:
         entry = registry.pick(store, Role.OBSERVER, project)
     except registry.RegistryError as e:
         return {"verdict": "unknown", "summary": f"нет модели наблюдателя: {e}", "action": "", "cost_go": 0.0}
+    win = since if since is not None else window_since(store, deep=deep, now=ts)
     cwd = paths.state_dir() / "observer" / str(ts)
     cwd.mkdir(parents=True, exist_ok=True)
     prompt = TRIAGE_PROMPT.format(
         log=hublog.log_file(), kind=DEEP_CHECKLIST if deep else "## Разбор подозрений",
         suspicions="\n".join(f"- {'КРИТИЧНО ' if s.critical else ''}{s.text}" for s in sus) or "- нет",
-        snapshot=snapshot(store, now=ts))
+        snapshot=snapshot(store, now=ts),
+        now_str=fmt_local(ts, now=ts), now_ms=ts, since=win, since_str=fmt_local(win, now=ts),
+        log_digest=log_digest(win, now=ts))
     prov = providers.get(entry.provider)
     r = run_session(prov, RunSpec(prompt=prompt, cwd=str(cwd), model_id=entry.model_id, variant=entry.variant,
                                   log_path=str(cwd / "observer.log"), timeout_s=15 * 60, idle_s=600))
@@ -224,9 +307,11 @@ def cycle(store: Store, *, now: int | None = None, deep_due: bool | None = None,
           projects: list[config.ProjectConfig] | None = None) -> str:
     """Один проход наблюдателя. Возвращает вердикт: ok | false_alarm | alarm | critical | unknown."""
     ts = now if now is not None else now_ms()
+    prev_quick = int(store.meta_get(LAST_QUICK) or 0)
     sus = quick_check(store, projects=projects, now=ts)
     last_deep = int(store.meta_get(LAST_DEEP) or 0)
     deep = deep_due if deep_due is not None else ts - last_deep >= DEEP_MS
+    win = (last_deep or ts - DEEP_MS) if deep else (prev_quick or ts - QUICK_MS)
     fresh = _fresh(store, sus, ts)
     if not fresh and not deep:
         _report(store, "quick", "ok", "чисто" if not sus else f"известное: {len(sus)}", {}, 0.0, ts)
@@ -236,7 +321,7 @@ def cycle(store: Store, *, now: int | None = None, deep_due: bool | None = None,
         verdict = "critical" if crit_code else ("alarm" if fresh else "ok")
         res = {"verdict": verdict, "summary": "; ".join(s.text for s in fresh)[:300], "action": "", "cost_go": 0.0}
     else:
-        res = triage(store, fresh, deep=deep, now=ts)
+        res = triage(store, fresh, deep=deep, now=ts, since=win)
         if res["verdict"] == "unknown" and crit_code:  # модель не ответила, а код видит критичное — не молчим
             res["verdict"] = "critical"
             res["summary"] = "; ".join(s.text for s in crit_code)[:300] + " (модель наблюдателя не ответила)"
