@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from ahub.i18n import t as _t
+
 
 class Cap(StrEnum):
     RESUME = "resume"  # продолжить ту же сессию
@@ -197,9 +199,10 @@ class Provider(ABC):
             return Outcome.TRANSIENT, transient.text[:2000]
         if exit_code not in (0, None):
             last = errors[-1].text if errors else stderr_tail
-            return Outcome.MODEL_ERROR if errors else Outcome.CRASH, (last or f"код выхода {exit_code}")[-2000:]
+            return Outcome.MODEL_ERROR if errors else Outcome.CRASH, \
+                (last or _t("provider.exit_code", code=exit_code))[-2000:]
         if session_id is None and self.has(Cap.RESUME):
-            return Outcome.CRASH, ("нет id сессии в выводе; " + stderr_tail)[-2000:]
+            return Outcome.CRASH, _t("provider.no_session", tail=stderr_tail)[-2000:]
         return Outcome.OK, ""
 
     def final_text(self, activities: list[Activity]) -> str:
@@ -235,7 +238,7 @@ class Provider(ABC):
         return []
 
     def health(self) -> Health:
-        return Health(ok=True, problems=("проверка здоровья не поддерживается",))
+        return Health(ok=True, problems=(_t("provider.no_health"),))
 
 
 def clip(text: Any, limit: int = 2000) -> str:

@@ -27,6 +27,7 @@ from pathlib import Path
 
 from ahub import log as hublog
 from ahub import procs
+from ahub.i18n import t as _t
 from ahub.providers.base import Act, Activity, Cap, Outcome, Provider, RunResult, RunSpec, Usage, clip
 from ahub.time import now_ms
 
@@ -282,8 +283,9 @@ def run(provider: Provider, spec: RunSpec, *,
         if transient is not None and forced is not Outcome.KILLED:
             outcome, error = Outcome.TRANSIENT, clip(transient.text)
         else:
-            error = {Outcome.SILENCE: f"тишина {silence_s} c", Outcome.TIMEOUT: f"таймаут {spec.timeout_s} c",
-                     Outcome.KILLED: "остановлено по просьбе"}[forced]
+            error = {Outcome.SILENCE: _t("runner.silence", secs=silence_s),
+                     Outcome.TIMEOUT: _t("runner.timeout", secs=spec.timeout_s),
+                     Outcome.KILLED: _t("runner.killed")}[forced]
     else:
         try:
             outcome, error = provider.classify(exit_code=proc.returncode, activities=acts, session_id=sid,
