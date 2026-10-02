@@ -263,3 +263,37 @@ def test_hub_telegram_env_bad_type(tmp_path, monkeypatch):
     monkeypatch.setenv("AHUB_TG_CHAT", "не-число")
     with pytest.raises(config.ConfigError, match="AHUB_TG_CHAT"):
         config.load_hub()
+
+
+def test_hub_paths_parsed(tmp_path, monkeypatch):
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    write(paths.global_config_path(), """
+[paths]
+opencode = "$HOME/bin/opencode"
+claude = "~/.claude/local/claude"
+opencode_db = "$HOME/data/opencode.db"
+""")
+    hub = config.load_hub()
+    assert hub.opencode == os.path.expandvars("$HOME/bin/opencode")
+    assert hub.claude == os.path.expanduser("~/.claude/local/claude")
+    assert hub.opencode_db == os.path.expandvars("$HOME/data/opencode.db")
+
+
+def test_hub_paths_defaults(tmp_path, monkeypatch):
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    hub = config.load_hub()
+    assert hub.opencode == "" and hub.claude == "" and hub.opencode_db == ""
+
+
+def test_hub_paths_bad_types(tmp_path, monkeypatch):
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    write(paths.global_config_path(), "[paths]\nopencode = 123\nclaude = true\nopencode_db = 5\n")
+    with pytest.raises(config.ConfigError) as ei:
+        config.load_hub()
+    errs = " | ".join(ei.value.errors)
+    assert "paths.opencode" in errs
+    assert "paths.claude" in errs
+    assert "paths.opencode_db" in errs
