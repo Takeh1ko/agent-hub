@@ -4,29 +4,41 @@
 проверка файловой системы — отдельно (`check_project`), чтобы конфиг можно было разобрать без диска.
 Файлы v1 (schema_version = 1) читаются с переводом полей — нужно для переключения (V31a).
 
+Пример ~/.config/ahub/config.toml:
+
+    projects = ["$HOME/Projects/webapp"]
+
+    [telegram]                          # всё необязательно; бот включён, если есть token
+    token = "..."
+    chat_id = 123
+    proxy = "socks5://127.0.0.1:1080"
+
+    [usage]
+    go_month_limit = 60.0               # нет — лимит не показывается
+
 Пример .hub.toml v2:
 
     schema_version = 2
-    name = "PlayerUP"
-    root = "$HOME/Projects/Python/PlayerUP"        # по умолчанию — каталог файла
-    worktrees = "$HOME/Projects/Python/PlayerUP-wt"
-    work_branch = "market"
-    python = "$HOME/Projects/Python/PlayerUP/venv/bin/python"
+    name = "webapp"
+    root = "$HOME/Projects/webapp"        # по умолчанию — каталог файла
+    worktrees = "$HOME/Projects/webapp-wt"
+    work_branch = "main"
+    python = "$HOME/Projects/webapp/venv/bin/python"
     rules = "docs/agents/rules.md"
     allowed_paths = ["core/**", "tests/**"]
     max_parallel = 2
     test_resource = "test_db"                      # приёмка идёт под этим ресурсом
 
     [resources]                                    # общие ресурсы: не больше capacity задач одновременно
-    test_db = { lock = "/tmp/playerup_test_db.lock" }   # lock — внешний flock-файл, общий с другими инструментами
-    playerok = { capacity = 1 }
+    test_db = { lock = "/tmp/webapp_test_db.lock" }   # lock — внешний flock-файл, общий с другими инструментами
+    gpu = { capacity = 1 }
 
     [hooks]                                        # shell; env: AHUB_TASK_ID, AHUB_WORKTREE, AHUB_PROJECT_ROOT
-    task_setup = "venv/bin/python -m tools.agents.task_db create"
-    task_cleanup = "venv/bin/python -m tools.agents.task_db drop"
+    task_setup = "venv/bin/python -m tools.task_db create"
+    task_cleanup = "venv/bin/python -m tools.task_db drop"
 
     [models]
-    deny = ["deepseek"]                            # снимает только человек
+    deny = ["slow-model"]                          # снимает только человек
 
     [budget]
     go = 1.5
@@ -123,6 +135,15 @@ class ProjectConfig:
 class HubConfig:
     projects: tuple[str, ...] = ()  # пути к корням проектов (или к их .hub.toml)
     source: str = ""
+    tg_token: str = ""  # [telegram] token; пусто — бот выключен
+    tg_chat_id: int | None = None  # [telegram] chat_id; запасной чат для рассылки
+    tg_proxy: str = ""  # [telegram] proxy; пусто — системный HTTPS_PROXY
+    go_month_limit: float | None = None  # [usage] go_month_limit; None — не показывать
+
+    @property
+    def telegram_enabled(self) -> bool:
+        """Включён ли бот: есть токен."""
+        return bool(self.tg_token)
 
 
 class _Reader:
@@ -335,8 +356,56 @@ def _legacy_global_path() -> Path:
     return base / "agent-hub" / "config.toml"
 
 
+def _parse_hub_data(data: dict, source: str) -> HubConfig:
+    """dict из TOML → HubConfig. Все проблемы разом — в ConfigError."""
+    r = _Reader()
+    projects = r.strs(data, "projects")
+    tg = r.table(data, "telegram")
+    token = r.str_(tg, "token", "", "telegram.")
+    chat_id: int | None = None
+    if "chat_id" in tg:
+        v = tg["chat_id"]
+        if isinstance(v, bool) or not isinstance(v, int):
+            r.errors.append(f"telegram.chat_id: ожидается целое, получено {v!r}")
+        else:
+            chat_id = v
+    proxy = r.str_(tg, "proxy", "", "telegram.")
+    usage = r.table(data, "usage")
+    go_limit: float | None = None
+    if "go_month_limit" in usage:
+        v = usage["go_month_limit"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            r.errors.append(f"usage.go_month_limit: ожидается число, получено {v!r}")
+        elif v < 0:
+            r.errors.append(f"usage.go_month_limit: не может быть отрицательным ({v})")
+        else:
+            go_limit = float(v)
+    env_token = os.environ.get("AHUB_TG_TOKEN")
+    if env_token is not None and env_token.strip():
+        token = env_token.strip()
+    env_chat = os.environ.get("AHUB_TG_CHAT")
+    if env_chat is not None and env_chat.strip():
+        try:
+            chat_id = int(env_chat.strip())
+        except ValueError:
+            r.errors.append(f"AHUB_TG_CHAT: ожидается целое, получено {env_chat!r}")
+    if r.errors:
+        raise ConfigError(source or "<dict>", r.errors)
+    return HubConfig(
+        projects=tuple(expand(x) for x in projects),
+        source=source,
+        tg_token=token.strip(),
+        tg_chat_id=chat_id,
+        tg_proxy=proxy.strip(),
+        go_month_limit=go_limit,
+    )
+
+
 def load_hub(path: str | Path | None = None) -> HubConfig:
-    """Глобальный конфиг. Нет своего — список проектов из конфига v1. Нет ничего — пустой."""
+    """Глобальный конфиг. Нет своего — список проектов из конфига v1. Нет ничего — пустой.
+
+    AHUB_TG_TOKEN и AHUB_TG_CHAT перекрывают файл (и работают без файла).
+    """
     cands = [Path(path)] if path is not None else [paths.global_config_path(), _legacy_global_path()]
     for p in cands:
         if not p.is_file():
@@ -345,12 +414,8 @@ def load_hub(path: str | Path | None = None) -> HubConfig:
             data = tomllib.loads(p.read_text(encoding="utf-8"))
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(str(p), [f"TOML: {e}"]) from e
-        r = _Reader()
-        projects = r.strs(data, "projects")
-        if r.errors:
-            raise ConfigError(str(p), r.errors)
-        return HubConfig(projects=tuple(expand(x) for x in projects), source=str(p))
-    return HubConfig()
+        return _parse_hub_data(data, str(p))
+    return _parse_hub_data({}, "")
 
 
 def load_projects(hub: HubConfig | None = None) -> tuple[list[ProjectConfig], list[str]]:
