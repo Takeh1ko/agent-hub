@@ -45,7 +45,7 @@ drop a "done".
 
 | | |
 |---|---|
-| Task kinds | `scout` (report only), `code` (branch + gates + review), `routine` (light changes), `review` (of a branch/commit/range) |
+| Task kinds | `scout` (report only), `code` (branch + gates + review), `routine` (light changes) |
 | Isolation | a git worktree per task, secrets hidden from the copy, clean environment for the worker |
 | Gates | commit present, diff ⊆ allowed paths, structured result, acceptance tests under a shared lock |
 | Review | panel of reviewer models in new sessions; disputes count only with file, line and reason; N rounds |
@@ -57,7 +57,7 @@ drop a "done".
 | Live transcript | `ahub follow T12` — the prompt, the worker's text, tool calls and results as they happen (`ahub log T12` stays raw) |
 | Talking to a worker | `ahub nudge T12 "…"` — a message into the running session; the turn is interrupted and the same session continues |
 | Waking Claude | `ahub watch` for Claude Code's Monitor, `ahub wait`; stable codes `DONE` `DECISION` `ERROR` `OWNER` `ANSWER` `ALARM` |
-| Projects | one hub, several repositories; a Claude session sees only its project, the owner adds `--all`; `ahub projects`, `ahub cost` |
+| Projects | one hub, several repositories; a Claude session sees only its project, the owner adds `--all`; `ahub projects`, `ahub cost`; Telegram routes messages per project |
 | Pulse | 🟢 working · 🟡 waiting for a reason · 🔴 silent · ⚫ dead · ⚪ no data — from the provider, processes and locks |
 | Observer | code checks every 5 min, a model review every 30 min, escalation to Claude, then to you |
 | Human | `ahub top`; optional Telegram bot that talks to Claude (and starts Claude if no session is live) |
@@ -187,7 +187,7 @@ Codex or Cursor config.
 
 ```
 python -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # ~2.5 min, no network, HOME is faked
+.venv/bin/python -m pytest -q          # ~6 min, no network, HOME is faked
 AHUB_LIVE=1 .venv/bin/python -m pytest -m live   # real providers, costs money
 ```
 

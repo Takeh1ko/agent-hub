@@ -10,7 +10,7 @@ python -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest -q
 ```
 
-The suite takes about three minutes, needs no network and fakes `HOME`, so it never touches your real hub.
+The suite takes about six minutes, needs no network and fakes `HOME`, so it never touches your real hub.
 Tests against real providers cost money and run only on request: `AHUB_LIVE=1 .venv/bin/python -m pytest -m live`.
 
 ## Lint and smoke test

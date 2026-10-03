@@ -23,9 +23,9 @@ ahub doctor
 2. **Проект** — корень git-репозитория. Мастер создаёт `.hub.toml` (схема v2) с полями, которые захочется поправить:
    `name`, `allowed_paths`, `worktrees`, `work_branch`, `python`, `[budget]`, `[timeouts]`, и регистрирует проект в
    `~/.config/ahub/config.toml`.
-3. **Поставщики** — все, которых знает хаб (opencode, `agy`, `codex`): найден или нет, есть вход или нет, заметка и
+3. **Провайдеры** — все, которых знает хаб (opencode, `agy`, `codex`): найден или нет, есть вход или нет, заметка и
    подсказка по установке, если его нет. Вы выбираете, кого включить.
-4. **Модели** — живая проверка (по одному крошечному запросу на модель) всех моделей включённых поставщиков с
+4. **Модели** — живая проверка (по одному крошечному запросу на модель) всех моделей включённых провайдеров с
    пометкой free / paid / plan и выбор умолчаний для ролей. `AHUB_PROBE=0` отключает проверку.
 5. **Служба** — системная служба (systemd в Linux, launchd в macOS) или фоновый процесс.
 6. **Claude Code** — навык `ahub`, блок в `CLAUDE.md` проекта и разрешение `Bash(ahub:*)`.
@@ -44,7 +44,7 @@ ahub doctor
 `ahub service status` показывает пульс, очередь и процессы задач. Процессы задач отдельные и переживают перезапуск
 службы; задача, чей процесс умер, возвращается в очередь.
 
-## Поставщики и модели
+## Провайдеры и модели
 
 ```
 ahub providers                      # таблица: найден, вход, включён, модели
@@ -52,12 +52,12 @@ ahub providers enable opencode      # его модели становятся �
 ahub providers disable codex        # его модели уходят из всех меню ролей
 ```
 
-Выключенный поставщик — это жёсткий переключатель: назвать его модель в задаче можно только с отказом и подсказкой
+Выключенный провайдер — это жёсткий переключатель: назвать его модель в задаче можно только с отказом и подсказкой
 (`ahub providers enable <имя>`).
 
 ```
-ahub models                         # модель по умолчанию для каждой роли
-ahub models --all                   # все псевдонимы с поставщиком и id модели
+ahub models                         # меню каждой роли, ★ — умолчание роли
+ahub models --all                   # все псевдонимы с провайдером и id модели
 ahub models role reviewer --add mimo-flash --default
 ahub models add mymodel --provider opencode --model-id opencode-go/mimo-v2.6-flash
 ahub models check                   # по одному живому запросу на модель по умолчанию
@@ -68,13 +68,13 @@ ahub models check                   # по одному живому запро�
 | Роль | Что делает |
 |---|---|
 | `executor` | работает над `code`: пишет код и тесты в копии задачи, коммитит |
-| `reviewer` | панель ревью (новые сессии) и задачи `review` |
+| `reviewer` | панель ревью: новые сессии, вердикт каждого, споры и починка |
 | `scout` | задачи `scout`: читает и отчитывается, ничего не меняет |
 | `routine` | задачи `routine`: мелкие правки файлов, без приёмочных тестов |
 | `observer` | следит за самим хабом: проверка кодом раз в 5 мин, моделью раз в 30 мин |
 | `drafter` | превращает обычные слова в поля задачи (`ahub draft`) |
 
-Как платить по поставщикам: бесплатные модели opencode не требуют входа и стоят $0; модели opencode Go требуют
+Как платить по провайдерам: бесплатные модели opencode не требуют входа и стоят $0; модели opencode Go требуют
 `opencode auth login` и считаются за токены; `agy` тратит квоту аккаунта Google; codex тратит подписку ChatGPT.
 Последние двое отдают токены и никакой цены, поэтому задача на них показывает `$0.000 Go`, а токены видны в
 `ahub follow`.
@@ -90,14 +90,13 @@ ahub task new --kind code --title "добавить повтор в платёж
 |---|---|---|
 | `scout` | отчёт | отчёт есть и по форме; ничего не изменено |
 | `code` | ветка + отчёт | есть коммит, дифф ⊆ `--paths`, приёмка зелёная под замком проекта |
-| `review` | замечания | замечания по форме; ничего не изменено |
 | `routine` | правки + отчёт | есть коммит, дифф ⊆ `--paths` |
 
 Флаги, которые стоит знать: `--paths` (разрешённые файлы, глобы через запятую), `--accept` (узлы pytest, которые
 должны пройти), `--model` (псевдоним, иначе умолчание роли), `--budget` (доллары Go на всю задачу) и
 `--budget-usd` (реальные деньги), `--after T3,T4` (начать только после принятия этих задач), `--review` /
-`--rounds` / `--no-review` (панель ревью), `--time-limit` (минуты), `--input` (что смотрит задача `review`: ветка,
-sha, `a..b` или файлы), `--resources` (сделать задачу эксклюзивной), `--draft` (создать черновик, а не задачу).
+`--rounds` / `--no-review` (панель ревью), `--time-limit` (минуты), `--resources` (сделать задачу эксклюзивной),
+`--draft` (создать черновик, а не задачу).
 
 Задача проверяется до того, как потратится хоть копейка: разрешённые файлы должны попадать в `allowed_paths`
 проекта, файлы для чтения должны существовать, приёмка должна собираться, модель должна быть доступна. Отказ
@@ -138,25 +137,32 @@ ahub history -n 20         # недавние задачи с исходом и 
 ahub top                   # терминальный экран: задачи, пульс, деньги, события
 ```
 
-Настоящий вывод `ahub status`:
+Настоящий вывод `ahub status` — задача `scout` и проверенная задача `code` на бесплатной модели `bunny`:
 
 ```
 $ ahub status
-repo · 0 active · 2 waiting · 0 queued
-Waiting
-  T1  done   report ready
-  T5  done   review: all agree
+repo · активных 0 · ждут решения 2 · в очереди 0
+Ждут
+  T2  готово  отчёт готов
+  T3  готово  ревью: все согласны
 
-$ ahub status T5
-T5  code  add a retry wrapper
-─────────────────────────────
-State  done · review: all agree
-Model  fake  Review  fake
-Cost   $0.096 Go of $1.50 budget
-Age    0 min
-Summary
-  code: lib.retry retries once, test updated
-Next  ahub accept T5 · ahub rework T5 --notes "…" · ahub reject T5
+$ ahub status T3
+T3  code  add a double() helper next to retry()
+───────────────────────────────────────────────
+Состояние  готово · ревью: все согласны
+Модель     bunny  Ревью  bunny
+Стоимость  0.000 Go из $1.50 бюджета
+Возраст    2 мин
+Итог работника
+  Added a double(x) helper to lib.py alongside the existing retry(fn), plus unit tests in
+  tests/test_lib.py covering zero, positive, negative and float inputs. The pre-existing test_ok and
+  a retry regression test are kept, and all three tests pass under pytest.
+Открытые вопросы
+  No additional files were needed; everything requested fit inside the allowed paths (lib.py,
+  tests/**). tests/test_lib.py prepends the repository root to sys.path before importing lib so the
+  test passes regardless of the working directory pytest is launched from, because there is no
+  root-level conftest.py and adding one would be outside the allowed file list.…
+Дальше  ahub accept T3 · ahub rework T3 --notes "…" · ahub reject T3
 ```
 
 `ahub follow T12` печатает промпт и ход по мере их появления и следит дальше, пока задача не покинет активное
@@ -188,7 +194,7 @@ Telegram (по желанию, `pipx install 'ahub[telegram]'` и токен в 
 
 ## Деньги и бюджеты
 
-Хаб считает деньги так, как их сообщает поставщик: сессии opencode несут токены и цену, поэтому задача показывает
+Хаб считает деньги так, как их сообщает провайдер: сессии opencode несут токены и цену, поэтому задача показывает
 `$0.096 Go of $1.50 budget`. `agy` и codex отдают токены и никакой цены, поэтому их задачи показывают
 `$0.000 Go`, а токены по шагам видны в `ahub follow` — сколько они стоят, это квота аккаунта.
 
@@ -250,11 +256,11 @@ namespace (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` и ф
 
 | Симптом | Что запустить |
 |---|---|
-| Что-то в установке сломано или поставщик не отвечает | `ahub doctor` — каждая строка это симптом и починка |
-| Задача падает с «provider is off» или «no such model» | `ahub providers`, затем `ahub providers enable <имя>` |
+| Что-то в установке сломано или провайдер не отвечает | `ahub doctor` — каждая строка это симптом и починка |
+| Задача отклонена с `no model 'spark'` или `provider opencode is off` | `ahub models --all` — список псевдонимов; `ahub providers enable opencode` — если провайдер выключен |
 | Бесплатная модель перестала отвечать (лимит или её убрали из каталога) | `ahub models check`, затем `ahub models role <роль> --set-default <псевдоним>` |
 | Задача слишком долго в одном состоянии | `ahub follow T12` — посмотреть, что делает работник; `ahub nudge T12 "…"` — направить; `ahub stop T12` и `ahub continue T12`, если перезапустить |
 | codex молча не выполняет команды на Ubuntu 24.04 | `ahub doctor` называет причину: либо разрешить user namespace, либо `sandbox = "danger-full-access"` |
-| Поставщик установлен, но входа нет | `ahub doctor` показывает точную команду: `opencode auth login`, `agy` (аккаунт Google), `codex login` |
+| Провайдер установлен, но входа нет | `ahub doctor` показывает точную команду: `opencode auth login`, `agy` (аккаунт Google), `codex login` |
 | Не выполняется вообще ничего | `ahub service status` — очереди нужна живая служба; без системной службы `ahub service start` |
 | Оркестратор не увидел событие | оно не потерялось: `ahub inbox`, `ahub status`, а `ahub ack` — только после решения |

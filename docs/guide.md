@@ -30,14 +30,14 @@ ahub doctor
 5. **Service** — the OS service (systemd on Linux, launchd on macOS) or a background process.
 6. **Claude Code** — the `ahub` skill, a block in the project `CLAUDE.md`, and the permission `Bash(ahub:*)`.
 7. **Telegram** — optional, off by default; needs `pipx install 'ahub[telegram]'`.
-8. **Doctor** — the full check of step 1 through 7 as a summary.
+8. **Doctor** — the full check of steps 1 through 7 as a summary.
 
 Flags: `ahub setup --yes` takes every default without questions, `--claude` installs the Claude Code part without
 asking, `--service` installs and enables the OS service, `--name` and `--deny` set the project name and the models
 denied in it, `--lang` writes the hub language.
 
-`ahub doctor` is the same checks on demand: every line says what is wrong and what to do about it, and it exits 1 if
-something is broken. `ahub --json doctor` gives the machine form.
+`ahub doctor` runs the same checks on demand: every line says what is wrong and what to do about it, and it exits 1
+if something is broken. `ahub --json doctor` gives the machine form.
 
 The service runs the queue: `queued → preparing → working → checking → reviewing → … → done`, or
 `needs_decision`, `error`, `stopped`. Without an OS service, `ahub service start` runs it in the background
@@ -56,7 +56,7 @@ A provider that is off is a hard switch: naming one of its models in a task is a
 (`ahub providers enable <name>`).
 
 ```
-ahub models                         # the default model of every role
+ahub models                         # the menu of every role, ★ = the default of the role
 ahub models --all                   # every alias with its provider and model id
 ahub models role reviewer --add mimo-flash --default
 ahub models add mymodel --provider opencode --model-id opencode-go/mimo-v2.6-flash
@@ -68,7 +68,7 @@ Roles:
 | Role | What it does |
 |---|---|
 | `executor` | works on `code` tasks: writes code and tests in the task copy, commits |
-| `reviewer` | the review panel (fresh sessions) and `review` tasks |
+| `reviewer` | the review panel: fresh sessions, one verdict each, disputes and fixes |
 | `scout` | `scout` tasks: reads and reports, changes nothing |
 | `routine` | `routine` tasks: light file work, no acceptance tests |
 | `observer` | watches the hub itself: a code check every 5 min, a model review every 30 min |
@@ -90,14 +90,13 @@ ahub task new --kind code --title "add retry to the payment client" \
 |---|---|---|
 | `scout` | a report | the report exists and fits the shape; nothing changed |
 | `code` | a branch + a report | a commit exists, the diff ⊆ `--paths`, acceptance is green under the project lock |
-| `review` | findings | the findings fit the shape; nothing changed |
 | `routine` | changes + a report | a commit exists, the diff ⊆ `--paths` |
 
 Flags worth knowing: `--paths` (allowed files, comma-separated globs), `--accept` (pytest nodes that must pass),
 `--model` (an alias, otherwise the role default), `--budget` (Go dollars for the whole task) and `--budget-usd`
 (real money), `--after T3,T4` (start only after those tasks are accepted), `--review` / `--rounds` / `--no-review`
-(the panel), `--time-limit` (minutes), `--input` (what a `review` task looks at: a branch, a sha, `a..b` or files),
-`--resources` (make the task exclusive), `--draft` (file a draft instead of a task).
+(the panel), `--time-limit` (minutes), `--resources` (make the task exclusive), `--draft` (file a draft instead of
+a task).
 
 A task is validated before anything is paid for: the allowed files must be inside the project's `allowed_paths`,
 the files to read must exist, the acceptance must collect, the model must be available. A refusal comes with the
@@ -138,25 +137,32 @@ ahub history -n 20         # recent tasks with their outcome and cost
 ahub top                   # the terminal UI: tasks, pulse, money, events
 ```
 
-Real `ahub status` output:
+Real `ahub status` output (a `scout` and a reviewed `code` task on the free `bunny` model):
 
 ```
 $ ahub status
 repo · 0 active · 2 waiting · 0 queued
 Waiting
-  T1  done   report ready
-  T5  done   review: all agree
+  T2  done  report ready
+  T3  done  review: all agree
 
-$ ahub status T5
-T5  code  add a retry wrapper
-─────────────────────────────
+$ ahub status T3
+T3  code  add a double() helper next to retry()
+───────────────────────────────────────────────
 State  done · review: all agree
-Model  fake  Review  fake
-Cost   $0.096 Go of $1.50 budget
-Age    0 min
+Model  bunny  Review  bunny
+Cost   $0.000 Go of $1.50 budget
+Age    2 min
 Summary
-  code: lib.retry retries once, test updated
-Next  ahub accept T5 · ahub rework T5 --notes "…" · ahub reject T5
+  Added a double(x) helper to lib.py alongside the existing retry(fn), plus unit tests in
+  tests/test_lib.py covering zero, positive, negative and float inputs. The pre-existing test_ok and
+  a retry regression test are kept, and all three tests pass under pytest.
+Open points
+  No additional files were needed; everything requested fit inside the allowed paths (lib.py,
+  tests/**). tests/test_lib.py prepends the repository root to sys.path before importing lib so the
+  test passes regardless of the working directory pytest is launched from, because there is no
+  root-level conftest.py and adding one would be outside the allowed file list.…
+Next  ahub accept T3 · ahub rework T3 --notes "…" · ahub reject T3
 ```
 
 `ahub follow T12` prints the prompt and the turn as they happen and keeps following until the task leaves an
@@ -252,7 +258,7 @@ skill parses them.
 | Symptom | What to run |
 |---|---|
 | Something in the installation is wrong, or a provider does not answer | `ahub doctor` — every line is a symptom and a fix |
-| A task fails with "provider is off" or "no such model" | `ahub providers`, then `ahub providers enable <name>` |
+| A task is refused with `no model 'spark'` or `provider opencode is off` | `ahub models --all` for the list of aliases; `ahub providers enable opencode` for a provider that is switched off |
 | A free model stopped answering (rate limit, gone from the catalog) | `ahub models check`, then `ahub models role <role> --set-default <alias>` |
 | A task sits in one state for too long | `ahub follow T12` to see what the worker does; `ahub nudge T12 "…"` to steer it; `ahub stop T12` and `ahub continue T12` if it must restart |
 | codex fails every command silently on Ubuntu 24.04 | `ahub doctor` names it; either allow the user namespaces or set `sandbox = "danger-full-access"` |
