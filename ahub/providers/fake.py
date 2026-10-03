@@ -2,6 +2,13 @@
 
 The prompt is a fake_agent JSON scenario (or a path to a scenario file). Usage comes from stream
 usage events, the session log and state — from the recorded log. Used in runner, engine, and gate tests.
+
+Two env switches make it usable outside the tests too (both are read by the installed CLI):
+- AHUB_FAKE_PROVIDER=1 — the model "fake" is added to the registry and made the default of every role
+  (registry.seed), so `ahub task new` can run a task on this provider without a network or a real model.
+- AHUB_FAKE_QUEUE=<dir> — the scenarios, one *.json per turn, taken in order (an empty queue answers
+  an empty result).
+Neither has a CLI flag: both exist for tests and for tools/smoke.sh (the CI smoke test).
 """
 
 from __future__ import annotations
@@ -15,6 +22,17 @@ from ahub.providers.base import Act, Activity, Cap, Health, ModelInfo, Provider,
 
 TRANSIENT_MARKERS = ("unexpected server error", "cannot connect", "econnrefused", "etimedout", "status 5", "429")
 
+ENV_FLAG = "AHUB_FAKE_PROVIDER"  # =1 — this provider becomes selectable (the model alias is "fake")
+ENV_QUEUE = "AHUB_FAKE_QUEUE"  # =<dir> — scenarios for the turns, *.json in order
+
+ALIAS = "fake"  # the model alias the registry gets under ENV_FLAG
+MODEL_ID = "fake/model"
+
+
+def selectable_from_env() -> bool:
+    """AHUB_FAKE_PROVIDER=1 — the fake provider is a normal registry entry (not a test-only import)."""
+    return os.environ.get(ENV_FLAG, "").strip().lower() in ("1", "true", "yes", "on")
+
 
 class FakeProvider(Provider):
     name = "fake"
@@ -26,7 +44,7 @@ class FakeProvider(Provider):
 
     def build_command(self, spec: RunSpec) -> list[str]:
         src = spec.prompt.strip()
-        queue = os.environ.get("AHUB_FAKE_QUEUE")
+        queue = os.environ.get(ENV_QUEUE)
         if not src.startswith("{") and queue:
             # Cross-process e2e tests: next scenario from the queue dir (in order).
             files = sorted(Path(queue).glob("*.json"))
@@ -106,7 +124,7 @@ class FakeProvider(Provider):
         return None
 
     def catalog(self) -> list[ModelInfo]:
-        return [ModelInfo("fake/model", ("low", "high"), counter="go", price_in=0.1, price_out=0.2)]
+        return [ModelInfo(MODEL_ID, ("low", "high"), counter="go", price_in=0.1, price_out=0.2)]
 
     def health(self) -> Health:
         if self.healthy:

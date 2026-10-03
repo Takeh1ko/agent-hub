@@ -43,6 +43,36 @@ jobs:
           /tmp/v/bin/ahub version
           HOME=$(mktemp -d) /tmp/v/bin/ahub status
 
+  # The smoke test as a new user: wheel → fresh venv → setup → one task end to end. After the package
+  # job: if the wheel is broken there is no point in the deeper check.
+  smoke:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - name: Smoke test (wheel, setup, one task on the fake provider)
+        run: tools/smoke.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e '.[dev]'
+      - run: ruff check ahub tests
+
   secrets:
     runs-on: ubuntu-latest
     steps:
