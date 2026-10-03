@@ -34,6 +34,7 @@ from ahub.store import Task
 TEST_TIMEOUT_S = 30 * 60
 LOCK_WAIT_S = 30 * 60
 TAIL_LINES = 15
+DIFF_LIMIT = 200_000  # the diff a reviewer reads; over that it is cut, not the task
 # the shape of .ahub/result.json — a problem an orchestrator's own edit over the result may cause
 RESULT_JSON_CODES = frozenset({"result_commit", "result_files", "no_result"})
 
@@ -96,8 +97,13 @@ def diff_files(path: str, base: str) -> list[str]:
     return [x for x in r.stdout.splitlines() if x.strip()]
 
 
-def diff_text(path: str, base: str, limit: int = 200_000) -> str:
-    r = workspace.git(path, "diff", f"{base}..HEAD", check=False)
+def diff_text(path: str, base: str, limit: int = DIFF_LIMIT) -> str:
+    return rev_diff_text(path, f"{base}..HEAD", limit)
+
+
+def rev_diff_text(path: str, revs: str, limit: int = DIFF_LIMIT) -> str:
+    """The diff of any range of commits — the base..HEAD of a code task, the input of a review task."""
+    r = workspace.git(path, "diff", revs, check=False)
     out = r.stdout
     return out if len(out) <= limit else out[:limit] + "\n" + _t("gates.diff_cut", size=len(out))
 

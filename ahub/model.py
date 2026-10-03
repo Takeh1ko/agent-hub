@@ -25,7 +25,7 @@ class State(StrEnum):
     PREPARING = "preparing"  # project copy, branch, environment
     WORKING = "working"  # worker does the task (phase says: studying/writing)
     CHECKING = "checking"  # gates
-    REVIEWING = "reviewing"  # review panel
+    REVIEWING = "reviewing"  # review panel (also a review task — the whole task is the panel)
     FIXING = "fixing"  # rework on findings (same executor session)
     DONE = "done"  # done — waits for the orchestrator/human decision
     NEEDS_DECISION = "needs_decision"  # rounds over, budget, disputed — needs a decision
@@ -52,7 +52,7 @@ TRANSITIONS: dict[State, frozenset[State]] = {
     State.QUEUED: frozenset({State.PREPARING, State.STOPPED, State.REJECTED, State.NEEDS_DECISION}),
     State.PREPARING: frozenset({State.WORKING, State.FIXING, State.ERROR, State.STOPPED, State.NEEDS_DECISION,
                                 _ORPHAN}),
-    State.WORKING: frozenset({State.CHECKING, State.DONE, State.NEEDS_DECISION, State.ERROR,
+    State.WORKING: frozenset({State.CHECKING, State.REVIEWING, State.DONE, State.NEEDS_DECISION, State.ERROR,
                               State.STOPPED, _ORPHAN}),
     State.CHECKING: frozenset({State.WORKING, State.FIXING, State.REVIEWING, State.DONE,
                                State.NEEDS_DECISION, State.ERROR, State.STOPPED, _ORPHAN}),

@@ -16,6 +16,7 @@ from pathlib import Path
 from ahub import reasons, workspace
 from ahub.config import ProjectConfig
 from ahub.gates import GateResult
+from ahub.model import Kind
 from ahub.prompts import orchestrator_heading, reply_language_line, rules_text
 from ahub.store import Task
 
@@ -82,24 +83,34 @@ def verdict_repair_prompt(round_no: int, model: str) -> str:
 
 def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResult, round_no: int,
                   model: str) -> str:
+    """The prompt of one reviewer.
+
+    A review task has no allowed files, no acceptance and no gates — its input is what is under review, so
+    those sections are replaced by the input itself (`gate` is then an empty result).
+    """
     out = review_path(".", round_no, model).as_posix().removeprefix("./")
-    return "\n\n".join([
-        rules_text(project).strip(),
-        f"# Review of {task.label}: {task.title}\nYou are a reviewer in a fresh session; you have not seen "
-        "the worker's work. Do not change or commit project files.",
-        "## Task\n" + strip_arbiter(task.spec.strip() or "(empty description)"),
-        f"## Allowed files\n{', '.join(task.limits.get('paths') or [])}\n"
-        f"## Acceptance\n{', '.join(task.limits.get('accept') or []) or '—'}",
-        f"## Gates (no models)\n{gate.summary()}" + (f"\nTest tail:\n```\n{gate.tests_tail}\n```"
-                                                        if gate.tests_tail else ""),
-        "## Diff\n```diff\n" + diff + "\n```",
+    sections = [rules_text(project).strip(),
+                f"# Review of {task.label}: {task.title}\nYou are a reviewer in a fresh session; you have not seen "
+                "the worker's work. Do not change or commit project files.",
+                "## Task\n" + strip_arbiter(task.spec.strip() or "(empty description)")]
+    if task.kind is Kind.REVIEW:
+        sections.append(f"## Under review\n`{task.limits.get('input') or ''}`")
+        sections.append("## Material under review\n```\n" + diff + "\n```")
+    else:
+        sections.append(f"## Allowed files\n{', '.join(task.limits.get('paths') or [])}\n"
+                        f"## Acceptance\n{', '.join(task.limits.get('accept') or []) or '—'}")
+        sections.append(f"## Gates (no models)\n{gate.summary()}" + (f"\nTest tail:\n```\n{gate.tests_tail}\n```"
+                                                                      if gate.tests_tail else ""))
+        sections.append("## Diff\n```diff\n" + diff + "\n```")
+    sections += [
         "## What to check\nMatch to the task and acceptance; stub tests (pass on broken logic — "
         "check by breaking the logic locally and reverting via git checkout); races; resource leaks; "
         "blocking calls in async; changes outside allowed files. Style/taste — low only.",
         f"## How to submit\nWrite `{out}`:\n{verdict_format()}\n"
         f"Each finding needs file, line, and a concrete fix. {reply_language_line()} "
         'Last message — one line: "done".',
-    ])
+    ]
+    return "\n\n".join(sections)
 
 
 def parse(path: Path, model: str) -> Review | None:
@@ -136,21 +147,33 @@ def dedup(findings: list[Finding]) -> list[Finding]:
     return sorted(seen.values(), key=lambda f: (order.get(f.severity, 1), f.file, f.line or 0))
 
 
-def panel(reviews: list[Review], expected: list[str], round_no: int, max_rounds: int) -> tuple[str, str]:
-    """(decision, reason): done | fix | decision. The reason is a stored code blob, not text."""
+def panel(reviews: list[Review], expected: list[str], round_no: int, max_rounds: int,
+          *, rework: bool = True) -> tuple[str, str]:
+    """(decision, reason): done | fix | decision. The reason is a stored code blob, not text.
+
+    `rework` False — a review task: the verdicts are the result, not a gate before a fix, so every verdict
+    in hand finishes it (only a missing one needs a decision).
+    """
     got = {r.model for r in reviews}
     missing = [m for m in expected if m not in got]
     if missing:
         return "decision", reasons.dump("review_missing", items=", ".join(missing))
     if all(r.effective == "approve" for r in reviews):
         return "done", reasons.dump("review_agree")
+    if not rework:  # a review task: the verdicts are the result — every finding of them counts
+        return "done", reasons.dump("review_findings", n=len(dedup([f for r in reviews for f in r.findings])))
     if any(r.effective == "dispute" for r in reviews) and not any(r.effective == "changes" for r in reviews):
         return "decision", reasons.dump("review_dispute")
-    blocking = dedup([f for r in reviews if r.effective != "approve" for f in r.findings if f.severity != "low"])
+    blocking = blocking_findings(reviews)
     if round_no < max_rounds:
         return "fix", reasons.dump("review_findings", n=len(blocking))
     highs = sum(1 for f in blocking if f.severity == "high")
     return "decision", reasons.dump("review_exhausted", n=len(blocking), highs=highs)
+
+
+def blocking_findings(reviews: list[Review]) -> list[Finding]:
+    """Findings that hold a code task: not from an approving reviewer, not low. Deduplicated."""
+    return dedup([f for r in reviews if r.effective != "approve" for f in r.findings if f.severity != "low"])
 
 
 def fix_prompt(findings: list[Finding], gate: GateResult | None = None, notes: str = "") -> str:

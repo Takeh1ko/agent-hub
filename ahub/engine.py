@@ -8,7 +8,8 @@ One engine instance = one task process (ahub.worker). It:
   "Needs decision"; a message from the orchestrator (ahub nudge) → the worker turn is interrupted and the same
   session continues with it (gates and reviewers are not interrupted by a message — they carry the result of
   the turn); quota/timeout → "Needs decision"; no access/model error/crash → "Error"; requested stop → "Stopped".
-V08: scout. Code/routine/review (gates, panel, merge) — M3.
+V08: scout. Code/routine: gates, panel, merge — M3. Review: the panel over the given input, the findings are
+the result (nothing is merged).
 Robustness of a live code reload: the owner poll (stop/budget/request) reads the task row through the dataclass
 of this code. Old code on a newer schema cannot — POLL_FAIL_MAX failures in a row give the process up: the
 provider session is stopped, the task stays active, and the worker exits non-zero (the service re-picks it
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sqlite3
 import threading
@@ -71,7 +73,69 @@ class LeaseLost(RuntimeError):
     """Lease taken away: stop work, leave state alone."""
 
 
+class ReviewInputError(RuntimeError):
+    """The --input of a review task names nothing that exists — the task needs a decision, not a worker."""
+
+
 UNFIXABLE_SCOUT = ("scout_files", "scout_commits")  # a scout that touched files — a repair prompt cannot fix it
+
+_SHA = re.compile(r"[0-9a-fA-F]{7,40}")
+FILE_LIMIT = 60_000  # one file of a "review these files" input
+
+
+def _ref(worktree: str, spec: str) -> str:
+    """The commit the name (a branch, a tag, a sha) resolves to ('' — nothing by that name)."""
+    r = workspace.git(worktree, "rev-parse", "--verify", "--quiet", f"{spec}^{{commit}}", check=False)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _file_of_copy(worktree: str, name: str) -> bool:
+    """The name is a file of the copy — a review never reads outside its worktree."""
+    p = Path(name)
+    return not p.is_absolute() and ".." not in p.parts and (Path(worktree) / p).is_file()
+
+
+def review_material(project: ProjectConfig, worktree: str, spec: str) -> str:
+    """What the panel reads for a review task: the diff of a branch/commit/range, or the content of files.
+
+    A branch is read from its merge-base with the work branch, a commit as `sha^!` (what that commit changed),
+    an `a..b` range as it is. Files are read as they are in the copy — there is no diff of them. Everything
+    is capped like the diff of a code task.
+    """
+    spec = (spec or "").strip()
+    if ".." in spec:
+        left, right = spec.split("..", 1)
+        if not (_ref(worktree, left) and _ref(worktree, right)):
+            raise ReviewInputError(_t("engine.review_input_bad", input=spec))
+        return gates.rev_diff_text(worktree, spec)
+    names = [n for n in re.split(r"[,\s]+", spec) if n]
+    if names and all(_file_of_copy(worktree, n) for n in names):
+        return "\n\n".join(_file_text(worktree, n) for n in names)
+    sha = _ref(worktree, spec)
+    if sha:
+        if _SHA.fullmatch(spec):  # a commit — what it itself changed
+            return gates.rev_diff_text(worktree, f"{sha}^!")
+        base = workspace.git(worktree, "merge-base", project.work_branch, sha, check=False).stdout.strip()
+        if not base:  # unrelated histories — nothing to count the branch from
+            raise ReviewInputError(_t("engine.review_input_bad", input=spec))
+        return gates.rev_diff_text(worktree, f"{base}..{sha}")
+    raise ReviewInputError(_t("engine.review_input_bad", input=spec))
+
+
+def _file_text(worktree: str, name: str) -> str:
+    """One file of a review input: its current content under its path."""
+    body = (Path(worktree) / name).read_text(encoding="utf-8", errors="replace")
+    if len(body) > FILE_LIMIT:
+        body = body[:FILE_LIMIT] + "\n" + _t("engine.review_cut", size=len(body))
+    return f"### {name}\n```\n{body}\n```"
+
+
+def _findings_summary(findings: list[review.Finding]) -> str:
+    """One line for the state and the result: '3 findings: 1 high, 2 medium' / 'no findings'."""
+    if not findings:
+        return _t("engine.findings_none")
+    counts = {s: sum(1 for f in findings if f.severity == s) for s in ("high", "medium", "low")}
+    return _t("engine.findings_line", n=len(findings), parts=", ".join(f"{n} {s}" for s, n in counts.items() if n))
 
 
 def _problem(code: str, **params) -> gates.Problem:
@@ -464,6 +528,8 @@ class Engine:
             return self._settle(State.NEEDS_DECISION, reasons.dump("budget_before"))
         if t.kind is Kind.SCOUT:
             return self._scout(t)
+        if t.kind is Kind.REVIEW:
+            return self._review(t)
         if t.kind in (Kind.CODE, Kind.ROUTINE):
             return self._code(t)
         return self._settle(State.NEEDS_DECISION, reasons.dump("unsupported_kind", kind=t.kind.value))
@@ -597,6 +663,57 @@ class Engine:
             if self._result(t).get("status") != "blocked":
                 problems.append(_problem("no_report"))
         return problems
+
+    # --- review ---
+
+    def _review(self, t: Task) -> Settled:
+        """The review kind: the panel reads the given input and its findings are the result.
+
+        There is nothing to rework and nothing to merge: no gates are run (a review task has no acceptance
+        and no allowed files) and the copy is left exactly as it was prepared. `ahub accept` closes the task
+        like a scout's.
+        """
+        t = self._prepare(t)
+        try:
+            material = review_material(self.project, t.worktree, str(t.limits.get("input") or ""))
+        except ReviewInputError as e:
+            return self._settle(State.NEEDS_DECISION, reasons.dump("review_input", err=e))
+        models = list(t.review.get("models") or []) or [t.executor]
+        round_no = max(1, t.round)
+        self.set_phase(Phase.STUDYING)
+        t = self.move(State.REVIEWING, reasons.dump("review_round", round=round_no))
+        # no gates of a code task here: an empty result, so nothing pretends a test ran
+        decision, reason, findings = self._review_round(t, gates.GateResult(base="", head=""), models, round_no,
+                                                        max(1, int(t.review.get("rounds") or 1)),
+                                                        material=material, rework=False)
+        if decision == "decision":  # a reviewer without a verdict, a stop, the budget
+            return self._settle(State.NEEDS_DECISION, reason, payload={"findings": len(findings)})
+        summary = _findings_summary(findings)
+        report = self._write_review(t, findings, summary, models)
+        return self._settle(State.DONE, reason, payload={"summary": summary, "findings": len(findings),
+                                                         "report_bytes": report})
+
+    def _write_review(self, t: Task, findings: list[review.Finding], summary: str, models: list[str]) -> int:
+        """The result of a review task, written by the hub: the reviewers only wrote verdicts.
+
+        report.md — the findings grouped by severity (file:line, issue, fix); result.json — the usual shape.
+        Returns the size of the report.
+        """
+        base = Path(t.worktree) / workspace.AHUB_DIR
+        sections = [f"{prompts.report_heading()}\n{summary}"]
+        if findings:
+            by_sev = [f"### {s}\n" + "\n".join(
+                f"- `{f.file}:{f.line}` — {f.issue}" + (f"\n  fix: {f.fix}" if f.fix else "")
+                for f in findings if f.severity == s)
+                for s in ("high", "medium", "low") if any(f.severity == s for f in findings)]
+            sections.append(f"## {_t('engine.findings_head')}\n" + "\n\n".join(by_sev))
+        text = "\n\n".join(sections) + "\n"
+        (base / "report.md").write_text(text, encoding="utf-8")
+        result = {"summary": summary, "status": "done",
+                  "notes": _t("engine.review_notes", models=", ".join(models))}
+        (base / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+                                          encoding="utf-8")
+        return len(text.encode())
 
     # --- code and routine ---
 
@@ -733,10 +850,16 @@ class Engine:
         return gates.check(self.project, t, orch_edit=orch, on_wait=on_wait, should_stop=self.stop_requested)
 
     def _review_round(self, t: Task, g: gates.GateResult, models: list[str], round_no: int,
-                      max_rounds: int) -> tuple[str, str, list]:
+                      max_rounds: int, *, material: str | None = None,
+                      rework: bool = True) -> tuple[str, str, list]:
+        """One round of the panel: the reviewer sessions, the verdict repair retry, the decision.
+
+        `material` — what is under review (None — the diff of the copy, a code task's own);
+        `rework` False — a review task: the findings are the result, every one of them, the low ones too.
+        """
         from concurrent.futures import ThreadPoolExecutor
 
-        diff = gates.diff_text(t.worktree, g.base)
+        diff = gates.diff_text(t.worktree, g.base) if material is None else material
         for m in models:
             review.review_path(t.worktree, round_no, m).unlink(missing_ok=True)
 
@@ -776,10 +899,10 @@ class Engine:
                 if rv is not None:
                     found[m] = rv
         reviews = [found[m] for m in models if m in found]
-        decision, reason = review.panel(reviews, models, round_no, max_rounds)
-        blocking = review.dedup([f for rv in reviews if rv.effective != "approve" for f in rv.findings
-                                 if f.severity != "low"])
-        return decision, reason, blocking
+        decision, reason = review.panel(reviews, models, round_no, max_rounds, rework=rework)
+        if not rework:  # a review task reports what every reviewer wrote, low findings included
+            return decision, reason, review.dedup([f for rv in reviews for f in rv.findings])
+        return decision, reason, review.blocking_findings(reviews)
 
     def _review_interrupted(self, results: list) -> tuple[str, str, list] | None:
         """Reviewer session stopped: lost lease — raise, budget or stop — "needs decision"."""
