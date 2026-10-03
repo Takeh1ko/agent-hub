@@ -270,6 +270,18 @@ def test_a_group_without_a_directory_is_reported_once(store, tmp_path, caplog):
     assert sp.calls == []
 
 
+def test_the_owner_group_without_any_project_is_reported_once(store, caplog):
+    """'' is a target too: with no project configured the hub-wide group has no directory — say it, never idle."""
+    comms.owner_message(store, "всем сразу", project="")
+    sp = Spawner()
+    with caplog.at_level("WARNING", logger="launcher"):
+        assert launcher.tick(store, projects=[], spawn=sp, binary="claude") == "nodir:"
+        assert launcher.tick(store, projects=[], spawn=sp, binary="claude") == "idle"  # said once
+    assert [r.message for r in caplog.records] == [
+        "cannot launch Claude: no directory for the hub-wide group — no projects in the hub config"]
+    assert sp.calls == []
+
+
 def _messages_block(prompt: str) -> str:
     """The owner messages of a launch prompt — the part that must not leak between projects."""
     return prompt.split("Owner messages:\n")[1].split("\n\nHub summary")[0]
@@ -334,6 +346,15 @@ def test_a_pick_of_a_project_that_left_the_hub_is_dropped(store):
     assert core.current_project(store, 1) == ""
     assert [m["project"] for m in comms.inbox(store, mark=False)] == [""]
     assert "не выбран" in core.project_reply(store, ["P"], chat_id=1).text  # the list agrees with the routing
+
+
+def test_the_gone_notice_says_where_the_message_went(store):
+    """With a valid prefix the message went to that project — the notice must not claim it went everywhere."""
+    core.project_reply(store, ["P", "B"], "B", chat_id=1)  # B is picked…
+    rep = core.on_text(store, 1, "по P: почини", projects=["P"])  # …but gone from the hub; the prefix says P
+    assert "проекта B в хабе больше нет — сообщение ушло в проект P" in rep.text
+    assert "по всем проектам" not in rep.text and "проект: P" in rep.text
+    assert [m["project"] for m in comms.inbox(store, mark=False)] == ["P"]
 
 
 def test_a_pick_can_be_cleared(store):
@@ -404,6 +425,28 @@ async def test_background_tells_the_owner_about_a_project_without_a_directory(st
     with pytest.raises(asyncio.CancelledError):
         await tgrun.background(bot, store)
     assert [text for _, text, _ in bot.sent] == [t("tg.launch_no_dir", name="B")]
+
+
+async def test_background_tells_the_owner_when_the_hub_has_no_projects(store, monkeypatch):
+    """`nodir:` with an empty name — the hub-wide group with nothing configured: its own line, not one
+    with a blank project name."""
+    import asyncio
+
+    from ahub.i18n import t
+    from ahub.tg import run as tgrun
+
+    core.remember_chat(store, 7)
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda s: "nodir:")
+
+    async def stop(_):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", stop)
+    bot = FakeBot()
+    with pytest.raises(asyncio.CancelledError):
+        await tgrun.background(bot, store)
+    text = bot.sent[0][1]
+    assert text == t("tg.launch_no_dir_hub") and text != t("tg.launch_no_dir", name="")
 
 
 def test_dispatcher_builds(store):

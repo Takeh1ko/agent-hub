@@ -10,8 +10,9 @@
 - Directory of an owner launch: where Claude last worked (presence), else the hub's first project.
 - One resumable "TG session" (claude --resume) per project within a day and while turns stay under MAX_TURNS.
 - `--dangerously-skip-permissions` — same as the owner. Supervision: timeout, launch journal (claude_launch),
-  hourly limit (MAX_PER_HOUR — still hub-wide: one launch per project spends it), and a group whose project has
-  no directory here is reported once (`nodir:<project>`, the bot tells the owner) instead of every tick.
+  hourly limit (MAX_PER_HOUR — still hub-wide: one launch per project spends it), and a group with no directory
+  here is reported once (`nodir:<project>`, the bot tells the owner; an empty name — the hub-wide group with no
+  configured project) instead of every tick.
 """
 
 from __future__ import annotations
@@ -233,12 +234,19 @@ def _reap(store: Store, ts: int) -> str | None:
     return outcome
 
 
-def _no_directory(store: Store, target: str, ts: int) -> bool:
-    """A group whose project is not in the hub: log it once in a while (not on every tick). True — tell the owner."""
+def _no_directory(target: str, ts: int) -> bool:
+    """A group with no directory: log it once in a while (not on every tick). True — tell the owner.
+
+    target='' is the hub-wide group: with no project configured there is nowhere to run it, and that is said
+    too — an owner launch must never sit idle unnoticed.
+    """
     if ts - _no_dir.get(target, 0) < NO_DIR_MS:
         return False
     _no_dir[target] = ts
-    _log.warning("cannot launch Claude: no directory for project %s — no such project in the hub config", target)
+    if target:
+        _log.warning("cannot launch Claude: no directory for project %s — no such project in the hub config", target)
+    else:
+        _log.warning("cannot launch Claude: no directory for the hub-wide group — no projects in the hub config")
     return True
 
 
@@ -247,7 +255,8 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
     """One supervise/launch step.
 
     Returns what happened: idle | running | finished | killed | launched | limit | nodir:<project>
-    (nothing will ever be launched for that project — said once in NO_DIR_MS).
+    (nothing will ever be launched for that project — said once in NO_DIR_MS; an empty name — the hub-wide
+    group with no configured project).
     """
     ts = now if now is not None else now_ms()
     ended = _reap(store, ts)
@@ -257,7 +266,7 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
     if projects is None:
         projects, _ = config.load_projects()
     targets = _groups(store)
-    nodir = ""
+    nodir: str | None = None  # None, not "" — a hub-wide group is a target too
     for target, msgs in targets:
         if target in alive:
             continue  # the Claude of this project is already on it
@@ -271,7 +280,8 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
             _log.error("cannot launch Claude: no claude binary")
             return "idle"
         if root is None:
-            nodir = nodir or target
+            if nodir is None:
+                nodir = target
             continue
         scope = Scope((target,)) if target else Scope()
         prompt = PROMPT.format(project_line=project_line(target),
@@ -299,6 +309,6 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
         _log.info("launched Claude in %s (pid %s, %s)", target or "the hub", pid,
                   "resume" if resume else "new session")
         return "launched"
-    if nodir and _no_directory(store, nodir, ts):
+    if nodir is not None and _no_directory(nodir, ts):
         return f"nodir:{nodir}"
     return "running" if alive else "idle"
