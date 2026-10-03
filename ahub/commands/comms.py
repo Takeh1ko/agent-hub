@@ -71,17 +71,20 @@ def cmd_wait(args) -> int:
     """Block until an event or the deadline.
 
     A broken poll is retried (KeyboardInterrupt is not) — until the cap says it is hopeless. The timeout is
-    the deadline: once it is past, not one more poll is started, not even one of length 0.
+    the deadline: the first poll always happens (`--timeout 0` — take what is there right now), and past the
+    deadline not one more poll is started.
     """
     store = Store()
     sc = scope.resolve(args)
     fails = _Failures("wait")
     deadline = clock() + parse_duration(args.timeout)
     got: list[str] = []
+    first = True  # a zero timeout is one poll of what is already pending, not a refusal
     while True:
-        left = deadline - clock()
-        if left <= 0:
+        left = max(0.0, deadline - clock())
+        if left <= 0 and not first:
             break  # the timeout is what it was asked for — no poll past it
+        first = False
         try:
             got = events.wait(store, timeout_s=left, scope=sc, who=args.who)
             break
