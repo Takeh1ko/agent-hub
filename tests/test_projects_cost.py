@@ -438,20 +438,35 @@ async def test_top_header_row_opens_nothing(hub, store):
         assert not any("T0" in n.message for n in app._notifications._notifications)
 
 
-async def test_top_project_filter_waits_for_the_refresh_in_flight(hub, store):
-    """`o` must not be swallowed by the periodic refresh that is already running: it is remembered."""
+async def test_top_project_filter_waits_for_the_refresh_in_flight(hub, store, monkeypatch):
+    """`o` must not be swallowed by the refresh that is already running: the request is kept.
+
+    The refresh in flight is a real one — a thread stuck inside the snapshot until the test opens the
+    gate — and nothing but the kept request may serve the table: the 2 s tick is off, so this test
+    stands or falls on the pending block of `_apply`.
+    """
+    import threading
+
+    from ahub.tui import data as tdata
     from ahub.tui.app import TopApp
 
     tids = filled(store)
+    monkeypatch.setattr(TopApp, "set_interval", lambda self, *a, **kw: None)  # no periodic rescue
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
-        app._busy = True  # a refresh is in flight (the 2 s tick landed on it)
-        await pilot.press("o")
-        await pilot.pause(0.3)
+        assert len(app._ids) == 6
+        gate, real = threading.Event(), tdata.snapshot
+        monkeypatch.setattr(tdata, "snapshot",
+                            lambda *a, **kw: (gate.wait(10), real(*a, **kw))[1])
+        app.refresh_data()  # the refresh that is in flight
+        await pilot.pause(0.2)
+        assert app._busy
+        await pilot.press("o")  # the request arrives while it runs
+        await pilot.pause(0.2)
         assert app.project == "A" and app._pending is True and len(app._ids) == 6
-        app._busy = False
-        app.refresh_data()  # the in-flight one ends...
+        monkeypatch.setattr(tdata, "snapshot", real)  # the kept request must not wait at the gate
+        gate.set()  # the refresh in flight ends...
         await pilot.pause(0.5)  # ...and the kept request is served right after it
         assert app._pending is False
         assert app._ids == [tids["a_working"], tids["a_done"]]
