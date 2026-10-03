@@ -35,7 +35,8 @@ from typing import Any
 from ahub import gates, prepare, prompts, providers, reasons, registry, review, transcript, transitions, workspace
 from ahub import log as hublog
 from ahub.config import ProjectConfig
-from ahub.i18n import plural, t as _t
+from ahub.i18n import plural
+from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Kind, Phase, Role, State
 from ahub.providers.base import Act, Activity, Outcome, RunResult, RunSpec
 from ahub.providers.runner import PollFailed
@@ -90,8 +91,25 @@ def _ref(worktree: str, spec: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
-def _file_of_copy(worktree: str, name: str, project: ProjectConfig | None = None) -> bool:
-    """The name is a file of the copy — a review never reads outside its worktree or secret excludes."""
+def _is_secret(name: str, project: ProjectConfig) -> bool:
+    p = Path(name)
+    return any(fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(p.name, pat) for pat in project.secret_excludes)
+
+
+def _file_in_repo(worktree: str, project: ProjectConfig, name: str) -> bool:
+    p = Path(name)
+    if p.is_absolute() or ".." in p.parts:
+        return False
+    if (Path(worktree) / p).is_file():
+        return True
+    if (Path(project.root) / p).is_file():
+        return True
+    r = workspace.git(worktree, "ls-files", name, check=False)
+    return bool(r.stdout.strip())
+
+
+def _file_of_copy(worktree: str, name: str) -> bool:
+    """The name is a file of the copy — a review never reads outside its worktree."""
     p = Path(name)
     if p.is_absolute() or ".." in p.parts:
         return False
@@ -102,8 +120,6 @@ def _file_of_copy(worktree: str, name: str, project: ProjectConfig | None = None
         resolved = full.resolve(strict=True)
         resolved.relative_to(Path(worktree).resolve(strict=True))
     except (ValueError, OSError):
-        return False
-    if project and any(fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(p.name, pat) for pat in project.secret_excludes):
         return False
     return True
 
@@ -126,14 +142,19 @@ def review_material(project: ProjectConfig, worktree: str, spec: str) -> str:
             raise ReviewInputError(_t("engine.review_empty", input=spec))
         return diff
     names = [n for n in re.split(r"[,\s]+", spec) if n]
-    if names and all(_file_of_copy(worktree, n, project) for n in names):
-        files_text = [_file_text(worktree, n) for n in names]
-        text = "\n\n".join(t for t in files_text if t.strip())
-        if not text.strip():
-            raise ReviewInputError(_t("engine.review_empty", input=spec))
-        if len(text) > gates.DIFF_LIMIT:
-            text = text[:gates.DIFF_LIMIT] + "\n" + _t("engine.review_cut_total", size=len(text))
-        return text
+    if names:
+        secret_names = [n for n in names if _is_secret(n, project) and _file_in_repo(worktree, project, n)]
+        valid_names = [n for n in names if _file_of_copy(worktree, n) and not _is_secret(n, project)]
+        if valid_names and len(valid_names) + len(secret_names) == len(names):
+            files_text = [_file_text(worktree, n) for n in valid_names]
+            text = "\n\n".join(t for t in files_text if t.strip())
+            if not text.strip():
+                raise ReviewInputError(_t("engine.review_empty", input=spec))
+            if len(text) > gates.DIFF_LIMIT:
+                text = text[:gates.DIFF_LIMIT] + "\n" + _t("engine.review_cut_total", size=len(text))
+            return text
+        if secret_names and len(secret_names) == len(names):
+            raise ReviewInputError(_t("engine.review_secret_excluded", file=secret_names[0]))
     sha = _ref(worktree, spec)
     if sha:
         if _SHA.fullmatch(spec):  # a commit — what it itself changed

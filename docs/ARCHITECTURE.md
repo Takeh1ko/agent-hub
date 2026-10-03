@@ -14,7 +14,7 @@ The command is `ahub` (package ahub; the `hub` script was removed from the packa
 ahub task new (tasks.py: field checks, defaults by kind)  → task: queued
 ahub service (service.py, systemd ahub.service): queue, slots, resources, "after X" → spawn `python -m ahub.worker T12`
 worker.py → engine.py (task owner, lease):
-  scout:  prepare(copy) → working → result in the shape (.ahub/result.json + report.md) → done
+  scout:  prepare(copy without secrets — hides [secrets] exclude files too) → working → result in the shape (.ahub/result.json + report.md) → done
   review: prepare(copy, read-only) → working → reviewing (review.py: the panel over --input — branch, commit,
            a..b or files; the same verdict schema and the one verdict repair retry, no gates) → the hub writes
            report.md (findings by severity) + result.json → done (nothing is merged; accept = acknowledge)

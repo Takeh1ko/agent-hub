@@ -104,10 +104,15 @@ def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResul
         sections.append(f"## Gates (no models)\n{gate.summary()}" + (f"\nTest tail:\n```\n{gate.tests_tail}\n```"
                                                                       if gate.tests_tail else ""))
         sections.append("## Diff\n```diff\n" + diff + "\n```")
+    if task.kind is Kind.REVIEW:
+        check = ("## What to check\nMatch to the task; correctness of what the input shows; "
+                 "security; races; resource leaks; blocking calls in async; edge cases. Style/taste — low only.")
+    else:
+        check = ("## What to check\nMatch to the task and acceptance; stub tests (pass on broken logic — "
+                 "check by breaking the logic locally and reverting via git checkout); races; resource leaks; "
+                 "blocking calls in async; changes outside allowed files. Style/taste — low only.")
     sections += [
-        "## What to check\nMatch to the task and acceptance; stub tests (pass on broken logic — "
-        "check by breaking the logic locally and reverting via git checkout); races; resource leaks; "
-        "blocking calls in async; changes outside allowed files. Style/taste — low only.",
+        check,
         f"## How to submit\nWrite `{out}`:\n{verdict_format()}\n"
         f"Each finding needs file, line, and a concrete fix. {reply_language_line()} "
         'Last message — one line: "done".',

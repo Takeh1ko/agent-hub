@@ -86,12 +86,22 @@ def test_branch_input(store, project):
     prompt = fake.calls[0]["prompt"]
     assert "diff --git" in prompt and "Y = 2" in prompt
     assert "feature" in prompt and "## Gates" not in prompt  # a review task has no gates
+    assert "acceptance" not in prompt and "outside allowed files" not in prompt
+    assert "correctness of what the input shows" in prompt
 
 
 def test_sha_input(store, project):
     sha = branch_with_work(project)
     fake = install_fake(store, [verdict()])
     t = review_task(store, project, sha)
+    assert run(store, project, t.id).state is State.DONE
+    assert "diff --git" in fake.calls[0]["prompt"] and "Y = 2" in fake.calls[0]["prompt"]
+
+
+def test_sha_abbreviated_input(store, project):
+    sha = branch_with_work(project)
+    fake = install_fake(store, [verdict()])
+    t = review_task(store, project, sha[:8])
     assert run(store, project, t.id).state is State.DONE
     assert "diff --git" in fake.calls[0]["prompt"] and "Y = 2" in fake.calls[0]["prompt"]
 
@@ -129,6 +139,15 @@ def test_range_input(store, project):
     t = review_task(store, project, f"{first}..{sha}")
     assert run(store, project, t.id).state is State.DONE
     assert "Y = 2" in fake.calls[0]["prompt"]
+
+
+def test_range_input_bad_side(store, project):
+    first = git_out(project.root, "rev-parse", "HEAD")
+    install_fake(store, [verdict()])
+    t = review_task(store, project, f"{first}..nonexistent_branch")
+    res = run(store, project, t.id)
+    assert res.state is State.NEEDS_DECISION
+    assert "вход ревью непригоден" in res.reason or "review input is not usable" in res.reason
 
 
 def test_files_input(store, project):
@@ -188,10 +207,39 @@ def test_secrets_excluded_from_diff_and_files(store, project):
     assert "PUBLIC = True" in prompt
     assert "SECRET_TOKEN" not in prompt
 
-    # Files input with secret file only is refused
+    git(root, "merge", "-q", "sec_branch")
+
+    # Files input with secret file only is refused with its own message
     t2 = review_task(store, project, "core/secret.key")
     res = run(store, project, t2.id)
     assert res.state is State.NEEDS_DECISION
+    assert ("core/secret.key is excluded by [secrets]" in res.reason
+            or "core/secret.key исключён настройкой [secrets]" in res.reason)
+
+    # Files input with mixed files: secret is excluded, rest are reviewed
+    fake3 = install_fake(store, [verdict()])
+    t3 = review_task(store, project, "core/public.py, core/secret.key")
+    assert run(store, project, t3.id).state is State.DONE
+    prompt3 = fake3.calls[0]["prompt"]
+    assert "PUBLIC = True" in prompt3
+    assert "SECRET_TOKEN" not in prompt3
+
+
+def test_branch_input_diff_cap(store, project, monkeypatch):
+    from ahub import gates
+    root = project.root
+    git(root, "checkout", "-q", "-b", "big_branch")
+    (Path(root) / "core" / "big.py").write_text("X = " + ("1" * 50_000) + "\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "big branch")
+    git(root, "checkout", "-q", project.work_branch)
+
+    fake = install_fake(store, [verdict()])
+    monkeypatch.setattr(gates, "DIFF_LIMIT", 500)
+    t = review_task(store, project, "big_branch")
+    assert run(store, project, t.id).state is State.DONE
+    prompt = fake.calls[0]["prompt"]
+    assert "обрезан" in prompt or "truncated" in prompt
 
 
 def test_files_input_total_cap(store, project, monkeypatch):

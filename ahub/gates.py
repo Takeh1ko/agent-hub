@@ -97,18 +97,19 @@ def diff_files(path: str, base: str) -> list[str]:
     return [x for x in r.stdout.splitlines() if x.strip()]
 
 
-def diff_text(path: str, base: str, limit: int = DIFF_LIMIT) -> str:
+def diff_text(path: str, base: str, limit: int | None = None) -> str:
     return rev_diff_text(path, f"{base}..HEAD", limit=limit)
 
 
-def rev_diff_text(path: str, *revs: str, limit: int = DIFF_LIMIT, exclude: Sequence[str] = ()) -> str:
+def rev_diff_text(path: str, *revs: str, limit: int | None = None, exclude: Sequence[str] = ()) -> str:
     """The diff of any commits — the base..HEAD of a code task, the input of a review task."""
+    lim = DIFF_LIMIT if limit is None else limit
     args = ["diff", *revs]
     if exclude:
         args += ["--", ".", *[f":(top,exclude){pat}" for pat in exclude]]
     r = workspace.git(path, *args, check=False)
     out = r.stdout
-    return out if len(out) <= limit else out[:limit] + "\n" + _t("gates.diff_cut", size=len(out))
+    return out if len(out) <= lim else out[:lim] + "\n" + _t("gates.diff_cut", size=len(out))
 
 
 def allowed(file: str, globs: list[str]) -> bool:
