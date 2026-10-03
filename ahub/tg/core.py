@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from ahub import archive, comms, config, events, views
+from ahub import archive, comms, config, events, ui, views
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION
 from ahub.store import Store
@@ -160,7 +160,9 @@ def help_text() -> str:
 
 
 def status_text(store: Store) -> str:
-    return views.status_text(store)
+    """Telegram has no terminal: the hub text stays plain (ui.plain), never coloured for nobody."""
+    with ui.plain():
+        return views.status_text(store)
 
 
 def _task_label(t) -> str:
@@ -187,7 +189,8 @@ def task_detail(store: Store, task_id: int) -> Reply:
     from ahub.service import live_workers
 
     live = live_workers()
-    text = views.task_text(store, t, live=live)
+    with ui.plain():
+        text = views.task_text(store, t, live=live)
     if t.state in ACTIVE:
         pl = pulse.task_pulse(store, t, live=live)
         text = f"{pl.mark} {pl.reason or _t('tui.working_now')}\n" + text
