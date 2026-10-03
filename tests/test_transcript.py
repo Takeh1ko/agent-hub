@@ -198,7 +198,7 @@ def test_broken_lines_are_skipped(tmp_path, codex):
 
 def test_prompts_path_and_kinds():
     assert str(transcript.prompts_path("/w/.ahub/logs/executor.log")).endswith("executor.log.prompts.jsonl")
-    assert transcript.PROMPT_KINDS == ("start", "continue", "repair", "rework", "stop", "review")
+    assert transcript.PROMPT_KINDS == ("start", "continue", "repair", "rework", "stop", "review", "nudge")
 
 
 # --- the engine writes the sidecar ---

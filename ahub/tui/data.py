@@ -20,7 +20,7 @@ from ahub.time import fmt_local, now_ms, to_local
 _UNSET: object = object()  # marker "limit not passed — take from config"
 PHASE = views.PHASE_WORDS
 CURRENT = ACTIVE | WAITING_DECISION | {State.QUEUED}  # the table by default: what is going on now
-EV_WORDS: Words = Words("tui.ev_", ("created", "retry", "silence", "orphan", "budget_soft", "budget_hard",
+EV_WORDS: Words = Words("tui.ev_", ("created", "retry", "silence", "nudge", "orphan", "budget_soft", "budget_hard",
                                     "orch_edit", "paths_extended", "model_changed", "budget_extended"))
 
 
