@@ -13,6 +13,7 @@ import json
 import pytest
 
 from ahub import cli, comms, cost, paths, transitions
+from ahub.i18n import t
 from ahub.model import State
 from ahub.scope import OWNER, Scope
 from ahub.store import Store
@@ -97,16 +98,22 @@ def test_projects_one_row_per_project_with_counts_and_money(hub, store, capsys):
 
 
 def test_projects_json_and_open_questions(hub, store, capsys):
-    filled(store)
+    tids = filled(store)
+    answered = comms.ask(store, "answered long ago?", project="A")
+    comms.answer(store, answered, "yes")  # an answered question is not open
+    store.update_task(tids["a_working"], phase="writing", now=now_ms())  # the newer touch of A
     rc, out, _ = ahub(capsys, "--json", "projects")
     assert rc == 0
     data_ = json.loads(out)
     by_name = {p["name"]: p for p in data_["projects"]}
-    assert by_name["A"]["active"] == 1 and by_name["A"]["decision"] == 1 and by_name["A"]["waiting"] == 0
-    assert by_name["A"]["questions"] == 1  # the hub-wide question is nobody's
-    assert by_name["B"]["waiting"] == 1 and by_name["B"]["questions"] == 1
+    assert by_name["A"]["active"] == 1 and by_name["A"]["decision"] == 1 and by_name["A"]["queued"] == 0
+    assert by_name["A"]["questions"] == 1  # the answered one and the hub-wide one are not open
+    assert by_name["B"]["queued"] == 1 and by_name["B"]["questions"] == 1
     assert by_name["A"]["go"] == 0.42 and by_name["A"]["usd"] == 0.05
     assert by_name["B"]["go"] == 0.02 and by_name["B"]["usd"] == 0.0
+    # `last` is the newest touch of the project, not the first task that happened to be counted
+    assert by_name["A"]["last"] == store.get_task(tids["a_working"]).updated_at
+    assert by_name["A"]["last"] > store.get_task(tids["a_done"]).updated_at
     assert data_["errors"] == [] and data_["problems"] == {"A": [], "B": []}
     assert data_["month"].count("-") == 2  # the first day of this month
 
@@ -225,7 +232,52 @@ def test_cost_data_layer_groups_and_sums(hub, store):
     assert cost.month_start(0) <= cost.month_start(now_ms())
 
 
+def test_projects_table_keeps_the_name_whole_in_a_narrow_terminal(hub, store, capsys, monkeypatch):
+    """A narrow terminal drops the least important columns; the name and its `!` mark are never cut."""
+    filled(store)
+    store.create_task(project="Ghost", kind="scout", title="orphan")  # a row with a `!` mark
+    monkeypatch.setenv("COLUMNS", "60")
+    out = ahub(capsys, "--lang", "en", "projects")[1]
+    lines = out.splitlines()
+    assert "! Ghost" in out and "\n  A " in out  # the whole name cells, no `!…`
+    assert not any(ln.rstrip().endswith("…") and len(ln.split()) < 3 for ln in lines)
+    for dropped in ("path", "questions", "last"):
+        assert t(f"projects.col_{dropped}") not in lines[0]
+    assert t("projects.col_project") in lines[0] and t("projects.col_go") in lines[0]
+    monkeypatch.setenv("COLUMNS", "120")  # a wide terminal keeps them all
+    assert t("projects.col_path") in ahub(capsys, "projects")[1].splitlines()[0]
+
+
 # --- ahub top data layer ---
+
+
+def test_top_group_money_is_the_true_sum_not_a_sum_of_rounded_cells(hub, store):
+    """Five sessions of $0.0006: the raw sum is 0.003, a sum of the rounded cells would be 0.005."""
+    for i in range(4):
+        working(store, "A", f"a{i}", go=0.0006)
+    working(store, "A", "a4", go=0.0006, usd=0.0004)
+    working(store, "B", "b", go=0.01)
+    rows = data.rows(store, {}, {}, now_ms())
+    group = {r.project: r for r in rows if r.header}["A"]
+    assert group.cost == "0.003"  # 0.0030 go + 0.0004 usd, rounded once
+    assert abs(group.go - 0.003) < 1e-12 and group.usd == 0.0004
+    assert [r.cost for r in rows if not r.header][:5] == ["0.001"] * 4 + ["0.001"]
+    whole = cost.total(store, scope=Scope(("A",)))
+    assert abs(whole.go - group.go) < 1e-12 and whole.usd == group.usd  # the money `ahub cost` prints
+
+
+def test_top_filtered_history_is_complete(hub, store):
+    """`o` + `h`: the finished tasks of one project must not be cut by the newer tasks of another."""
+    b_old = store.create_task(project="B", kind="code", title="old B")
+    for st in (State.PREPARING, State.WORKING, State.DONE, State.ACCEPTED):
+        transitions.move(store, b_old, st, now=0)
+    for i in range(40):  # newer tasks of A — they would eat the history limit of the whole table
+        tid = store.create_task(project="A", kind="scout", title=f"a{i}")
+        for st in (State.PREPARING, State.WORKING, State.DONE, State.ACCEPTED):
+            transitions.move(store, tid, st)
+    screen, _live, _pulses = data.snapshot(store, projects=[], history=True, only="B")
+    assert [r.task_id for r in screen.rows] == [b_old]
+    assert screen.projects == ["A", "B"]  # the key still cycles every project of the hub
 
 
 def test_top_rows_are_grouped_by_project(hub, store):
@@ -314,6 +366,25 @@ async def test_top_header_row_opens_nothing(hub, store):
         await pilot.pause(0.3)
         assert app.screen.__class__.__name__ != "Ask"
         assert not any("T0" in n.message for n in app._notifications._notifications)
+
+
+async def test_top_project_filter_waits_for_the_refresh_in_flight(hub, store):
+    """`o` must not be swallowed by the periodic refresh that is already running: it is remembered."""
+    from ahub.tui.app import TopApp
+
+    tids = filled(store)
+    app = TopApp(store=store, projects=[])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        app._busy = True  # a refresh is in flight (the 2 s tick landed on it)
+        await pilot.press("o")
+        await pilot.pause(0.3)
+        assert app.project == "A" and app._pending is True and len(app._ids) == 6
+        app._busy = False
+        app.refresh_data()  # the in-flight one ends...
+        await pilot.pause(0.5)  # ...and the kept request is served right after it
+        assert app._pending is False
+        assert app._ids == [tids["a_working"], tids["a_done"]]
 
 
 async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
