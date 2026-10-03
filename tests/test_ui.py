@@ -142,7 +142,7 @@ Next  ahub accept T3 · ahub rework T3 --notes "…" · ahub reject T3"""
 
 OVERVIEW = """\
 all projects · 1 active · 1 waiting · 2 queued
-     task  kind  title                           state    model  round  idle   cost
+      task  kind  title                           state    model  round  idle   cost
   🟢  T1    code  Setup wizard: choose providers  writing  bunny  3      2 min  $0.046
 Waiting
   T3  done    gates passed, acceptance is green
@@ -151,6 +151,34 @@ Waiting
 Unread
   DONE T3 code «Setup wizard: choose providers and per-role models» — report 2.1 KB; ready; $0.04
 unread events 1"""
+
+DETAIL_TTY = """\
+\x1b[38;5;208m⏺\x1b[0m T3  code  Setup wizard: choose providers and per-role models
+\x1b[2m──────────────────────────────────────────────────────────────\x1b[0m
+\x1b[2mState  done · gates passed, acceptance is green · process alive\x1b[0m
+\x1b[2mModel  bunny  Review  spark ×2  Round  3\x1b[0m
+\x1b[2mCost   $0.046 Go of $1.50 budget\x1b[0m
+\x1b[2mAge    4 h 0 min  After  T2\x1b[0m
+\x1b[1mSummary\x1b[0m
+  The wizard asks for every provider and probes its models once. The answer is stored in the hub
+  config.
+\x1b[1mOpen points\x1b[0m
+  \x1b[2m⎿\x1b[0m \x1b[2mShould the ru strings live in the catalog or in the setup wizard?\x1b[0m
+  Not done: the rebrand of the Telegram card.
+\x1b[1mReport 0.1 KB\x1b[0m
+  the wizard, the models and the service
+  \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub accept T3 · ahub rework T3 --notes "…" · ahub reject T3\x1b[0m"""
+
+OVERVIEW_TTY = """\
+\x1b[1mall projects · 1 active · 1 waiting · 2 queued\x1b[0m
+\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers                                \x1b[2mwriting · bunny · 2 min · $0.046\x1b[0m
+\x1b[38;5;208m⏺\x1b[0m T3  done · gates passed, acceptance is green
+  \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub accept T3 · ahub rework T3 --notes "…" · ahub reject T3\x1b[0m
+\x1b[38;5;208m⏺\x1b[0m T2  queued
+\x1b[38;5;208m⏺\x1b[0m T4  queued · waiting for T3 to be accepted (queued)
+\x1b[1mUnread\x1b[0m
+  \x1b[2m⎿\x1b[0m \x1b[2mDONE T3 code «Setup wizard: choose providers and per-role models» — report 2.1 KB; ready; $0.04\x1b[0m
+\x1b[2munread events 1\x1b[0m"""
 
 HISTORY = """\
   task  kind   title                                              state     round  cost    took
@@ -210,6 +238,26 @@ def test_status_overview_snapshot(tmp_path):
     pulses = {ids["active"]: pulse.Pulse(ids["active"], "working", pid=42)}
     text = views.status_text(store, live=live, now=NOW + 2 * 60_000, pulses=pulses, w=W)
     assert text == OVERVIEW
+
+
+def test_status_detail_tty_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    store = Store()
+    ids = _fill(store, tmp_path)
+    text = views.task_text(store, store.get_task(ids["done"]), live={ids["done"]: 1}, now=NOW + 4 * HOUR, w=W)
+    assert text == DETAIL_TTY
+
+
+def test_status_overview_tty_snapshot(tmp_path, monkeypatch):
+    from ahub import pulse
+
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    store = Store()
+    ids = _fill(store, tmp_path)
+    live = {ids["active"]: 42}
+    pulses = {ids["active"]: pulse.Pulse(ids["active"], "working", pid=42)}
+    text = views.status_text(store, live=live, now=NOW + 2 * 60_000, pulses=pulses, w=W)
+    assert text == OVERVIEW_TTY
 
 
 def test_history_snapshot(tmp_path):
@@ -301,14 +349,24 @@ def test_live_line_only_on_a_terminal(monkeypatch):
     with ui.Live("Checking 2 models…", total=2) as p:
         p.step()
         p.step()
-    assert out.buf == (ui.CLEAR_LINE + "Checking 2 models… 0/2"
-                       + ui.CLEAR_LINE + "Checking 2 models… 1/2"
-                       + ui.CLEAR_LINE + "Checking 2 models… 2/2"
+    s0 = ui.styled("·", "accent")
+    s1 = ui.styled("✢", "accent")
+    s2 = ui.styled("✳", "accent")
+    assert out.buf == (ui.CLEAR_LINE + f"{s0} Checking 2 models… (0/2)"
+                       + ui.CLEAR_LINE + f"{s1} Checking 2 models… (1/2)"
+                       + ui.CLEAR_LINE + f"{s2} Checking 2 models… (2/2)"
                        + ui.CLEAR_LINE)  # cleared at the end, whatever happens
+    # done() replaces the spinner with an item on a terminal
+    out.buf = ""
+    with ui.Live("Checking 2 models…", total=2) as p:
+        p.step()
+        p.done("2 models ready")
+    assert out.buf.endswith(ui.CLEAR_LINE + ui.item("2 models ready") + "\n")
     pipe = _TTY(tty=False)
     monkeypatch.setattr(ui.sys, "stdout", pipe)
     with ui.Live("Checking 2 models…", total=2) as p:
         p.step()
+        p.done("2 models ready")
     assert pipe.buf == ""  # a pipe (Claude) gets nothing
 
 
@@ -319,7 +377,7 @@ def test_live_spins_when_the_total_is_unknown(monkeypatch):
         p.step()
         p.total(3)
         p.step()
-    assert out.buf.count(ui.SPINNER[0]) == 1 and "Checking the providers… 1/3" in out.buf
+    assert out.buf.count("·") == 1 and "Checking the providers… (1/3)" in out.buf
 
 
 def test_plain_len_ignores_the_colour_codes(monkeypatch):
@@ -355,6 +413,40 @@ def test_table_measures_coloured_cells_by_what_is_seen():
     mark = "\033[32m🟢\033[0m"
     out = ui.table(["", "task"], [[mark, "T1"], ["x", "T22"]], w=40).split("\n")
     assert mark in out[1]  # fits — kept whole, colour and all
-    assert out[1].index("T1") - len(mark) == out[2].index("T22") - 1  # the columns line up as seen
+    assert ui.plain_len(out[1][:out[1].index("T1")]) == ui.plain_len(out[2][:out[2].index("T22")])
     cut = ui.table(None, [["\033[1m" + "word " * 30 + "\033[0m", "end"]], w=30)
     assert "…" in cut and "\033" not in cut  # a cut cell drops its colour instead of a broken code
+
+
+def test_home_screen_tty_snapshot(tmp_path, monkeypatch):
+    import ahub
+    from ahub import home, paths
+
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    monkeypatch.setattr(home, "_project_here", lambda: "demo")
+    monkeypatch.setattr(paths, "global_config_path", lambda: tmp_path / "nonexistent.toml")
+    text = home.text(w=W)
+    lines = text.splitlines()
+    assert lines[0] == "\x1b[2m╭───────────────────────────────────────╮\x1b[0m"
+    assert lines[1] == f"│ \x1b[38;5;208m✻ ahub\x1b[0m \x1b[2m{ahub.__version__} · demo · service stopped\x1b[0m │"
+    assert lines[2] == "\x1b[2m╰───────────────────────────────────────╯\x1b[0m"
+    assert lines[3] == "\x1b[38;5;208m⏺\x1b[0m the hub is not configured yet"
+    assert lines[4] == "  \x1b[2m⎿\x1b[0m \x1b[2mRun `ahub setup` to get started\x1b[0m"
+    assert lines[5] == "\x1b[2mahub setup · ahub doctor · ahub models\x1b[0m"
+
+
+def test_action_result_and_error_tty(monkeypatch):
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    res = ui.item("T12 merged into main", [views._t("views.hint_next", cmd="ahub status")])
+    assert res == "\x1b[38;5;208m⏺\x1b[0m T12 merged into main\n  \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub status\x1b[0m"
+
+    err = ui.failed("something broke", "hint: ahub doctor")
+    assert err == "\x1b[31m✗ something broke\x1b[0m\n  \x1b[2m⎿\x1b[0m \x1b[2mhint: ahub doctor\x1b[0m"
+
+
+def test_table_head_is_dim_without_separators_on_tty(monkeypatch):
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    out = ui.table(["task", "state"], [["T1", "done"]], w=30)
+    lines = out.splitlines()
+    assert lines[0] == "\x1b[2mtask  state\x1b[0m"
+    assert lines[1] == "T1    done"

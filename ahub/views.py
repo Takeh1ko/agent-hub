@@ -108,6 +108,31 @@ def _state_cell(t: Task) -> str:
     return state_word(t.state)
 
 
+def _pulse_detail(pl) -> str:
+    """What a task is doing under its ⏺ line: the tool it runs, why it waits, or that it went quiet.
+    The pulse brings its own colour (green/yellow/red) — the mark and the words together."""
+    if pl is None or not pl.reason:
+        return ""
+    return ui.badge(pl.mark, pl.reason, pl.state)
+
+
+def _item_tail(t: Task, ts: int, cost: str = "") -> str:
+    """The dim right-aligned tail of an item: what it is doing · model · idle · cost."""
+    return " · ".join([x for x in (_state_cell(t), t.executor or "—", _age(t.updated_at, ts), cost) if x])
+
+
+def _waiting_item(t: Task, w: int | None) -> str:
+    """A task that waits a person: its state and reason on the item line, the exact commands under it."""
+    reason = reasons.text(t.state_reason)
+    head = f"{t.label}  {state_word(t.state)}" + (f" · {reason}" if reason else "")
+    nxt = _t("views.hint_next", cmd=_t(next_key(t), label=t.label)) if _offers_next(t) else ""
+    return ui.item(head, [nxt], w=w)
+
+
+def _offers_next(t: Task) -> bool:
+    return t.state in DECISION_STATES or t.state in RESUME_STATES
+
+
 def _active_table(store: Store, active: list[Task], live: dict[int, int], pulses: dict, ts: int,
                   w: int | None) -> tuple[str, list[str]]:
     """The active tasks: the column head and the rows (one line per task) — the overview caps them itself."""
@@ -124,9 +149,23 @@ def _active_table(store: Store, active: list[Task], live: dict[int, int], pulses
     return lines[0], lines[1:]
 
 
+def _active_items(store: Store, active: list[Task], pulses: dict, ts: int, w: int | None) -> list[str]:
+    """The active tasks as items: the mark, the id and the title, the tail right-aligned, the pulse under it."""
+    out = []
+    for t in active:
+        go, usd = archive.task_cost(store, t.id)
+        out.append(ui.item(f"{t.label}  {t.title}", [_pulse_detail(pulses.get(t.id))],
+                           tail=_item_tail(t, ts, f"${go + usd:.3f}"), w=w))
+    return out
+
+
 def status_text(store: Store, *, scope: Scope | None = None, live: dict[int, int] | None = None,
                 now: int | None = None, pulses: dict | None = None, w: int | None = None) -> str:
-    """L1: the counts, the active tasks as a table, what waits, the unread — of the scope. ≤ 1500 bytes."""
+    """L1: the counts, the active tasks, what waits, the unread — of the scope. ≤ 1500 bytes.
+
+    A terminal reads them as ⏺ items; a pipe gets the compact table (contracts §5 — the orchestrator
+    reads that one).
+    """
     sc = scope or OWNER
     ts = now if now is not None else now_ms()
     live = live or {}
@@ -159,18 +198,23 @@ def status_text(store: Store, *, scope: Scope | None = None, live: dict[int, int
                              waiting=len(waiting), queued=len(queued)), "bold")
     groups: list[tuple[str, list[str]]] = []
     if active:
-        table_head, rows = _active_table(store, active, live, pulses, ts, w)
-        groups.append((table_head, rows))  # the column head is the heading of the group
-    waiting_rows = []
+        if ui.colour_on():
+            groups.append(("", _active_items(store, active, pulses, ts, w)))
+        else:
+            table_head, rows = _active_table(store, active, live, pulses, ts, w)
+            groups.append((table_head, rows))  # the column head is the heading of the group
     if waiting or queued:
-        block = ui.kv([(t.label, [state_word(t.state), reasons.text(t.state_reason)])
-                       for t in waiting + queued], indent=2, w=w)
-        waiting_rows = block.split("\n")
-    if waiting_rows:
-        groups.append((ui.section(_t("views.sec_waiting")), waiting_rows))
+        rest = waiting + queued
+        if ui.colour_on():
+            groups.append(("", [_waiting_item(t, w) for t in rest]))
+        else:
+            groups.append((ui.section(_t("views.sec_waiting")),
+                           ui.kv([(t.label, [state_word(t.state), reasons.text(t.state_reason)])
+                                  for t in rest], indent=2, w=w).split("\n")))
     if unacked:
         lines = events.lines(store, unacked[:UNREAD_LINES])
-        groups.append((ui.section(_t("views.sec_unread")), ["  " + ln for ln in lines]))
+        head_of = ui.section(_t("views.sec_unread"))
+        groups.append((head_of, [ui.hint(ln, w=w) if ui.colour_on() else "  " + ln for ln in lines]))
     return _cap(head, groups, ui.styled(" · ".join(tail), "dim") if tail else "")
 
 
@@ -245,7 +289,8 @@ def _findings_lines(t: Task, w: int | None) -> list[str]:
         return []
     out, used = [ui.section(_t("views.sec_findings"))], 0
     for i, f in enumerate(findings):
-        block = [f"  {f.severity:<6} {f.file}:{f.line}" if f.line else f"  {f.severity:<6} {f.file}",
+        head = f"{f.severity:<6} {f.file}:{f.line}" if f.line else f"{f.severity:<6} {f.file}"
+        block = [ui.hint(head, w=w) if ui.colour_on() else "  " + head,
                  ui.para(ui.fit(f.issue, FINDING_BYTES), indent=FINDING_INDENT, w=w)]
         if f.fix:
             block.append(ui.para(_t("views.finding_fix", fix=ui.fit(f.fix, FINDING_BYTES)),
@@ -257,9 +302,14 @@ def _findings_lines(t: Task, w: int | None) -> list[str]:
         out += block
         used += size
     if more:
-        out.append(ui.para(plural(more, "views.findings_more_one", "views.findings_more_few",
-                                  "views.findings_more", label=t.label), indent=2, w=w))
+        out.append(_point(plural(more, "views.findings_more_one", "views.findings_more_few",
+                                 "views.findings_more", label=t.label), 2, w))
     return out
+
+
+def _point(text: str, indent: int, w: int | None) -> str:
+    """A secondary line of a block: a ⎿ detail on a terminal, an indented paragraph in a pipe."""
+    return ui.hint(text, indent=indent, w=w) if ui.colour_on() else ui.para(text, indent=indent, w=w)
 
 
 def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now: int | None = None,
@@ -267,8 +317,9 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
     """L2: the whole task, but brief — a header, the facts, the worker result. ≤ 4000 bytes."""
     ts = now if now is not None else now_ms()
     go, usd = archive.task_cost(store, t.id)
-    title = ui.para(f"{t.label}  {t.kind.value}  {t.title}", indent=0, w=w)
-    out = [title, ui.rule(min(ui.width(w), len(title.split("\n")[0])))]
+    head_text = f"{t.label}  {t.kind.value}  {t.title}"
+    title = ui.item(head_text, w=w) if ui.colour_on() else ui.para(head_text, indent=0, w=w)
+    out = [title, ui.rule(min(ui.width(w), ui.plain_len(title.split("\n")[0])))]
 
     state = state_word(t.state)
     reason = reasons.text(t.state_reason)
@@ -304,8 +355,10 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
         notes = str(res.get("notes") or "").strip()
         if points or notes:
             out.append(ui.section(_t("views.sec_points")))
-            if points:
-                out.append(ui.bullets([ui.fit(p, QUESTION_BYTES) for p in points], indent=2, w=w))
+            if points:  # open points — one ⎿ line each on a terminal, one bullet each in a pipe
+                shown = [ui.fit(p, QUESTION_BYTES) for p in points]
+                out += [ui.hint(p, w=w) for p in shown] if ui.colour_on() \
+                    else [ui.bullets(shown, indent=2, w=w)]
             if notes:
                 out.append(ui.para(ui.fit(notes, NOTES_BYTES), indent=2, w=w))
     if rp is not None and rp.exists():
@@ -315,7 +368,7 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
     out.extend(_findings_lines(t, w))
     # the Next line is booked before the clip: the decision commands are the point of the screen, so what
     # does not fit is the tail of the blocks above them (the findings), never the way out
-    nxt = _next_line(t, next_key(t), w) if (t.state in DECISION_STATES or t.state in RESUME_STATES) else ""
+    nxt = next_line(next_key(t), t.label, w) if _offers_next(t) else ""
     body = clip_bytes("\n".join(out), L2_LIMIT - (len(nxt.encode()) + 1 if nxt else 0))
     return f"{body}\n{nxt}" if nxt else body
 
@@ -325,12 +378,13 @@ def _facts(groups: list[list[tuple[str, Value]]], w: int | None) -> list[str]:
     Age/After), and a long value (the state, the cost) does not push the pair columns of another line.
 
     Every group is its own kv block — that is what keeps its columns local — and every label is padded to
-    the width of the widest one, so the block has a single label column.
+    the width of the widest one, so the block has a single label column. On a terminal the whole card is
+    secondary text (grey).
     """
     lw = max(len(label) for group in groups for label, _ in group)
     out = []
     for group in groups:
-        block = ui.kv([(label.ljust(lw), value) for label, value in group], w=w)
+        block = ui.kv([(label.ljust(lw), value) for label, value in group], w=w, dim=ui.colour_on())
         if block:
             out.append(block)
     return out
@@ -341,14 +395,12 @@ def next_key(t: Task) -> str:
     return "views.next_decide" if t.state in DECISION_STATES else "views.next_resume"
 
 
-def _next_line(t: Task, key: str, w: int | None) -> str:
-    """The 'Next' line — the decision commands, for a task whose decision is pending."""
-    return ui.styled(ui.kv([(_t("views.lbl_next"), _t(key, label=t.label))], w=w), "dim")
-
-
 def next_line(key: str, label: str = "", w: int | None = None) -> str:
-    """The 'Next' line after a command did something — the commands that follow it."""
-    return ui.styled(ui.kv([(_t("views.lbl_next"), _t(key, label=label))], w=w), "dim")
+    """The 'Next' line — the way out: a ⎿ detail under the item on a terminal, an aligned dim line in a pipe."""
+    cmd = _t(key, label=label)
+    if ui.colour_on():
+        return ui.hint(_t("views.hint_next", cmd=cmd), w=w)
+    return ui.styled(ui.kv([(_t("views.lbl_next"), cmd)], w=w), "dim")
 
 
 def result_text(store: Store, t: Task, *, full: bool = False, max_bytes: int = L3_DEFAULT,

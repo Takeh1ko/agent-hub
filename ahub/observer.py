@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ahub import comms, config, events, paths, procs, providers, pulse, registry
+from ahub import comms, config, events, paths, procs, providers, pulse, registry, ui
 from ahub import log as hublog
 from ahub.i18n import t as _t
 from ahub.model import Role, State
@@ -220,7 +220,9 @@ def snapshot(store: Store, *, now: int, proc_root: str | Path = "/proc") -> str:
 
     live = live_workers()
     none = _t("observer.none")
-    lines = [_t("observer.snap_summary"), views.status_text(store, live=live, now=now)]
+    with ui.plain():  # the snapshot is a prompt, not a screen — no colour, no marks
+        status = views.status_text(store, live=live, now=now)
+    lines = [_t("observer.snap_summary"), status]
     evs = store.events(after_id=max(0, store.last_event_id() - 40))
     lines.append(_t("observer.snap_events"))
     lines += [f"{fmt_local(e.ts)} {e.kind} T{e.task_id or '-'} {json.dumps(e.payload, ensure_ascii=False)[:140]}"

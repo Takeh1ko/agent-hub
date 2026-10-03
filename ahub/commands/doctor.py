@@ -50,8 +50,9 @@ def _lines(checks: list[doctor.Check], w: int | None) -> list[str]:
             out.append(f"  {_MARKS[c.ok]} {t(f'doctor.name_{c.name}')}: {c.detail}")
     bad = sum(1 for c in checks if c.ok is False)
     # one / few / many — Russian inflects the noun by the count
-    out.append(ui.styled(plural(bad, "doctor.problem_one", "doctor.problems_few", "doctor.problems")
-                         if bad else t("doctor.ok_all"), "dim"))
+    last = plural(bad, "doctor.problem_one", "doctor.problems_few", "doctor.problems") if bad \
+        else t("doctor.ok_all")
+    out.append(ui.item(last) if ui.colour_on() else ui.styled(last, "dim"))
     return out
 
 

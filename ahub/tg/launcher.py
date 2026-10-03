@@ -25,7 +25,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from ahub import config, events, paths, procs, views
+from ahub import config, events, paths, procs, ui, views
 from ahub import log as hublog
 from ahub.scope import Scope
 from ahub.store import Store
@@ -283,9 +283,11 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
             nodir.append(target)
             continue
         scope = Scope((target,)) if target else Scope()
+        with ui.plain():  # a prompt for Claude, not a screen — no colour, no marks
+            status = views.status_text(store, scope=scope, now=ts)
         prompt = PROMPT.format(project_line=project_line(target),
                                messages="\n".join(f"- {m['text']}" for m in msgs)[:6000],
-                               status=views.status_text(store, scope=scope, now=ts),
+                               status=status,
                                lang_line=_owner_lang_line())
         resume = _session(store, ts, target)
         with store.tx() as c:

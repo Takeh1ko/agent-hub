@@ -277,7 +277,7 @@ def test_projects_table_keeps_the_name_whole_in_a_narrow_terminal(hub, store, ca
     monkeypatch.setenv("COLUMNS", "60")
     out = ahub(capsys, "--lang", "en", "projects")[1]
     lines = out.splitlines()
-    assert "! Ghost" in out and "\n  A " in out  # the whole name cells, no `!…`
+    assert "! Ghost" in out and "\n    A " in out  # the whole name cells, no `!…`
     assert not any(ln.rstrip().endswith("…") and len(ln.split()) < 3 for ln in lines)
     for dropped in ("path", "questions", "last"):
         assert t(f"projects.col_{dropped}") not in lines[0]

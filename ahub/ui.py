@@ -1,12 +1,15 @@
 """The one rendering layer for human output: styled(), badge(), rule(), section(), kv(), para(), bullets(),
-table(), fit(), Live().
+table(), fit(), item(), box(), hint(), failed(), Live().
 
-Three rules keep it small:
+Four rules keep it small:
 - colour is a hint — ANSI only when stdout is a TTY and NO_COLOR is unset (ahub is read through a pipe by
   Claude, so that output must stay plain and compact);
 - every block takes the width explicitly or takes it from COLUMNS/the terminal (fallback 100), so the
   layout is deterministic in tests;
-- a long operation shows one live line only on a TTY (`Live`); a pipe gets nothing at all.
+- a long operation shows one live line only on a TTY (`Live`); a pipe gets nothing at all;
+- a terminal gets the item language (⏺ and its ⎿ spine, one accent colour), a pipe gets the compact
+  aligned text — the same words in a different shape (`plain()` says the text is not going to a terminal
+  at all: a Telegram message, a prompt).
 
 Words are never hardcoded here — the caller passes them through t().
 """
@@ -18,7 +21,9 @@ import re
 import shutil
 import sys
 import textwrap
-from collections.abc import Iterable, Sequence
+import unicodedata
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from types import TracebackType
 from typing import Any
 
@@ -29,16 +34,20 @@ GAP = 2
 BULLET = "•"
 RULE = "─"
 ELLIPSIS = "…"
-SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+MARK = "⏺"    # an item: the mark is the only accent on the line
+SPINE = "⎿"   # a detail under an item
+CROSS = "✗"    # the error mark
+SPINNER = "·✢✳✶✻✽"
 CLEAR_LINE = "\r\033[K"
 
 _CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "blue": "34",
-          "magenta": "35", "cyan": "36", "grey": "90"}
+          "magenta": "35", "cyan": "36", "grey": "90", "accent": "38;5;208"}  # 256-colour warm orange
 PULSE_STYLE = {"working": "green", "waiting": "yellow", "silent": "red", "dead": "magenta", "unknown": "dim"}
 _ANSI = re.compile(r"\033\[[0-9;]*m")
 _ITEM = re.compile(r"^([-*•]|\d+\.)\s+(.*)$")
 _SENTENCE = re.compile(r"[.!?…](?=\s|$)")
 _PARAGRAPH = re.compile(r"\n[ \t]*\n")
+_force_plain = False
 
 Value = str | Sequence[Any]  # a kv value: text, or the chunks of the line (a string, or a (label, value) pair)
 
@@ -51,12 +60,29 @@ def width(explicit: int | None = None) -> int:
 
 
 def colour_on() -> bool:
-    """True — a human at a terminal that wants colour. A pipe or NO_COLOR — plain text."""
+    """True — a human at a terminal that wants colour. A pipe, NO_COLOR or plain() — plain text."""
+    global _force_plain
+    if _force_plain:
+        return False
     try:
         tty = sys.stdout.isatty()
     except (AttributeError, ValueError):  # a closed or exotic stream — treat it as a pipe
         tty = False
     return bool(tty) and "NO_COLOR" not in os.environ
+
+
+@contextmanager
+def plain() -> Iterator[None]:
+    """The text leaves the terminal for good (a Telegram message, a model prompt): plain inside.
+
+    The layout follows the colour: the compact aligned text, not the ⏺ item language.
+    """
+    global _force_plain
+    prev, _force_plain = _force_plain, True
+    try:
+        yield
+    finally:
+        _force_plain = prev
 
 
 def styled(text: str, *styles: str) -> str:
@@ -73,8 +99,15 @@ def badge(mark: str, word: str, pulse: str = "") -> str:
 
 
 def plain_len(text: str) -> int:
-    """The width as it is seen — the ANSI colour codes take no columns (for indenting what follows)."""
-    return len(_ANSI.sub("", text))
+    """The width as it is seen — the ANSI colour codes take no columns, a wide glyph (⏺ ✻ 🟢) takes
+    the columns it occupies (for indenting what follows and for aligning columns)."""
+    return sum(_columns(ch) for ch in _ANSI.sub("", text))
+
+
+def _columns(ch: str) -> int:
+    if unicodedata.combining(ch):  # an accent or a diacritic rides on the letter before it
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
 
 
 def rule(n: int) -> str:
@@ -142,6 +175,55 @@ def _chunk(item: Any) -> tuple[str, str]:
     return (str(item[0]), str(item[1])) if isinstance(item, tuple) else ("", str(item))
 
 
+def hint(text: Any, *, indent: int = 2, w: int | None = None) -> str:
+    """A detail line of an item: "  ⎿ text", dim, wrapped at the width. Empty text — no line."""
+    body = " ".join(str(text or "").split())
+    if not body:
+        return ""
+    pad = " " * indent + styled(SPINE, "dim") + " "
+    if "\033" in body:  # the caller coloured it (a pulse mark) — wrapping would cut the escape
+        return pad + body
+    lines = textwrap.wrap(body, max(20, width(w) - (indent + 2)), break_long_words=False,
+                          break_on_hyphens=False) or [""]
+    return "\n".join(pad + styled(ln, "dim") for ln in lines)
+
+
+def item(head: str, details: Iterable[Any] = (), *, tail: str = "", indent: int = 0, w: int | None = None) -> str:
+    """One item the way a person reads it: ⏺ <head> (the mark alone is accent), the dim `tail` right-aligned
+    on the same line while it fits, and the details on their own lines under "  ⎿ ".
+    """
+    line = " " * indent + styled(MARK, "accent") + " " + head
+    out = [line]
+    rest = [d for d in details if str(d or "").strip()]
+    if tail:
+        gap = width(w) - plain_len(line) - plain_len(tail)
+        if gap >= GAP:
+            out[0] = line + " " * gap + styled(tail, "dim")
+        else:  # the tail does not fit on the line — it becomes the first detail
+            rest.insert(0, styled(tail, "dim"))
+    out += [hint(d, indent=indent + 2, w=w) for d in rest]
+    return "\n".join(out)
+
+
+def failed(what: str, way_out: str = "") -> str:
+    """An error on a terminal: ✗ <what> in red, the way out under it, dim."""
+    out = styled(f"{CROSS} {what}", "red")
+    return f"{out}\n{hint(way_out)}" if way_out else out
+
+
+def box(lines: Sequence[str], *, w: int | None = None) -> str:
+    """The lines inside a rounded box (╭ ─ ╮ │ ╰ ╯) — the header of the home screen."""
+    rows = [str(ln or "") for ln in lines]
+    n = min(width(w), max((plain_len(ln) for ln in rows), default=0) + 2)
+    top, bottom = styled("╭" + "─" * n + "╮", "dim"), styled("╰" + "─" * n + "╯", "dim")
+    out = [top]
+    for ln in rows:
+        room = n - plain_len(ln) - 1
+        out.append(("│ " + ln if room >= 0 else styled("│ " + clip(ln, n - 2), "dim")) + " " * max(room, 0) + "│")
+    out.append(bottom)
+    return "\n".join(out)
+
+
 def _chunks(rows: Sequence[tuple[str, Value]]) -> list[list[tuple[str, str]]]:
     """Normalize rows to a list of (label, value) cells; empty rows are dropped. In a chunk list the row
     label names the first chunk; the rest get their own labels (a chunk with no value is skipped)."""
@@ -158,10 +240,11 @@ def _chunks(rows: Sequence[tuple[str, Value]]) -> list[list[tuple[str, str]]]:
     return out
 
 
-def kv(rows: Sequence[tuple[str, Value]], *, indent: int = 0, gap: int = GAP, w: int | None = None) -> str:
+def kv(rows: Sequence[tuple[str, Value]], *, indent: int = 0, gap: int = GAP, w: int | None = None,
+       dim: bool = False) -> str:
     """An aligned "label  value" block. The value may be the chunks of the line — the first is the value of
     the label, the rest are their own label/value pairs, so a block reads as a table without a header.
-    The last cell wraps under its label."""
+    The last cell wraps under its label. dim — the whole block is secondary text (grey on a terminal)."""
     cells = _chunks(rows)
     if not cells:
         return ""
@@ -185,7 +268,8 @@ def kv(rows: Sequence[tuple[str, Value]], *, indent: int = 0, gap: int = GAP, w:
         lines = para(value, indent=len(head), w=w).split("\n")
         out.append(head + lines[0][len(head):])
         out.extend(lines[1:])
-    return "\n".join(ln.rstrip() for ln in out)
+    block = "\n".join(ln.rstrip() for ln in out)
+    return styled(block, "dim") if dim else block
 
 
 def table(head: Sequence[str] | None, rows: Sequence[Sequence[Any]], *, max_width: Sequence[int | None] | None = None,
@@ -213,8 +297,8 @@ def table(head: Sequence[str] | None, rows: Sequence[Sequence[Any]], *, max_widt
     pad = " " * indent
     out = []
     if head:
-        out.append((pad + (" " * gap).join(styled(_cell(head[i], widths[i]), "dim")
-                                          for i in range(cols))).rstrip())
+        line = (pad + (" " * gap).join(_cell(head[i], widths[i]) for i in range(cols))).rstrip()
+        out.append(styled(line, "dim"))
     for r in body:
         out.append((pad + (" " * gap).join(_cell(r[i], widths[i]) for i in range(cols))).rstrip())
     return "\n".join(out)
@@ -270,10 +354,11 @@ def fit(text: Any, limit: int, hint: str = "") -> str:
 
 
 class Live:
-    """One live line for a long operation: a spinner, or progress `label… n/total`.
+    """One live line for a long operation: "✻ <verb>ing … (n/m)" with rotating glyphs, cleared at the end
+    and replaced by the result (`done()`).
 
-    Only on a TTY — into a pipe it writes nothing (a `\r` line would be noise for Claude). The line is
-    cleared when the block ends, whatever happens; `step()` refreshes it (and moves the spinner on).
+    Only on a TTY — into a pipe it writes nothing (a `\r` line would be noise for Claude). `step()`
+    refreshes the line and moves the glyph on.
 
         with Live(t("models.checking"), total=len(aliases)) as p:
             for alias in aliases:
@@ -285,8 +370,9 @@ class Live:
         self._label = label
         self._total = int(total)
         self._done = 0
-        self._frame = -1
+        self._frame = 0
         self._live = colour_on()
+        self._was_live = self._live
         self._out = out if out is not None else sys.stdout
 
     def __enter__(self) -> "Live":
@@ -300,11 +386,9 @@ class Live:
     def draw(self) -> None:
         if not self._live:
             return
-        text = self._label
+        text = f"{styled(SPINNER[self._frame % len(SPINNER)], 'accent')} {self._label}"
         if self._total:
-            text = f"{text} {self._done}/{self._total}"
-        elif self._frame >= 0:
-            text = f"{SPINNER[self._frame % len(SPINNER)]} {text}"
+            text += f" ({self._done}/{self._total})"
         try:
             self._out.write(CLEAR_LINE + text)
             self._out.flush()
@@ -317,6 +401,18 @@ class Live:
         self._live = False
         try:
             self._out.write(CLEAR_LINE)
+            self._out.flush()
+        except (OSError, ValueError):
+            pass
+
+    def done(self, result: str) -> None:
+        """The work is over: the live line is cleared and the result takes its place (⏺ on a terminal)."""
+        if not self._live and not self._was_live:
+            return
+        self.clear()
+        self._was_live = False
+        try:
+            self._out.write(item(result) + "\n")
             self._out.flush()
         except (OSError, ValueError):
             pass

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ahub import drafts, ui
-from ahub.cliutil import CliError, add_project_arg, emit, resolve_project
+from ahub.cliutil import CliError, add_project_arg, emit, resolve_project, result
 from ahub.store import Store
 
 
@@ -22,7 +22,6 @@ def cmd_new(args) -> int:
 
 
 def cmd_start(args) -> int:
-    from ahub import views
     from ahub.i18n import t
 
     project = resolve_project(args)
@@ -30,8 +29,7 @@ def cmd_start(args) -> int:
         tid = drafts.start(Store(), project, args.id)
     except ValueError as e:
         raise CliError(str(e), hint=t("draft.next_start", id=args.id)) from e
-    emit(args, {"task": tid}, t("draft.queued", tid=tid) + "\n"
-         + views.next_line("views.next_task", f"T{tid}"))
+    result(args, {"task": tid}, t("draft.queued", tid=tid), "views.next_task", f"T{tid}")
     return 0
 
 

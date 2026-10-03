@@ -20,7 +20,17 @@ from ahub.time import now_ms
 MAX_TASKS = 5  # the screen is a glance, not a list: `ahub status` has all of them
 
 
-def _head(project: str | None, alive: bool) -> str:
+def _head(project: str | None, alive: bool, w: int | None = None) -> str:
+    """The header of a terminal: a rounded box, one line inside — the product, the version, the project,
+    the service. A pipe gets the same words as one plain line (`_line_head`)."""
+    svc = _t("home.svc_running") if alive else _t("home.svc_stopped")
+    rest = _t("home.head_tty", version=ahub.__version__,
+              project=project or _t("home.no_project"), svc=svc)
+    inside = f"{ui.styled('✻ ahub', 'accent')} {ui.styled(rest, 'dim')}"
+    return ui.box([inside], w=w)
+
+
+def _line_head(project: str | None, alive: bool) -> str:
     svc = _t("home.head_up") if alive else _t("home.head_down")
     return ui.styled(_t("home.head", version=ahub.__version__,
                         project=project or _t("home.no_project"), svc=svc), "bold")
@@ -49,24 +59,28 @@ def _scope(*, all_projects: bool, project: str | None) -> scope.Scope:
 
 
 def _suggestions(*keys: str) -> str:
-    """The 'Next' block: three or four commands, as one aligned column."""
-    return ui.bullets([_t(k) for k in keys], indent=2)
+    """The 'Next' block: three or four commands — one dim line on a terminal, one bullet each in a pipe."""
+    words = [_t(k) for k in keys]
+    return ui.styled(" · ".join(words), "dim") if ui.colour_on() else ui.bullets(words, indent=2)
 
 
 def text(*, w: int | None = None, all_projects: bool = False, project: str | None = None) -> str:
     """The whole screen as one string (the caller prints it).
 
     The scope is the project's own, like every handle (architecture §9): the tasks of the directory's
-    project, `ahub --all` — every project.
+    project, `ahub --all` — every project. A terminal reads the screen as items — the header in a box,
+    every task a `⏺` line, the way out under it — while a pipe gets the compact screen of contracts §5.
     """
     sc = _scope(all_projects=all_projects, project=project)
     store = Store()
     now = now_ms()
     hb = store.meta_get(HEARTBEAT_KEY)
     alive = bool(hb) and now - int(hb) < 30_000
-    out = [_head(_project_here(), alive)]
+    items = ui.colour_on()
+    out = [_head(_project_here(), alive, w)] if items else [_line_head(_project_here(), alive)]
     if not _configured():
-        out.append(ui.para(_t("home.unconfigured") + " — " + _t("home.setup_hint"), indent=2, w=w))
+        out.append(ui.item(_t("home.unconfigured"), [_t("home.setup_hint")]) if items
+                   else ui.para(_t("home.unconfigured") + " — " + _t("home.setup_hint"), indent=2, w=w))
         out.append(_suggestions("home.next_setup", "home.next_doctor", "home.next_models"))
         return "\n".join(out)
 
@@ -78,7 +92,15 @@ def text(*, w: int | None = None, all_projects: bool = False, project: str | Non
     waiting = store.list_tasks(states=WAITING_DECISION, projects=sc.projects or None)
     waiting_shown, waiting_rest = waiting[:MAX_TASKS], max(0, len(waiting) - MAX_TASKS)
 
-    if shown:
+    if items:
+        for task in shown:  # the task is the item line: the id and the title, the tail right-aligned
+            out.append(ui.item(f"{task.label}  {task.title}", [views._pulse_detail(pulses.get(task.id))],
+                               tail=views._item_tail(task, now), w=w))
+        if rest:  # the screen is a glance — what does not fit is counted, not dropped
+            out.append(ui.hint(_t("home.more_tasks", n=rest), w=w))
+        if not shown:
+            out.append(ui.item(_t("home.no_tasks")))
+    elif shown:
         out.append(ui.section(_t("home.sec_tasks")))
         out.append(ui.table(["", _t("views.col_id"), _t("views.col_kind"), _t("views.col_title"),
                              _t("views.col_state"), _t("views.col_model"), _t("views.col_idle")],
@@ -89,15 +111,22 @@ def text(*, w: int | None = None, all_projects: bool = False, project: str | Non
     else:
         out.append(ui.para(_t("home.no_tasks"), indent=2, w=w))
     if waiting_shown:
-        out.append(ui.section(_t("home.sec_decide")))
-        out.append(ui.kv([(t.label, [views.state_word(t.state), reasons.text(t.state_reason)])
-                          for t in waiting_shown], indent=2, w=w))
-        if waiting_rest:  # capped like the list above — the screen is a glance, not a queue
-            out.append(ui.para(_t("home.more_tasks", n=waiting_rest), indent=2, w=w))
-        out.append(ui.kv([(_t("views.lbl_next"),
-                           _t(views.next_key(_focus(waiting_shown)), label=_focus(waiting_shown).label))],
-                         indent=2, w=w))  # the same "Next" line as ahub status T<id>
-    out.append(ui.section(_t("home.sec_next")))
+        if items:
+            lines = [_t(views.next_key(t), label=t.label) for t in waiting_shown if views._offers_next(t)]
+            out.append(ui.item(_t("home.waiting_you"), lines, w=w))
+            if waiting_rest:  # capped like the list above — the screen is a glance, not a queue
+                out.append(ui.hint(_t("home.more_tasks", n=waiting_rest), w=w))
+        else:
+            focus = _focus(waiting_shown)
+            out.append(ui.section(_t("home.sec_decide")))
+            out.append(ui.kv([(t.label, [views.state_word(t.state), reasons.text(t.state_reason)])
+                              for t in waiting_shown], indent=2, w=w))
+            if waiting_rest:  # capped like the list above — the screen is a glance, not a queue
+                out.append(ui.para(_t("home.more_tasks", n=waiting_rest), indent=2, w=w))
+            out.append(ui.kv([(_t("views.lbl_next"), _t(views.next_key(focus), label=focus.label))],
+                             indent=2, w=w))  # the same "Next" line as ahub status T<id>
+    if not items:
+        out.append(ui.section(_t("home.sec_next")))
     out.append(_suggestions(*_next_keys(alive, waiting)))
     return "\n".join(out)
 
