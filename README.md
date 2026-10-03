@@ -146,6 +146,8 @@ live to pick the role defaults. Telegram is optional: `pipx install 'ahub[telegr
 
 Platforms: Linux (systemd), macOS (launchd; tested in CI), Windows via WSL2 only.
 
+Per-provider proxy and the Codex sandbox: [the guide](docs/guide.md#advanced-a-proxy-per-provider-the-codex-sandbox).
+
 ## Quick start for Claude Code
 
 `ahub setup --claude` gives Claude Code everything it needs in one step: the `ahub` skill, a short block in the

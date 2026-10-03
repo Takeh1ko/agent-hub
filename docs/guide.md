@@ -130,7 +130,7 @@ ahub task edit T12 --spec-file spec2.md   # a new specification, in a new sessio
 ```
 ahub status                # L1: one line per task, byte-budgeted (`ahub top` for the rest)
 ahub status T12            # L2: state, model, cost, summary, the next commands
-ahub result T12            # the result in full (--full for the whole report)
+ahub result T12            # L2, the same task view as ahub status T12; --full — result.json and the whole report (L3)
 ahub diff T12              # the diff from the base
 ahub follow T12            # live readable transcript: prompts, text, tool calls, results
 ahub log T12               # the raw session log
@@ -142,7 +142,7 @@ Real `ahub status` output:
 
 ```
 $ ahub status
-repo · 0 active · 1 waiting · 0 queued
+repo · 0 active · 2 waiting · 0 queued
 Waiting
   T1  done   report ready
   T5  done   review: all agree

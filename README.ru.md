@@ -146,6 +146,8 @@ ahub providers             # поставщики, которые знает ahu
 
 Платформы: Linux (systemd), macOS (launchd; проверяется в CI), Windows — только через WSL2.
 
+Прокси на каждого провайдера и песочница Codex: [руководстве](docs/guide.ru.md#продвинуто-прокси-на-провайдера-песочница-codex).
+
 ## Быстрый старт с Claude Code
 
 `ahub setup --claude` даёт Claude Code всё нужное за один шаг: навык `ahub`, короткий блок в `CLAUDE.md` проекта и

@@ -130,7 +130,7 @@ ahub task edit T12 --spec-file spec2.md   # новое техзадание, в 
 ```
 ahub status                # L1: строка на задачу с ограничением по байтам (остальное — `ahub top`)
 ahub status T12            # L2: состояние, модель, деньги, сводка, следующие команды
-ahub result T12            # результат целиком (--full — весь отчёт)
+ahub result T12            # L2, тот же вид задачи, что `ahub status T12`; --full — result.json и весь отчёт (L3)
 ahub diff T12              # дифф от базы
 ahub follow T12            # живая расшифровка: промпты, текст, вызовы инструментов, результаты
 ahub log T12               # сырой лог сессии
@@ -142,7 +142,7 @@ ahub top                   # терминальный экран: задачи, 
 
 ```
 $ ahub status
-repo · 0 active · 1 waiting · 0 queued
+repo · 0 active · 2 waiting · 0 queued
 Waiting
   T1  done   report ready
   T5  done   review: all agree
