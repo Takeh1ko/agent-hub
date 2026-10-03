@@ -45,23 +45,32 @@ PAUSE_KEY = "queue_paused"
 _TASK_ARG = re.compile(r"^[Tt]?(\d+)$")
 
 
+def _worker_task(args: list[str]) -> int | None:
+    """Task id of a `python -m ahub.worker T<n>` command line; None — anything else.
+
+    The mark must be an argument of its own, right after the module flag: a shell command, a grep pattern
+    or an agent prompt that merely mentions "ahub.worker T1" is not a task process — such a process once
+    hid a dead task from the pulse and took a slot in the queue.
+    """
+    for i, a in enumerate(args):
+        if a != CMD_MARK and not a.endswith(f"/{CMD_MARK}"):
+            continue
+        if i == 0 or args[i - 1] != "-m":  # the only form the service spawns: python -m ahub.worker T<n>
+            continue
+        for rest in args[i + 1:]:
+            m = _TASK_ARG.match(rest)
+            if m:
+                return int(m.group(1))
+    return None
+
+
 def live_workers(proc_root: str | Path = "/proc") -> dict[int, int]:
     """task_id → pid of live task processes on this machine."""
     out: dict[int, int] = {}
     for pid in procs.pids(proc_root):
-        args = procs.cmdline(pid, proc_root)
-        if not args or not any(CMD_MARK in a for a in args):
-            continue
-        try:
-            i = next(i for i, a in enumerate(args) if CMD_MARK in a)
-        except StopIteration:
-            continue
-        for a in args[i + 1:]:
-            m = _TASK_ARG.match(a)
-            if m:
-                if procs.alive(pid, proc_root):
-                    out[int(m.group(1))] = pid
-                break
+        tid = _worker_task(procs.cmdline(pid, proc_root))
+        if tid is not None and procs.alive(pid, proc_root):
+            out[tid] = pid
     return out
 
 

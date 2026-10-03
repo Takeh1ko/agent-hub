@@ -47,7 +47,8 @@ def _no_real_providers(monkeypatch):
 
 
 def qc(store, **kw):
-    return observer.quick_check(store, projects=[], health=False, **kw)
+    """live={} — hermetic: the pulse of a test task is ⚫ whatever else runs on this machine."""
+    return observer.quick_check(store, projects=[], health=False, live={}, **kw)
 
 
 def test_clean(store):
@@ -84,7 +85,7 @@ def test_broken_provider_is_critical(store, monkeypatch):
             return Health(False, ("no login",))
 
     monkeypatch.setitem(providers._cache, "opencode", _Broken())
-    sus = observer.quick_check(store, projects=[], health=True)
+    sus = observer.quick_check(store, projects=[], health=True, live={})
     assert [s.sig for s in sus] == ["health:opencode"] and sus[0].critical
     assert sus[0].text.endswith("no login")
     assert qc(store) == []  # the same check without the health part — clean
