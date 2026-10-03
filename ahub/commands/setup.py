@@ -2,7 +2,9 @@
 
 - no .hub.toml → writes the v2 template; v1 present → migrates to v2 (old copy → .hub.toml.v1);
 - registers the project in ~/.config/ahub/config.toml;
-- --claude: ahub skill for Claude Code (~/.claude/skills/ahub/SKILL.md) and a short block in the project CLAUDE.md.
+- --claude: ahub skill for Claude Code (~/.claude/skills/ahub/SKILL.md), a short block in the project CLAUDE.md
+  and the permission Bash(ahub:*) in .claude/settings.json — so `ahub …` runs without a question every time.
+- Other agents get the same stdio server over MCP; setup only prints the one-line hint, it never runs it.
 - TTY without --yes → interactive wizard (language, project, providers, models, service, Claude, Telegram, doctor).
 - The providers step lists every provider ahub knows (found / logged in / a note / an install hint) and writes
   [providers.<name>] enabled — the same switch `ahub providers enable|disable` changes.
@@ -13,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -24,6 +27,8 @@ from ahub.cliutil import CliError, emit
 
 MARK_BEGIN = "<!-- ahub:begin -->"
 MARK_END = "<!-- ahub:end -->"
+BASH_RULE = "Bash(ahub:*)"  # the Claude Code permission rule for every `ahub …` command
+MCP_CMD = "claude mcp add ahub -- ahub mcp"  # the one-line hint for MCP, printed and never run
 CLAUDE_BLOCK = f"""{MARK_BEGIN}
 ## agent-hub
 Tasks for worker models go through `ahub` (skill `ahub`). At session start — Monitor on `ahub watch`;
@@ -247,6 +252,37 @@ def claude_md(root: Path) -> str:
         return t("setup.claude_updated")
     f.write_text((text.rstrip() + "\n\n" if text else "") + CLAUDE_BLOCK, encoding="utf-8")
     return t("setup.claude_added")
+
+
+def allow_bash(root: Path) -> str:
+    """Put BASH_RULE into .claude/settings.json permissions.allow; the rest of the file stays.
+
+    The file and the directory are created if missing, the rule is never duplicated, the JSON is written
+    with a 2-space indent. Returns the line for the user; a settings.json that is not readable JSON is
+    reported as is — setup does not refuse over it.
+    """
+    from ahub.i18n import t
+
+    f = root / ".claude" / "settings.json"
+    data: dict = {}
+    if f.exists():
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return t("setup.perm_bad", path=f, err=f"{e}"[:120])
+        if not isinstance(data, dict):
+            return t("setup.perm_bad", path=f, err=t("setup.perm_bad_json"))
+    perms = data.get("permissions")
+    perms = dict(perms) if isinstance(perms, dict) else {}
+    allow = list(perms.get("allow")) if isinstance(perms.get("allow"), list) else []
+    if BASH_RULE in allow:
+        return t("setup.perm_exists", path=f, rule=BASH_RULE)
+    allow.append(BASH_RULE)
+    perms["allow"] = allow
+    data["permissions"] = perms
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return t("setup.perm_added", path=f, rule=BASH_RULE)
 
 
 def ensure_free_default(store=None, *, alias: str | None = None, warn=None) -> tuple[str, list[str]]:
@@ -516,6 +552,23 @@ def _service_enable_lines(os_kind: str, names: list[str], written: list[str], hi
     return lines
 
 
+def _claude_install(root: Path, *, ask: bool, log) -> None:
+    """The Claude Code step: skill, CLAUDE.md block, Bash(ahub:*) — then the MCP hint for other agents.
+
+    ask=False (the --claude flag) — the permission is written without a question, the default of the wizard.
+    """
+    from ahub.i18n import t
+
+    log(t("setup.skill", path=install_skill()))
+    log(claude_md(root))
+    if ask and not _ask_yes_no(t("setup.wizard_perm_ask", rule=BASH_RULE), True):
+        log(t("setup.perm_skip", rule=BASH_RULE))
+        log(t("setup.mcp_hint", cmd=MCP_CMD, server="ahub mcp"))
+        return
+    log(allow_bash(root))
+    log(t("setup.mcp_hint", cmd=MCP_CMD, server="ahub mcp"))
+
+
 def run_wizard(args) -> int:
     import os
     import types
@@ -604,15 +657,13 @@ def run_wizard(args) -> int:
     want_claude = bool(getattr(args, "claude", False))
     cl_check = doctor.check_claude()
     if want_claude and not cl_check.ok:
-        print(t("setup.skill", path=install_skill()))
-        print(claude_md(root))
+        _claude_install(root, ask=False, log=print)
     elif cl_check.ok:
         from ahub.tg.launcher import claude_bin
 
         binary = claude_bin() or cl_check.detail
         if want_claude or _ask_yes_no(t("setup.wizard_claude_ask", binary=binary), True):
-            print(t("setup.skill", path=install_skill()))
-            print(claude_md(root))
+            _claude_install(root, ask=not want_claude, log=print)
     else:
         print(t("setup.wizard_claude_missing"))
     # 7) Telegram (default no)
@@ -644,7 +695,7 @@ def run_wizard(args) -> int:
     print(t("setup.wizard_doctor_head"))
     from ahub.commands.doctor import _text as _doctor_text
 
-    print(_doctor_text(doctor.run_all()))
+    print(_doctor_text(doctor.run_all(root)))  # the project from step 2, not the cwd
     return 0
 
 
@@ -687,6 +738,8 @@ def _cmd_noninteractive(args) -> int:
     if args.claude:
         lines.append(t("setup.skill", path=install_skill()))
         lines.append(claude_md(root))
+        lines.append(allow_bash(root))  # no question here: --claude asked for the whole step
+        lines.append(t("setup.mcp_hint", cmd=MCP_CMD, server="ahub mcp"))
     want_service = bool(getattr(args, "service", False))
     want_install = bool(getattr(args, "yes", False)) or want_service
     if want_install and (sys.platform.startswith("linux") or sys.platform == "darwin" or want_service):
