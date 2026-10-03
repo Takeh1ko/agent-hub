@@ -120,8 +120,15 @@ def test_say_ask_answer_alarms(env, capsys):
     assert comms.answer(store, 1, "да") and not comms.answer(store, 1, "нет")
     assert events.lines(store, events.unacked(store)) == ["ANSWER #1 «сливать T12?» → да"]
     comms.raise_alarm(store, "opencode недоступен 12 мин", critical=True)
+    rc, out, _ = ahub(capsys, "alarms")
+    assert rc == 0
+    lines = out.splitlines()
+    assert "#2" in out and "ALARM! opencode недоступен 12 мин" in out  # the id, so it can be acked by hand
+    age_cell = lines[1].split()[1:3]
+    assert len(age_cell) == 2 and age_cell[0] == "0" and age_cell[1] in ("мин", "мин.")  # the age column
+    assert lines[-1] == "Дальше  ahub ack <#> · ahub alarms --ack"  # --ack marks read; --acked would list read ones
+
     rc, out, _ = ahub(capsys, "alarms", "--ack")
-    assert "ALARM! opencode недоступен 12 мин" in out and "#2" in out  # the id, so it can be acked by hand
     assert out.splitlines()[-1] == "1 тревога отмечена прочитанной"  # the result, not a Next command
     assert ahub(capsys, "alarms")[1] == "тревог нет"
 

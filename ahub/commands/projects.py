@@ -16,6 +16,7 @@ def cmd_projects(args) -> int:
     problems = {p.name: config.check_project(p) for p in projects}
     head = [t("projects.col_name"), t("projects.col_root"), t("projects.col_state")]
     rows = [[p.name, p.root, "—" if not problems[p.name]
+             else t("projects.state_bad_one") if len(problems[p.name]) == 1
              else t("projects.state_bad", n=len(problems[p.name]))] for p in projects]
     out: list[str] = []
     if projects:

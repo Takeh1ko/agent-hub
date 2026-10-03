@@ -579,6 +579,19 @@ def test_config_is_a_kv_block(capsys, monkeypatch, tmp_path):
     assert lines[6] == "  Allowed files  core/**, tests/**"
     assert lines[7].startswith("  Next  ahub setup ")
 
+    # a broken project: one problem per line under the label, not one wrapped paragraph
+    from ahub import config as cfgmod
+
+    monkeypatch.setattr(cfgmod, "check_project", lambda cfg: ["python: not an executable file /nope/python",
+                                                             "allowed_paths: core/** does not exist"])
+    rc, out = run(capsys, "config")
+    lines = out.splitlines()
+    assert rc == 1  # problems — the exit code of a refusal
+    at = next(i for i, ln in enumerate(lines) if ln.startswith("  Problems"))
+    assert lines[at] == "  Problems  ! python: not an executable file /nope/python"
+    assert lines[at + 1] == "            ! allowed_paths: core/** does not exist"  # aligned under it
+    assert lines[-1].startswith("  Next  ahub setup ")  # and the Next line is still last
+
 
 def test_service_status_lists_the_task_processes_of_this_hub(capsys, monkeypatch):
     from ahub import transitions
@@ -797,3 +810,63 @@ def test_the_waiting_list_is_capped_like_the_active_one(capsys, monkeypatch, tmp
     assert lines[head + home.MAX_TASKS].strip() == "+4 more — ahub status"
     assert "T" + str(home.MAX_TASKS + 4) not in lines[head + home.MAX_TASKS + 1]
     assert lines[head + home.MAX_TASKS + 1].strip().startswith("Next  ahub accept T1")  # the oldest decision
+
+
+def test_the_next_line_survives_a_full_screen(capsys, monkeypatch, tmp_path):
+    """A full report, a full summary, questions and six findings: the screen may lose its tail,
+    but never the way out — `ahub accept T1` is the point of the view."""
+    import json as _json
+
+    from ahub import reasons, views
+    from ahub.model import Kind
+    from ahub.store import Store, Task
+
+    long = "Подробности о состоянии задачи и о том, что именно было сделано. " * 60
+    findings = [{"severity": "high", "file": f"core/{i}.py", "line": i,
+                 "issue": "Находка ревью номер %d: код делает не то, что от него ждут в этом месте. " % i * 6,
+                 "fix": "Исправить так, чтобы поведение совпадало с контрактом вызова. " * 6} for i in range(6)]
+    wt = tmp_path / "wt"
+    (wt / ".ahub").mkdir(parents=True)
+    (wt / ".ahub" / "review_r1_fake.json").write_text(
+        _json.dumps({"verdict": "changes", "summary": "", "findings": findings}), encoding="utf-8")
+    (wt / ".ahub" / "report.md").write_text("## Суть\n" + long + "\n\n## Подробно\n" + long, encoding="utf-8")
+    (wt / ".ahub" / "result.json").write_text(_json.dumps(
+        {"summary": long, "questions": [long[:120] + f" {i}" for i in range(3)], "notes": long},
+        ensure_ascii=False), encoding="utf-8")
+    task = Task(id=1, project="P", kind=Kind.CODE, title="большая задача", executor="bunny",
+                worktree=str(wt), state="needs_decision", review={"models": ["fake"], "rounds": 2},
+                state_reason=reasons.dump("quota", err="подробности ошибки провайдера. " * 20))
+    text = views.task_text(Store(), task, w=W)
+    assert len(text.encode()) <= views.L2_LIMIT  # L2 stays within the cap of contracts §5
+    assert text.splitlines()[-1].strip().startswith("Next  ahub accept T1")  # the way out is the last line
+    assert "rework" in text.splitlines()[-1] and "reject" in text.splitlines()[-1]
+
+    # the same screen under a tighter cap: what is given up is the tail of the blocks above
+    monkeypatch.setattr(views, "L2_LIMIT", 2400)
+    cut = views.task_text(Store(), task, w=W)
+    assert len(cut.encode()) <= 2400 and text.splitlines()[-1] in cut  # the Next line survived the clip
+    assert "…" in cut  # what was given up is a block above it, not the way out
+
+
+def test_one_problem_is_singular_in_english(capsys, monkeypatch, tmp_path):
+    """English plurals: one problem is "1 problem", not "1 problems" (the catalogue carries both forms)."""
+    from ahub import config as cfgmod
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    # ahub doctor: exactly one failed check
+    checks = [doctor.Check("python", True, "Python 3.12.3", ""),
+              doctor.Check("git", True, "git 2.43.0", ""),
+              doctor.Check("service", False, "not running (no OS service)", "ahub service install")]
+    monkeypatch.setattr(doctor, "run_all", lambda root=None, step=None: checks)
+    rc, out = run(capsys, "doctor")
+    assert rc == 1 and out.splitlines()[-1] == "1 problem — the fix is under the check"
+    assert "1 problems" not in out
+
+    # ahub projects: one project with one config problem
+    root = tmp_path / "shop"
+    write(root / ".hub.toml", 'schema_version = 2\nname = "shop"\n')
+    write(paths.global_config_path(), f'projects = ["{root}"]\n')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cfgmod, "check_project", lambda cfg: ["python: not an executable file /nope/python"])
+    rc, out = run(capsys, "projects")
+    assert "1 problem" in out and "1 problems" not in out

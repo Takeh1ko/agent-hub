@@ -271,8 +271,9 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
          model: str | None = None, by: str = "orchestrator") -> str:
     """New brief: on resume — a fresh executor session (different fingerprint).
 
-    review/rounds/model — the review panel and the executor of a task that has not started its review yet
-    (the panel decides what the task is checked against, so it cannot change once a reviewer has run).
+    review/rounds — before the review starts: the panel decides what the task is checked against, so it
+    cannot change once a reviewer has run (`review_started()`). model — like `ahub model`, any inactive
+    task: the executor is picked for the next session, review or not.
     """
     t = _get(store, task_id)
     if t.state in (State.ACCEPTED, State.REJECTED) or t.state in transitions.ACTIVE:

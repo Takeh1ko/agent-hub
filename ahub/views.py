@@ -257,7 +257,8 @@ def _findings_lines(t: Task, w: int | None) -> list[str]:
         out += block
         used += size
     if more:
-        out.append(ui.para(_t("views.findings_more", n=more, label=t.label), indent=2, w=w))
+        more_key = "views.findings_more_one" if more == 1 else "views.findings_more"
+        out.append(ui.para(_t(more_key, n=more, label=t.label), indent=2, w=w))
     return out
 
 
@@ -312,9 +313,11 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
         out.append(ui.section(_t("views.sec_report", kb=f"{len(rep.encode()) / 1024:.1f}")))
         out.append(ui.para(ui.fit(report_essence(rep), REPORT_BYTES), indent=2, w=w))
     out.extend(_findings_lines(t, w))
-    if t.state in DECISION_STATES or t.state in RESUME_STATES:
-        out.append(_next_line(t, next_key(t), w))
-    return clip_bytes("\n".join(out), L2_LIMIT)
+    # the Next line is booked before the clip: the decision commands are the point of the screen, so what
+    # does not fit is the tail of the blocks above them (the findings), never the way out
+    nxt = _next_line(t, next_key(t), w) if (t.state in DECISION_STATES or t.state in RESUME_STATES) else ""
+    body = clip_bytes("\n".join(out), L2_LIMIT - (len(nxt.encode()) + 1 if nxt else 0))
+    return f"{body}\n{nxt}" if nxt else body
 
 
 def _facts(groups: list[list[tuple[str, Value]]], w: int | None) -> list[str]:

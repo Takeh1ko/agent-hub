@@ -22,11 +22,14 @@ def _text(cfg: config.ProjectConfig, problems: list[str], w: int | None = None) 
     if cfg.models_deny:
         rows.append((t("config.lbl_denied"), t("config.denied_line", deny=", ".join(cfg.models_deny))))
     rows.append((t("config.lbl_files"), ", ".join(cfg.allowed_paths) or "—"))
-    if problems:
-        rows.append((t("config.lbl_problems"), "\n".join(f"! {p}" for p in problems)))
     out = [ui.para(t("config.title", name=cfg.name, root=cfg.root), indent=0, w=w),
-           ui.kv(rows, indent=2, w=w),
-           ui.styled(ui.kv([(t("views.lbl_next"), t("config.next", root=cfg.root))], indent=2, w=w), "dim")]
+           ui.kv(rows, indent=2, w=w)]
+    if problems:  # one problem per line: a kv value with newlines in it comes back as one wrapped paragraph
+        label = t("config.lbl_problems")
+        out.append(ui.kv([(label, f"! {problems[0]}")], indent=2, w=w))
+        under = 2 + len(label) + ui.GAP
+        out.extend(ui.para(f"! {p}", indent=under, w=w) for p in problems[1:])
+    out.append(ui.styled(ui.kv([(t("views.lbl_next"), t("config.next", root=cfg.root))], indent=2, w=w), "dim"))
     return "\n".join(out)
 
 
