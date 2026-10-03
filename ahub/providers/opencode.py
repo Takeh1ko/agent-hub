@@ -124,6 +124,7 @@ def _usage_of_part(part: dict) -> Usage | None:
 
 class OpencodeProvider(Provider):
     name = "opencode"
+    stamped = True  # every event carries `timestamp`
     capabilities = frozenset({Cap.RESUME, Cap.STREAM, Cap.TOKENS, Cap.COST_MONEY, Cap.ACTIVE_TOOL, Cap.EXPORT,
                               Cap.CATALOG, Cap.HEALTH, Cap.FIND_SESSION})
 
@@ -183,7 +184,8 @@ class OpencodeProvider(Provider):
             state = part.get("state") if isinstance(part.get("state"), dict) else {}
             status = str(state.get("status", ""))
             out.append(Activity(Act.TOOL_END, ts, tool=str(part.get("tool", "")),
-                                data={"status": status, "input": _short_input(state.get("input"))}))
+                                data={"status": status, "input": _short_input(state.get("input")),
+                                      "output": _short_output(state.get("output"))}))
         elif t == "text":
             out.append(Activity(Act.TEXT, ts, text=str(part.get("text", ""))))
         elif t == "reasoning":
@@ -274,6 +276,17 @@ def _short_input(inp) -> dict:
         if isinstance(v, str) and v:
             out[k] = v[:200]
     return out
+
+
+def _short_output(out) -> str:
+    """First 300 characters of what a tool returned (the transcript shows them; the pulse does not)."""
+    if isinstance(out, str):
+        return out[:300]
+    if isinstance(out, dict):
+        return _short_output(out.get("output") or out.get("text") or "")
+    if isinstance(out, list):
+        return " ".join(x for x in (_short_output(v) for v in out[:3]) if x)
+    return ""
 
 
 _FENCE = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.DOTALL)

@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ahub import log as hublog
-from ahub import gates, prepare, prompts, providers, registry, review, transitions, workspace
+from ahub import gates, prepare, prompts, providers, registry, review, transitions, transcript, workspace
 from ahub.config import ProjectConfig
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Kind, Phase, Role, State
@@ -265,10 +265,32 @@ class Engine:
         return self.store.add_session(task_id=self.task_id, provider=provider, role=role.value, model=alias,
                                       round=round_no, external_id=session_id or "", log_path=log_path)
 
+    def _note_prompt(self, log_path: str, kind: str, prompt: str) -> None:
+        """The prompt of the turn into the sidecar next to the log — `ahub follow` reads it.
+
+        The kinds are transcript.PROMPT_KINDS: start | continue | repair | rework | stop | review.
+        """
+        try:
+            path = transcript.prompts_path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                turn = path.read_text(encoding="utf-8", errors="replace").count("\n") + 1
+            except FileNotFoundError:
+                turn = 1
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"ts": now_ms(), "turn": turn, "kind": kind, "text": prompt},
+                                   ensure_ascii=False) + "\n")
+        except OSError as e:
+            self.log.warning("prompt of the turn not saved: %s", e)
+
     def session(self, role: Role, alias: str, prompt: str, *, session_id: str | None = None,
                 keep_session_on_retry: bool = True, log_name: str = "", schema: dict | None = None,
-                cwd: str | None = None) -> RunResult:
-        """One worker step with retries on network failure (architecture §6.3)."""
+                cwd: str | None = None, prompt_kind: str = "start") -> RunResult:
+        """One worker step with retries on network failure (architecture §6.3).
+
+        `prompt_kind` says what the prompt is (start | continue | repair | rework | stop | review) and goes
+        into the prompts sidecar, which is what `ahub follow` shows as the turn header.
+        """
         entry = registry.get(self.store, alias)
         prov = providers.get(entry.provider)
         t = self.task()
@@ -278,6 +300,7 @@ class Engine:
         while True:
             self._check_lease()
             log_path = str(Path(cwd) / workspace.AHUB_DIR / "logs" / f"{log_name or role.value}.log")
+            self._note_prompt(log_path, prompt_kind, prompt)
             row = self._session_row(prov.name, role, alias, t.round, session_id, log_path)
 
             def on_session(sid: str, _row=row) -> None:
@@ -369,15 +392,15 @@ class Engine:
         return None
 
     def _step_with_continue(self, role: Role, alias: str, prompt: str, *, session_id: str | None,
-                            log_name: str) -> tuple[RunResult, tuple[State, str] | None]:
+                            log_name: str, prompt_kind: str = "start") -> tuple[RunResult, tuple[State, str] | None]:
         """Worker step; silence → one same-session nudge."""
-        r = self.session(role, alias, prompt, session_id=session_id, log_name=log_name)
+        r = self.session(role, alias, prompt, session_id=session_id, log_name=log_name, prompt_kind=prompt_kind)
         if r.outcome is Outcome.SILENCE:
             self.store.add_event("silence", task_id=self.task_id, project=self.project.name,
                                  payload={"secs": r.silence_s, "action": "continue",
                                           "text": _t("engine.silence_text", secs=r.silence_s)})
             r = self.session(role, alias, prompts.CONTINUE_PROMPT, session_id=r.session_id or session_id,
-                             log_name=log_name)
+                             log_name=log_name, prompt_kind="continue")
             if r.outcome is Outcome.SILENCE:
                 return r, (State.NEEDS_DECISION, _t("engine.silence_twice", secs=r.silence_s))
         return r, self._outcome_to_state(r)
@@ -392,13 +415,14 @@ class Engine:
         self._clear_fresh(t)
         prompt = prompts.CONTINUE_PROMPT if resume_sid else prompts.scout_prompt(self.project, t)
         r, final = self._step_with_continue(Role.SCOUT, t.executor, prompt, session_id=resume_sid,
-                                            log_name="scout")
+                                            log_name="scout",
+                                            prompt_kind="continue" if resume_sid else "start")
         if final is not None:
             return self._settle(*final)
         problem = self._check_scout(t)
         if problem and not problem.startswith("!"):
             r, final = self._step_with_continue(Role.SCOUT, t.executor, prompts.repair_prompt(problem),
-                                                session_id=r.session_id, log_name="scout")
+                                                session_id=r.session_id, log_name="scout", prompt_kind="repair")
             if final is not None:
                 return self._settle(*final)
             problem = self._check_scout(t)
@@ -454,7 +478,8 @@ class Engine:
         """Budget spent: worker saves progress in one short step, task goes to "Needs decision"."""
         self.budget_hit = False  # allow one short "save and stop" step
         if sid:
-            self.session(role, alias, prompts.stop_prompt(), session_id=sid, log_name=role.value)
+            self.session(role, alias, prompts.stop_prompt(), session_id=sid, log_name=role.value,
+                         prompt_kind="stop")
         go, usd = self.task_cost()
         self.store.add_event("budget_hard", task_id=self.task_id, project=self.project.name,
                              payload={"go": round(go, 4), "usd": round(usd, 4)})
@@ -492,18 +517,21 @@ class Engine:
             lim.pop("rework_notes", None)
             self.store.update_task(t.id, limits=lim)
         if fresh:  # new session (different model/brief, or no session before): full brief + instructions
-            prompt, sid = prompts.code_prompt(self.project, t), None
+            prompt, kind = prompts.code_prompt(self.project, t), "start"
             if notes:
                 prompt += f"\n\n{prompts.orchestrator_heading(rework=True)}\n" + notes
+                kind = "rework"
+            sid = None
         elif notes:
-            prompt = review.fix_prompt([], notes=notes)
+            prompt, kind = review.fix_prompt([], notes=notes), "rework"
         else:
-            prompt = prompts.CONTINUE_PROMPT
+            prompt, kind = prompts.CONTINUE_PROMPT, "continue"
         self._clear_fresh(t)
         round_no = t.round
         while True:
             self.set_phase(Phase.WRITING)
-            r, final = self._step_with_continue(role, t.executor, prompt, session_id=sid, log_name=role.value)
+            r, final = self._step_with_continue(role, t.executor, prompt, session_id=sid, log_name=role.value,
+                                                prompt_kind=kind)
             sid = r.session_id or sid
             if final is not None:
                 if self.budget_hit:
@@ -529,9 +557,10 @@ class Engine:
                                         _t("engine.gates_retry_fail", problem=problem)[:500],
                                         payload={"tests_tail": g.tests_tail[-800:]})
                 fixed_once = True
-                fix = (review.fix_prompt([], gate=g) if g.tests_ok is False and not g.repairable
-                       else prompts.repair_prompt(problem))
-                r, final = self._step_with_continue(role, t.executor, fix, session_id=sid, log_name=role.value)
+                red_tests = g.tests_ok is False and not g.repairable
+                fix = (review.fix_prompt([], gate=g) if red_tests else prompts.repair_prompt(problem))
+                r, final = self._step_with_continue(role, t.executor, fix, session_id=sid, log_name=role.value,
+                                                    prompt_kind="rework" if red_tests else "repair")
                 sid = r.session_id or sid
                 if final is not None:
                     if self.budget_hit:
@@ -555,7 +584,7 @@ class Engine:
                                     payload={**payload, "findings": len(findings)})
             round_no += 1
             t = self.move(State.FIXING, reason, fields={"round": round_no})
-            prompt = review.fix_prompt(findings)
+            prompt, kind = review.fix_prompt(findings), "rework"
 
     def _clear_fresh(self, t: Task) -> None:
         if t.limits.get("fresh_session"):
@@ -587,7 +616,7 @@ class Engine:
         def one(m: str):
             prompt = review.review_prompt(self.project, t, diff, g, round_no, m)
             return self.session(Role.REVIEWER, m, prompt, keep_session_on_retry=False,
-                                log_name=f"reviewer_r{round_no}_{m}")
+                                log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review")
 
         with ThreadPoolExecutor(max_workers=len(models)) as ex:
             results = list(ex.map(one, models))
@@ -605,7 +634,7 @@ class Engine:
             def retry_one(m: str):
                 return self.session(Role.REVIEWER, m, review.verdict_repair_prompt(round_no, m),
                                     session_id=by_model[m].session_id, keep_session_on_retry=False,
-                                    log_name=f"reviewer_r{round_no}_{m}")
+                                    log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review")
 
             with ThreadPoolExecutor(max_workers=len(missing)) as ex:
                 retries = list(ex.map(retry_one, missing))
