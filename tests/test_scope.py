@@ -152,6 +152,31 @@ def test_inbox_reads_only_its_scope(two_projects, capsys):
     assert len(comms.inbox(store, mark=False, scope=OWNER)) == 1  # and the hub-wide one was read
 
 
+def test_a_row_of_another_project_is_refused(two_projects, capsys):
+    """`ahub inbox <id>` / `ahub questions <id>` name one row — a row of another project is refused,
+    with the way out (the same rule as for a task)."""
+    store, _root_a, _root_b = two_projects
+    mid = comms.owner_message(store, "дело B подробно", project="B")
+    qid = comms.ask(store, "вопрос B подробно?", project="B")
+    ahub(capsys, "inbox")  # the inbox of A — B's message stays unread
+
+    rows = [(["inbox", str(mid)], "#1"), (["questions", str(qid)], "#1")]  # own numbers: message and question
+    for argv, ref in rows:
+        rc, out, err = ahub(capsys, *argv)
+        assert rc == 2 and out == ""
+        assert err.splitlines() == [f"ошибка: {ref} — строка проекта B",
+                                    "подсказка: запустите из того репозитория или добавьте --project B"]
+    for argv, ref in rows:
+        rc, out, err = ahub(capsys, "--lang", "en", *argv)
+        assert rc == 2 and out == ""
+        assert err.splitlines() == [f"error: {ref} belongs to project B",
+                                    "hint: run from that repo or add --project B"]
+
+    assert len(comms.inbox(store, mark=False)) == 1  # B's message is still unread
+    assert "дело B подробно" in ahub(capsys, "inbox", str(mid), "--project", "B")[1]  # the way out
+    assert "вопрос B подробно?" in ahub(capsys, "questions", str(qid), "--all")[1]
+
+
 def test_hub_wide_alarms_are_seen_by_every_scope(two_projects, capsys):
     store, _root_a, _root_b = two_projects
     comms.raise_alarm(store, "opencode недоступен", critical=True)  # the observer writes project=''

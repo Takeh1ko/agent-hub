@@ -47,6 +47,14 @@ def inbox(store: Store, *, mark: bool = True, scope: Scope | None = None, now: i
     return rows
 
 
+def message(store: Store, message_id: int) -> dict | None:
+    """One message by its number, read or not — `ahub inbox <id>` reads a message in full."""
+    with store.read() as c:
+        row = c.execute("SELECT id, ts, direction, text, project, chat_id, delivered_at FROM message WHERE id=?",
+                        (message_id,)).fetchone()
+    return dict(row) if row is not None else None
+
+
 def say(store: Store, text: str, *, project: str = "", now: int | None = None) -> int:
     with store.tx() as c:
         return int(c.execute("INSERT INTO message(ts, direction, text, project) VALUES(?,?,?,?)",
@@ -108,6 +116,17 @@ def cancel_question(store: Store, question_id: int) -> bool:
     with store.tx() as c:
         return c.execute("UPDATE question SET status='cancelled' WHERE id=? AND status='open'",
                          (question_id,)).rowcount == 1
+
+
+def question(store: Store, question_id: int) -> dict | None:
+    """One question by its number, open or not — `ahub questions <id>` reads it in full."""
+    with store.read() as c:
+        row = c.execute("SELECT * FROM question WHERE id=?", (question_id,)).fetchone()
+    if row is None:
+        return None
+    out = dict(row)
+    out["options"] = json.loads(out.pop("options_json") or "[]")
+    return out
 
 
 def raise_alarm(store: Store, text: str, *, critical: bool = False, project: str = "", details: dict | None = None,

@@ -125,10 +125,10 @@ def _wait(a: dict) -> list[str]:
     return _project_flag(a, ["wait", "--timeout", a.get("timeout") or "10m", "--who", "mcp"])
 
 
-@tool("inbox", "Owner messages of the project (marked as read).",
+@tool("inbox", "Owner messages of the project in full (marked as read).",
       {"project": S, "all": {"type": "boolean"}, "peek": {"type": "boolean"}})
 def _inbox(a: dict) -> list[str]:
-    argv = ["inbox"] + (["--peek"] if a.get("peek") else [])
+    argv = ["inbox", "--full"] + (["--peek"] if a.get("peek") else [])  # an agent reads the whole text
     return _project_flag(a, argv)
 
 
