@@ -31,7 +31,7 @@ from pathlib import Path
 
 from ahub import log as hublog
 from ahub.i18n import t as _t
-from ahub.providers.base import (Act, Activity, Cap, Health, ModelInfo, Outcome, Provider, RunSpec, Usage)
+from ahub.providers.base import Act, Activity, Cap, Health, ModelInfo, Outcome, Provider, RunSpec, Usage
 from ahub.providers.opencode import extract_json, prompt_arg  # shared bits: prompt → argument, JSON out of text
 
 _log = hublog.get("agy")

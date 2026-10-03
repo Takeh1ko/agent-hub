@@ -112,13 +112,16 @@ def test_outside_allowed_is_decision(store, project):
 
 
 def test_no_commit_repair(store, project):
-    nocommit = {"session": "ses_x", "steps": [{"write": {"path": "core/b.py", "text": "Y = 2\n"}},
-                                              {"event": {"type": "text", "text": "готово"}}]}
-    fix = {"session": "ses_x", "steps": [{"git_commit": "feat: b"}, {"result": {"summary": "ок", "files": ["core/b.py"]}}]}
+    nocommit = {"session": "ses_x", "steps": [
+        {"write": {"path": "core/b.py", "text": "Y = 2\n"}},
+        {"event": {"type": "text", "text": "готово"}}]}
+    fix = {"session": "ses_x", "steps": [{"git_commit": "feat: b"},
+                                         {"result": {"summary": "ок", "files": ["core/b.py"]}}]}
     fake = install_fake(store, [nocommit, fix])
     t = code_task(store, project)
     assert run(store, project, t.id).state is State.DONE
-    assert "Result is not in the required form" in fake.calls[1]["prompt"] and "незакоммиченные" in fake.calls[1]["prompt"]
+    repair = fake.calls[1]["prompt"]
+    assert "Result is not in the required form" in repair and "незакоммиченные" in repair
 
 
 def test_red_tests_fixed_once(store, project):

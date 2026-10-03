@@ -26,7 +26,7 @@ DEFAULT_MODELS: dict[str, tuple[str, str, str, str]] = {
     "spark-high": ("opencode", SPARK, "high", "Spark 1.3, high reasoning"),
     "spark-medium": ("opencode", SPARK, "medium", "Spark 1.3, medium reasoning"),
     "mimo-flash": ("opencode", "opencode-go/mimo-v2.6-flash", "", "MiMo 2.6 Flash"),
-    "deepseek-flash": ("opencode", "opencode-go/deepseek-v4.1-flash", "high", "DeepSeek v4.1 Flash (pricier than Spark)"),
+    "deepseek-flash": ("opencode", "opencode-go/deepseek-v4.1-flash", "high", "DeepSeek v4.1 Flash (pricier)"),
     "spark-free": ("opencode", "opencode/muse-spark-1.3-contributor-free", "xhigh", "free Spark (slower)"),
     "bunny": ("opencode", "opencode/space-bunny-free", "", "Space Bunny free (opencode)"),
     "gemini": ("agy", "gemini-3.8-flash-high", "", "Gemini via agy (window quota)"),

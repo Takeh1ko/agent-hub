@@ -5,7 +5,8 @@
   before finishing, the rest goes to the next launch.
 - Project: named in the message, else where Claude last worked (presence), else the hub's first project.
 - One resumable "TG session" (claude --resume) within a day and while turns stay under MAX_TURNS.
-- `--dangerously-skip-permissions` — same as the owner. Supervision: timeout, launch journal (claude_launch), hourly limit.
+- `--dangerously-skip-permissions` — same as the owner. Supervision: timeout, launch journal (claude_launch),
+  hourly limit.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from ahub import comms, config, events, paths, procs, views
+from ahub import config, events, paths, procs, views
 from ahub import log as hublog
 from ahub.store import Store
 from ahub.time import now_ms, to_local

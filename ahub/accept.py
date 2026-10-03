@@ -253,5 +253,6 @@ def change_model(store: Store, project: ProjectConfig, task_id: int, alias: str,
     lim = dict(t.limits)
     lim["fresh_session"] = True  # never resume another model's session
     store.update_task(t.id, executor=alias, limits=lim)
-    store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project, payload={"from": t.executor, "to": alias, "by": by})
+    store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                    payload={"from": t.executor, "to": alias, "by": by})
     return _t("accept.model_msg", label=t.label, old=t.executor, new=alias)

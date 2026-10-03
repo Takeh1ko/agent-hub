@@ -337,7 +337,7 @@ def test_step6_pulse_providers_en(monkeypatch, tmp_path):
     """Step 6: pulse and provider reasons in English (AHUB_LANG=en)."""
     import re as _re
 
-    from ahub import config, pulse, transitions
+    from ahub import pulse, transitions
     from ahub.model import State
     from ahub.providers import opencode_db as odb
     from ahub.providers.fake import FakeProvider

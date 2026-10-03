@@ -388,4 +388,5 @@ def test_python_bin_explicit_venv_or_path(tmp_path):
     venv_py.parent.mkdir(parents=True)
     venv_py.write_text("")
     assert cfg.python_bin() == str(venv_py)
-    assert config.parse_project({"schema_version": 2, "name": "A", "python": "/opt/py"}, tmp_path).python_bin() == "/opt/py"
+    fixed = config.parse_project({"schema_version": 2, "name": "A", "python": "/opt/py"}, tmp_path)
+    assert fixed.python_bin() == "/opt/py"

@@ -24,7 +24,7 @@ def _cells(state, aliases: list[str], enabled: bool) -> list[str]:
 
 def _line(cells: list[str], widths: list[int]) -> str:
     """Columns left-aligned, the last one (the model list) as long as it is."""
-    return " ".join(c.ljust(w) for c, w in zip(cells[:-1], widths)).rstrip() + " " + cells[-1]
+    return " ".join(c.ljust(w) for c, w in zip(cells[:-1], widths, strict=False)).rstrip() + " " + cells[-1]
 
 
 def cmd_providers(args) -> int:

@@ -24,8 +24,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ahub import gates, prepare, prompts, providers, registry, review, transcript, transitions, workspace
 from ahub import log as hublog
-from ahub import gates, prepare, prompts, providers, registry, review, transitions, transcript, workspace
 from ahub.config import ProjectConfig
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Kind, Phase, Role, State
@@ -551,7 +551,7 @@ class Engine:
             try:
                 p = prepare.prepare(self.project, t)
             except prepare.PrepareError as e:
-                raise _Settle(State.ERROR, _t("engine.prepare_fail", err=e))
+                raise _Settle(State.ERROR, _t("engine.prepare_fail", err=e)) from e
             fields = {"worktree": p.workspace.path, "branch": p.workspace.branch, "round": max(1, t.round)}
             if not t.base_sha:
                 fields["base_sha"] = p.workspace.base_sha
@@ -684,7 +684,7 @@ class Engine:
         if (stop := self._review_interrupted(results)) is not None:
             return stop
         self._revert_reviewer(t)
-        by_model = dict(zip(models, results))
+        by_model = dict(zip(models, results, strict=True))
         found: dict[str, review.Review] = {}
         for m in models:
             rv = review.parse(review.review_path(t.worktree, round_no, m), m)

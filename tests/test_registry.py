@@ -31,7 +31,8 @@ def test_seed_once(store):
 def test_pick_default_and_explicit(store):
     assert registry.pick(store, Role.EXECUTOR, None).alias == "spark"
     assert registry.pick(store, Role.EXECUTOR, None, explicit="deepseek-flash").alias == "deepseek-flash"
-    assert registry.pick(store, Role.EXECUTOR, None, explicit="spark-free").alias == "spark-free"  # outside the menu — explicit is fine
+    outside = registry.pick(store, Role.EXECUTOR, None, explicit="spark-free")  # outside the menu — explicit is fine
+    assert outside.alias == "spark-free"
     with pytest.raises(registry.RegistryError, match="нет модели"):
         registry.pick(store, Role.EXECUTOR, None, explicit="nope")
 

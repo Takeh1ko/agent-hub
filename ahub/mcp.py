@@ -98,8 +98,8 @@ def _say(a: dict) -> list[str]:
     return ["say", a["text"]]
 
 
-@tool("ask", "Question to the owner with options; the answer arrives as an ANSWER event.", {"text": S, "options": S, "task": S},
-      ["text"])
+@tool("ask", "Question to the owner with options; the answer arrives as an ANSWER event.",
+      {"text": S, "options": S, "task": S}, ["text"])
 def _ask(a: dict) -> list[str]:
     argv = ["ask", a["text"]]
     if a.get("options"):

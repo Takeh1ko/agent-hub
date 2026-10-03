@@ -11,7 +11,7 @@ import os
 import sys
 from pathlib import Path
 
-from ahub.providers.base import (Act, Activity, Cap, Health, ModelInfo, Provider, RunSpec, SessionState, Usage)
+from ahub.providers.base import Act, Activity, Cap, Health, ModelInfo, Provider, RunSpec, SessionState, Usage
 
 TRANSIENT_MARKERS = ("unexpected server error", "cannot connect", "econnrefused", "etimedout", "status 5", "429")
 

@@ -12,8 +12,15 @@ from pathlib import Path
 import pytest
 
 from ahub.providers.base import Act, Cap, Outcome, RunSpec
-from ahub.providers.codex import (CodexProvider, classify_text, error_text, parse_models, prompt_arg,
-                                   sandbox_mode, usage_of)
+from ahub.providers.codex import (
+    CodexProvider,
+    classify_text,
+    error_text,
+    parse_models,
+    prompt_arg,
+    sandbox_mode,
+    usage_of,
+)
 
 DATA = Path(__file__).parent / "data" / "codex"
 SID = "01a0fec9-9da7-7c71-9fa0-cdba1d4bfc35"
