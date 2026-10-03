@@ -218,8 +218,7 @@ def box(lines: Sequence[str], *, w: int | None = None) -> str:
     top, bottom = styled("╭" + "─" * n + "╮", "dim"), styled("╰" + "─" * n + "╯", "dim")
     out = [top]
     for ln in rows:
-        room = n - plain_len(ln) - 1
-        out.append(("│ " + ln if room >= 0 else styled("│ " + clip(ln, n - 2), "dim")) + " " * max(room, 0) + "│")
+        out.append("│ " + _cell(ln, n - 1) + "│")
     out.append(bottom)
     return "\n".join(out)
 
@@ -372,7 +371,6 @@ class Live:
         self._done = 0
         self._frame = 0
         self._live = colour_on()
-        self._was_live = self._live
         self._out = out if out is not None else sys.stdout
 
     def __enter__(self) -> "Live":
@@ -401,18 +399,6 @@ class Live:
         self._live = False
         try:
             self._out.write(CLEAR_LINE)
-            self._out.flush()
-        except (OSError, ValueError):
-            pass
-
-    def done(self, result: str) -> None:
-        """The work is over: the live line is cleared and the result takes its place (⏺ on a terminal)."""
-        if not self._live and not self._was_live:
-            return
-        self.clear()
-        self._was_live = False
-        try:
-            self._out.write(item(result) + "\n")
             self._out.flush()
         except (OSError, ValueError):
             pass

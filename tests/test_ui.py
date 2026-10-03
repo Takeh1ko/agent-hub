@@ -169,16 +169,20 @@ DETAIL_TTY = """\
   the wizard, the models and the service
   \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub accept T3 · ahub rework T3 --notes "…" · ahub reject T3\x1b[0m"""
 
-OVERVIEW_TTY = """\
-\x1b[1mall projects · 1 active · 1 waiting · 2 queued\x1b[0m
-\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers                                \x1b[2mwriting · bunny · 2 min · $0.046\x1b[0m
-\x1b[38;5;208m⏺\x1b[0m T3  done · gates passed, acceptance is green
-  \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub accept T3 · ahub rework T3 --notes "…" · ahub reject T3\x1b[0m
-\x1b[38;5;208m⏺\x1b[0m T2  queued
-\x1b[38;5;208m⏺\x1b[0m T4  queued · waiting for T3 to be accepted (queued)
-\x1b[1mUnread\x1b[0m
-  \x1b[2m⎿\x1b[0m \x1b[2mDONE T3 code «Setup wizard: choose providers and per-role models» — report 2.1 KB; ready; $0.04\x1b[0m
-\x1b[2munread events 1\x1b[0m"""
+OVERVIEW_TTY = (
+    "\x1b[1mall projects · 1 active · 1 waiting · 2 queued\x1b[0m\n"
+    "\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers                                "
+    "\x1b[2mwriting · bunny · 2 min · $0.046\x1b[0m\n"
+    "  \x1b[2m⎿\x1b[0m \x1b[32m🟢 running pytest\x1b[0m\n"
+    "\x1b[38;5;208m⏺\x1b[0m T3  done · gates passed, acceptance is green\n"
+    '  \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub accept T3 · ahub rework T3 --notes "…" · ahub reject T3\x1b[0m\n'
+    "\x1b[38;5;208m⏺\x1b[0m T2  queued\n"
+    "\x1b[38;5;208m⏺\x1b[0m T4  queued · waiting for T3 to be accepted (queued)\n"
+    "\x1b[1mUnread\x1b[0m\n"
+    "  \x1b[2m⎿\x1b[0m \x1b[2mDONE T3 code «Setup wizard: choose providers and per-role models» — "
+    "report 2.1 KB; ready; $0.04\x1b[0m\n"
+    "\x1b[2munread events 1\x1b[0m"
+)
 
 HISTORY = """\
   task  kind   title                                              state     round  cost    took
@@ -255,7 +259,7 @@ def test_status_overview_tty_snapshot(tmp_path, monkeypatch):
     store = Store()
     ids = _fill(store, tmp_path)
     live = {ids["active"]: 42}
-    pulses = {ids["active"]: pulse.Pulse(ids["active"], "working", pid=42)}
+    pulses = {ids["active"]: pulse.Pulse(ids["active"], "working", pid=42, reason="running pytest")}
     text = views.status_text(store, live=live, now=NOW + 2 * 60_000, pulses=pulses, w=W)
     assert text == OVERVIEW_TTY
 
@@ -356,17 +360,10 @@ def test_live_line_only_on_a_terminal(monkeypatch):
                        + ui.CLEAR_LINE + f"{s1} Checking 2 models… (1/2)"
                        + ui.CLEAR_LINE + f"{s2} Checking 2 models… (2/2)"
                        + ui.CLEAR_LINE)  # cleared at the end, whatever happens
-    # done() replaces the spinner with an item on a terminal
-    out.buf = ""
-    with ui.Live("Checking 2 models…", total=2) as p:
-        p.step()
-        p.done("2 models ready")
-    assert out.buf.endswith(ui.CLEAR_LINE + ui.item("2 models ready") + "\n")
     pipe = _TTY(tty=False)
     monkeypatch.setattr(ui.sys, "stdout", pipe)
     with ui.Live("Checking 2 models…", total=2) as p:
         p.step()
-        p.done("2 models ready")
     assert pipe.buf == ""  # a pipe (Claude) gets nothing
 
 
@@ -450,3 +447,98 @@ def test_table_head_is_dim_without_separators_on_tty(monkeypatch):
     lines = out.splitlines()
     assert lines[0] == "\x1b[2mtask  state\x1b[0m"
     assert lines[1] == "T1    done"
+
+
+def test_home_screen_configured_tty_snapshot(tmp_path, monkeypatch):
+    import ahub
+    from ahub import home, paths, pulse, reasons, transitions
+    from ahub.model import Kind, State
+    from ahub.service import HEARTBEAT_KEY
+
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    demo_dir = tmp_path / "demo"
+    demo_dir.mkdir(parents=True)
+    (demo_dir / ".hub.toml").write_text('schema_version = 2\nname = "demo"\n', encoding="utf-8")
+    monkeypatch.chdir(demo_dir)
+    monkeypatch.setattr(paths, "global_config_path", lambda: tmp_path / "global.toml")
+    (tmp_path / "global.toml").write_text("projects = []\n", encoding="utf-8")
+    monkeypatch.setattr("ahub.home.now_ms", lambda: NOW + 30_000)
+
+    store = Store()
+    working = store.create_task(project="demo", kind=Kind.CODE, title="Setup wizard: choose providers",
+                                executor="spark", now=NOW)
+    transitions.move(store, working, State.PREPARING, now=NOW)
+    transitions.move(store, working, State.WORKING, now=NOW)
+    store.update_task(working, phase="writing", now=NOW)
+
+    waiting = store.create_task(project="demo", kind=Kind.SCOUT, title="find the leak", now=NOW)
+    for st in (State.PREPARING, State.WORKING):
+        transitions.move(store, waiting, st, now=NOW)
+    transitions.move(store, waiting, State.DONE, reason=reasons.dump("review_exhausted", n=2, highs=1), now=NOW)
+
+    store.meta_set(HEARTBEAT_KEY, str(NOW + 30_000))
+
+    monkeypatch.setattr("ahub.home.live_workers", lambda: {working: 42})
+    monkeypatch.setattr(pulse, "all_pulses", lambda store, live, projects, now: {
+        working: pulse.Pulse(working, "working", pid=42, reason="running pytest")
+    })
+
+    text = home.text(w=W)
+    expected = "\n".join([
+        "\x1b[2m╭───────────────────────────────────────╮\x1b[0m",
+        f"│ \x1b[38;5;208m✻ ahub\x1b[0m \x1b[2m{ahub.__version__} · demo · service running\x1b[0m │",
+        "\x1b[2m╰───────────────────────────────────────╯\x1b[0m",
+        (
+            "\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers"
+            "                                         \x1b[2mwriting · spark · 0 min\x1b[0m"
+        ),
+        "  \x1b[2m⎿\x1b[0m \x1b[32m🟢 running pytest\x1b[0m",
+        "\x1b[38;5;208m⏺\x1b[0m Waiting for you",
+        '  \x1b[2m⎿\x1b[0m \x1b[2mahub accept T2 · ahub rework T2 --notes "…" · ahub reject T2\x1b[0m',
+        '\x1b[2mahub status · ahub top · ahub doctor · ahub task new --kind scout --title "…"\x1b[0m',
+    ])
+    assert text == expected
+
+
+def test_action_result_and_error_cli_tty(capsys, monkeypatch):
+    from ahub import cli, transitions
+    from ahub.model import Kind, State
+
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    store = Store()
+    tid = store.create_task(project="P", kind=Kind.CODE, title="wizard")
+    for st in (State.PREPARING, State.WORKING, State.DONE):
+        transitions.move(store, tid, st)
+
+    monkeypatch.setattr("ahub.commands.task._project_of", lambda store, task: None)
+    monkeypatch.setattr("ahub.accept.accept", lambda store, project, tid, by="orchestrator": "T12 merged into main")
+
+    rc = cli.main(["--all", "accept", f"T{tid}"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out == (
+        "\x1b[38;5;208m⏺\x1b[0m T12 merged into main\n"
+        '  \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub status · ahub task new --kind scout --title "…"\x1b[0m\n'
+    )
+
+    rc = cli.main(["accept", "T999"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err == (
+        "\x1b[31m✗ no such task T999\x1b[0m\n"
+        "  \x1b[2m⎿\x1b[0m \x1b[2mhint: ahub status\x1b[0m\n"
+    )
+
+
+def test_box_with_overlong_header_aligns():
+    long_line = "✻ ahub 3.0.0 · " + "p" * 80 + " · service running"
+    out = ui.box([long_line], w=50)
+    lines = out.splitlines()
+    assert len(lines) == 3
+    assert ui.plain_len(lines[0]) == 52
+    assert ui.plain_len(lines[1]) == 52
+    assert ui.plain_len(lines[2]) == 52
+    assert lines[1].startswith("│ ")
+    assert lines[1].endswith("│")
+    assert "…" in lines[1]
+

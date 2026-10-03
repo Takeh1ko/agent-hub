@@ -10,8 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from ahub import events, scope, tasks, transitions, views
-from ahub.cliutil import (CliError, add_project_arg, add_scope_args, check_task, emit, resolve_project,
-                       result)
+from ahub.cliutil import CliError, add_project_arg, add_scope_args, check_task, emit, resolve_project, result
 from ahub.model import ACTIVE, WAITING_DECISION, Kind, State, parse_task_id
 from ahub.service import live_workers
 from ahub.store import Store, Task
