@@ -43,9 +43,7 @@ def cmd_cost(args) -> int:
     store = Store()
     models = cost.by_model(store, scope=sc, since=since)
     projects = cost.by_project(store, scope=sc, since=since)
-    total = cost.Money()
-    for m in models:
-        total += cost.Money(m.go, m.usd)
+    total = cost.total(store, scope=sc, since=since)  # the one place the scope is summed
     sessions = sum(m.sessions for m in models)
     head = [t("cost.col_project"), t("cost.col_model"), t("cost.col_sessions"), t("cost.col_go"),
             t("cost.col_usd")]
