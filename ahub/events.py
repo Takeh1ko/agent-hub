@@ -8,20 +8,25 @@
 - "Delivered" is set by wait/watch handoff; "acked" — ack (explicit, or implicit on reading the task/inbox).
 - Delivered but unacked is re-offered once after REDELIVER_MS — so nothing is lost
   if the orchestrator never picked it up, without waking it with the same thing in a loop.
-- Presence: wait/watch stamp `presence` at least every PRESENCE_TOUCH_S; "present" — younger than PRESENT_MS.
+- Presence: wait/watch stamp `presence` (presence_project — one row per who+project, plus the pre-006 table)
+  at least every PRESENCE_TOUCH_S; "present" — younger than PRESENT_MS. A failed stamp is logged, never raised.
 """
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from collections.abc import Callable
 
-from ahub import reasons, ui
+from ahub import config, reasons, ui
+from ahub import log as hublog
 from ahub.i18n import t
 from ahub.model import Ev
 from ahub.scope import Scope, where
 from ahub.store import Event, Store, Task
 from ahub.time import now_ms
+
+_log = hublog.get("events")
 
 GROUP_WINDOW_MS = 120_000
 REDELIVER_MS = 30 * 60_000
@@ -214,26 +219,96 @@ def lines(store: Store, evs: list[Event]) -> list[str]:
 
 
 # --- presence ---
+# One row per (who, project) in presence_project: an orchestrator session works in one repository, so a live
+# session in A says nothing about B. The owner's scope (every project) stamps a row for every project.
+# The pre-006 table `presence` (one row per who) is written too and read as a fallback — a process on the
+# previous code still stamps only it, and must neither break nor look absent (migration 006 is additive).
+
+NEW_SQL = ("INSERT INTO presence_project(who, project, last_seen, session_id, via) VALUES(?,?,?,?,?)"
+           " ON CONFLICT(who, project) DO UPDATE SET last_seen=excluded.last_seen, via=excluded.via,"
+           " session_id=CASE WHEN excluded.session_id!='' THEN excluded.session_id"
+           " ELSE presence_project.session_id END")
+
+LEGACY_SQL = ("INSERT INTO presence(who, project, last_seen, session_id, via) VALUES(?,?,?,?,?)"
+              " ON CONFLICT(who) DO UPDATE SET project=CASE WHEN excluded.project!='' THEN excluded.project"
+              " ELSE presence.project END, last_seen=excluded.last_seen, via=excluded.via,"
+              " session_id=CASE WHEN excluded.session_id!='' THEN excluded.session_id"
+              " ELSE presence.session_id END")
+
 
 def touch(store: Store, who: str = DEFAULT_WHO, *, project: str = "", via: str = "", session_id: str = "",
           now: int | None = None) -> None:
+    """Stamp presence of one project, in both tables, in one transaction."""
+    touch_scope(store, Scope((project,)), who, via=via, session_id=session_id, now=now)
+
+
+def presence_projects(scope: Scope | None = None) -> list[str]:
+    """The names a scope stamps: its own project(s), or every project of the hub (the owner).
+
+    Resolved once per wait/watch (`names=`) — not on every touch.
+    """
+    own = (scope or Scope()).projects
+    if own:
+        return list(own)
+    try:
+        projects, _ = config.load_projects()
+    except (config.ConfigError, OSError):
+        return [""]
+    return [p.name for p in projects] or [""]
+
+
+def touch_scope(store: Store, scope: Scope | None = None, who: str = DEFAULT_WHO, *, via: str = "",
+                session_id: str = "", names: list[str] | None = None, now: int | None = None) -> None:
+    """Presence for the scope's projects (or the given names), in one transaction.
+
+    Never raises: a presence stamp must not kill a stream (`ahub watch`) — a failure goes to the log.
+    """
     ts = now if now is not None else now_ms()
-    with store.tx() as c:
-        c.execute("INSERT INTO presence(who, project, last_seen, session_id, via) VALUES(?,?,?,?,?)"
-                  " ON CONFLICT(who) DO UPDATE SET project=CASE WHEN excluded.project!='' THEN excluded.project"
-                  " ELSE presence.project END, last_seen=excluded.last_seen, via=excluded.via,"
-                  " session_id=CASE WHEN excluded.session_id!='' THEN excluded.session_id ELSE presence.session_id END",
-                  (who, project, ts, session_id, via))
+    try:
+        with store.tx() as c:
+            for name in (presence_projects(scope) if names is None else names):
+                c.execute(NEW_SQL, (who, name, ts, session_id, via))
+                c.execute(LEGACY_SQL, (who, name, ts, session_id, via))
+    except sqlite3.Error as e:
+        _log.warning("presence touch failed: %s", e)
 
 
-def presence(store: Store, who: str = DEFAULT_WHO) -> dict | None:
+def presence(store: Store, who: str = DEFAULT_WHO, project: str | None = None) -> dict | None:
+    """The presence row of one project; project=None — the freshest of any project.
+
+    presence_project first, then the old table (a process on the previous code writes only it); a database
+    without presence_project yet (a migration under a live process) falls back to the old one.
+    """
+    sql = "SELECT * FROM presence_project WHERE who=?"
+    args: list = [who]
+    if project is not None:
+        sql += " AND project=?"
+        args.append(project)
     with store.read() as c:
-        row = c.execute("SELECT * FROM presence WHERE who=?", (who,)).fetchone()
+        try:
+            row = c.execute(sql + " ORDER BY last_seen DESC, project LIMIT 1", args).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row is None:
+            row = _legacy_presence(c, who, project)
     return dict(row) if row else None
 
 
-def present(store: Store, who: str = DEFAULT_WHO, *, now: int | None = None, fresh_ms: int = PRESENT_MS) -> bool:
-    p = presence(store, who)
+def _legacy_presence(c: sqlite3.Connection, who: str, project: str | None) -> sqlite3.Row | None:
+    """The pre-006 row of `who`: one row per who, so it answers "is anyone live" and where that one worked last."""
+    try:
+        row = c.execute("SELECT * FROM presence WHERE who=?", (who,)).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is not None and project is not None and str(row["project"]) != project:
+        return None
+    return row
+
+
+def present(store: Store, who: str = DEFAULT_WHO, *, project: str | None = None, now: int | None = None,
+            fresh_ms: int = PRESENT_MS) -> bool:
+    """A live session: in that project, or (project=None) in any of them."""
+    p = presence(store, who, project)
     ts = now if now is not None else now_ms()
     return bool(p) and ts - int(p["last_seen"]) < fresh_ms
 
@@ -246,10 +321,11 @@ def wait(store: Store, *, timeout_s: float, scope: Scope | None = None, who: str
     """Block until an event batch of the scope or timeout. Handed-out events are marked delivered."""
     deadline = clock() + timeout_s
     last_touch = -1e9
+    names = presence_projects(scope)  # the owner's projects are read from the config once, not per touch
     while True:
         now_c = clock()
         if now_c - last_touch >= PRESENCE_TOUCH_S:
-            touch(store, who, project=(scope or Scope()).name, via="wait")
+            touch_scope(store, scope, who, via="wait", names=names)
             last_touch = now_c
         batch = ready_batch(store, scope=scope)
         if batch:

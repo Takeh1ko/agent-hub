@@ -84,6 +84,8 @@ async def background(bot, store: Store) -> None:
                 res = await asyncio.to_thread(launcher.tick, store)
                 if res == "limit":
                     _log.warning("Claude launch hourly limit exhausted")
+                elif res.startswith("nodir:"):  # the launcher says it once — the owner hears it once
+                    await _send(bot, store, core.Reply(_t("tg.launch_no_dir", name=res.split(":", 1)[1])))
             await asyncio.to_thread(store.meta_set, HEARTBEAT_KEY, str(int(loop.time())))
         except Exception:
             _log.exception("bot background loop crashed")
@@ -109,6 +111,21 @@ def build_dispatcher(store: Store):
     @r.message(Command("status"))
     async def _status(msg: Message) -> None:
         await msg.answer(core.clip(await asyncio.to_thread(core.status_text, store)))
+
+    @r.message(Command("project"))
+    async def _project(msg: Message) -> None:
+        arg = " ".join((msg.text or "").split()[1:]).strip()
+        names = await asyncio.to_thread(_projects)
+        rep = await asyncio.to_thread(core.project_reply, store, names, arg or None, msg.chat.id)
+        await msg.answer(rep.text, reply_markup=_markup(rep.buttons))
+
+    @r.callback_query(F.data.startswith("proj:"))
+    async def _pick_project(call: CallbackQuery) -> None:
+        names = await asyncio.to_thread(_projects)
+        rep = await asyncio.to_thread(core.project_reply, store, names, call.data.split(":", 1)[1],
+                                      call.message.chat.id)
+        await call.message.edit_text(rep.text, reply_markup=_markup(rep.buttons))
+        await call.answer()
 
     @r.message(Command("tasks"))
     async def _tasks(msg: Message) -> None:
