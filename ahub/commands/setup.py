@@ -365,9 +365,6 @@ class Steps:
         for ln in (str(text) or "").splitlines() or [""]:
             self.write(ui.para(ln, indent=4, w=self.w) if wrap else " " * 4 + ln)
 
-    def kv(self, rows) -> None:
-        self.write(ui.kv(rows, indent=4, w=self.w))
-
     def table(self, head, rows, max_width=None) -> None:
         self.write(ui.table(head, rows, max_width=max_width, indent=4, w=self.w))
 

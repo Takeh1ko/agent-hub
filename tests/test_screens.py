@@ -488,3 +488,78 @@ def test_an_error_is_one_line_and_names_the_command(capsys, monkeypatch, tmp_pat
     assert "belongs to no project" in err and err.splitlines()[1] == "  hint: ahub setup"
     assert command_hint("no project 'x' (known: shop)") == ""  # nothing obvious — no second line
     assert CliError("boom", hint="ahub doctor").hint == "ahub doctor"
+
+
+def test_draft_list_is_a_table(capsys, tmp_path):
+    import json as _json
+
+    from ahub import drafts
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    store = Store()
+    did = drafts.create(store, project, "кнопка повторной оплаты", run_model=False)
+    drafts._update(store, did, status="ready",
+                   task_json=_json.dumps({"kind": "code", "title": "кнопка", "spec": "do it",
+                                         "paths": ["core/**"], "review_level": 2}))
+    rc, out = run(capsys, "draft", "list")
+    assert rc == 0
+    assert out == ("  #   status  words                    task\n"
+                   f"  #{did}  ready   кнопка повторной оплаты  —\n")
+    # not ready — the reason instead of a task
+    drafts._update(store, did, status="failed", errors="boom")
+    assert "failed" in run(capsys, "draft", "list")[1]
+    assert run(capsys, "draft", "start", str(did))[0] == 2
+
+
+def test_observer_reports_is_a_table(capsys, monkeypatch):
+    from ahub import observer
+
+    monkeypatch.setattr(observer, "reports", lambda store, n: [
+        {"ts": 1_700_000_000_000, "kind": "quick", "verdict": "ok", "summary": "всё тихо", "cost_go": 0.0},
+        {"ts": 1_700_000_060_000, "kind": "deep", "verdict": "alarm", "summary": "T1 молчит", "cost_go": 0.012},
+    ])
+    rc, out = run(capsys, "observer", "reports")
+    assert rc == 0
+    assert out.splitlines()[0].split() == ["when", "check", "verdict", "summary"]
+    assert "T1 молчит ($0.012)" in out
+    assert len(run(capsys, "observer", "reports", "-n", "1")[1].splitlines()) == 3  # the head and one row
+
+
+def test_service_status_shows_the_queue_and_the_next_command(capsys, monkeypatch):
+    from ahub import reasons
+    from ahub.commands import service as svccmd
+    from ahub.service import HEARTBEAT_KEY
+
+    monkeypatch.setattr(svccmd, "live_workers", lambda: {})
+    store = Store()
+    tid = store.create_task(project="P", kind="scout", title="later")
+    store.update_task(tid, state_reason=reasons.dump("wait_accept", task="T1", state="queued"))
+    store.meta_set(HEARTBEAT_KEY, str(now_ms()))
+    rc, out = run(capsys, "service", "status")
+    assert rc == 0
+    assert out == (f"  Service  alive (tick 0s ago)\n"
+                   "Queue\n"
+                   "  T1  queued  waiting for T1 to be accepted (queued)\n"
+                   "  Next  ahub status · ahub top\n")
+    store.meta_del(HEARTBEAT_KEY)
+    rc, out = run(capsys, "service", "status")
+    assert out.splitlines()[0] == "  Service  not responding (no ticks yet)"
+    assert out.splitlines()[-1] == "  Next  ahub service install · ahub service start"
+
+
+def test_config_is_a_kv_block(capsys, monkeypatch, tmp_path):
+    write(tmp_path / "p" / ".hub.toml", 'schema_version = 2\nname = "shop"\nmax_parallel = 4\n'
+          'allowed_paths = ["core/**", "tests/**"]\n[models]\ndeny = ["deepseek"]\n')
+    monkeypatch.chdir(tmp_path / "p")
+    rc, out = run(capsys, "config")
+    assert rc == 0
+    lines = out.splitlines()
+    assert lines[0] == f"shop  {tmp_path / 'p'}"
+    assert lines[1].split() == ["Branch", "main", "→", "tasks", "ahub/<ID>", "in", "—"]
+    assert lines[2] == "  Python         python3"
+    assert lines[3] == "  Parallel       4 at a time · resources — · tests under —"
+    assert lines[4] == "  Budget         $1.5 Go · $0 real"  # the default budget of a code task
+    assert lines[5] == "  Denied models  deepseek"
+    assert lines[6] == "  Allowed files  core/**, tests/**"
+    assert lines[7].startswith("  Next  ahub setup ")

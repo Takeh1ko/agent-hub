@@ -361,12 +361,13 @@ def cmd_stop(args) -> int:
     except ProcessLookupError:
         pass
     except PermissionError as e:
-        raise CliError(t("err.service_no_perm", pid=pid, err=e)) from e
+        raise CliError(t("err.service_no_perm", pid=pid, err=e),
+                       hint=t("service.next_up")) from e
     deadline = time.monotonic() + 10
     while procs.alive(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
     if procs.alive(pid):
-        raise CliError(t("err.service_not_stopped", pid=pid))
+        raise CliError(t("err.service_not_stopped", pid=pid), hint=t("service.next_down"))
     pf.unlink(missing_ok=True)
     emit(args, {"pid": pid, "stopped": True},
          t("service.stopped", pid=pid) + "\n"

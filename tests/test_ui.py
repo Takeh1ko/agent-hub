@@ -274,3 +274,48 @@ def test_a_crowded_overview_shows_the_rows_that_fit_and_counts_the_rest():
     assert len(active) + len(queued) + more == 40  # nothing is dropped silently
     assert "ahub top" in out
     assert len(out.encode()) <= views.L1_LIMIT
+
+
+class _TTY:
+    """A stdout that keeps what was written and claims to be (or not to be) a terminal."""
+
+    def __init__(self, tty: bool) -> None:
+        self.buf = ""
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def write(self, text: str) -> int:
+        self.buf += text
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+
+def test_live_line_only_on_a_terminal(monkeypatch):
+    out = _TTY(tty=True)
+    monkeypatch.setattr(ui.sys, "stdout", out)
+    with ui.Live("Checking 2 models…", total=2) as p:
+        p.step()
+        p.step()
+    assert out.buf == (ui.CLEAR_LINE + "Checking 2 models… 0/2"
+                       + ui.CLEAR_LINE + "Checking 2 models… 1/2"
+                       + ui.CLEAR_LINE + "Checking 2 models… 2/2"
+                       + ui.CLEAR_LINE)  # cleared at the end, whatever happens
+    pipe = _TTY(tty=False)
+    monkeypatch.setattr(ui.sys, "stdout", pipe)
+    with ui.Live("Checking 2 models…", total=2) as p:
+        p.step()
+    assert pipe.buf == ""  # a pipe (Claude) gets nothing
+
+
+def test_live_spins_when_the_total_is_unknown(monkeypatch):
+    out = _TTY(tty=True)
+    monkeypatch.setattr(ui.sys, "stdout", out)
+    with ui.Live("Checking the providers…") as p:
+        p.step()
+        p.total(3)
+        p.step()
+    assert out.buf.count(ui.SPINNER[0]) == 1 and "Checking the providers… 1/3" in out.buf

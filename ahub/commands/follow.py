@@ -54,16 +54,18 @@ def cmd_follow(args) -> int:
     t = _task(store, args.task)
     session = _pick(store.list_sessions(t.id), args.role, args.round)
     if session is None:
-        raise CliError(_t("follow.no_sessions", label=t.label))
+        raise CliError(_t("follow.no_sessions", label=t.label), hint=_t("hint.status_task", label=t.label))
     log = Path(session.log_path) if session.log_path else None
     if log is None or not log.is_file():
         where = _archive_hint(t)
         raise CliError(_t("follow.archived", label=t.label, path=where) if where
-                       else _t("follow.no_log", label=t.label))
+                       else _t("follow.no_log", label=t.label),
+                       hint=_t("hint.status_task", label=t.label))
     try:
         provider = providers.get(session.provider)
     except KeyError:
-        raise CliError(_t("follow.unknown_provider", provider=session.provider)) from None
+        raise CliError(_t("follow.unknown_provider", provider=session.provider),
+                       hint=_t("hint.doctor")) from None
 
     out = sys.stdout
     writer = transcript.Writer(out, full=args.full, color=out.isatty())

@@ -65,7 +65,7 @@ def text(*, w: int | None = None) -> str:
         out.append(ui.section(_t("home.sec_tasks")))
         out.append(ui.table(["", _t("views.col_id"), _t("views.col_kind"), _t("views.col_title"),
                              _t("views.col_state"), _t("views.col_model"), _t("views.col_idle")],
-                            _task_rows(store, active, live, pulses, now), max_width=[1, 6, 7, None, 13, 10, 8],
+                            _task_rows(active, live, pulses, now), max_width=[1, 6, 7, None, 13, 10, 8],
                             indent=2, w=w))
     else:
         out.append(ui.para(_t("home.no_tasks"), indent=2, w=w))
@@ -79,7 +79,7 @@ def text(*, w: int | None = None) -> str:
     return "\n".join(out)
 
 
-def _task_rows(store: Store, tasks: list, live: dict[int, int], pulses: dict, now: int) -> list[list[str]]:
+def _task_rows(tasks: list, live: dict[int, int], pulses: dict, now: int) -> list[list[str]]:
     rows = []
     for task in tasks:
         pl = pulses.get(task.id)
