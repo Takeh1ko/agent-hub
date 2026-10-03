@@ -26,10 +26,6 @@ class Money:
     def __add__(self, other: "Money") -> "Money":
         return Money(self.go + other.go, self.usd + other.usd)
 
-    @property
-    def total(self) -> float:
-        return self.go + self.usd
-
 
 @dataclass(frozen=True)
 class ModelSpend:
@@ -59,11 +55,17 @@ def _condition(sc: Scope | None) -> tuple[str, list[str]]:
     return (f"t.project IN ({','.join('?' * len(sc.projects))})", list(sc.projects))
 
 
-def _grouped(store: Store, key: str, sc: Scope | None, since: int | None) -> list[sqlite3.Row]:
-    """Sum the sessions of the scope by an expression over (project, model); the priciest group first."""
+_PROJECT = "COALESCE(t.project,'')"
+
+
+def _grouped(store: Store, with_model: bool, sc: Scope | None, since: int | None) -> list[sqlite3.Row]:
+    """Sum the sessions of the scope by (project, model); the priciest group first.
+
+    The project of a session is the project of its task — a session without a task comes under "".
+    """
     args: list[object] = []
-    sql = ("SELECT " + key + " AS k, COUNT(*) AS n,"
-           " COALESCE(SUM(s.cost_go),0) AS go, COALESCE(SUM(s.cost_usd),0) AS usd"
+    sql = ("SELECT " + _PROJECT + " AS project, " + ("s.model" if with_model else "''") + " AS model,"
+           " COUNT(*) AS n, COALESCE(SUM(s.cost_go),0) AS go, COALESCE(SUM(s.cost_usd),0) AS usd"
            " FROM session s LEFT JOIN task t ON t.id=s.task_id WHERE 1=1")
     if since is not None:
         sql += " AND s.started_at>=?"
@@ -72,27 +74,21 @@ def _grouped(store: Store, key: str, sc: Scope | None, since: int | None) -> lis
     if cond:
         sql += " AND " + cond
         args.extend(cond_args)
-    sql += " GROUP BY k ORDER BY go DESC, k"
+    sql += " GROUP BY project, model ORDER BY go DESC, project, model"
     with store.read() as c:
         return c.execute(sql, args).fetchall()
 
 
-_PROJECT = "COALESCE(t.project,'')"
-_MODEL = "COALESCE(t.project,'') || '|' || s.model"
-
-
 def by_project(store: Store, *, scope: Scope | None = None, since: int | None = None) -> dict[str, Money]:
     """Go/USD per project name of the scope; sessions without a task come under the key ""."""
-    return {str(r["k"]): Money(float(r["go"]), float(r["usd"])) for r in _grouped(store, _PROJECT, scope, since)}
+    return {str(r["project"]): Money(float(r["go"]), float(r["usd"]))
+            for r in _grouped(store, False, scope, since)}
 
 
 def by_model(store: Store, *, scope: Scope | None = None, since: int | None = None) -> list[ModelSpend]:
     """One row per project and model of the scope, the priciest first."""
-    out = []
-    for r in _grouped(store, _MODEL, scope, since):
-        project, _sep, model = str(r["k"]).partition("|")
-        out.append(ModelSpend(project, model, int(r["n"]), float(r["go"]), float(r["usd"])))
-    return out
+    return [ModelSpend(str(r["project"]), str(r["model"]), int(r["n"]), float(r["go"]), float(r["usd"]))
+            for r in _grouped(store, True, scope, since)]
 
 
 def total(store: Store, *, scope: Scope | None = None, since: int | None = None) -> Money:

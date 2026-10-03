@@ -140,9 +140,8 @@ def rows(store: Store, live: dict[int, int], pulses: dict, now: int, recent: int
     name would say nothing new). `only` — one project: the rows of that project alone.
     """
     active = store.list_tasks(states=CURRENT, project=only or None)
-    done = [t for t in store.list_tasks(newest_first=True, limit=recent * 3)
-            if t.state.value in ("accepted", "rejected") and (not only or t.project == only)
-            ][:recent] if history else []
+    done = [t for t in store.list_tasks(project=only or None, newest_first=True, limit=recent * 3)
+            if t.state.value in ("accepted", "rejected")][:recent] if history else []
     groups: dict[str, list[Row]] = {}
     for t in active + done:
         groups.setdefault(t.project, []).append(_task_row(store, t, pulses.get(t.id), now))

@@ -281,6 +281,7 @@ class TopApp(App):
         self._names = screen.projects
         self.query_one("#header", Static).update(screen.header)
         table = self.query_one("#tasks", DataTable)
+        row_at = table.cursor_row
         cur = self.selected()
         table.clear()
         self._ids = []
@@ -288,8 +289,11 @@ class TopApp(App):
             table.add_row(r.mark, r.label, r.kind, r.title[:40], r.state, r.phase, r.model, str(r.round),
                           r.age, r.cost)
             self._ids.append(r.task_id)
-        if cur in self._ids:
-            table.move_cursor(row=self._ids.index(cur))
+        if cur:  # the same task stays picked when the rows move under it
+            if cur in self._ids:
+                table.move_cursor(row=self._ids.index(cur))
+        elif row_at:  # the cursor is on a project header row — keep its place, not the first group
+            table.move_cursor(row=min(row_at, len(self._ids) - 1))
         self.query_one("#feed", Static).update("\n".join(screen.feed[-7:]) or _t("tui.no_events"))
         self._show_detail()
 

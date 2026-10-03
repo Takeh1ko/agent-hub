@@ -28,13 +28,11 @@ def _since(args) -> int:
         raise CliError(str(e)) from e
 
 
-def _project_cell(name: str, single: bool) -> str:
-    """The project of a row; a session without a task belongs to the hub itself (the owner's view)."""
+def _project_cell(name: str) -> str:
+    """The project of a row; a session without a task (or of a hub-wide one) is the hub's own."""
     from ahub.i18n import t
 
-    if name:
-        return name
-    return "" if single else t("cost.hub")
+    return name or t("cost.hub")
 
 
 def cmd_cost(args) -> int:
@@ -46,13 +44,12 @@ def cmd_cost(args) -> int:
     models = cost.by_model(store, scope=sc, since=since)
     projects = cost.by_project(store, scope=sc, since=since)
     total = cost.Money()
-    sessions = 0
     for m in models:
         total += cost.Money(m.go, m.usd)
-        sessions += m.sessions
+    sessions = sum(m.sessions for m in models)
     head = [t("cost.col_project"), t("cost.col_model"), t("cost.col_sessions"), t("cost.col_go"),
             t("cost.col_usd")]
-    body = [[_project_cell(m.project, not sc.all), m.model or EMPTY_MODEL, str(m.sessions),
+    body = [[_project_cell(m.project), m.model or EMPTY_MODEL, str(m.sessions),
              f"{m.go:.3f}", f"{m.usd:.3f}"] for m in models]
     lines = []
     if body:

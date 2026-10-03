@@ -288,3 +288,16 @@ async def test_top_header_row_opens_nothing(hub, store):
         await pilot.press("s")  # stop — nothing to stop
         await pilot.pause(0.3)
         assert store.get_task(1).state is State.WORKING
+
+
+async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
+    """The screen refreshes every 2 s; a header row is not a task, so the cursor holds its place."""
+    from ahub.tui.app import TopApp
+
+    filled(store)
+    app = TopApp(store=store, projects=[])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        app.query_one("#tasks").move_cursor(row=3)  # the header row of B
+        await pilot.pause(2.5)  # a refresh of the screen
+        assert app.query_one("#tasks").cursor_row == 3
