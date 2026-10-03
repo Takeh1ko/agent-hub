@@ -34,9 +34,27 @@ def test_round_trip():
     assert reasons.load(stored) == {"code": "wait_accept", "task": "T53", "state": "reviewing"}
 
 
-def test_empty_params_are_not_stored():
-    assert reasons.dump("accepted", note="") == '{"code":"accepted"}'
+def test_an_empty_param_is_stored_and_none_is_not():
+    """The template of a code must always get what it asks for, even when the value is empty."""
+    assert reasons.dump("merged", branch="main", note="") == '{"code":"merged","branch":"main","note":""}'
+    assert reasons.dump("accepted", note=None) == '{"code":"accepted"}'
+    assert reasons.part("push_failed", err="") == {"code": "push_failed", "err": ""}
     assert reasons.dump("") == ""
+
+
+def test_merged_without_a_push_note(monkeypatch):
+    """The accept path with no push configured: the row renders, it does not raise."""
+    assert reasons.text(reasons.dump("merged", branch="main", note="")) == "merged into main"
+    # a row written before the param existed — the same sentence, no KeyError
+    assert reasons.text('{"code":"merged","branch":"main"}') == "merged into main"
+    _ru(monkeypatch)
+    assert reasons.text('{"code":"merged","branch":"main"}') == "слита в main"
+
+
+def test_a_missing_param_never_breaks_the_reader():
+    for stored in ('{"code":"blocked","summary":""}', '{"code":"scout_bad","problems":[]}',
+                   '{"code":"merged"}', '{"code":"gates_failed"}'):
+        assert reasons.text(stored)  # a sentence (or at least the code) — never an exception
 
 
 def test_plain_text_is_shown_as_it_is():

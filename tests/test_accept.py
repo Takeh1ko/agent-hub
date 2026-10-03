@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ahub import accept, tasks
+from ahub import accept, reasons, tasks, views
 from ahub.engine import Engine
 from ahub.model import Kind, State
 from ahub.store import Store
@@ -51,6 +51,10 @@ def test_merge_happy(store, project):
     assert msg.startswith(f"T{t.id} слита в main")
     t2 = store.get_task(t.id)
     assert t2.state is State.ACCEPTED and t2.accepted_sha
+    # the reason is a code + params; no push configured here, so the note is empty — and it still reads
+    assert t2.state_reason == '{"code":"merged","branch":"main","note":""}'
+    assert reasons.text(t2.state_reason) == "слита в main"
+    assert views.task_text(store, t2, now=0, w=100).count("слита в main") == 1
     assert (Path(project.root) / "core" / "b.py").read_text() == "Y = 2\n"
     assert f"merge T{t.id}" in root_log(project)
     assert not Path(t.worktree).exists()

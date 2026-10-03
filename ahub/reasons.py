@@ -9,23 +9,27 @@ an old row, or a human note from `ahub reject --reason` — is shown as it is.
 from __future__ import annotations
 
 import json
+import string
 from typing import Any
 
 from ahub.i18n import template
 
 
 def dump(code: str, **params: Any) -> str:
-    """The stored form of a reason: a code + params (JSON). Empty code — no reason."""
+    """The stored form of a reason: a code + params (JSON). Empty code — no reason.
+
+    An empty param is kept (only None is dropped): the template of the code always gets what it asks for.
+    """
     if not code:
         return ""
     body: dict[str, Any] = {"code": code}
-    body.update({k: v for k, v in params.items() if v is not None and v != ""})
+    body.update({k: v for k, v in params.items() if v is not None})
     return json.dumps(body, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def part(code: str, **params: Any) -> dict:
     """A sub-reason (one gate problem inside another reason) — rendered by text()."""
-    return {k: v for k, v in (("code", code), *params.items()) if v is not None and v != ""}
+    return {k: v for k, v in (("code", code), *params.items()) if v is not None}
 
 
 def load(stored: str) -> dict:
@@ -49,11 +53,17 @@ def text(stored: str) -> str:
 
 
 def _render(data: dict) -> str:
+    """The sentence for one stored reason. A param the row does not carry is empty, never an error:
+    reading a task must not depend on which params the writer happened to pass."""
     code = str(data.get("code") or "")
     tpl = template("reason." + code) if code else None
     if tpl is None:
         return code
-    return tpl.format(**{k: _value(k, v) for k, v in data.items() if k != "code"})
+    fields = {f.split(".")[0].split("[")[0] for _, f, _, _ in string.Formatter().parse(tpl) if f}
+    try:
+        return tpl.format(**{f: _value(f, data.get(f, "")) for f in fields})
+    except (IndexError, KeyError, ValueError):  # a broken template or an odd param type — show the code
+        return code
 
 
 def _words(key: str) -> Any:
