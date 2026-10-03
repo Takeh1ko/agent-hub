@@ -182,6 +182,12 @@ def preview(store: Store, draft_id: int, limit: int = 1500) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def hint(store: Store, draft_id: int) -> str:
+    """What to run with this draft: start it — only a ready one can be started."""
+    row = _row(store, draft_id)
+    return _t("draft.next_start", id=draft_id) if row is not None and row["status"] == "ready" else ""
+
+
 def start(store: Store, project: ProjectConfig, draft_id: int) -> int:
     """Explicit launch: draft → queued task. Repeat — same task."""
     row = _row(store, draft_id)

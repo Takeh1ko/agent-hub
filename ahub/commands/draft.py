@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ahub import drafts
+from ahub import drafts, ui
 from ahub.cliutil import CliError, add_project_arg, emit, resolve_project
 from ahub.store import Store
 
@@ -12,20 +12,26 @@ def cmd_new(args) -> int:
 
     project = resolve_project(args)
     store = Store()
-    did = drafts.create(store, project, args.text, source="cli")
-    emit(args, {"id": did}, drafts.preview(store, did) + "\n\n" + t("draft.start_hint", id=did))
+    # the model reads the project and fills the fields — a minute or three, one live line on a terminal
+    with ui.Live(t("draft.drafting")) as p:
+        did = drafts.create(store, project, args.text, source="cli")
+        p.step()
+    preview, nxt = drafts.preview(store, did), drafts.hint(store, did)
+    emit(args, {"id": did}, "\n\n".join([preview, ui.styled(nxt, "dim")]) if nxt else preview)
     return 0
 
 
 def cmd_start(args) -> int:
+    from ahub import views
     from ahub.i18n import t
 
     project = resolve_project(args)
     try:
         tid = drafts.start(Store(), project, args.id)
     except ValueError as e:
-        raise CliError(str(e)) from e
-    emit(args, {"task": tid}, t("draft.queued", tid=tid))
+        raise CliError(str(e), hint=t("draft.next_start", id=args.id)) from e
+    emit(args, {"task": tid}, t("draft.queued", tid=tid) + "\n"
+         + views.next_line("views.next_task", f"T{tid}"))
     return 0
 
 
@@ -41,8 +47,14 @@ def cmd_list(args) -> int:
     from ahub.i18n import t
 
     rows = drafts.list_drafts(Store())
-    lines = "\n".join(f"#{r['id']} {r['status']} {r['text'][:70]}" for r in rows)
-    emit(args, {"drafts": rows}, lines or t("draft.empty"))
+    if not rows:
+        emit(args, {"drafts": rows}, t("draft.empty"))
+        return 0
+    body = ui.table([t("draft.col_id"), t("draft.col_status"), t("draft.col_words"), t("draft.col_task")],
+                    [[f"#{r['id']}", r["status"], r["text"], f"T{r['task_id']}" if r["task_id"] else "—"]
+                     for r in rows],
+                    max_width=[4, 10, None, 6], indent=2)
+    emit(args, {"drafts": rows}, body)
     return 0
 
 

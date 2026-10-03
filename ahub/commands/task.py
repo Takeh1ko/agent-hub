@@ -20,15 +20,15 @@ def _csv(v: str | None) -> list[str]:
 
 
 def _task(store: Store, ref: str) -> Task:
+    from ahub.i18n import t as _t
+
     try:
         tid = parse_task_id(ref)
     except ValueError as e:
-        raise CliError(str(e)) from e
+        raise CliError(str(e), hint=_t("hint.status")) from e
     t = store.get_task(tid)
     if t is None:
-        from ahub.i18n import t as _t
-
-        raise CliError(_t("err.no_task", ref=ref))
+        raise CliError(_t("err.no_task", ref=ref), hint=_t("hint.status"))
     return t
 
 
@@ -41,7 +41,7 @@ def cmd_new(args) -> int:
         except OSError as e:
             from ahub.i18n import t as _t
 
-            raise CliError(_t("err.spec_file", err=e)) from e
+            raise CliError(_t("err.spec_file", err=e), hint=_t("hint.status")) from e
     review_models = None
     if args.no_review:
         review_models = []
@@ -60,7 +60,7 @@ def cmd_new(args) -> int:
     except tasks.TaskInvalid as e:
         from ahub.i18n import t as _t
 
-        raise CliError(_t("err.task_invalid", errors="; ".join(e.errors))) from e
+        raise CliError(_t("err.task_invalid", errors="; ".join(e.errors)), hint=_t("hint.doctor")) from e
     from ahub.i18n import t as _t
 
     word = _t("task.word_draft") if t.state is State.DRAFT else _t("task.word_queued")
@@ -68,8 +68,9 @@ def cmd_new(args) -> int:
         extra = _t("task.review_extra", models="+".join(t.review["models"]), rounds=t.review["rounds"])
     else:
         extra = ""
-    emit(args, {"id": t.id, "label": t.label, "state": t.state.value},
-         _t("task.created", label=t.label, word=word, kind=t.kind.value, executor=t.executor, extra=extra))
+    text = _t("task.created", label=t.label, word=word, kind=t.kind.value, executor=t.executor, extra=extra)
+    text += "\n" + views.next_line("views.next_new", t.label)
+    emit(args, {"id": t.id, "label": t.label, "state": t.state.value}, text)
     return 0
 
 
@@ -120,6 +121,91 @@ def cmd_log(args) -> int:
     return 0
 
 
+
+
+def _project_of(store: Store, t: Task):
+    from ahub.worker import find_project
+
+    p = find_project(t.project)
+    if p is None:
+        from ahub.i18n import t as _t
+
+        raise CliError(_t("err.project_missing", project=t.project), hint=_t("hint.setup_path", path=t.project))
+    return p
+
+
+def _decide(args, fn, next_key: str = "") -> int:
+    """One decision command: its result line, and the command that follows it (when there is one)."""
+    from ahub.accept import DecisionError
+
+    store = Store()
+    t = _task(store, args.task)
+    try:
+        msg = fn(store, t)
+    except DecisionError as e:
+        raise CliError(str(e), hint=getattr(e, "hint", "")) from e
+    text = msg + ("\n" + views.next_line(next_key, t.label) if next_key else "")
+    emit(args, {"id": t.id, "result": msg}, text)
+    return 0
+
+
+def cmd_continue(args) -> int:
+    from ahub import accept
+
+    return _decide(args, lambda s, t: accept.continue_task(s, t.id, by=args.by), "views.next_continue")
+
+
+def cmd_accept(args) -> int:
+    from ahub import accept
+
+    return _decide(args, lambda s, t: accept.accept(s, _project_of(s, t), t.id, by=args.by), "views.next_accept")
+
+
+def cmd_reject(args) -> int:
+    from ahub import accept
+
+    return _decide(args, lambda s, t: accept.reject(s, _project_of(s, t), t.id, reason=args.reason or "",
+                                                    by=args.by, keep=args.keep), "views.next_reject")
+
+
+def cmd_rework(args) -> int:
+    from ahub import accept
+
+    return _decide(args, lambda s, t: accept.rework(s, t.id, args.notes, by=args.by), "views.next_rework")
+
+
+def cmd_edit(args) -> int:
+    """A new brief (title/spec), and — before the review starts — a new panel and executor."""
+    from ahub import accept
+
+    spec = Path(args.spec_file).read_text(encoding="utf-8") if args.spec_file else args.spec
+    review = _csv(args.review) or None
+    return _decide(args, lambda s, t: accept.edit(s, _project_of(s, t), t.id, spec=spec, title=args.title,
+                                                  review=review, rounds=args.rounds, model=args.model,
+                                                  by=args.by))
+
+
+def cmd_extend(args) -> int:
+    from ahub import accept
+
+    return _decide(args, lambda s, t: accept.extend_paths(s, _project_of(s, t), t.id, _csv(args.paths), by=args.by),
+                   "views.next_task")
+
+
+def cmd_budget(args) -> int:
+    from ahub import accept
+
+    return _decide(args, lambda s, t: accept.extend_budget(s, t.id, add=args.add, set_to=args.set,
+                                                           add_usd=args.add_usd, by=args.by), "views.next_task")
+
+
+def cmd_model(args) -> int:
+    from ahub import accept
+
+    return _decide(args, lambda s, t: accept.change_model(s, _project_of(s, t), t.id, args.alias, by=args.by),
+                   "views.next_task")
+
+
 def cmd_stop(args) -> int:
     store = Store()
     t = _task(store, args.task)
@@ -130,12 +216,9 @@ def cmd_stop(args) -> int:
         how = transitions.request_stop(store, t.id, reason=args.reason or reasons.dump("stop_command"),
                                        by=args.by)
     except transitions.TransitionError as e:
-        raise CliError(str(e)) from e
-    if how == "stopped":
-        text = _t("task.stopped", label=t.label)
-    else:
-        text = _t("task.stop_requested", label=t.label)
-    emit(args, {"id": t.id, "result": how}, text)
+        raise CliError(str(e), hint=_t("hint.status_task", label=t.label)) from e
+    text = _t("task.stopped", label=t.label) if how == "stopped" else _t("task.stop_requested", label=t.label)
+    emit(args, {"id": t.id, "result": how}, text + "\n" + views.next_line("views.next_task", t.label))
     return 0
 
 
@@ -148,78 +231,10 @@ def cmd_nudge(args) -> int:
     try:
         transitions.request_nudge(store, t.id, text=args.text, by=args.by)
     except transitions.TransitionError as e:
-        raise CliError(str(e)) from e
+        raise CliError(str(e), hint=_t("hint.status_task", label=t.label)) from e
     emit(args, {"id": t.id, "result": "requested", "text": args.text},
          _t("task.nudge_requested", label=t.label))
     return 0
-
-
-def _project_of(store: Store, t: Task):
-    from ahub.worker import find_project
-
-    p = find_project(t.project)
-    if p is None:
-        from ahub.i18n import t as _t
-
-        raise CliError(_t("err.project_missing", project=t.project))
-    return p
-
-
-def _decide(args, fn) -> int:
-    from ahub.accept import DecisionError
-
-    store = Store()
-    t = _task(store, args.task)
-    try:
-        msg = fn(store, t)
-    except DecisionError as e:
-        raise CliError(str(e)) from e
-    emit(args, {"id": t.id, "result": msg}, msg)
-    return 0
-
-
-def cmd_continue(args) -> int:
-    from ahub import accept
-    return _decide(args, lambda s, t: accept.continue_task(s, t.id, by=args.by))
-
-
-def cmd_accept(args) -> int:
-    from ahub import accept
-    return _decide(args, lambda s, t: accept.accept(s, _project_of(s, t), t.id, by=args.by))
-
-
-def cmd_reject(args) -> int:
-    from ahub import accept
-    return _decide(args, lambda s, t: accept.reject(s, _project_of(s, t), t.id, reason=args.reason or "",
-                                                    by=args.by, keep=args.keep))
-
-
-def cmd_rework(args) -> int:
-    from ahub import accept
-    return _decide(args, lambda s, t: accept.rework(s, t.id, args.notes, by=args.by))
-
-
-def cmd_edit(args) -> int:
-    from ahub import accept
-    spec = Path(args.spec_file).read_text(encoding="utf-8") if args.spec_file else args.spec
-    return _decide(args, lambda s, t: accept.edit(s, _project_of(s, t), t.id, spec=spec, title=args.title,
-                                                  by=args.by))
-
-
-def cmd_extend(args) -> int:
-    from ahub import accept
-    return _decide(args, lambda s, t: accept.extend_paths(s, _project_of(s, t), t.id, _csv(args.paths), by=args.by))
-
-
-def cmd_budget(args) -> int:
-    from ahub import accept
-    return _decide(args, lambda s, t: accept.extend_budget(s, t.id, add=args.add, set_to=args.set,
-                                                           add_usd=args.add_usd, by=args.by))
-
-
-def cmd_model(args) -> int:
-    from ahub import accept
-    return _decide(args, lambda s, t: accept.change_model(s, _project_of(s, t), t.id, args.alias, by=args.by))
 
 
 def cmd_diff(args) -> int:
@@ -316,6 +331,9 @@ def register(subparsers) -> None:
     g2 = ed.add_mutually_exclusive_group()
     g2.add_argument("--spec")
     g2.add_argument("--spec-file")
+    ed.add_argument("--review", help=t("help.task_edit_review"))
+    ed.add_argument("--rounds", type=int, help=t("help.task_edit_rounds"))
+    ed.add_argument("--model", help=t("help.task_edit_model"))
     ed.add_argument("--by", default="orchestrator")
     ed.set_defaults(func=cmd_edit)
     ex = subparsers.add_parser("extend", help=t("help.extend"))

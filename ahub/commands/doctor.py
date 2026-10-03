@@ -1,29 +1,68 @@
-"""ahub doctor — installation check: what is wrong and what to do."""
+"""ahub doctor — installation check: what is wrong and what to do.
+
+The checks live in ahub/doctor.py; this module draws them: one section per area, the ✓/✗/– marks
+in a column of their own, and the fix of a failed check indented right under it. `ahub setup`
+renders the same list (setup.wizard_doctor_head + _text).
+"""
 
 from __future__ import annotations
 
 from dataclasses import asdict
 
-from ahub import doctor
+from ahub import doctor, ui
 from ahub.cliutil import emit
 
-_MARKS = {True: "\u2713", False: "\u2717", None: "\u2013"}
+_MARKS = {True: "✓", False: "✗", None: "–"}
+_STYLES = {True: "green", False: "red", None: "dim"}
+
+# area title key → the checks of it, in display order (doctor.run_all returns all of them)
+_AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("doctor.area_system", ("python", "git")),
+    ("doctor.area_hub", ("config", "service", "models", "network")),
+    ("doctor.area_providers", ("opencode", "opencode_health", "opencode_auth", "agy", "codex")),
+    ("doctor.area_claude", ("claude", "claude_skill")),
+    ("doctor.area_optional", ("telegram",)),
+)
 
 
-def _text(checks: list[doctor.Check]) -> str:
+def _lines(checks: list[doctor.Check], w: int | None) -> list[str]:
+    """The screen: a heading per area, then `mark name  detail` and the fix under it."""
     from ahub.i18n import t
 
-    lines = []
-    for c in checks:
-        name = t(f"doctor.name_{c.name}")
-        lines.append(t("doctor.line", mark=_MARKS[c.ok], name=name, detail=c.detail))
-        if c.ok is False and c.fix:
-            lines.append(t("doctor.fix_line", fix=c.fix))
-    return "\n".join(lines)
+    by_name = {c.name: c for c in checks}
+    nw = max((len(t(f"doctor.name_{c.name}")) for c in checks), default=0)
+    out: list[str] = []
+    shown = {name for _title, names in _AREAS for name in names}
+    for title, names in _AREAS:  # the areas in order
+        block = [by_name[n] for n in names if n in by_name]
+        if not block:
+            continue
+        out.append(ui.section(t(title)))
+        for c in block:
+            head = f"  {ui.styled(_MARKS[c.ok], _STYLES[c.ok])} {t(f'doctor.name_{c.name}').ljust(nw)}  "
+            out.append((head + ui.para(c.detail, indent=len(head), w=w)).rstrip())
+            if c.ok is False and c.fix:
+                out.append(ui.para(t("doctor.fix_line", fix=c.fix), indent=4, w=w))
+    rest = [c for c in checks if c.name not in shown]  # a check the areas do not know about
+    if rest:
+        out.append(ui.section(t("doctor.area_other")))
+        for c in rest:
+            out.append(f"  {_MARKS[c.ok]} {t(f'doctor.name_{c.name}')}: {c.detail}")
+    bad = sum(1 for c in checks if c.ok is False)
+    out.append(ui.styled(t("doctor.problems", n=bad) if bad else t("doctor.ok_all"), "dim"))
+    return out
+
+
+def _text(checks: list[doctor.Check], w: int | None = None) -> str:
+    return "\n".join(_lines(checks, w))
 
 
 def cmd_doctor(args) -> int:
-    checks = doctor.run_all()
+    from ahub.i18n import t
+
+    # the provider checks call the binaries — one live line while they run, only on a terminal
+    with ui.Live(t("doctor.checking")) as p:
+        checks = doctor.run_all(step=p.step)
     data = [asdict(c) for c in checks]
     emit(args, {"checks": data}, _text(checks))
     return 1 if any(c.ok is False for c in checks) else 0

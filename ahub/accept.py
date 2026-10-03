@@ -22,6 +22,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from ahub import archive, events, gates, prepare, reasons, registry, tasks, transitions, workspace
 from ahub import log as hublog
@@ -30,6 +31,7 @@ from ahub.engine import owner_token
 from ahub.i18n import t as _t
 from ahub.model import CHANGES_FILES, Ev, Kind, State
 from ahub.store import Store, Task
+from ahub.time import now_ms
 
 _log = hublog.get("accept")
 
@@ -41,11 +43,13 @@ class DecisionError(RuntimeError):
     """Action impossible (one line for the orchestrator).
 
     `reason` — the stored form (a reason code blob); empty — the message itself goes on the task.
+    `hint` — the command that gets out of it (the CLI prints it under the error).
     """
 
-    def __init__(self, message: str, reason: str = "") -> None:
+    def __init__(self, message: str, reason: str = "", hint: str = "") -> None:
         super().__init__(message)
         self.reason = reason
+        self.hint = hint
 
 
 def _get(store: Store, task_id: int) -> Task:
@@ -251,24 +255,76 @@ def continue_task(store: Store, task_id: int, *, by: str = "orchestrator") -> st
     return _t("accept.continued_msg", label=t.label)
 
 
+REVIEW_PHASES = frozenset({State.CHECKING, State.REVIEWING, State.FIXING})  # the review is past
+
+
+def review_started(store: Store, task_id: int) -> bool:
+    """Has the review begun? Every move into a review phase leaves a state event, so the history knows."""
+    return any(str((e.payload or {}).get("to") or "") in {s.value for s in REVIEW_PHASES}
+               for e in store.events(task_id=task_id))
+
+
 def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None = None,
-         title: str | None = None, by: str = "orchestrator") -> str:
-    """New brief: on resume — a fresh executor session (different fingerprint)."""
+         title: str | None = None, review: list[str] | None = None, rounds: int | None = None,
+         model: str | None = None, by: str = "orchestrator") -> str:
+    """New brief: on resume — a fresh executor session (different fingerprint).
+
+    review/rounds/model — the review panel and the executor of a task that has not started its review yet
+    (the panel decides what the task is checked against, so it cannot change once a reviewer has run).
+    """
     t = _get(store, task_id)
     if t.state in (State.ACCEPTED, State.REJECTED) or t.state in transitions.ACTIVE:
-        raise DecisionError(_t("accept.edit_state", label=t.label))
+        raise DecisionError(_t("accept.edit_state", label=t.label), hint=_t("hint.status_task", label=t.label))
+    changes: list[str] = []
+    fields: dict[str, Any] = {}
+    limits = dict(t.limits)
+    if review is not None or rounds is not None:
+        if review_started(store, t.id):
+            raise DecisionError(_t("accept.edit_review_state", label=t.label),
+                                hint=_t("hint.status_task", label=t.label))
+        models = list(review if review is not None else (t.review.get("models") or []))
+        count = int(rounds if rounds is not None else (t.review.get("rounds") or 0))
+        if not models:
+            raise DecisionError(_t("accept.need_review"), hint=_t("hint.models"))
+        count = count or 1
+        if not 1 <= count <= tasks.MAX_ROUNDS:
+            raise DecisionError(_t("accept.edit_rounds_bad", rounds=count, max=tasks.MAX_ROUNDS),
+                                hint=_t("hint.models"))
+        for alias in models:
+            try:
+                registry.check(store, alias, project)
+            except registry.RegistryError as e:
+                raise DecisionError(str(e)) from e
+        if t.kind is Kind.REVIEW:
+            raise DecisionError(_t("tasks.review_self"), hint=_t("help.task_new_review"))
+        fields["review"] = {"models": models, "rounds": count}
+        changes.append(_t("accept.review_msg", label=t.label, models="+".join(models), rounds=count)
+                       .removeprefix(t.label + ": "))
+    if model:
+        try:
+            registry.check(store, model, project)
+        except registry.RegistryError as e:
+            raise DecisionError(str(e)) from e
+        if model != t.executor:
+            changes.append(_t("accept.model_edit", old=t.executor or "—", new=model))
+            fields["executor"] = model
+            limits["fresh_session"] = True  # never resume another model's session
     new = tasks.TaskSpec(project=t.project, kind=t.kind, title=title if title is not None else t.title,
-                         spec=spec if spec is not None else t.spec, result_format=t.result_format,
-                         paths=list(t.limits.get("paths") or []), accept=list(t.limits.get("accept") or []),
-                         review_input=str(t.limits.get("input") or ""))
+                             spec=spec if spec is not None else t.spec, result_format=t.result_format,
+                             paths=list(t.limits.get("paths") or []), accept=list(t.limits.get("accept") or []),
+                             review_input=str(t.limits.get("input") or ""))
     h = tasks.spec_hash(new)
-    if h == t.spec_hash:
-        return _t("accept.edit_same", label=t.label)
-    lim = dict(t.limits)
-    lim["fresh_session"] = True
-    store.update_task(t.id, title=new.title, spec=new.spec, spec_hash=h, limits=lim)
-    store.add_event(Ev.STATE, task_id=t.id, project=t.project, payload={"edit": _t("accept.edit_text"), "by": by})
-    return _t("accept.edit_msg", label=t.label)
+    if h != t.spec_hash:
+        limits["fresh_session"] = True
+        fields |= {"title": new.title, "spec": new.spec, "spec_hash": h}
+        changes.append(_t("accept.edit_msg", label=t.label).removeprefix(t.label + ": "))
+    if not changes:
+        return _t("accept.edit_nothing", label=t.label)
+    fields["limits"] = limits
+    store.update_task(t.id, now=now_ms(), **fields)
+    store.add_event(Ev.STATE, task_id=t.id, project=t.project,
+                    payload={"edit": ", ".join(changes), "by": by})
+    return f"{t.label}: {', '.join(changes)}"
 
 
 def extend_paths(store: Store, project: ProjectConfig, task_id: int, paths: list[str], *,

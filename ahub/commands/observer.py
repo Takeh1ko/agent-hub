@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ahub import observer
+from ahub import observer, ui, views
 from ahub.cliutil import emit
 from ahub.store import Store
 from ahub.time import fmt_local
@@ -14,11 +14,17 @@ def cmd_run(args) -> int:
     store = Store()
     if args.check_only:
         sus = observer.quick_check(store)
-        emit(args, {"suspicions": [s.text for s in sus]}, "\n".join(s.text for s in sus) or t("observer.clean"))
+        emit(args, {"suspicions": [s.text for s in sus]},
+             ui.bullets([s.text for s in sus], indent=2) if sus else t("observer.clean"))
         return 0
-    v = observer.cycle(store, deep_due=args.deep or None, use_model=not args.no_model)
+    with ui.Live(t("observer.checking")) as p:
+        v = observer.cycle(store, deep_due=args.deep or None, use_model=not args.no_model)
+        p.step()
     r = observer.reports(store, 1)[0]
-    emit(args, {"verdict": v, "report": r}, f"{v}: {r['summary']}")
+    out = [ui.styled(f"{v}: {r['summary']}", "bold" if v in ("alarm", "critical") else ""),
+           ui.para(ui.fit(str(r["summary"]), views.REPORT_BYTES), indent=2),
+           ui.styled(ui.kv([(t("views.lbl_next"), t("observer.next"))], indent=2), "dim")]
+    emit(args, {"verdict": v, "report": r}, "\n".join(out))
     return 0
 
 
@@ -26,9 +32,15 @@ def cmd_reports(args) -> int:
     from ahub.i18n import t
 
     rows = observer.reports(Store(), args.n)
-    text = "\n".join(f"{fmt_local(r['ts'])} {r['kind']} {r['verdict']}: {r['summary'][:120]}"
-                     + (f" (${r['cost_go']:.3f})" if r['cost_go'] else "") for r in rows) or t("observer.no_reports")
-    emit(args, {"reports": rows}, text)
+    if not rows:
+        emit(args, {"reports": rows}, t("observer.no_reports"))
+        return 0
+    head = [t("observer.col_when"), t("observer.col_check"), t("observer.col_verdict"),
+            t("observer.col_summary")]
+    body = [[fmt_local(r["ts"]), r["kind"], r["verdict"],
+             ui.clip(r["summary"], 120) + (f" (${r['cost_go']:.3f})" if r["cost_go"] else "")]
+            for r in rows]
+    emit(args, {"reports": rows}, ui.table(head, body, max_width=[16, 8, 12, None], indent=2))
     return 0
 
 

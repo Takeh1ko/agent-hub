@@ -1,13 +1,23 @@
-"""ahub version."""
+"""ahub version — the version, and what it runs on."""
 
 from __future__ import annotations
 
+import platform
+import sys
+
 import ahub
+from ahub import paths, ui
 from ahub.cliutil import emit
 
 
 def cmd_version(args) -> int:
-    emit(args, {"version": ahub.__version__}, f"ahub {ahub.__version__}")
+    from ahub.i18n import t
+
+    out = [ui.styled(f"ahub {ahub.__version__}", "bold"),
+           ui.styled(t("version.where", python=f"{sys.version_info.major}.{sys.version_info.minor}."
+                     f"{sys.version_info.micro}",
+                     os=f"{platform.system().lower()} {platform.release()}", data=str(paths.data_dir())), "dim")]
+    emit(args, {"version": ahub.__version__}, "\n".join(out))
     return 0
 
 

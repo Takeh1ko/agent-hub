@@ -1,16 +1,19 @@
 """ahub models — model registry and role menus (view / edit), plus `check`: a live probe of the aliases.
-Never lifts project denies."""
+
+The menus are a table (role, default, other models); `check` probes the aliases one by one with a live
+line on a terminal. Never lifts project denies.
+"""
 
 from __future__ import annotations
 
 from dataclasses import asdict
 
-from ahub import registry
+from ahub import registry, ui
 from ahub.cliutil import CliError, add_project_arg, emit
 from ahub.model import Role
 from ahub.store import Store
 
-_MARKS = {True: "\u2713", False: "\u2717"}
+_MARKS = {True: "✓", False: "✗"}
 
 
 def _project_or_none(args):
@@ -23,6 +26,18 @@ def _project_or_none(args):
         return None
 
 
+def _tags(entry, project) -> str:
+    """The (off) / (project-denied) marks after an alias."""
+    from ahub.i18n import t
+
+    out = ""
+    if not entry.enabled:
+        out += t("models.tag_off")
+    if registry.denied_by(entry, project):
+        out += t("models.tag_denied")
+    return out
+
+
 def cmd_list(args) -> int:
     from ahub.i18n import t
 
@@ -30,26 +45,25 @@ def cmd_list(args) -> int:
     project = _project_or_none(args)
     roles = [Role(args.role)] if args.role else list(Role)
     data = {"roles": {}, "models": [asdict(m) for m in registry.models(store)]}
-    lines = []
+    head = [t("models.col_role"), t("models.col_default"), t("models.col_other")]
+    rows = []
     for role in roles:
         items = registry.menu(store, role)
         data["roles"][role.value] = [{"alias": e.alias, "default": d} for e, d in items]
-        cells = []
-        for e, d in items:
-            mark = "★" if d else ""
-            if not e.enabled:
-                mark += t("models.tag_off")
-            if registry.denied_by(e, project):
-                mark += t("models.tag_denied")
-            cells.append(f"{e.alias}{mark}")
-        lines.append(f"{role.value:<9} {', '.join(cells)}")
+        default = next((e for e, d in items if d), None)
+        others = [e.alias + _tags(e, project) for e, d in items if not d]
+        rows.append([role.value,
+                     (default.alias + _tags(default, project)) if default is not None else t("models.no_default"),
+                     ", ".join(others) or t("models.no_other")])
+    lines = [ui.table(head, rows, max_width=[10, 18, None], indent=2)]
     if args.all:
         lines.append("")
-        for m in registry.models(store):
-            flag = "" if m.enabled else t("models.flag_off")
-            deny = t("models.flag_denied") if registry.denied_by(m, project) else ""
-            var = f" [{m.variant}]" if m.variant else ""
-            lines.append(f"{m.alias:<15} {m.provider}: {m.model_id}{var}{flag}{deny}")
+        lines.append(ui.table([t("models.col_model"), "provider", "model id"],
+                              [[m.alias + ("" if m.enabled else t("models.flag_off")), m.provider,
+                                m.model_id + (f" [{m.variant}]" if m.variant else "")
+                                + (t("models.flag_denied") if registry.denied_by(m, project) else "")]
+                               for m in registry.models(store)],
+                              max_width=[20, 10, None], indent=2))
     emit(args, data, "\n".join(lines))
     return 0
 
@@ -60,12 +74,16 @@ def cmd_add(args) -> int:
     try:
         registry.add_model(Store(), args.alias, args.provider, args.model_id, args.variant or "", args.note or "")
     except registry.RegistryError as e:
-        raise CliError(str(e)) from e
-    emit(args, {"ok": True}, t("models.added", alias=args.alias))
+        raise CliError(str(e), hint=t("hint.models_all")) from e
+    nxt = t("hint.models_role", role=Role.EXECUTOR.value, alias=args.alias)
+    emit(args, {"ok": True}, t("models.added", alias=args.alias) + "\n"
+         + ui.styled(ui.kv([(t("views.lbl_next"), nxt)]), "dim"))
     return 0
 
 
 def cmd_role(args) -> int:
+    from ahub.i18n import t
+
     store = Store()
     try:
         if args.add:
@@ -75,14 +93,15 @@ def cmd_role(args) -> int:
         elif args.default_to:
             registry.set_default(store, args.role, args.default_to)
         else:
-            from ahub.i18n import t
-
             raise CliError(t("err.models_need_opt"))
     except registry.RegistryError as e:
-        raise CliError(str(e)) from e
+        raise CliError(str(e), hint=t("hint.models_role", role=args.role, alias=args.add or args.default_to
+                                                    or args.remove or "")) from e
     items = registry.menu(store, args.role)
+    default = next((e.alias for e, d in items if d), "")
     emit(args, {"role": args.role, "menu": [{"alias": e.alias, "default": d} for e, d in items]},
-         f"{args.role}: " + ", ".join(e.alias + ("★" if d else "") for e, d in items))
+         ui.kv([(args.role, [default or t("models.no_default"), ", ".join(e.alias for e, d in items if not d)])],
+               indent=2))
     return 0
 
 
@@ -106,18 +125,32 @@ def cmd_check(args) -> int:
     store = Store()
     aliases = list(args.aliases or []) or _role_defaults(store)
     if not aliases:
-        raise CliError(t("err.models_no_defaults"))
-    results, lines = [], []
-    for alias in aliases:
-        try:
-            entry = registry.get(store, alias)
-        except registry.RegistryError as e:
-            raise CliError(str(e)) from e
-        ok, detail = doctor.probe_model(entry)
-        results.append({"alias": alias, "ok": ok, "detail": detail})
-        lines.append(f"{_MARKS[ok]} {detail}")
-    emit(args, {"checked": results}, "\n".join(lines))
+        raise CliError(t("err.models_no_defaults"), hint=t("hint.models"))
+    results = []
+    head = ["", t("models.col_model"), t("models.col_probe")]
+    rows = []
+    with ui.Live(t("models.checking", n=len(aliases)), total=len(aliases)) as p:
+        for alias in aliases:
+            try:
+                entry = registry.get(store, alias)
+            except registry.RegistryError as e:
+                raise CliError(str(e), hint=t("hint.models_all")) from e
+            ok, detail = doctor.probe_model(entry)
+            results.append({"alias": alias, "ok": ok, "detail": detail})
+            rows.append([_MARKS[ok], alias, _body(detail, alias)])
+            p.step()
+    ok_n = sum(1 for r in results if r["ok"])
+    last = t("models.check_ok", ok=ok_n, total=len(results)) if ok_n == len(results) \
+        else t("models.check_bad", ok=ok_n, total=len(results))
+    emit(args, {"checked": results},
+         "\n".join([ui.table(head, rows, max_width=[1, 16, None], indent=2), ui.styled(last, "dim")]))
     return 1 if any(not r["ok"] for r in results) else 0
+
+
+def _body(detail: str, alias: str) -> str:
+    """The probe detail without the alias it repeats in its own cell."""
+    text = str(detail or "")
+    return text[len(alias) + 2:] if text.startswith(f"{alias}: ") else text
 
 
 def cmd_enable(args, on: bool) -> int:
@@ -126,9 +159,11 @@ def cmd_enable(args, on: bool) -> int:
     try:
         registry.set_enabled(Store(), args.alias, on)
     except registry.RegistryError as e:
-        raise CliError(str(e)) from e
+        raise CliError(str(e), hint=t("hint.models_enable", alias=args.alias)) from e
     state = t("models.enabled_on") if on else t("models.enabled_off")
-    emit(args, {"ok": True}, t("models.enabled_line", alias=args.alias, state=state))
+    emit(args, {"ok": True}, t("models.enabled_line", alias=args.alias, state=state) + "\n"
+         + ui.styled(ui.kv([(t("views.lbl_next"), t("hint.status") if on
+                             else t("hint.models_enable", alias=args.alias))]), "dim"))
     return 0
 
 

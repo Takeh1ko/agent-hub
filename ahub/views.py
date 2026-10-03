@@ -41,7 +41,11 @@ def clip_bytes(text: str, limit: int) -> str:
     return cut.rsplit("\n", 1)[0] + "\n…" if "\n" in cut else cut + "…"
 
 
-def _age(ms: int, now: int) -> str:
+def age(ms: int, now: int | None = None) -> str:
+    """How long ago (in minutes) — "4 h 0 min"; under a minute, seconds."""
+    now = now if now is not None else now_ms()
+    if now - ms < 60_000:
+        return _t("views.age_sec", s=max(0, (now - ms) // 1000))
     m = max(0, (now - ms) // 60000)
     if m < 60:
         return _t("views.age_min", m=m)
@@ -109,7 +113,7 @@ def _active_table(store: Store, active: list[Task], live: dict[int, int], pulses
         pl = pulses.get(t.id)
         mark = ui.badge(pl.mark, "", pl.state) if pl else ("⚫" if t.id not in live else "")
         rows.append([mark, t.label, t.kind.value, t.title, _state_cell(t), t.executor or "—",
-                     str(t.round), _age(t.updated_at, ts), f"${go + usd:.3f}"])
+                     str(t.round), age(t.updated_at, ts), f"${go + usd:.3f}"])
     lines = ui.table(head, rows, max_width=[1, 6, 7, None, 13, 10, 5, 8, 10], indent=2, w=w).split("\n")
     return lines[0], lines[1:]
 
@@ -188,6 +192,47 @@ def _review_cell(t: Task) -> str:
     return models + (_t("views.review_rounds", rounds=rounds) if rounds > 1 else "")
 
 
+def open_findings(t: Task, limit: int = 5) -> tuple[list, int]:
+    """(blocking findings of the last review round, how many more there are).
+
+    The verdict files live in the task copy (`.ahub/review_r<N>_<model>.json`) — the same files the
+    engine reads; an accepted task has no copy left, so nothing is shown for it.
+    """
+    from ahub import review
+
+    if not t.worktree or t.state not in (State.DONE, State.NEEDS_DECISION, State.REVIEWING, State.FIXING):
+        return [], 0
+    try:
+        rounds = sorted((int(m.group(1)) for p in Path(t.worktree, workspace.AHUB_DIR).glob("review_r*_*.json")
+                         if (m := re.match(r"review_r(\d+)_", p.name))), reverse=True)
+    except OSError:
+        return [], 0
+    if not rounds:
+        return [], 0
+    round_no = rounds[0]
+    found = []
+    for path in sorted(Path(t.worktree, workspace.AHUB_DIR).glob(f"review_r{round_no}_*.json")):
+        model = path.stem.split("_", 2)[-1]
+        rv = review.parse(path, model)
+        if rv is not None:
+            found += [f for f in rv.findings if f.severity != "low"]
+    blocking = review.dedup(found)
+    return blocking[:limit], max(0, len(blocking) - limit)
+
+
+def _findings_lines(t: Task, w: int | None) -> list[str]:
+    """The 'Review findings' block: severity, file:line, one wrapped line each."""
+    findings, more = open_findings(t)
+    if not findings:
+        return []
+    out = [ui.section(_t("views.sec_findings"))]
+    rows = [[f.severity, f"{f.file}:{f.line}" if f.line else f.file, f.issue] for f in findings]
+    out.append(ui.table(None, rows, max_width=[7, 28, None], indent=2, w=w))
+    if more:
+        out.append(ui.para(_t("views.findings_more", n=more, label=t.label), indent=2, w=w))
+    return out
+
+
 def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now: int | None = None,
               w: int | None = None) -> str:
     """L2: the whole task, but brief — a header, the facts, the worker result. ≤ 4000 bytes."""
@@ -213,10 +258,10 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
     groups.append([(_t("views.lbl_model"), model)])
     if go or usd or t.budget_go:
         groups.append([(_t("views.lbl_cost"), _cost_cell(go, usd, t.budget_go))])
-    age: list[Any] = [_age(t.created_at, ts)]
+    since: list[Any] = [age(t.created_at, ts)]
     if t.after:
-        age.append((_t("views.lbl_after"), ", ".join(f"T{a}" for a in t.after)))
-    groups.append([(_t("views.lbl_age"), age)])
+        since.append((_t("views.lbl_after"), ", ".join(f"T{a}" for a in t.after)))
+    groups.append([(_t("views.lbl_age"), since)])
     out.extend(_facts(groups, w))
 
     rj, rp = _result_paths(t)
@@ -238,6 +283,7 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
         rep = rp.read_text(encoding="utf-8", errors="replace")
         out.append(ui.section(_t("views.sec_report", kb=f"{len(rep.encode()) / 1024:.1f}")))
         out.append(ui.para(ui.fit(report_essence(rep), REPORT_BYTES), indent=2, w=w))
+    out.extend(_findings_lines(t, w))
     if t.state in DECISION_STATES:
         out.append(_next_line(t, "views.next_decide", w))
     elif t.state in RESUME_STATES:
@@ -264,6 +310,11 @@ def _facts(groups: list[list[tuple[str, Value]]], w: int | None) -> list[str]:
 def _next_line(t: Task, key: str, w: int | None) -> str:
     """The 'Next' line — the decision commands, for a task whose decision is pending."""
     return ui.styled(ui.kv([(_t("views.lbl_next"), _t(key, label=t.label))], w=w), "dim")
+
+
+def next_line(key: str, label: str = "", w: int | None = None) -> str:
+    """The 'Next' line after a command did something — the commands that follow it."""
+    return ui.styled(ui.kv([(_t("views.lbl_next"), _t(key, label=label))], w=w), "dim")
 
 
 def result_text(store: Store, t: Task, *, full: bool = False, max_bytes: int = L3_DEFAULT,
@@ -303,7 +354,7 @@ def history_text(store: Store, *, project: str | None = None, limit: int = 20, w
     rows = []
     for t in done:
         go, usd = archive.task_cost(store, t.id)
-        dur = _age(t.created_at, t.finished_at) if t.finished_at else "—"
+        dur = age(t.created_at, t.finished_at) if t.finished_at else "—"
         rows.append([t.label, t.kind.value, t.title, state_word(t.state), str(t.round),
                      f"${go + usd:.3f}", dur])
     return ui.table(head, rows, max_width=[6, 7, None, 16, 5, 9, 13], indent=2, w=w)

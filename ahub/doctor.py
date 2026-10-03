@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -269,7 +270,7 @@ def codex_sandbox_fix() -> str:
     """Fix for a codex sandbox that does not start: allow user namespaces (the admin's decision) or
     drop the OS sandbox in the hub config. The hub never changes system settings itself."""
     if apparmor_blocks_userns():
-        return f"{_t('doctor.codex_fix_userns')} {_t('doctor.codex_fix_no_sandbox')}"
+        return f"{_t('doctor.codex_fix_userns')}; {_t('doctor.codex_fix_no_sandbox')}"
     return _t("doctor.codex_fix_no_sandbox")
 
 
@@ -292,9 +293,10 @@ def check_codex() -> Check:
         logged_in = providers.get("codex").login()[0]
     except Exception:
         logged_in = False
-    fix = "" if logged_in else _t("doctor.codex_fix_login")
+    parts = [] if logged_in else [_t("doctor.codex_fix_login")]
     if h.details.get("sandbox_ok") is False:  # every command would fail silently — both fixes in one hint
-        fix = f"{fix} {codex_sandbox_fix()}".strip()
+        parts.append(codex_sandbox_fix())
+    fix = "; ".join(parts)
     return Check("codex", False, _t("doctor.health_bad", problems=problems), fix)
 
 
@@ -480,11 +482,13 @@ def _free_alias(store) -> str:
     return cands[0].alias if cands else FALLBACK_FREE
 
 
-def pick_free(store, *, timeout_s: int = PROBE_TIMEOUT_S) -> tuple[str, str]:
+def pick_free(store, *, timeout_s: int = PROBE_TIMEOUT_S,
+              step: Callable[[], None] | None = None) -> tuple[str, str]:
     """(free alias, warning): the first candidate that answers the live probe.
 
     The probe is one tiny free request per candidate. With none answering — the first candidate
     (as before) and a warning for the caller to print; AHUB_PROBE=0 — no probe at all.
+    step() — after every candidate (the caller's live line).
     """
     cands = free_candidates(store)
     if not cands:
@@ -496,6 +500,8 @@ def pick_free(store, *, timeout_s: int = PROBE_TIMEOUT_S) -> tuple[str, str]:
             ok, _detail = probe_model(entry, timeout_s)
         except Exception:
             ok = False
+        if step is not None:
+            step()
         if ok:
             return entry.alias, ""
     return cands[0].alias, probe_none_warning([e.alias for e in cands])
@@ -655,30 +661,40 @@ def _safe(name: str, fn) -> Check:
         return _fail(name, e)
 
 
-def run_all(root: Path | None = None) -> list[Check]:
-    """All checks in display order; never raises. root — the project of the claude_skill check, cwd by default."""
+# the checks that call a binary (the slow ones): `ahub doctor` shows one live line while they run
+_SLOW = frozenset({"opencode_health", "agy", "codex", "network"})
+
+
+def run_all(root: Path | None = None, step: Callable[[], None] | None = None) -> list[Check]:
+    """All checks in display order; never raises. root — the project of the claude_skill check, cwd by
+    default. step() — called after every check (the caller's live line: one spin per check)."""
     providers: list[str] = []
     try:
         providers = auth_providers()
     except Exception:
         providers = []
-    checks = [
-        _safe("python", check_python),
-        _safe("git", check_git),
-        _safe("config", check_config),
-        _safe("service", check_service),
-        _safe("opencode", check_opencode),
-        _safe("opencode_health", check_opencode_health),
-        _safe("opencode_auth", lambda: _auth_check(providers)),
-        _safe("agy", check_agy),
-        _safe("codex", check_codex),
-        _safe("models", lambda: check_models(providers)),
-        _safe("network", check_network),
-        _safe("claude", check_claude),
-        _safe("claude_skill", lambda: check_claude_skill(root)),
-        _safe("telegram", check_telegram),
+    todo = [
+        ("python", check_python),
+        ("git", check_git),
+        ("config", check_config),
+        ("service", check_service),
+        ("opencode", check_opencode),
+        ("opencode_health", check_opencode_health),
+        ("opencode_auth", lambda: _auth_check(providers)),
+        ("agy", check_agy),
+        ("codex", check_codex),
+        ("models", lambda: check_models(providers)),
+        ("network", check_network),
+        ("claude", check_claude),
+        ("claude_skill", lambda: check_claude_skill(root)),
+        ("telegram", check_telegram),
     ]
-    return checks
+    out: list[Check] = []
+    for name, fn in todo:
+        out.append(_safe(name, fn))
+        if step is not None and name in _SLOW:
+            step()  # only the slow ones move the line — a fast check would only flicker
+    return out
 
 
 __all__ = ["Check", "ProviderState", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_WIZARD_S", "PROBE_PROMPT",

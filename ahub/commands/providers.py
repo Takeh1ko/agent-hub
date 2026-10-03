@@ -6,11 +6,11 @@ command change the same thing, and a provider that is off offers no models (a ta
 
 from __future__ import annotations
 
-from ahub import doctor, registry
+from ahub import doctor, registry, ui
 from ahub.cliutil import CliError, emit
 from ahub.store import Store
 
-_MARKS = {True: "\u2713", False: "\u2717", None: "\u2013"}
+_MARKS = {True: "✓", False: "✗", None: "–"}
 
 
 def _cells(state, aliases: list[str], enabled: bool) -> list[str]:
@@ -20,11 +20,6 @@ def _cells(state, aliases: list[str], enabled: bool) -> list[str]:
     return [state.name, _MARKS[state.found], _MARKS[state.logged_in] if state.found else _MARKS[None],
             t("providers.enabled_on") if enabled else t("providers.enabled_off"),
             ", ".join(aliases) or t("providers.no_models")]
-
-
-def _line(cells: list[str], widths: list[int]) -> str:
-    """Columns left-aligned, the last one (the model list) as long as it is."""
-    return " ".join(c.ljust(w) for c, w in zip(cells[:-1], widths, strict=False)).rstrip() + " " + cells[-1]
 
 
 def cmd_providers(args) -> int:
@@ -37,18 +32,20 @@ def cmd_providers(args) -> int:
         aliases = [e.alias for e in registry.models(store) if e.provider == state.name]
         rows.append((_cells(state, aliases, state.name not in off), state, aliases))
     head = t("providers.head").split()
-    widths = [max([9] + [len(cells[i]) for cells, _s, _a in rows]) for i in range(len(head) - 1)] + [0]
-    lines = [_line(head, widths)]
-    for cells, state, _aliases in rows:
-        lines.append(_line(cells, widths))
+    widths = [max([9] + [len(cells[i]) for cells, _s, _a in rows]) for i in range(len(head) - 1)] + [None]
+    table = ui.table(head, [cells for cells, _s, _a in rows], max_width=widths).split("\n")
+    # the table is a table; the note and the install/login hint of a provider are text under its row
+    out: list[str] = [table[0]]
+    for i, (_row, state, _aliases) in enumerate(rows, start=1):
+        out.append(table[i])
         if state.note:
-            lines.append(f"  · {state.note}")
+            out.append(ui.para(f"· {state.note}", indent=2))
         if state.hint:
-            lines.append(f"  → {state.hint}")
+            out.append(ui.para(f"→ {state.hint}", indent=2))
     data = {"providers": [{"name": st.name, "found": st.found, "logged_in": st.logged_in,
                            "enabled": st.name not in off, "detail": st.detail, "note": st.note,
                            "hint": st.hint, "models": aliases} for _cells, st, aliases in rows]}
-    emit(args, data, "\n".join(lines))
+    emit(args, data, "\n".join(out))
     return 0
 
 
@@ -63,7 +60,10 @@ def cmd_switch(args, on: bool) -> int:
         raise CliError(t("err.providers_unknown", name=name, known=", ".join(known)))
     set_provider_enabled(name, on)
     state = t("providers.enabled_on") if on else t("providers.enabled_off")
-    emit(args, {"ok": True, "name": name, "enabled": on}, t("providers.enabled_line", name=name, state=state))
+    nxt = t("hint.models") if on else t("hint.status")
+    emit(args, {"ok": True, "name": name, "enabled": on},
+         t("providers.enabled_line", name=name, state=state) + "\n"
+         + ui.styled(ui.kv([(t("views.lbl_next"), nxt)]), "dim"))
     return 0
 
 
