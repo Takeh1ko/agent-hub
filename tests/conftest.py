@@ -16,6 +16,7 @@ def _isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("AHUB_HOME", str(tmp_path / "ahub-home"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
     monkeypatch.setenv("AHUB_LANG", "ru")
+    monkeypatch.setenv("AHUB_PROBE", "0")  # no live model probes in tests (they would hit the network)
     for var in ("XDG_DATA_HOME", "XDG_STATE_HOME", "AHUB_FAKE_QUEUE", "LANG", "LC_ALL", "LC_MESSAGES"):
         monkeypatch.delenv(var, raising=False)
     from ahub import log

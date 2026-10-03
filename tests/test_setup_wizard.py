@@ -43,6 +43,20 @@ def _fake_claude(monkeypatch, tmp_path: Path):
     return fake
 
 
+def _probe_stub(monkeypatch, answering: set[str]) -> list[str]:
+    """Live probe stub: only the aliases in `answering` answer. Returns the list of probed aliases."""
+    tried: list[str] = []
+
+    def _probe(entry, timeout_s=doctor.PROBE_TIMEOUT_S):
+        tried.append(entry.alias)
+        ok = entry.alias in answering
+        return ok, f"{entry.alias}: {'ответил' if ok else 'молчит'}"
+
+    monkeypatch.setattr(doctor, "probing_enabled", lambda: True)
+    monkeypatch.setattr(doctor, "probe_model", _probe)
+    return tried
+
+
 def test_wizard_full_lang_project_free_telegram(tmp_path, monkeypatch, capsys):
     _tty(monkeypatch, True)
     _no_go(monkeypatch)
@@ -90,9 +104,18 @@ def test_wizard_service_install_writes_units(tmp_path, monkeypatch, capsys):
     _tty(monkeypatch, True)
     _no_go(monkeypatch)
     monkeypatch.setattr(sys, "platform", "linux")
+    from ahub.commands import service as svccmd
     from ahub.tg import launcher
 
     monkeypatch.setattr(launcher, "claude_bin", lambda: None)
+    calls: list[tuple[str, list[str], list[str]]] = []
+
+    def _fake_enable(os_kind, names, written):
+        calls.append((os_kind, list(names), list(written)))
+        return []
+
+    monkeypatch.setattr(svccmd, "enable_service", _fake_enable)
+    monkeypatch.setattr(svccmd, "wait_for_heartbeat", lambda timeout_s=15.0: 3)
     root = tmp_path / "proj"
     make_repo(root)
     _answers(monkeypatch, [
@@ -104,6 +127,9 @@ def test_wizard_service_install_writes_units(tmp_path, monkeypatch, capsys):
     unit = Path.home() / ".config" / "systemd" / "user" / "ahub.service"
     assert unit.exists()
     assert "systemctl --user" in out
+    # T48: after agreeing the wizard enables the service and checks the heartbeat.
+    assert calls and calls[0][0] == "linux" and calls[0][1] == ["ahub.service"]
+    assert "loginctl enable-linger" in out
 
 
 def test_yes_passes_without_input(tmp_path, monkeypatch, capsys):
@@ -135,6 +161,43 @@ def test_noninteractive_keeps_old_behavior_plus_free(tmp_path, monkeypatch, caps
     assert doctor.check_models([]).ok is True
 
 
+def _defaults() -> dict[str, str]:
+    return {role.value: next(e.alias for e, d in registry.menu(Store(), role) if d) for role in Role}
+
+
+def test_free_default_picks_the_candidate_that_answers(tmp_path, monkeypatch, capsys):
+    """The first free model is dead — setup defaults to the one that answers, not to the dead one."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    from ahub.tg import launcher
+
+    monkeypatch.setattr(launcher, "claude_bin", lambda: None)
+    tried = _probe_stub(monkeypatch, {"bunny"})
+    root = tmp_path / "probe"
+    make_repo(root)
+    _answers(monkeypatch, ["", str(root), "", "n", "n", "n"])  # models: yes, service: no, telegram: no
+    assert cli.main(["setup"]) == 0
+    out = capsys.readouterr().out
+    assert tried == ["spark-free", "bunny"]  # in registry order, up to the one that answers
+    assert "bunny" in out
+    assert set(_defaults().values()) == {"bunny"}
+    assert doctor.check_models([]).ok is True
+
+
+def test_no_free_model_answers_warns_and_keeps_the_old_default(tmp_path, monkeypatch, capsys):
+    """--yes: the probe still runs; with nothing answering — the old behaviour and a warning with a hint."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    tried = _probe_stub(monkeypatch, set())
+    root = tmp_path / "dead"
+    make_repo(root)
+    assert cli.main(["setup", str(root), "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert tried == ["spark-free", "bunny"]
+    assert "ahub doctor" in out and "ahub models check" in out
+    assert set(_defaults().values()) == {"spark-free"}  # as before
+
+
 def test_set_global_keeps_comments_and_sections(tmp_path, monkeypatch):
     from ahub.commands.setup import set_global
 
@@ -150,3 +213,89 @@ def test_set_global_keeps_comments_and_sections(tmp_path, monkeypatch):
     assert "[usage]" in text and "go_month_limit = 10.0" in text
     hub = config.load_hub()
     assert hub.lang == "ru" and hub.tg_token == "t" and hub.tg_chat_id == 5
+
+
+def test_wizard_enable_failure_continues(tmp_path, monkeypatch, capsys):
+    """T48: enable fails — the wizard prints cmd+error, dead hint, and continues."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")
+    from ahub.commands import service as svccmd
+    from ahub.tg import launcher
+
+    monkeypatch.setattr(launcher, "claude_bin", lambda: None)
+    monkeypatch.setattr(svccmd, "enable_service",
+                        lambda os_kind, names, written: [(["systemctl", "--user", "enable", "--now",
+                                                           *names], "boom")])
+    monkeypatch.setattr(svccmd, "wait_for_heartbeat", lambda timeout_s=15.0: None)
+    root = tmp_path / "fail"
+    make_repo(root)
+    _answers(monkeypatch, ["", str(root), "", "y", "n"])
+    assert cli.main(["setup"]) == 0
+    out = capsys.readouterr().out
+    assert "systemctl" in out and "boom" in out  # command and error printed
+    assert "loginctl enable-linger" in out  # Linux hint still printed, setup did not crash
+
+
+def test_yes_installs_without_enable(tmp_path, monkeypatch, capsys):
+    """T48: --yes writes units but does not enable."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")
+    from ahub.commands import service as svccmd
+
+    def _boom(*a, **k):
+        raise AssertionError("enable при --yes без --service")
+
+    monkeypatch.setattr(svccmd, "enable_service", _boom)
+    monkeypatch.setattr(svccmd, "wait_for_heartbeat", _boom)
+    root = tmp_path / "yesno"
+    make_repo(root)
+    assert cli.main(["setup", str(root), "--yes"]) == 0
+    capsys.readouterr()
+    assert (Path.home() / ".config" / "systemd" / "user" / "ahub.service").exists()
+
+
+def test_yes_service_enables_without_questions(tmp_path, monkeypatch, capsys):
+    """T48: --yes --service installs and enables without input()."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")
+    from ahub.commands import service as svccmd
+
+    def _boom(_prompt=""):
+        raise AssertionError("input() при --yes --service")
+
+    monkeypatch.setattr("builtins.input", _boom)
+    seen: list[tuple[str, list[str], list[str]]] = []
+    monkeypatch.setattr(svccmd, "enable_service",
+                        lambda os_kind, names, written: seen.append((os_kind, names, written)) or [])
+    monkeypatch.setattr(svccmd, "wait_for_heartbeat", lambda timeout_s=15.0: 2)
+    root = tmp_path / "yessvc"
+    make_repo(root)
+    assert cli.main(["setup", str(root), "--yes", "--service"]) == 0
+    out = capsys.readouterr().out
+    assert seen and seen[0][0] == "linux"
+    assert "loginctl enable-linger" in out
+
+
+def test_service_flag_skips_wizard_questions(tmp_path, monkeypatch, capsys):
+    """T48: --service in a TTY wizard enables without the service questions."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")
+    from ahub.commands import service as svccmd
+    from ahub.tg import launcher
+
+    monkeypatch.setattr(launcher, "claude_bin", lambda: None)
+    seen: list = []
+    monkeypatch.setattr(svccmd, "enable_service",
+                        lambda os_kind, names, written: seen.append((os_kind, names)) or [])
+    monkeypatch.setattr(svccmd, "wait_for_heartbeat", lambda timeout_s=15.0: 1)
+    root = tmp_path / "flag"
+    make_repo(root)
+    # no "y" for service here — the flag skips the questions entirely.
+    _answers(monkeypatch, ["", str(root), "", "n"])
+    assert cli.main(["setup", "--service"]) == 0
+    capsys.readouterr()
+    assert seen and seen[0][0] == "linux"

@@ -4,6 +4,8 @@
 - registers the project in ~/.config/ahub/config.toml;
 - --claude: ahub skill for Claude Code (~/.claude/skills/ahub/SKILL.md) and a short block in the project CLAUDE.md.
 - TTY without --yes → interactive wizard (language, project, providers, models, service, Claude, Telegram, doctor).
+- Without a Go login the roles move to a free alias, but only after a live probe of the free candidates
+  (doctor.pick_free) — a free model that does not answer is never set as the default.
 """
 
 from __future__ import annotations
@@ -230,8 +232,12 @@ def claude_md(root: Path) -> str:
     return t("setup.claude_added")
 
 
-def ensure_free_default(store=None) -> tuple[str, list[str]]:
-    """Free alias as default where default is opencode-go/*; via registry, no CLI."""
+def ensure_free_default(store=None, *, alias: str | None = None, warn=None) -> tuple[str, list[str]]:
+    """Free alias as default where default is opencode-go/*; via registry, no CLI.
+
+    The alias is picked by a live probe of the free candidates (free, ~a second each); with none
+    answering it stays as it was and warn(...) gets the text. alias=... — the probe is already done.
+    """
     from ahub import doctor, registry
     from ahub.model import Role
     from ahub.store import Store
@@ -240,14 +246,18 @@ def ensure_free_default(store=None) -> tuple[str, list[str]]:
     provs = doctor.auth_providers()
     if doctor.has_go_login(provs):
         return "", []
+    picked = alias
+    if not picked:
+        try:
+            picked, warning = doctor.pick_free(st)
+        except Exception:
+            picked, warning = doctor.FALLBACK_FREE, ""
+        if warning:
+            (warn or print)(warning)
     try:
-        alias = doctor._free_alias(st)
+        registry.get(st, picked)
     except Exception:
-        return "spark-free", []
-    try:
-        registry.get(st, alias)
-    except Exception:
-        return alias, []
+        return picked, []
     changed: list[str] = []
     for role in Role:
         try:
@@ -257,17 +267,17 @@ def ensure_free_default(store=None) -> tuple[str, list[str]]:
         default = next((e for e, d in menu if d), None)
         if default is None or not default.model_id.startswith("opencode-go/"):
             continue
-        if alias not in [e.alias for e, _ in menu]:
+        if picked not in [e.alias for e, _ in menu]:
             try:
-                registry.add_to_role(st, role, alias)
+                registry.add_to_role(st, role, picked)
             except Exception:
                 continue
         try:
-            registry.set_default(st, role, alias)
+            registry.set_default(st, role, picked)
         except Exception:
             continue
         changed.append(role.value)
-    return alias, changed
+    return picked, changed
 
 
 def _prompt(text: str, default: str = "") -> str:
@@ -313,6 +323,24 @@ def _roles_needing_free(store) -> list[str]:
         if default is not None and default.model_id.startswith("opencode-go/"):
             bad.append(role.value)
     return bad
+
+
+def _service_enable_lines(os_kind: str, names: list[str], written: list[str], hint: str) -> list[str]:
+    """Enable an installed service and check it by heartbeat; never raises."""
+    import os
+
+    from ahub.commands import service as svc
+    from ahub.i18n import t
+
+    lines = [t("setup.wizard_service_enable_fail", cmd=" ".join(cmd), err=err)
+             for cmd, err in svc.enable_service(os_kind, names, written)]
+    age = svc.wait_for_heartbeat()
+    lines.append(t("setup.wizard_service_alive", age=age) if age is not None
+                 else t("setup.wizard_service_dead", hint=hint))
+    if os_kind == "linux":
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or "$USER"
+        lines.append(t("setup.wizard_service_linger", user=user))
+    return lines
 
 
 def run_wizard(args) -> int:
@@ -366,16 +394,35 @@ def run_wizard(args) -> int:
     bad = _roles_needing_free(store)
     if not bad:
         print(t("setup.wizard_models_ok"))
-    elif _ask_yes_no(t("setup.wizard_models_ask", alias=doctor._free_alias(store), roles=", ".join(bad)), True):
-        alias, changed = ensure_free_default(store)
-        if changed:
-            print(t("setup.wizard_models_done", roles=", ".join(changed), alias=alias))
+    else:
+        alias, warning = doctor.pick_free(store)  # free probe: a dead free model is not offered
+        if warning:
+            print(f"! {warning}")
+        if _ask_yes_no(t("setup.wizard_models_ask", alias=alias, roles=", ".join(bad)), True):
+            _alias, changed = ensure_free_default(store, alias=alias)
+            if changed:
+                print(t("setup.wizard_models_done", roles=", ".join(changed), alias=alias))
+            else:
+                print(t("setup.wizard_models_skip"))
         else:
             print(t("setup.wizard_models_skip"))
-    else:
-        print(t("setup.wizard_models_skip"))
     # 5) service
-    if sys.platform.startswith("linux") or sys.platform == "darwin":
+    want_service = bool(getattr(args, "service", False))
+    if want_service:
+        # --service: install and enable without questions; failures never stop setup.
+        try:
+            from ahub.commands import service as svc
+
+            _kind, _names, written, hint = svc.install_service_files()
+            print(t("setup.wizard_service_done", names=", ".join(written)))
+            print(hint)
+            for line in _service_enable_lines(_kind, _names, written, hint):
+                print(line)
+        except CliError as e:
+            print(e)
+        except Exception as e:
+            print(t("setup.wizard_service_enable_fail", cmd="install", err=str(e)[:300]))
+    elif sys.platform.startswith("linux") or sys.platform == "darwin":
         if _ask_yes_no(t("setup.wizard_service_ask_install"), True):
             try:
                 from ahub.commands import service as svc
@@ -383,8 +430,12 @@ def run_wizard(args) -> int:
                 _kind, _names, written, hint = svc.install_service_files()
                 print(t("setup.wizard_service_done", names=", ".join(written)))
                 print(hint)
+                for line in _service_enable_lines(_kind, _names, written, hint):
+                    print(line)
             except CliError as e:
                 print(e)
+            except Exception as e:
+                print(t("setup.wizard_service_enable_fail", cmd="install", err=str(e)[:300]))
         elif _ask_yes_no(t("setup.wizard_service_ask_start"), False):
             try:
                 from ahub.commands import service as svc
@@ -471,9 +522,24 @@ def _cmd_noninteractive(args) -> int:
         lines.append(t("setup.skill", path=install_skill()))
         lines.append(claude_md(root))
     try:
-        ensure_free_default()
+        ensure_free_default(warn=lines.append)
     except Exception:
         pass
+    want_service = bool(getattr(args, "service", False))
+    want_install = bool(getattr(args, "yes", False)) or want_service
+    if want_install and (sys.platform.startswith("linux") or sys.platform == "darwin" or want_service):
+        try:
+            from ahub.commands import service as svc
+
+            _kind, _names, written, hint = svc.install_service_files()
+            lines.append(t("setup.wizard_service_done", names=", ".join(written)))
+            lines.append(hint)
+            if want_service:
+                lines.extend(_service_enable_lines(_kind, _names, written, hint))
+        except CliError as e:
+            lines.append(str(e))
+        except Exception as e:
+            lines.append(t("setup.wizard_service_enable_fail", cmd="install", err=str(e)[:300]))
     problems = config.check_project(cfg)
     lines += [f"! {p}" for p in problems]
     emit(args, {"project": cfg.name, "file": str(f), "problems": problems}, "\n".join(lines))
@@ -503,5 +569,6 @@ def register(subparsers) -> None:
     p.add_argument("--deny", help=t("help.setup_deny"))
     p.add_argument("--claude", action="store_true", help=t("help.setup_claude"))
     p.add_argument("--yes", action="store_true", help=t("help.setup_yes"))
+    p.add_argument("--service", action="store_true", help=t("help.setup_service"))
     p.add_argument("--lang", dest="setup_lang", choices=("en", "ru"), default=None, help=t("help.setup_lang"))
     p.set_defaults(func=cmd_setup)

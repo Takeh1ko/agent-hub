@@ -121,3 +121,74 @@ def test_start_refuses_when_heartbeat_alive(monkeypatch, capsys):
     assert cli.main(["service", "start"]) == 0
     assert "уже работает" in capsys.readouterr().out
     assert not paths.service_pid_path().exists()
+
+
+def _ok_run(calls: list):
+    import subprocess as _sp
+
+    def _fake(cmd, **kw):
+        calls.append(list(cmd))
+        return _sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    return _fake
+
+
+def test_enable_linux_order(monkeypatch):
+    """T48: Linux enable runs daemon-reload then enable --now, in order."""
+    calls: list = []
+    monkeypatch.setattr(svccmd.subprocess, "run", _ok_run(calls))
+    assert svccmd.enable_service("linux", ["ahub.service"], ["/x/ahub.service"]) == []
+    assert calls == [["systemctl", "--user", "daemon-reload"],
+                     ["systemctl", "--user", "enable", "--now", "ahub.service"]]
+
+
+def test_enable_darwin_order(monkeypatch):
+    """T48: macOS enable bootstraps each plist."""
+    calls: list = []
+    monkeypatch.setattr(svccmd.subprocess, "run", _ok_run(calls))
+    monkeypatch.setattr(svccmd.os, "getuid", lambda: 501)
+    written = ["/Users/u/Library/LaunchAgents/dev.ahub.service.plist"]
+    assert svccmd.enable_service("darwin", ["ahub.service"], written) == []
+    assert calls == [["launchctl", "bootstrap", "gui/501", written[0]]]
+    assert svccmd.enable_commands("darwin", ["ahub.service"], written) == calls
+
+
+def test_enable_darwin_tolerates_already_loaded(monkeypatch):
+    """T48: launchctl 'already loaded' is not a failure."""
+    import subprocess as _sp
+
+    def _fake(cmd, **kw):
+        return _sp.CompletedProcess(cmd, 1, stdout="", stderr="Bootstrap failed: already loaded")
+
+    monkeypatch.setattr(svccmd.subprocess, "run", _fake)
+    assert svccmd.enable_service("darwin", ["ahub.service"], ["/p.plist"]) == []
+
+
+def test_enable_failure_collects_and_continues(monkeypatch):
+    """T48: a failing daemon-reload does not skip enable --now; errors are returned."""
+    import subprocess as _sp
+
+    calls: list = []
+
+    def _fake(cmd, **kw):
+        calls.append(list(cmd))
+        if "daemon-reload" in cmd:
+            return _sp.CompletedProcess(cmd, 1, stdout="", stderr="boom-reload")
+        return _sp.CompletedProcess(cmd, 1, stdout="", stderr="boom-enable")
+
+    monkeypatch.setattr(svccmd.subprocess, "run", _fake)
+    fails = svccmd.enable_service("linux", ["ahub.service"], ["/x"])
+    assert len(calls) == 2  # second command still ran
+    assert len(fails) == 2 and "boom-reload" in fails[0][1] and "boom-enable" in fails[1][1]
+
+
+def test_wait_for_heartbeat_alive(monkeypatch):
+    """T48: fresh tick returns its age without waiting."""
+    monkeypatch.setattr(svccmd, "_heartbeat_age_s", lambda: 4)
+    assert svccmd.wait_for_heartbeat(timeout_s=15.0) == 4
+
+
+def test_wait_for_heartbeat_timeout(monkeypatch):
+    """T48: no tick — None after the timeout (mocked, no 15s sleep)."""
+    monkeypatch.setattr(svccmd, "_heartbeat_age_s", lambda: None)
+    assert svccmd.wait_for_heartbeat(timeout_s=0) is None
