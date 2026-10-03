@@ -252,6 +252,21 @@ def test_projects_table_keeps_the_name_whole_in_a_narrow_terminal(hub, store, ca
     assert t("projects.col_path") in ahub(capsys, "projects")[1].splitlines()[0]
 
 
+def test_projects_never_cuts_the_name_however_wide_it_is(hub, store, capsys, monkeypatch):
+    """The name cell is the widest one and it still comes out whole — the other columns give way."""
+    long = "a-very-long-project-name"
+    store.create_task(project=long, kind="scout", title="orphan")
+    monkeypatch.setenv("COLUMNS", "40")
+    out = ahub(capsys, "--lang", "en", "projects")[1]
+    lines = out.splitlines()
+    row = next(ln for ln in lines if ln.lstrip().startswith("!"))  # the row of the unconnected project
+    assert row.lstrip().startswith(f"! {long}")
+    assert "…" not in row  # no cell of it was cut, not even the widest one
+    assert t("projects.col_go") in lines[0]  # the money outlasted the counts
+    for dropped in ("active", "queued", "decision", "questions", "last", "path"):
+        assert t(f"projects.col_{dropped}") not in lines[0]
+
+
 # --- ahub top data layer ---
 
 

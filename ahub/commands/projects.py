@@ -4,8 +4,8 @@ One row per project: the path, how much is going on (active / queued / waiting f
 questions, the money of this month from the hub sessions (Go and USD apart) and when it was last touched.
 A project with config problems is marked `!` and its problems are printed under the row; a project that
 has tasks but is not connected to the hub is listed too, as a problem. In a narrow terminal the least
-important columns go first — the questions, the last activity, the path — the name and its `!` mark
-stay whole.
+important columns go first — the questions, the last activity, the path, then the counts and the money —
+the name and its `!` mark stay whole.
 
 The whole hub is shown, not the scope of the current directory: this is the owner's glance at every
 repository the hub serves (architecture §9), the same as `ahub cost --all`.
@@ -25,11 +25,13 @@ from ahub.time import fmt_local, to_local
 EMPTY = "—"
 # The columns in order: a name, the cap for ui.table (None — as wide as the content needs) and whether the
 # column is FLEX (it may take any width, so it is the one that gives when the terminal is narrow).
-COLUMNS = (("project", 16, False), ("path", None, True), ("active", None, False), ("queued", None, False),
+COLUMNS = (("project", None, False), ("path", None, True), ("active", None, False), ("queued", None, False),
            ("decision", None, False), ("questions", None, False), ("go", 9, False), ("usd", 9, False),
            ("last", 13, False))
-DROP_FIRST = ("questions", "last", "path")  # least important first — the name and its `!` mark stay
+DROP_FIRST = ("questions", "last", "path", "decision", "queued", "active", "usd", "go")
+# least important first — the name and its `!` mark give only when nothing else is left to give
 FLEX_MIN = 12  # what the flexible column is assumed to need while deciding what to drop
+INDENT = 2  # the table is drawn indented; the width left for it is what the columns must fit into
 
 
 @dataclass
@@ -87,7 +89,12 @@ def _row_cells(name: str, root: str, st: Stat, mark: str) -> dict[str, str]:
 
 
 def _keys(rows: list[dict[str, str]], w: int) -> list[str]:
-    """The columns to draw at this width: the name is never cut, the least important go first."""
+    """The columns to draw in `w` characters: the name is never cut, the least important go first.
+
+    A set of columns is kept only while it fits as a whole — the flexible column counted at FLEX_MIN —
+    so ui.table is left nothing to cut and the name cell comes out whole even when it is the widest one.
+    A name wider than the terminal itself is cut like any cell: there is nothing else left to give.
+    """
     from ahub.i18n import t
 
     caps = {key: cap for key, cap, _flex in COLUMNS}
@@ -128,11 +135,11 @@ def cmd_projects(args) -> int:
         if not errors:
             lines.append(t("projects.empty", source=hub.source or config.paths.global_config_path()))
     else:
-        keys = _keys([cells for _name, cells in rows], ui.width())
+        keys = _keys([cells for _name, cells in rows], ui.width() - INDENT)
         caps = {key: cap for key, cap, _flex in COLUMNS}
         lines.extend(ui.table([t(f"projects.col_{key}") for key in keys],
                               [[cells[key] for key in keys] for _name, cells in rows],
-                              max_width=[caps[key] for key in keys], indent=2).split("\n"))
+                              max_width=[caps[key] for key in keys], indent=INDENT).split("\n"))
         for name, _cells in rows:  # the problems of a project go under its row
             lines.extend(f"    {e}" for e in problems[name])
     lines.extend(f"! {e}" for e in errors)
