@@ -13,6 +13,7 @@ from ahub import log as hublog
 from ahub import model
 from ahub import paths
 from ahub import procs
+from ahub import reasons, ui, views
 from ahub.cliutil import CliError, emit
 from ahub.service import HEARTBEAT_KEY, PAUSE_KEY, Service, live_workers
 from ahub.store import Store
@@ -43,10 +44,10 @@ def cmd_status(args) -> int:
         tsk = store.get_task(tid)
         lines.append(t("service.live_line", tid=tid, pid=pid, state=tsk.state.value if tsk else "?"))
     for tq in queued:
-        reason = t("service.queued_reason", reason=tq.state_reason) if tq.state_reason else ""
-        lines.append(t("service.queued_line", tid=tq.id, reason=reason))
+        reason = reasons.text(tq.state_reason)
+        lines.append(ui.kv([(f"T{tq.id}", [views.state_word(tq.state), reason])], indent=2))
     emit(args, {"heartbeat_age_s": age, "paused": paused, "live": live,
-                "queued": [{"id": t.id, "reason": t.state_reason} for t in queued],
+                "queued": [{"id": t.id, "reason": reasons.text(t.state_reason)} for t in queued],
                 "heartbeat": fmt_local(int(hb)) if hb else None}, "\n".join(lines))
     return 0
 
