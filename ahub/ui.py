@@ -1,11 +1,13 @@
 """The one rendering layer for human output: styled(), badge(), rule(), section(), kv(), para(), bullets(),
-table(), fit().
+table(), fit(), Live().
 
-Two rules keep it small:
+Three rules keep it small:
 - colour is a hint — ANSI only when stdout is a TTY and NO_COLOR is unset (ahub is read through a pipe by
   Claude, so that output must stay plain and compact);
 - every block takes the width explicitly or takes it from COLUMNS/the terminal (fallback 100), so the
-  layout is deterministic in tests.
+  layout is deterministic in tests;
+- a long operation shows one live line only on a TTY (`Live`); a pipe gets nothing at all.
+
 Words are never hardcoded here — the caller passes them through t().
 """
 
@@ -17,6 +19,7 @@ import shutil
 import sys
 import textwrap
 from collections.abc import Iterable, Sequence
+from types import TracebackType
 from typing import Any
 
 DEFAULT_WIDTH = 100
@@ -26,6 +29,8 @@ GAP = 2
 BULLET = "•"
 RULE = "─"
 ELLIPSIS = "…"
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+CLEAR_LINE = "\r\033[K"
 
 _CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "blue": "34",
           "magenta": "35", "cyan": "36", "grey": "90"}
@@ -177,12 +182,15 @@ def kv(rows: Sequence[tuple[str, Value]], *, indent: int = 0, gap: int = GAP, w:
     return "\n".join(ln.rstrip() for ln in out)
 
 
-def table(head: Sequence[str], rows: Sequence[Sequence[Any]], *, max_width: Sequence[int | None] | None = None,
+def table(head: Sequence[str] | None, rows: Sequence[Sequence[Any]], *, max_width: Sequence[int | None] | None = None,
           indent: int = 0, gap: int = GAP, w: int | None = None) -> str:
-    """Columns from the content, shrunk to fit the width — an ellipsis appears in a cell only."""
+    """Columns from the content, shrunk to fit the width — an ellipsis appears in a cell only.
+    head=None — no column head (the rows speak for themselves)."""
+    head = list(head) if head else []
     cols = max([len(head)] + [len(r) for r in rows]) if rows else len(head)
     body = [list(r) + [""] * (cols - len(r)) for r in rows]
-    widths = [max([len(str(head[i]))] + [len(str(r[i])) for r in body]) for i in range(cols)]
+    widths = [max(([len(str(head[i]))] if head else [0]) + [len(str(r[i])) for r in body])
+              for i in range(cols)]
     caps = list(max_width or []) + [None] * (cols - len(max_width or []))
     total = max(20, width(w) - indent)
     for i in range(cols):
@@ -197,8 +205,10 @@ def table(head: Sequence[str], rows: Sequence[Sequence[Any]], *, max_width: Sequ
         widths[i] -= cut
         over -= cut
     pad = " " * indent
-    head_line = pad + (" " * gap).join(styled(clip(head[i], widths[i]).ljust(widths[i]), "dim") for i in range(cols))
-    out = [head_line.rstrip()]
+    out = []
+    if head:
+        out.append((pad + (" " * gap).join(styled(clip(head[i], widths[i]).ljust(widths[i]), "dim")
+                                          for i in range(cols))).rstrip())
     for r in body:
         out.append((pad + (" " * gap).join(clip(r[i], widths[i]).ljust(widths[i])
                                           for i in range(cols))).rstrip())
@@ -243,3 +253,67 @@ def fit(text: Any, limit: int, hint: str = "") -> str:
         used += size
     body = "\n\n".join(kept)
     return f"{body}\n\n{hint}" if hint else body  # the hint is its own paragraph
+
+
+class Live:
+    """One live line for a long operation: a spinner, or progress `label… n/total`.
+
+    Only on a TTY — into a pipe it writes nothing (a `\r` line would be noise for Claude). The line is
+    cleared when the block ends, whatever happens; `step()` refreshes it (and moves the spinner on).
+
+        with Live(t("models.checking"), total=len(aliases)) as p:
+            for alias in aliases:
+                ...
+                p.step()
+    """
+
+    def __init__(self, label: str, total: int = 0, out: Any = None) -> None:
+        self._label = label
+        self._total = int(total)
+        self._done = 0
+        self._frame = -1
+        self._live = colour_on()
+        self._out = out if out is not None else sys.stdout
+
+    def __enter__(self) -> "Live":
+        self.draw()
+        return self
+
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None,
+                 tb: TracebackType | None) -> None:
+        self.clear()
+
+    def draw(self) -> None:
+        if not self._live:
+            return
+        text = self._label
+        if self._total:
+            text = f"{text} {self._done}/{self._total}"
+        elif self._frame >= 0:
+            text = f"{SPINNER[self._frame % len(SPINNER)]} {text}"
+        try:
+            self._out.write(CLEAR_LINE + text)
+            self._out.flush()
+        except (OSError, ValueError):  # a closed or exotic stream — drop the line, keep the work
+            self._live = False
+
+    def clear(self) -> None:
+        if not self._live:
+            return
+        self._live = False
+        try:
+            self._out.write(CLEAR_LINE)
+            self._out.flush()
+        except (OSError, ValueError):
+            pass
+
+    def step(self, n: int = 1) -> None:
+        """One item done (or `n` of them); the line is redrawn."""
+        self._done += n
+        self._frame += 1
+        self.draw()
+
+    def total(self, total: int) -> None:
+        """The total, when it is known only after the work started."""
+        self._total = int(total)
+        self.draw()
