@@ -293,7 +293,8 @@ async def test_app_transcript_screen(tmp_path, store):
 
 
 async def test_transcript_screen_nudges_the_worker(tmp_path, store):
-    """`m` inside the transcript screen: the same ask, with the task of the screen."""
+    """`m` inside the transcript screen: the same ask, with the task of the screen; the table's own `m`
+    waits behind the screen like every other table key."""
     tid = store.create_task(project="P", kind="code", title="починить")
     transitions.move(store, tid, State.PREPARING)
     transitions.move(store, tid, State.WORKING)
@@ -305,7 +306,9 @@ async def test_transcript_screen_nudges_the_worker(tmp_path, store):
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
         await pilot.pause(0.3)
-        await pilot.press("m")
+        assert app.check_action("nudge", ()) is False  # the table key is not offered behind the screen
+        assert await app.run_action("app.nudge") is False and store.get_task(tid).request == ""
+        await pilot.press("m")  # the screen's own m
         await pilot.pause(0.2)
         assert app.screen.__class__.__name__ == "Ask"
         await pilot.press(*"хватит, почини", "enter")

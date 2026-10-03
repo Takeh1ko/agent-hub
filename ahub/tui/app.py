@@ -2,7 +2,8 @@
 
 "View / Control" toggle (c): no actions in view mode. Refresh every 2 s in the background
 (thread; a new refresh never starts before the previous one finishes). The table shows the current
-work, `h` adds the history; `enter`/`t` — a live transcript of the task (ahub.tui.live, read-only).
+work, `h` adds the history; `enter`/`t` — a live transcript of the task (ahub.tui.live): it reads the
+log and, in control mode, `m` messages the worker. Every table key waits behind that screen.
 """
 
 from __future__ import annotations
@@ -21,8 +22,9 @@ from ahub.store import Store
 from ahub.tui import data
 from ahub.tui.live import LiveView
 
-TABLE_ONLY = ("toggle", "new", "stop", "accept", "reject", "rework", "model", "budget", "pause",
-              "history", "transcript")  # the keys of the table — they wait behind a screen that reads
+TABLE_ONLY = ("toggle", "new", "stop", "accept", "reject", "rework", "nudge", "model", "budget", "pause",
+              "history", "transcript")  # the keys of the table — they wait behind the transcript screen
+              # (that screen has its own m: a message to the worker of the task it shows)
 
 
 class Confirm(ModalScreen[bool]):
@@ -93,8 +95,9 @@ class Prompt(ModalScreen[None]):
 class Transcript(Screen[None]):
     """Live transcript of a task: the lines of the session (ahub/tui/live.py), followed as they come.
 
-    Read-only, no actions. `r` — the other role of the round, `[`/`]` — the previous/next round,
-    `p` — the full prompt, `f` — the tail back to the end after a scroll up, escape/q — back.
+    Reads; the only thing it changes is a message to the worker (`m`, control mode). `r` — the other role
+    of the round, `[`/`]` — the previous/next round, `p` — the full prompt, `f` — the tail back to the end
+    after a scroll up, escape/q — back.
     """
 
     BINDINGS = [Binding("escape", "back", _t("tui.bind_back")), Binding("q", "back", _t("tui.bind_back")),
@@ -316,7 +319,7 @@ class TopApp(App):
         self._show_mode()
 
     def _on_table(self) -> bool:
-        """False while the transcript screen is on top: that screen only reads, the table waits."""
+        """False while the transcript screen is on top: the table actions wait behind it."""
         return not isinstance(self.screen, Transcript)
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
