@@ -165,12 +165,12 @@ def test_a_row_of_another_project_is_refused(two_projects, capsys):
         rc, out, err = ahub(capsys, *argv)
         assert rc == 2 and out == ""
         assert err.splitlines() == [f"ошибка: {ref} — строка проекта B",
-                                    "подсказка: запустите из того репозитория или добавьте --project B"]
+                                    "  подсказка: запустите из того репозитория или добавьте --project B"]
     for argv, ref in rows:
         rc, out, err = ahub(capsys, "--lang", "en", *argv)
         assert rc == 2 and out == ""
         assert err.splitlines() == [f"error: {ref} belongs to project B",
-                                    "hint: run from that repo or add --project B"]
+                                    "  hint: run from that repo or add --project B"]
 
     assert len(comms.inbox(store, mark=False)) == 1  # B's message is still unread
     assert "дело B подробно" in ahub(capsys, "inbox", str(mid), "--project", "B")[1]  # the way out
@@ -254,10 +254,10 @@ def test_a_task_of_another_project_is_refused(two_projects, tmp_path, capsys, ar
     rc, out, err = ahub(capsys, *ref)
     assert rc == 2 and out == ""
     assert err.splitlines() == ["ошибка: T1 — задача проекта B",
-                                "подсказка: запустите из того репозитория или добавьте --project B"]
+                                "  подсказка: запустите из того репозитория или добавьте --project B"]
     rc, out, err = ahub(capsys, "--lang", "en", *ref)
     assert rc == 2 and out == ""
-    assert err.splitlines() == ["error: T1 belongs to B", "hint: run from that repo or add --project B"]
+    assert err.splitlines() == ["error: T1 belongs to B", "  hint: run from that repo or add --project B"]
     assert store.get_task(tid).state is State.QUEUED  # a refusal changes nothing
 
 

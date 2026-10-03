@@ -551,3 +551,69 @@ def test_service_flag_skips_wizard_questions(tmp_path, monkeypatch, capsys):
     assert cli.main(["setup", "--service"]) == 0
     capsys.readouterr()
     assert seen and seen[0][0] == "linux"
+
+
+def test_the_summary_always_has_the_models_row(tmp_path, monkeypatch, capsys):
+    """The owner refuses the free-model question — the row is still there (a summary with holes is worse
+    than a summary that says "left as is")."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)
+    from ahub.tg import launcher
+
+    monkeypatch.setattr(launcher, "claude_bin", lambda: None)
+    monkeypatch.setattr(sys, "platform", "linux")
+    from ahub.commands import service as svccmd
+
+    monkeypatch.setattr(svccmd, "install_service_files", lambda: ("linux", [], [], "hint"))
+    root = tmp_path / "nomodels"
+    make_repo(root)
+    _answers(monkeypatch, ["", str(root), "", "n", "n", "n", "n"])  # models: no; service: no, no; claude: no; tg: no
+    assert cli.main(["setup"]) == 0
+    summary = capsys.readouterr().out.split("Итог")[-1]
+    assert "Модели" in summary and "оставлены как есть" in summary
+
+
+def test_yes_project_problems_are_under_the_project_step(tmp_path, monkeypatch, capsys):
+    """A problem with the project itself belongs to "1. Project", not to the last step that ran."""
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)
+    from ahub import config as cfgmod
+
+    root = tmp_path / "badpython"
+    make_repo(root)
+    write(root / ".hub.toml", 'schema_version = 2\nname = "badpython"\npython = "/nope/python"\n')
+    monkeypatch.setattr(cfgmod, "check_project", lambda cfg: ["python: not an executable file /nope/python"])
+    assert cli.main(["setup", str(root), "--yes"]) == 0
+    out = capsys.readouterr().out
+    head = out.index("1. ")
+    service = out.index("4. ", head) if "4. " in out[head:] else len(out)
+    assert "! python: not an executable file" in out[head:service]  # inside the project section
+    assert "! python" not in out[service:]
+
+
+def test_the_wizard_starts_the_service_inside_its_step(tmp_path, monkeypatch, capsys):
+    """`ahub service start` from the wizard: its lines are part of the numbered step — indented,
+    and the report keeps its single Next."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")
+    from ahub.commands import service as svccmd
+    from ahub.tg import launcher
+
+    monkeypatch.setattr(launcher, "claude_bin", lambda: None)
+    from ahub.cliutil import emit
+
+    def _fake_start(args):  # the same two lines the real cmd_start emits (result line, its own Next)
+        emit(args, {"pid": 4242}, "сервис запущен, pid 4242\n  Next  ahub top")
+        return 0
+
+    monkeypatch.setattr(svccmd, "cmd_start", _fake_start)
+    root = tmp_path / "start"
+    make_repo(root)
+    _answers(monkeypatch, ["", str(root), "", "", "n", "y", "n"])  # install: no, start: yes, telegram: no
+    assert cli.main(["setup"]) == 0
+    out = capsys.readouterr().out
+    assert "\n    сервис запущен, pid 4242" in out  # indented into the step, wrapped by out.line
+    assert out.count("Next  ") == 1  # its own Next is not repeated: the report has one, at the end

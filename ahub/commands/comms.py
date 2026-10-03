@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from ahub import comms, events, log, scope, ui, views
 from ahub.cliutil import CliError, add_scope_args, emit
 from ahub.store import Store
+from ahub.time import now_ms
 from ahub.time import parse_duration as _parse_duration
 
 MAX_POLL_FAILURES = 20  # consecutive failures of a poll before the stream gives up
@@ -149,7 +150,7 @@ def cmd_ack(args) -> int:
         try:
             ids = [int(x) for x in args.ids]
         except ValueError as e:
-            raise CliError(t("err.ack_usage")) from e
+            raise CliError(t("err.ack_usage"), hint=t("hint.ack")) from e
         n = events.ack(store, ids, scope=sc)
     emit(args, {"acked": n}, t("comms.acked", n=n))
     return 0
@@ -227,15 +228,26 @@ def cmd_questions(args) -> int:
 
 
 def cmd_alarms(args) -> int:
-    from ahub.i18n import t
+    """Every alarm with its event id and age — so it can be acked (`ahub ack <id>`) or all at once."""
+    from ahub import ui
+    from ahub.i18n import plural, t
 
     store = Store()
     sc = scope.resolve(args)
     al = comms.alarms(store, unacked_only=not args.acked, scope=sc)
-    lines = events.lines(store, al) or [t("comms.alarms_empty")]
-    if args.ack and al:
+    if not al:
+        emit(args, {"alarms": []}, t("comms.alarms_empty"))
+        return 0
+    now = now_ms()
+    head = [t("alarms.col_id"), t("alarms.col_age"), t("alarms.col_what")]
+    body = [[f"#{e.id}", views._age(e.ts, now), line] for e, line in zip(al, events.lines(store, al), strict=True)]
+    out = [ui.table(head, body, max_width=[6, 8, None], indent=2)]
+    if args.ack:  # the result of the command, not a suggestion for the next one
         events.ack(store, [e.id for e in al], scope=sc)
-    emit(args, {"alarms": [e.payload | {"id": e.id, "critical": e.critical} for e in al]}, "\n".join(lines))
+        out.append(ui.styled(plural(len(al), "alarms.acked", "alarms.acked_few", "alarms.acked_many"), "dim"))
+    else:
+        out.append(ui.styled(ui.kv([(t("views.lbl_next"), t("alarms.next"))]), "dim"))
+    emit(args, {"alarms": [e.payload | {"id": e.id, "critical": e.critical} for e in al]}, "\n".join(out))
     return 0
 
 

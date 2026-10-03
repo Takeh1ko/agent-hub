@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import string
 
 import pytest
@@ -367,3 +368,122 @@ def test_step6_pulse_providers_en(monkeypatch, tmp_path):
     h = OpencodeProvider(db_path=str(tmp_path / "no.db"), binary="/nonexistent-xyz").health()
     assert not h.ok and "no opencode executable" in h.problems[0]
     assert not _re.search(r"[а-яА-ЯёЁ]", p.reason + err + h.problems[0])
+
+
+def test_every_literal_key_in_the_code_is_in_the_catalogues():
+    """`t("a.b")` with a literal is checked here: a key that exists in the code but in neither
+    catalogue only shows up as a KeyError in front of a person (`ahub alarms --ack` with two alarms)."""
+    import ast
+    from pathlib import Path
+
+    from ahub.i18n.en import MESSAGES as en
+    from ahub.i18n.ru import MESSAGES as ru
+
+    used: set[str] = set()
+    src = Path(__file__).resolve().parents[1] / "ahub"  # the tests run from anywhere
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("t", "_t")):
+                continue
+            key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
+            if isinstance(key, str) and re.fullmatch(r"[a-z0-9_]+(\.[a-z0-9_]+)+", key):
+                used.add(key)
+    assert len(used) > 200  # the scan really found the calls
+    assert not sorted(used - set(en)), sorted(used - set(en))
+    assert not sorted(used - set(ru)), sorted(used - set(ru))
+
+
+def _code_keys() -> tuple[set[str], set[str]]:
+    """The keys the code asks for by name, and the prefixes it builds at run time —
+    `t("setup.sum_" + k)`, `t(f"cli.group_{key}")`, `Words("archive.state_", …)`."""
+    import ast
+    from pathlib import Path
+
+    full = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
+    prefix = re.compile(r"^[a-z][a-z0-9_]*\.[a-z0-9_]*_?\.?$")
+    literal: set[str] = set()
+    prefixes: set[str] = set()
+    src = Path(__file__).resolve().parents[1] / "ahub"  # the tests run from anywhere
+    for path in sorted(src.rglob("*.py")):
+        if path.name in ("en.py", "ru.py") and path.parent.name == "i18n":
+            continue  # the catalogues themselves — a key there is a key asked for by nobody
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.JoinedStr) and node.values and isinstance(node.values[0], ast.Constant):
+                head = node.values[0].value  # the f-string prefix: f"cli.group_{key}"
+                if isinstance(head, str) and "." in head:
+                    prefixes.add(head)
+                continue
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, str) and "." in node.value):
+                continue
+            value = node.value
+            if value[-1] in "_." or prefix.fullmatch(value) and not full.fullmatch(value):
+                prefixes.add(value)  # a tail is added to it at run time
+            elif full.fullmatch(value):
+                literal.add(value)
+    return literal, prefixes
+
+
+def test_no_key_is_orphaned():
+    """A key nothing reads is a translation nobody keeps in sync — both catalogues only."""
+    from ahub.i18n.en import MESSAGES as en
+    from ahub.i18n.ru import MESSAGES as ru
+
+    literal, prefixes = _code_keys()
+    orphans = sorted(k for k in en if k not in literal and not any(k.startswith(p) for p in prefixes))
+    assert not orphans, orphans
+    assert not sorted(set(ru) - set(en))  # the same list, the same way round
+
+
+def test_every_next_line_is_a_runnable_command():
+    """A Next line is pasted: every command on it must parse (`ahub task new` without --kind/--title does
+    not — it prints an argparse usage dump instead of doing something)."""
+    import shlex
+
+    from ahub import cli
+    from ahub.i18n.en import MESSAGES as en
+
+    parser = cli.build_parser()
+    keys = [k for k in en if k.startswith(("views.next_", "home.next_"))]
+    assert len(keys) > 5
+    for key in keys:
+        text = en[key].format(label="T1", n=2)
+        for part in text.split("·"):
+            part = part.strip()
+            if not part.startswith("ahub "):
+                continue  # a word that is not a command ("Run `ahub setup` to get started")
+            argv = shlex.split(part)
+            assert argv[0] == "ahub" and len(argv) > 1, key
+            args = parser.parse_args(argv[1:])  # a usage dump here means the line cannot be pasted
+            cli._merge_root_scope(args)
+            assert getattr(args, "func", None) is not None, f"{key}: {part}"
+
+
+def test_the_russian_count_has_three_forms(monkeypatch):
+    """Russian inflects by the count: 1 проблема, 2-4 проблемы, 5+ проблем (and 11-14 like 5+)."""
+    from ahub.i18n import _reset, plural, set_lang
+
+    monkeypatch.setenv("AHUB_LANG", "ru")
+    _reset()
+    try:
+        set_lang("ru")
+        args = ("doctor.problem_one", "doctor.problems_few", "doctor.problems")
+        assert plural(1, *args) == "1 проблема — исправление под проверкой"
+        assert plural(2, *args) == "2 проблемы — исправление под каждой проверкой"
+        assert plural(4, *args).startswith("4 проблемы")
+        assert plural(5, *args).startswith("5 проблем —")
+        assert plural(11, *args).startswith("11 проблем —")  # the teens take the many form
+        assert plural(12, *args).startswith("12 проблем —")
+        assert plural(21, *args).startswith("21 проблема")
+        assert plural(22, *args).startswith("22 проблемы")
+
+        alarms = ("alarms.acked", "alarms.acked_few", "alarms.acked_many")
+        assert plural(1, *alarms) == "1 тревога отмечена прочитанной"
+        assert plural(2, *alarms) == "2 тревоги отмечены прочитанными"
+        assert plural(5, *alarms) == "5 тревог отмечено прочитанными"
+
+        found = ("views.findings_more_one", "views.findings_more_few", "views.findings_more")
+        assert plural(2, *found, label="T1").startswith("ещё 2 находки")
+        assert plural(5, *found, label="T1").startswith("ещё 5 находок")
+    finally:
+        _reset()

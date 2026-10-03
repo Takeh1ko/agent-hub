@@ -40,7 +40,7 @@ def test_scout_cycle(env, capsys):
     install_fake(store, [scout_ok(report="## Суть\nутечка в core/a.py:1\n\n## Подробно\nмного текста\n")])
     rc, out, err = ahub(capsys, "task", "new", "--kind", "scout", "--title", "где утечка", "--model", "fake",
                         "--spec", "посмотри core/")
-    assert rc == 0 and out == "T1 в очереди (scout, fake)", err
+    assert out.startswith("T1 в очереди (scout, fake)") and "ahub follow T1" in out, err
     assert Engine(store, project, 1, sleep=lambda s: None).run().state is State.DONE
 
     rc, out, _ = ahub(capsys, "status")
@@ -53,7 +53,7 @@ def test_scout_cycle(env, capsys):
     rc, out, _ = ahub(capsys, "result", "T1", "--full")
     assert "## Подробно" in out and '"summary"' in out
     rc, out, _ = ahub(capsys, "accept", "T1")
-    assert out == "T1 принята"
+    assert out.startswith("T1 принята")
     t = store.get_task(1)
     assert t.state is State.ACCEPTED and not Path(t.worktree).exists()
     arch = Path(project.root) / ".agent-hub"
@@ -78,9 +78,9 @@ def test_stop_continue_reject(env, capsys):
     store, _ = env
     install_fake(store, [])
     ahub(capsys, "task", "new", "--kind", "scout", "--title", "x", "--model", "fake")
-    assert ahub(capsys, "stop", "T1")[1] == "T1: остановлена"
-    assert ahub(capsys, "continue", "T1")[1] == "T1 снова в очереди"
-    assert ahub(capsys, "reject", "T1", "--reason", "не нужно")[1] == "T1 отклонена"
+    assert ahub(capsys, "stop", "T1")[1].startswith("T1: остановлена")
+    assert ahub(capsys, "continue", "T1")[1].startswith("T1 снова в очереди")
+    assert ahub(capsys, "reject", "T1", "--reason", "не нужно")[1].startswith("T1 отклонена")
     assert store.get_task(1).state is State.REJECTED
     rc, _, err = ahub(capsys, "continue", "T1")
     assert rc == 2 and "продолжить можно" in err
@@ -266,8 +266,23 @@ def test_say_ask_answer_alarms(env, capsys):
     assert comms.answer(store, 1, "да") and not comms.answer(store, 1, "нет")
     assert events.lines(store, events.unacked(store)) == ["ANSWER #1 «сливать T12?» → да"]
     comms.raise_alarm(store, "opencode недоступен 12 мин", critical=True)
+    rc, out, _ = ahub(capsys, "alarms")
+    assert rc == 0
+    lines = out.splitlines()
+    assert "#2" in out and "ALARM! opencode недоступен 12 мин" in out  # the id, so it can be acked by hand
+    age_cell = lines[1].split()[1:3]
+    assert len(age_cell) == 2 and age_cell[0] == "0" and age_cell[1] in ("мин", "мин.")  # the age column
+    assert lines[-1] == "Дальше  ahub ack <#> · ahub alarms --ack"  # --ack marks read; --acked would list read ones
+
     rc, out, _ = ahub(capsys, "alarms", "--ack")
-    assert out == "ALARM! opencode недоступен 12 мин"
+    assert out.splitlines()[-1] == "1 тревога отмечена прочитанной"  # the result, not a Next command
+    assert ahub(capsys, "alarms")[1] == "тревог нет"
+
+    # two at once — the plural branch has its own key (a missing one was a KeyError in front of a person)
+    comms.raise_alarm(store, "codex отвечает медленно", critical=True)
+    comms.raise_alarm(store, "telegram молчит", critical=True)
+    rc, out, _ = ahub(capsys, "alarms", "--ack")
+    assert rc == 0 and out.splitlines()[-1] == "2 тревоги отмечены прочитанными"
     assert ahub(capsys, "alarms")[1] == "тревог нет"
 
 

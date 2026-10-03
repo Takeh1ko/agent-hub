@@ -22,7 +22,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-from ahub import config, paths
+from ahub import config, paths, ui
 from ahub.cliutil import CliError, emit
 
 MARK_BEGIN = "<!-- ahub:begin -->"
@@ -333,6 +333,60 @@ def ensure_free_default(store=None, *, alias: str | None = None, warn=None) -> t
     return picked, changed
 
 
+class Steps:
+    """The setup report: numbered sections with one line of result each, then a summary block.
+
+    out — where the lines go: print for the wizard (so a question is asked right after its step),
+    a list for `--yes`/`--json` (the text is emitted at the end).
+    """
+
+    def __init__(self, w: int | None = None, out=None) -> None:
+        from ahub.i18n import t
+
+        self.w = w
+        self.lines: list[str] = []
+        self._t = t
+        self._out = out if out is not None else print
+        self._n = 0
+        self.summary: list[tuple[str, str]] = []
+
+    @classmethod
+    def collect(cls, w: int | None = None) -> "Steps":
+        """No printing — the text is built for emit() (--json prints the data only)."""
+        return cls(w, out=lambda line: None)
+
+    def section(self, key: str) -> None:
+        self._n += 1
+        self.write(ui.styled(f"{self._n}. {self._t(key)}", "bold"))
+
+    def line(self, text: str, wrap: bool = True) -> None:
+        """One line of result under the section (a multi-line text keeps its lines).
+        wrap=False — a command a person copies: it stays on one line, whatever its length."""
+        for ln in (str(text) or "").splitlines() or [""]:
+            self.write(ui.para(ln, indent=4, w=self.w) if wrap else " " * 4 + ln)
+
+    def table(self, head, rows, max_width=None) -> None:
+        self.write(ui.table(head, rows, max_width=max_width, indent=4, w=self.w))
+
+    def note(self, label: str, value: str) -> None:
+        self.summary.append((label, value))
+
+    def finish(self, nxt: str = "") -> None:
+        if self.summary:
+            self.write(ui.section(self._t("setup.step_summary")))
+            self.write(ui.kv(self.summary, indent=2, w=self.w))
+        if nxt:
+            self.write(ui.styled(ui.kv([(self._t("views.lbl_next"), nxt)], indent=2, w=self.w), "dim"))
+
+    def write(self, text: str) -> None:
+        if text:
+            self.lines.append(text)
+            self._out(text)
+
+    def text(self) -> str:
+        return "\n".join(self.lines)
+
+
 def _prompt(text: str, default: str = "") -> str:
     if default:
         raw = input(f"{text} ({default}): ")
@@ -374,7 +428,7 @@ def _roles_needing_free(store) -> list[str]:
     return bad
 
 
-def _provider_step(states, ask: bool, log) -> dict[str, bool]:
+def _provider_step(states, ask: bool, out: Steps) -> dict[str, bool]:
     """Every provider ahub knows, then which to enable (default: found and logged in).
 
     Writes [providers.<name>] enabled for each — the single place the switch lives. Returns name → on.
@@ -383,9 +437,8 @@ def _provider_step(states, ask: bool, log) -> dict[str, bool]:
     from ahub.i18n import t
 
     names = [st.name for st in states]
-    log(t("setup.wizard_providers_head"))
     for st in states:
-        log(doctor.provider_line(st))
+        out.line(doctor.provider_line(st))
     found = {st.name for st in states if st.found}
     recommended = [st.name for st in states if st.found and st.logged_in]
     picked = recommended
@@ -399,19 +452,21 @@ def _provider_step(states, ask: bool, log) -> dict[str, bool]:
             print(t("setup.wizard_providers_bad", name=", ".join(unknown), known=", ".join(names)))
     for name in picked:
         if name not in found:
-            log(t("setup.wizard_providers_skipped", name=name))
+            out.line(t("setup.wizard_providers_skipped", name=name))
     enabled = {st.name: st.name in picked and st.found for st in states}
     for name, on in enabled.items():
         try:
             set_provider_enabled(name, on)
         except CliError as e:
-            log(str(e))
-    log(t("setup.wizard_providers_on", names=", ".join(n for n, on in enabled.items() if on) or "—"))
+            out.line(str(e))
+    on_names = ", ".join(n for n, on in enabled.items() if on) or "—"
+    out.line(t("setup.wizard_providers_on", names=on_names))
     off = [n for n, on in enabled.items() if not on]
     if off:
-        log(t("setup.wizard_providers_off", names=", ".join(off)))
+        out.line(t("setup.wizard_providers_off", names=", ".join(off)))
     if not any(enabled.values()):
-        log(t("setup.wizard_providers_none"))
+        out.line(t("setup.wizard_providers_none"))
+    out.note(t("setup.step_providers"), on_names)
     return enabled
 
 
@@ -464,7 +519,7 @@ def _first_free(store) -> str:
     return cands[0].alias if cands else doctor.FALLBACK_FREE
 
 
-def _free_default_step(store, ask: bool, log, alias: str | None = None) -> dict[str, str]:
+def _free_default_step(store, ask: bool, out: Steps, alias: str | None = None) -> dict[str, str]:
     """No live probe (AHUB_PROBE=0), or nothing answered it: the free alias where the default is opencode-go/*.
 
     alias=... — it is already known (the probe step found no answerer), so no second probe.
@@ -474,24 +529,30 @@ def _free_default_step(store, ask: bool, log, alias: str | None = None) -> dict[
 
     bad = _roles_needing_free(store)
     if not bad:
-        log(t("setup.wizard_models_ok"))
+        out.line(t("setup.wizard_models_ok"))
+        out.note(t("setup.step_models"), t("setup.sum_models", roles=t("setup.wizard_models_ok")))
         return {}
     if alias is None:
-        alias, warning = doctor.pick_free(store)  # free probe: a dead free model is not offered
+        cands = doctor.free_candidates(store)  # free probe: a dead free model is not offered
+        with ui.Live(t("setup.probing", n=max(1, len(cands)))) as p:
+            alias, warning = doctor.pick_free(store, step=p.step)
         if warning:
-            log(f"! {warning}")
+            out.line(f"! {warning}")
     if ask and not _ask_yes_no(t("setup.wizard_models_ask", alias=alias, roles=", ".join(bad)), True):
-        log(t("setup.wizard_models_skip"))
+        out.line(t("setup.wizard_models_skip"))
+        out.note(t("setup.step_models"), t("setup.sum_models", roles=t("setup.wizard_models_skip")))
         return {}
-    alias, changed = ensure_free_default(store, alias=alias, warn=lambda w: log(f"! {w}"))
+    alias, changed = ensure_free_default(store, alias=alias, warn=lambda w: out.line(f"! {w}"))
     if changed:
-        log(t("setup.wizard_models_done", roles=", ".join(changed), alias=alias))
+        out.line(t("setup.wizard_models_done", roles=", ".join(changed), alias=alias))
+        out.note(t("setup.step_models"), t("setup.sum_models", roles=", ".join(f"{r}={alias}" for r in changed)))
     else:
-        log(t("setup.wizard_models_skip"))
+        out.line(t("setup.wizard_models_skip"))
+        out.note(t("setup.step_models"), t("setup.sum_models", roles=t("setup.wizard_models_skip")))
     return {}
 
 
-def _model_step(store, states, ask: bool, log) -> dict[str, str]:
+def _model_step(store, states, ask: bool, out: Steps) -> dict[str, str]:
     """Probe the models of the providers that are on, then set the default per role (executor, reviewer).
 
     A provider that is not found or not logged in is never probed — its models are not offered. Other roles
@@ -505,20 +566,23 @@ def _model_step(store, states, ask: bool, log) -> dict[str, str]:
     live = {st.name for st in states if st.found and st.logged_in}
     entries = [e for e in registry.models(store)
                if e.enabled and e.provider not in off and e.provider in live]
-    results = doctor.probe_models(entries, timeout_s=doctor.PROBE_WIZARD_S)
+    with ui.Live(t("setup.probing", n=len(entries)), total=len(entries)) as p:  # probes run at once
+        results = doctor.probe_models(entries, timeout_s=doctor.PROBE_WIZARD_S)
+        p.step()
     if not results:  # probing off or nothing to probe — the free-alias path knows better
-        return _free_default_step(store, ask, log)
-    log(t("setup.wizard_models_head"))
+        return _free_default_step(store, ask, out)
     kinds = {e.alias: t(f"setup.wizard_model_{registry.cost_kind(e)}") for e in entries}
-    width = max((len(kind) for kind in kinds.values()), default=0)
+    rows = []
     for entry in entries:
         ok, detail = results.get(entry.alias, (False, ""))
-        log(f"{'✓' if ok else '✗'} {kinds[entry.alias]:<{width}} {detail}"
-            + (f" — {entry.note}" if entry.note else ""))
+        body = detail[len(entry.alias) + 2:] if detail.startswith(entry.alias + ": ") else detail
+        rows.append(["✓" if ok else "✗", entry.alias, kinds[entry.alias],
+                     body + (f" — {entry.note}" if entry.note else "")])
+    out.table(None, rows, max_width=[1, 16, 5, None])
     recommended = doctor.recommend_model(entries, results)
     if not recommended:
-        log("! " + doctor.probe_none_warning([e.alias for e in entries]))
-        return _free_default_step(store, ask, log, alias=_first_free(store))
+        out.line("! " + doctor.probe_none_warning([e.alias for e in entries]))
+        return _free_default_step(store, ask, out, alias=_first_free(store))
     good = [e for e in entries if results[e.alias][0]]
     chosen: dict[Role, str] = {}
     for role in (Role.EXECUTOR, Role.REVIEWER):
@@ -530,53 +594,117 @@ def _model_step(store, states, ask: bool, log) -> dict[str, str]:
             continue
         _set_role_default(store, role, chosen[Role.EXECUTOR])
         chosen[role] = chosen[Role.EXECUTOR]
-    log(t("setup.wizard_roles_done", roles=", ".join(f"{r.value}={a}" for r, a in chosen.items())))
+    roles = ", ".join(f"{r.value}={a}" for r, a in chosen.items())
+    out.line(t("setup.wizard_roles_done", roles=roles))
+    out.note(t("setup.step_models"), t("setup.sum_models", roles=roles))
     return {r.value: a for r, a in chosen.items()}
 
 
-def _service_enable_lines(os_kind: str, names: list[str], written: list[str], hint: str) -> list[str]:
-    """Enable an installed service and check it by heartbeat; never raises."""
-    import os
-
-    from ahub.commands import service as svc
-    from ahub.i18n import t
-
-    lines = [t("setup.wizard_service_enable_fail", cmd=" ".join(cmd), err=err)
-             for cmd, err in svc.enable_service(os_kind, names, written)]
-    age = svc.wait_for_heartbeat()
-    lines.append(t("setup.wizard_service_alive", age=age) if age is not None
-                 else t("setup.wizard_service_dead", hint=hint))
-    if os_kind == "linux":
-        user = os.environ.get("USER") or os.environ.get("LOGNAME") or "$USER"
-        lines.append(t("setup.wizard_service_linger", user=user))
-    return lines
-
-
-def _claude_install(root: Path, *, ask: bool, log) -> None:
+def _claude_install(root: Path, *, ask: bool, out: Steps) -> None:
     """The Claude Code step: skill, CLAUDE.md block, Bash(ahub:*) — then the MCP hint for other agents.
 
     ask=False (the --claude flag) — the permission is written without a question, the default of the wizard.
     """
     from ahub.i18n import t
 
-    log(t("setup.skill", path=install_skill()))
-    log(claude_md(root))
+    out.line(t("setup.skill", path=install_skill()))
+    out.line(claude_md(root))
     if ask and not _ask_yes_no(t("setup.wizard_perm_ask", rule=BASH_RULE), True):
-        log(t("setup.perm_skip", rule=BASH_RULE))
-        log(t("setup.mcp_hint", cmd=MCP_CMD, server="ahub mcp"))
+        out.line(t("setup.perm_skip", rule=BASH_RULE))
+        out.note(t("setup.step_claude"), t("setup.sum_claude", state=t("setup.sum_claude_skip", rule=BASH_RULE)))
+    else:
+        out.line(allow_bash(root))
+        out.note(t("setup.step_claude"), t("setup.sum_claude", state=t("setup.sum_claude_yes", rule=BASH_RULE)))
+    out.line(t("setup.mcp_hint", cmd=MCP_CMD, server="ahub mcp"), wrap=False)
+
+
+def _install_and_enable(out: Steps) -> None:
+    """Write the unit/plist, enable it, wait for a tick, hint about lingering. Never raises."""
+    import os
+
+    from ahub.commands import service as svc
+    from ahub.i18n import t
+
+    kind, names, written, hint = svc.install_service_files()
+    out.line(t("setup.wizard_service_done", names=", ".join(written)))
+    out.line(t("service.next", cmd=hint), wrap=False)  # the same wording as the install-only path
+    for cmd, err in svc.enable_service(kind, names, written):
+        out.line(t("setup.wizard_service_enable_fail", cmd=" ".join(cmd), err=err))
+    age = svc.wait_for_heartbeat()
+    out.line(t("setup.wizard_service_alive", age=age) if age is not None
+             else t("setup.wizard_service_dead", hint=hint))
+    if kind == "linux":
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or "$USER"
+        out.line(t("setup.wizard_service_linger", user=user))
+    out.note(t("setup.step_service"),
+             t("setup.sum_service", state=t("setup.wizard_service_alive", age=age) if age is not None
+                                     else t("setup.sum_none")))
+
+
+def _install_only(out: Steps) -> None:
+    """--yes without --service: the unit is written, enabling it stays a human's decision."""
+    from ahub.commands import service as svc
+    from ahub.i18n import t
+
+    _kind, _names, written, hint = svc.install_service_files()
+    out.line(t("setup.wizard_service_done", names=", ".join(written)))
+    out.line(t("service.next", cmd=hint), wrap=False)
+    out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
+
+
+def _service_step(args, out: Steps, *, interactive: bool) -> None:
+    """The service step: write the unit/plist, enable it, wait for a tick.
+
+    Failures never stop setup — an OS the service does not exist for, a home that cannot be written to,
+    an enable that fails: each one is a line of the report and the summary says the step is empty.
+    """
+    from ahub.i18n import t
+
+    out.section("setup.step_service")
+    if not (sys.platform.startswith("linux") or sys.platform == "darwin"):  # the guard comes first:
+        out.line(t("setup.wizard_service_unsupported"))  # --service/--yes ask for the same files
+        out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
         return
-    log(allow_bash(root))
-    log(t("setup.mcp_hint", cmd=MCP_CMD, server="ahub mcp"))
+    try:
+        if bool(getattr(args, "service", False)):  # --service: install and enable, no questions
+            _install_and_enable(out)
+        elif bool(getattr(args, "yes", False)):  # --yes: the files are written, the enable is not run
+            _install_only(out)
+        elif not interactive:
+            out.line(t("setup.wizard_service_skip"))
+            out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
+        elif _ask_yes_no(t("setup.wizard_service_ask_install"), True):
+            _install_and_enable(out)
+        elif _ask_yes_no(t("setup.wizard_service_ask_start"), False):
+            import types
+
+            from ahub.cliutil import captured
+            from ahub.commands import service as svc
+
+            with captured() as lines:  # its lines are part of this step — not printed at indent 0
+                svc.cmd_start(types.SimpleNamespace(json=False))
+            for ln in "".join(ln + "\n" for ln in lines).splitlines():
+                out.line(ln)
+            out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
+        else:
+            out.line(t("setup.wizard_service_skip"))
+            out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
+    except CliError as e:  # the service refused (its own message is the one to show)
+        out.line(str(e))
+        out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
+    except Exception as e:  # an unwritable home, a missing systemctl — nothing of that stops setup
+        out.line(t("setup.wizard_service_enable_fail", cmd="install", err=f"{type(e).__name__}: {e}"[:300]))
+        out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
 
 
 def run_wizard(args) -> int:
     import os
-    import types
 
     from ahub import doctor
     from ahub.i18n import lang, set_lang, t
     from ahub.store import Store
 
+    out = Steps()
     # 1) language
     cur = lang()
     ans = _prompt(t("setup.wizard_lang"), cur).strip().lower()
@@ -599,104 +727,85 @@ def run_wizard(args) -> int:
     try:
         cfg = config.load_project_file(f)
     except config.ConfigError as e:
-        raise CliError(str(e)) from e
-    print(t("setup.done", name=cfg.name, what=what))
+        raise CliError(str(e), hint=t("hint.setup_path", path=root)) from e
+    out.section("setup.step_project")
+    out.line(t("setup.done", name=cfg.name, what=what))
+    out.line(f"{cfg.name}  {cfg.root}")
     if register_project(root):
-        print(t("setup.registered", path=paths.global_config_path()))
-    for p in config.check_project(cfg):
-        print(f"! {p}")
+        out.line(t("setup.registered", path=paths.global_config_path()))
+    out.note(t("setup.step_project"), t("setup.sum_project", name=cfg.name, root=cfg.root))
+    out.note(t("setup.step_config"), t("setup.sum_config", path=paths.global_config_path()))
+    problems = config.check_project(cfg)
+    for problem in problems:
+        out.line(f"! {problem}")
     # 3) providers: all of them, then which to enable
     states = doctor.provider_states()
-    _provider_step(states, ask=True, log=print)
+    out.section("setup.step_providers")
+    _provider_step(states, ask=True, out=out)
     # 4) models: a live probe of every model of a provider that is on, then the role defaults
-    store = Store()
-    _model_step(store, states, ask=True, log=print)
+    out.section("setup.step_models")
+    _model_step(Store(), states, ask=True, out=out)
     # 5) service
-    want_service = bool(getattr(args, "service", False))
-    if want_service:
-        # --service: install and enable without questions; failures never stop setup.
-        try:
-            from ahub.commands import service as svc
-
-            _kind, _names, written, hint = svc.install_service_files()
-            print(t("setup.wizard_service_done", names=", ".join(written)))
-            print(hint)
-            for line in _service_enable_lines(_kind, _names, written, hint):
-                print(line)
-        except CliError as e:
-            print(e)
-        except Exception as e:
-            print(t("setup.wizard_service_enable_fail", cmd="install", err=str(e)[:300]))
-    elif sys.platform.startswith("linux") or sys.platform == "darwin":
-        if _ask_yes_no(t("setup.wizard_service_ask_install"), True):
-            try:
-                from ahub.commands import service as svc
-
-                _kind, _names, written, hint = svc.install_service_files()
-                print(t("setup.wizard_service_done", names=", ".join(written)))
-                print(hint)
-                for line in _service_enable_lines(_kind, _names, written, hint):
-                    print(line)
-            except CliError as e:
-                print(e)
-            except Exception as e:
-                print(t("setup.wizard_service_enable_fail", cmd="install", err=str(e)[:300]))
-        elif _ask_yes_no(t("setup.wizard_service_ask_start"), False):
-            try:
-                from ahub.commands import service as svc
-
-                fake = types.SimpleNamespace(json=False)
-                svc.cmd_start(fake)
-            except CliError as e:
-                print(e)
-        else:
-            print(t("setup.wizard_service_skip"))
-    else:
-        print(t("setup.wizard_service_unsupported"))
+    _service_step(args, out, interactive=True)
     # 6) Claude
+    out.section("setup.step_claude")
     want_claude = bool(getattr(args, "claude", False))
     cl_check = doctor.check_claude()
     if want_claude and not cl_check.ok:
-        _claude_install(root, ask=False, log=print)
+        _claude_install(root, ask=False, out=out)
     elif cl_check.ok:
         from ahub.tg.launcher import claude_bin
 
         binary = claude_bin() or cl_check.detail
         if want_claude or _ask_yes_no(t("setup.wizard_claude_ask", binary=binary), True):
-            _claude_install(root, ask=not want_claude, log=print)
+            _claude_install(root, ask=not want_claude, out=out)
     else:
-        print(t("setup.wizard_claude_missing"))
+        out.line(t("setup.wizard_claude_missing"))
+        out.note(t("setup.step_claude"), t("setup.sum_claude", state=t("setup.sum_claude_no")))
     # 7) Telegram (default no)
-    if _ask_yes_no(t("setup.wizard_tg_ask"), False):
-        token = _prompt(t("setup.wizard_tg_token")).strip()
-        if token:
-            set_global("token", token, section="telegram")
-            while True:
-                raw_chat = _prompt(t("setup.wizard_tg_chat")).strip()
-                if not raw_chat:
-                    break
-                try:
-                    chat_id = int(raw_chat)
-                except ValueError:
-                    print(t("setup.wizard_tg_bad_chat"))
-                    continue
-                set_global("chat_id", chat_id, section="telegram")
-                break
-            print(t("setup.wizard_tg_done"))
-            import importlib.util
-
-            if importlib.util.find_spec("aiogram") is None:
-                print(t("setup.wizard_tg_no_aiogram"))
-        else:
-            print(t("setup.wizard_tg_skip"))
-    else:
-        print(t("setup.wizard_tg_skip"))
+    out.section("setup.step_telegram")
+    _telegram_step(out)
     # 8) final check
-    print(t("setup.wizard_doctor_head"))
+    out.section("setup.step_check")
     from ahub.commands.doctor import _text as _doctor_text
 
-    print(_doctor_text(doctor.run_all(root)))  # the project from step 2, not the cwd
+    for line in _doctor_text(doctor.run_all(root)).split("\n"):  # the project from step 2, not the cwd
+        out.write(line)
+    out.finish(t("setup.next"))
     return 0
+
+
+def _telegram_step(out: Steps) -> None:
+    """Telegram is optional; the token is asked for only if the owner wants the bot."""
+    from ahub.i18n import t
+
+    if not _ask_yes_no(t("setup.wizard_tg_ask"), False):
+        out.line(t("setup.wizard_tg_skip"))
+        out.note(t("setup.step_telegram"), t("setup.wizard_tg_skip"))
+        return
+    token = _prompt(t("setup.wizard_tg_token")).strip()
+    if not token:
+        out.line(t("setup.wizard_tg_skip"))
+        out.note(t("setup.step_telegram"), t("setup.wizard_tg_skip"))
+        return
+    set_global("token", token, section="telegram")
+    while True:
+        raw_chat = _prompt(t("setup.wizard_tg_chat")).strip()
+        if not raw_chat:
+            break
+        try:
+            chat_id = int(raw_chat)
+        except ValueError:
+            print(t("setup.wizard_tg_bad_chat"))
+            continue
+        set_global("chat_id", chat_id, section="telegram")
+        break
+    out.line(t("setup.wizard_tg_done"))
+    import importlib.util
+
+    if importlib.util.find_spec("aiogram") is None:
+        out.line(t("setup.wizard_tg_no_aiogram"))
+    out.note(t("setup.step_telegram"), t("setup.wizard_tg_done"))
 
 
 def _cmd_noninteractive(args) -> int:
@@ -711,16 +820,24 @@ def _cmd_noninteractive(args) -> int:
         set_global("lang", setup_lang)
     root = Path(config.expand(args.path or ".")).resolve()
     if not (root / ".git").exists():
-        raise CliError(t("err.setup_not_git", root=root))
+        raise CliError(t("err.setup_not_git", root=root), hint=t("hint.setup_path", path=root))
     deny = [x.strip() for x in (args.deny or "").split(",") if x.strip()]
     what, f = ensure_project_file(root, name=args.name, deny=deny)
     try:
         cfg = config.load_project_file(f)
     except config.ConfigError as e:
-        raise CliError(str(e)) from e
-    lines = [t("setup.done", name=cfg.name, what=what)]
+        raise CliError(str(e), hint=t("hint.setup_path", path=root)) from e
+    out = Steps.collect()  # the text is emitted at the end (with --json only the data goes out)
+    out.section("setup.step_project")
+    out.line(t("setup.done", name=cfg.name, what=what))
+    out.line(f"{cfg.name}  {cfg.root}")
     if register_project(root):
-        lines.append(t("setup.registered", path=paths.global_config_path()))
+        out.line(t("setup.registered", path=paths.global_config_path()))
+    problems = config.check_project(cfg)
+    for problem in problems:
+        out.line(f"! {problem}")  # under "1. Project", like the wizard — not under the last step
+    out.note(t("setup.step_project"), t("setup.sum_project", name=cfg.name, root=cfg.root))
+    out.note(t("setup.step_config"), t("setup.sum_config", path=paths.global_config_path()))
     from ahub.store import Store
 
     # providers and models: the same choices the wizard makes, by the recommendation rule, as a summary
@@ -730,35 +847,23 @@ def _cmd_noninteractive(args) -> int:
         from ahub import doctor
 
         states = doctor.provider_states()
-        chosen = _provider_step(states, ask=False, log=lines.append)
-        role_models = _model_step(Store(), states, ask=False, log=lines.append)
+        out.section("setup.step_providers")
+        chosen = _provider_step(states, ask=False, out=out)
+        out.section("setup.step_models")
+        role_models = _model_step(Store(), states, ask=False, out=out)
     except Exception as e:
-        lines.append(t("setup.wizard_models_skip"))
-        print(f"! {e}")
+        out.line(t("setup.wizard_models_skip"))
+        out.line(f"! {e}")
+    out.section("setup.step_claude")
     if args.claude:
-        lines.append(t("setup.skill", path=install_skill()))
-        lines.append(claude_md(root))
-        lines.append(allow_bash(root))  # no question here: --claude asked for the whole step
-        lines.append(t("setup.mcp_hint", cmd=MCP_CMD, server="ahub mcp"))
-    want_service = bool(getattr(args, "service", False))
-    want_install = bool(getattr(args, "yes", False)) or want_service
-    if want_install and (sys.platform.startswith("linux") or sys.platform == "darwin" or want_service):
-        try:
-            from ahub.commands import service as svc
-
-            _kind, _names, written, hint = svc.install_service_files()
-            lines.append(t("setup.wizard_service_done", names=", ".join(written)))
-            lines.append(hint)
-            if want_service:
-                lines.extend(_service_enable_lines(_kind, _names, written, hint))
-        except CliError as e:
-            lines.append(str(e))
-        except Exception as e:
-            lines.append(t("setup.wizard_service_enable_fail", cmd="install", err=str(e)[:300]))
-    problems = config.check_project(cfg)
-    lines += [f"! {p}" for p in problems]
+        _claude_install(root, ask=False, out=out)
+    else:
+        out.line(t("setup.wizard_claude_skip"))
+        out.note(t("setup.step_claude"), t("setup.sum_none"))
+    _service_step(args, out, interactive=False)
+    out.finish(t("setup.next"))
     emit(args, {"project": cfg.name, "file": str(f), "problems": problems, "providers": chosen,
-                "models": role_models}, "\n".join(lines))
+                "models": role_models}, out.text())
     return 0
 
 

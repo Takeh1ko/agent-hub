@@ -80,6 +80,22 @@ def t(key: str, **kw) -> str:
     return tpl.format(**kw)
 
 
+def plural(n: int, one: str, few: str, many: str, **kw) -> str:
+    """A count in the Russian form: n=1 — `one`, 2-4 (12-14 and the teens excluded) — `few`, 5+ — `many`.
+
+    Russian inflects the noun by the count, so a catalogue with one and many alone says "2 проблемы" as
+    "2 проблем" and "5 тревоги" as "5 тревог". Each caller names the three keys; English keeps the same
+    three keys (the text of `few` is the same as of `many` there).
+    """
+    if n % 10 == 1 and n % 100 != 11:
+        key = one
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        key = few
+    else:
+        key = many
+    return t(key, n=n, **kw)
+
+
 class Words(Mapping[str, str]):
     """Catalog words by key (states, phases): the value is t(prefix + key) on read, in the current language."""
 

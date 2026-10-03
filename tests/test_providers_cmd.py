@@ -31,8 +31,16 @@ def _states(monkeypatch, **kw) -> list[doctor.ProviderState]:
 
 
 def _rows(out: str) -> list[str]:
-    """The table rows (the note and hint lines are indented)."""
+    """The table rows (the models, note and hint lines are indented under their row)."""
     return [ln for ln in out.splitlines() if ln.strip() and not ln.startswith(" ")]
+
+
+def _under(out: str, name: str) -> str:
+    """Everything printed under the row of a provider (its models, note, hint)."""
+    lines = out.splitlines()
+    i = next(n for n, ln in enumerate(lines) if ln.startswith(name + " ") or ln == name)
+    end = next((n for n in range(i + 1, len(lines)) if lines[n] and not lines[n].startswith(" ")), len(lines))
+    return "\n".join(lines[i + 1:end])
 
 
 def _on(name: str) -> bool:
@@ -44,14 +52,14 @@ def test_providers_table_shows_every_provider(capsys, monkeypatch):
     assert cli.main(["providers"]) == 0
     out = capsys.readouterr().out
     rows = _rows(out)
-    assert rows[0].split() == ["имя", "найден", "вход", "включён", "модели"]
+    assert rows[0].split() == ["имя", "найден", "вход", "включён"]
     assert rows[1].split()[:4] == ["opencode", "\u2713", "\u2713", "включён"]
-    assert "spark" in rows[1] and "mimo-flash" in rows[1]
+    assert "spark" in _under(out, "opencode") and "mimo-flash" in _under(out, "opencode")
     assert rows[2].split()[:4] == ["agy", "\u2713", "\u2713", "включён"]
-    assert "gemini" in rows[2]
+    assert "gemini" in _under(out, "agy")
     # codex is not found: the mark, the note and the one-line install hint
     assert rows[3].split()[:4] == ["codex", "\u2717", "\u2013", "включён"]
-    assert "codex, codex-fast" in rows[3]
+    assert "codex, codex-fast" in _under(out, "codex")
     assert "npm i -g @openai/codex" in out
     # nothing is switched off yet — the switch is the hub config, and it is not touched by a view
     assert all(_on(n) for n in ("opencode", "agy", "codex"))

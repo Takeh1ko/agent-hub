@@ -1,14 +1,25 @@
-"""Shared by subcommands: text/JSON output, project pick, the scope guard of a single-task command."""
+"""Shared by subcommands: text/JSON output, project pick, the scope guard of a single-task command,
+the "what to do" hint of a refusal."""
 
 from __future__ import annotations
 
 import json
+import re
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from ahub import config, scope
 from ahub.store import Task
+
+_TOKEN = re.compile(r"[\w:.,=<>/*-]+")
+# the words a command never takes: the tail after them is prose, not part of the command
+_PROSE = frozenset("""a an and as at be by for from in into is it its no not of on or only that the their them then to
+with without again also because before after instead must should can will would could do does done give gives
+holds look looks needs offer offers please print prints refuses run runs see see try use uses wait waits work
+works you your""".split())
 
 
 class CliError(RuntimeError):
@@ -19,13 +30,63 @@ class CliError(RuntimeError):
         self.hint = hint
 
 
+def command_hint(message: str, known: frozenset[str] = frozenset()) -> str:
+    """The runnable `ahub …` command a refusal points at — the last one, ``ahub`` backticks dropped.
+
+    A refusal often ends with the way out ("… is off (ahub providers enable codex)"); a hint must be a
+    command a person can paste, so the tail after it is cut at the first word that cannot belong to a
+    command: prose (`_PROSE`, unless it is a subcommand name) and anything that is not `ahub`.
+    """
+    found = ""
+    for candidate in _candidates((message or "").replace("`", "")):
+        parts = []
+        for token in _TOKEN.findall(candidate):
+            word = token.strip(".,")
+            if not word:
+                continue  # a lone dot or a comma is not a word
+            if word in known or word not in _PROSE:
+                parts.append(word)
+                continue
+            break  # prose — the command ends here
+        if parts:
+            found = " ".join(parts)
+    return found
+
+
+def _candidates(text: str) -> list[str]:
+    """The `ahub …` runs of the text — `ahub` on its own word (never "the hub", never "ahub[telegram]")."""
+    out = []
+    for match in re.finditer(r"(?<![\w-])ahub(?=\s|$)", text):
+        tail = text[match.end():]
+        end = min([i for i in (tail.find(c) for c in "()\n;") if i > 0] or [len(tail)])
+        out.append(("ahub" + tail[:end]).strip())
+    return out
+
+
+_captured: list[str] | None = None
+
+
 def emit(args, data: Any, text: str) -> None:
-    """--json → data as JSON, else text."""
+    """--json → data as JSON, else text (into captured() when a caller is collecting it)."""
     if getattr(args, "json", False):
         json.dump(data, sys.stdout, ensure_ascii=False, separators=(",", ":"), default=str)
         sys.stdout.write("\n")
+    elif _captured is not None:
+        _captured.append(text)
     else:
         sys.stdout.write(text if text.endswith("\n") or not text else text + "\n")
+
+
+@contextmanager
+def captured() -> Iterator[list[str]]:
+    """Collect what a command emits instead of printing it — the setup wizard renders a command's own
+    lines inside its numbered step (indent, width and one Next) instead of letting it print at indent 0."""
+    global _captured
+    prev, _captured = _captured, []
+    try:
+        yield _captured
+    finally:
+        _captured = prev
 
 
 def add_project_arg(parser) -> None:
@@ -71,7 +132,7 @@ def resolve_project(args, cwd: str | Path | None = None) -> config.ProjectConfig
                 return cfg
         from ahub.i18n import t
 
-        raise CliError(t("err.no_project", want=want))
+        raise CliError(t("err.no_project", want=want), hint=t("hint.projects"))
     try:
         return config.load_project(cwd)
     except FileNotFoundError:
@@ -80,5 +141,6 @@ def resolve_project(args, cwd: str | Path | None = None) -> config.ProjectConfig
         if cfg is None:
             from ahub.i18n import t
 
-            raise CliError(t("err.no_project_cwd", cwd=cwd, file=config.PROJECT_FILE)) from None
+            raise CliError(t("err.no_project_cwd", cwd=cwd, file=config.PROJECT_FILE),
+                           hint=t("hint.setup")) from None
         return cfg

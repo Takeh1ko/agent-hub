@@ -50,4 +50,8 @@ def test_projects_reports_problems(tmp_path, capsys):
     write(paths.global_config_path(), f'projects = ["{tmp_path / "p"}", "{tmp_path / "gone"}"]\n')
     assert cli.main(["projects"]) == 1
     out = capsys.readouterr().out
-    assert "! P" in out and "rules" in out and "gone" in out
+    # the table of the projects (T72), the config problem of each under its row, the entry that does not load
+    head = out.splitlines()[0].split()
+    assert head[0] == "проект" and "актив" in head and "вопросы" in head  # the money and the counts
+    assert "! P" in out  # the row of a project with problems
+    assert "nope.md" in out and "gone" in out  # the problem under the row, the entry that does not load

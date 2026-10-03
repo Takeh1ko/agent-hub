@@ -36,17 +36,26 @@ def cmd_status(args) -> int:
     state = t("service.alive") if age is not None and age < 30 else t("service.dead")
     tick = t("service.tick", age=age) if age is not None else t("service.no_tick")
     suffix = t("service.paused_suffix") if paused else ""
-    lines = [t("service.status", state=state, tick=tick, paused=suffix)]
+    out = [ui.kv([(t("service.lbl_service"), f"{state}{tick}{suffix}")], indent=2)]
+    rows = []  # a live pid of a task this hub does not know (an isolated AHUB_HOME) is not ours to show
     for tid, pid in sorted(live.items()):
         tsk = store.get_task(tid)
-        lines.append(t("service.live_line", tid=tid, pid=pid, state=tsk.state.value if tsk else "?"))
-    for tq in queued:
-        reason = reasons.text(tq.state_reason)
-        lines.append(ui.kv([(f"T{tq.id}", [views.state_word(tq.state), reason])], indent=2))
+        if tsk is not None:
+            rows.append([f"T{tid}", str(pid), views.state_word(tsk.state)])
+    if rows:
+        out.append(ui.section(t("service.sec_tasks")))
+        out.append(ui.table([t("views.col_id"), "pid", t("views.col_state")], rows,
+                            max_width=[6, 7, 16], indent=2))
+    if queued:
+        out.append(ui.section(t("service.sec_queue")))
+        out.append(ui.kv([(f"T{tq.id}", [views.state_word(tq.state), reasons.text(tq.state_reason)])
+                          for tq in queued], indent=2))
+    nxt = t("service.next_up") if (age is not None and age < 30) else t("service.next_down")
+    out.append(ui.styled(ui.kv([(t("views.lbl_next"), nxt)], indent=2), "dim"))
     emit(args, {"heartbeat_age_s": age, "paused": paused, "live": live,
                 "queued": [{"id": t.id, "reason": t.state_reason,
                             "reason_text": reasons.text(t.state_reason)} for t in queued],
-                "heartbeat": fmt_local(int(hb)) if hb else None}, "\n".join(lines))
+                "heartbeat": fmt_local(int(hb)) if hb else None}, "\n".join(out))
     return 0
 
 
@@ -60,7 +69,6 @@ def cmd_pause(args, on: bool) -> int:
         store.meta_del(PAUSE_KEY)
     emit(args, {"paused": on}, t("service.paused_on") if on else t("service.paused_off"))
     return 0
-
 
 UNIT = """[Unit]
 Description={description}
@@ -260,15 +268,19 @@ def cmd_install(args) -> int:
 
     os_kind, names, written, hint = install_service_files()
     bot_skip = len(names) == 1
-    skip = f"\n{t('service.bot_skip')}" if bot_skip else ""
+    out: list[str] = []
     if os_kind == "darwin":
         d = Path(written[0]).parent if written else Path.home() / "Library" / "LaunchAgents"
-        text = t("service.installed_launchd", names=", ".join(PLIST_FILES[n] for n in names), dir=d, hint=hint)
-        emit(args, {"dir": str(d), "plists": [PLIST_FILES[n] for n in names]}, text + skip)
+        out.append(t("service.installed_launchd", names=", ".join(PLIST_FILES[n] for n in names), dir=d))
+        emit(args, {"dir": str(d), "plists": [PLIST_FILES[n] for n in names]},
+             "\n".join(out + [t("service.next", cmd=hint)] + ([t("service.bot_skip")] if bot_skip else [])))
         return 0
     d = Path(written[0]).parent if written else Path.home() / ".config" / "systemd" / "user"
-    text = t("service.installed_systemd", names_comma=", ".join(names), dir=d, names_space=" ".join(names))
-    emit(args, {"dir": str(d), "units": names}, text + skip)
+    out.append(t("service.installed_systemd", names_comma=", ".join(names), dir=d))
+    out.append(t("service.next", cmd=hint))
+    if bot_skip:
+        out.append(t("service.bot_skip"))
+    emit(args, {"dir": str(d), "units": names}, "\n".join(out))
     return 0
 
 
@@ -329,7 +341,9 @@ def cmd_start(args) -> int:
     finally:
         out.close()
     paths.service_pid_path().write_text(str(p.pid), encoding="utf-8")
-    emit(args, {"pid": p.pid, "log": str(logf)}, t("service.started", pid=p.pid, log=logf))
+    emit(args, {"pid": p.pid, "log": str(logf)},
+         t("service.started", pid=p.pid, log=logf) + "\n"
+         + ui.styled(ui.kv([(t("views.lbl_next"), t("service.next_up"))], indent=2), "dim"))
     return 0
 
 
@@ -348,14 +362,17 @@ def cmd_stop(args) -> int:
     except ProcessLookupError:
         pass
     except PermissionError as e:
-        raise CliError(t("err.service_no_perm", pid=pid, err=e)) from e
+        raise CliError(t("err.service_no_perm", pid=pid, err=e),
+                       hint=t("service.next_up")) from e
     deadline = time.monotonic() + 10
     while procs.alive(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
     if procs.alive(pid):
-        raise CliError(t("err.service_not_stopped", pid=pid))
+        raise CliError(t("err.service_not_stopped", pid=pid), hint=t("service.next_down"))
     pf.unlink(missing_ok=True)
-    emit(args, {"pid": pid, "stopped": True}, t("service.stopped", pid=pid))
+    emit(args, {"pid": pid, "stopped": True},
+         t("service.stopped", pid=pid) + "\n"
+         + ui.styled(ui.kv([(t("views.lbl_next"), t("service.next_down"))], indent=2), "dim"))
     return 0
 
 

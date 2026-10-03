@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from ahub import archive, events, reasons, ui, workspace
-from ahub.i18n import Words
+from ahub.i18n import Words, plural
 from ahub.i18n import t as _t
-from ahub.model import ACTIVE, WAITING_DECISION, State
+from ahub.model import ACTIVE, FINAL, WAITING_DECISION, State
 from ahub.scope import OWNER, Scope
 from ahub.scope import where as scope_where  # the SQL condition of a scope
 from ahub.store import Store, Task
@@ -28,6 +28,10 @@ SUMMARY_BYTES = 900  # the byte budget of every block in L2 (the whole L2 stays 
 QUESTION_BYTES = 240
 NOTES_BYTES = 400
 REPORT_BYTES = 700
+FINDINGS_BYTES = 1200  # the whole "Review findings" block (a long finding is worth its room, not its budget)
+FINDING_BYTES = 400    # one issue / one fix
+FINDING_INDENT = 10
+FINDINGS_MAX = 6
 UNREAD_LINES = 3
 MSG_LINES = 2  # the lines of a message in the inbox list; the rest is under `ahub inbox <id>`
 MSG_INDENT = 2
@@ -201,6 +205,63 @@ def _review_cell(t: Task) -> str:
     return models + (_t("views.review_rounds", rounds=rounds) if rounds > 1 else "")
 
 
+def open_findings(t: Task, limit: int = 5) -> tuple[list, int]:
+    """(blocking findings of the last review round, how many more there are).
+
+    The verdict files live in the task copy (`.ahub/review_r<N>_<model>.json`) — the same files the
+    engine reads; an accepted or rejected task has no copy left, so there is nothing to show.
+    """
+    from ahub import review
+
+    if not t.worktree or t.state in FINAL:
+        return [], 0
+    try:
+        rounds = sorted((int(m.group(1)) for p in Path(t.worktree, workspace.AHUB_DIR).glob("review_r*_*.json")
+                         if (m := re.match(r"review_r(\d+)_", p.name))), reverse=True)
+    except OSError:
+        return [], 0
+    if not rounds:
+        return [], 0
+    round_no = rounds[0]
+    found = []
+    for path in sorted(Path(t.worktree, workspace.AHUB_DIR).glob(f"review_r{round_no}_*.json")):
+        model = path.stem.split("_", 2)[-1]
+        rv = review.parse(path, model)
+        if rv is not None:
+            found += [f for f in rv.findings if f.severity != "low"]
+    blocking = review.dedup(found)
+    return blocking[:limit], max(0, len(blocking) - limit)
+
+
+def _findings_lines(t: Task, w: int | None) -> list[str]:
+    """The 'Review findings' block: severity and file:line on their own line, the whole issue and its fix
+    wrapped under them — a finding is worth reading, so nothing of it is cut to a table cell.
+
+    The block has its own byte budget (FINDINGS_BYTES): the L2 cap is 4 KB and the summary, the report and
+    the facts come first — what does not fit here is counted, not truncated mid-sentence.
+    """
+    findings, more = open_findings(t, limit=FINDINGS_MAX)
+    if not findings:
+        return []
+    out, used = [ui.section(_t("views.sec_findings"))], 0
+    for i, f in enumerate(findings):
+        block = [f"  {f.severity:<6} {f.file}:{f.line}" if f.line else f"  {f.severity:<6} {f.file}",
+                 ui.para(ui.fit(f.issue, FINDING_BYTES), indent=FINDING_INDENT, w=w)]
+        if f.fix:
+            block.append(ui.para(_t("views.finding_fix", fix=ui.fit(f.fix, FINDING_BYTES)),
+                                 indent=FINDING_INDENT, w=w))
+        size = sum(len(ln.encode()) + 1 for ln in block)
+        if used + size > FINDINGS_BYTES and i:
+            more += len(findings) - i  # every finding that does not fit — not just this one
+            break
+        out += block
+        used += size
+    if more:
+        out.append(ui.para(plural(more, "views.findings_more_one", "views.findings_more_few",
+                                  "views.findings_more", label=t.label), indent=2, w=w))
+    return out
+
+
 def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now: int | None = None,
               w: int | None = None) -> str:
     """L2: the whole task, but brief — a header, the facts, the worker result. ≤ 4000 bytes."""
@@ -226,10 +287,10 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
     groups.append([(_t("views.lbl_model"), model)])
     if go or usd or t.budget_go:
         groups.append([(_t("views.lbl_cost"), _cost_cell(go, usd, t.budget_go))])
-    age: list[Any] = [_age(t.created_at, ts)]
+    since: list[Any] = [_age(t.created_at, ts)]
     if t.after:
-        age.append((_t("views.lbl_after"), ", ".join(f"T{a}" for a in t.after)))
-    groups.append([(_t("views.lbl_age"), age)])
+        since.append((_t("views.lbl_after"), ", ".join(f"T{a}" for a in t.after)))
+    groups.append([(_t("views.lbl_age"), since)])
     out.extend(_facts(groups, w))
 
     rj, rp = _result_paths(t)
@@ -251,11 +312,12 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
         rep = rp.read_text(encoding="utf-8", errors="replace")
         out.append(ui.section(_t("views.sec_report", kb=f"{len(rep.encode()) / 1024:.1f}")))
         out.append(ui.para(ui.fit(report_essence(rep), REPORT_BYTES), indent=2, w=w))
-    if t.state in DECISION_STATES:
-        out.append(_next_line(t, "views.next_decide", w))
-    elif t.state in RESUME_STATES:
-        out.append(_next_line(t, "views.next_resume", w))
-    return clip_bytes("\n".join(out), L2_LIMIT)
+    out.extend(_findings_lines(t, w))
+    # the Next line is booked before the clip: the decision commands are the point of the screen, so what
+    # does not fit is the tail of the blocks above them (the findings), never the way out
+    nxt = _next_line(t, next_key(t), w) if (t.state in DECISION_STATES or t.state in RESUME_STATES) else ""
+    body = clip_bytes("\n".join(out), L2_LIMIT - (len(nxt.encode()) + 1 if nxt else 0))
+    return f"{body}\n{nxt}" if nxt else body
 
 
 def _facts(groups: list[list[tuple[str, Value]]], w: int | None) -> list[str]:
@@ -274,9 +336,19 @@ def _facts(groups: list[list[tuple[str, Value]]], w: int | None) -> list[str]:
     return out
 
 
+def next_key(t: Task) -> str:
+    """The commands that fit the state: a decision (done / needs decision) or a resume (error / stopped)."""
+    return "views.next_decide" if t.state in DECISION_STATES else "views.next_resume"
+
+
 def _next_line(t: Task, key: str, w: int | None) -> str:
     """The 'Next' line — the decision commands, for a task whose decision is pending."""
     return ui.styled(ui.kv([(_t("views.lbl_next"), _t(key, label=t.label))], w=w), "dim")
+
+
+def next_line(key: str, label: str = "", w: int | None = None) -> str:
+    """The 'Next' line after a command did something — the commands that follow it."""
+    return ui.styled(ui.kv([(_t("views.lbl_next"), _t(key, label=label))], w=w), "dim")
 
 
 def result_text(store: Store, t: Task, *, full: bool = False, max_bytes: int = L3_DEFAULT,

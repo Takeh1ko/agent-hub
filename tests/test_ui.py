@@ -275,3 +275,76 @@ def test_a_crowded_overview_shows_the_rows_that_fit_and_counts_the_rest():
     assert len(active) + len(queued) + more == 40  # nothing is dropped silently
     assert "ahub top" in out
     assert len(out.encode()) <= views.L1_LIMIT
+
+
+class _TTY:
+    """A stdout that keeps what was written and claims to be (or not to be) a terminal."""
+
+    def __init__(self, tty: bool) -> None:
+        self.buf = ""
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def write(self, text: str) -> int:
+        self.buf += text
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+
+def test_live_line_only_on_a_terminal(monkeypatch):
+    out = _TTY(tty=True)
+    monkeypatch.setattr(ui.sys, "stdout", out)
+    with ui.Live("Checking 2 models…", total=2) as p:
+        p.step()
+        p.step()
+    assert out.buf == (ui.CLEAR_LINE + "Checking 2 models… 0/2"
+                       + ui.CLEAR_LINE + "Checking 2 models… 1/2"
+                       + ui.CLEAR_LINE + "Checking 2 models… 2/2"
+                       + ui.CLEAR_LINE)  # cleared at the end, whatever happens
+    pipe = _TTY(tty=False)
+    monkeypatch.setattr(ui.sys, "stdout", pipe)
+    with ui.Live("Checking 2 models…", total=2) as p:
+        p.step()
+    assert pipe.buf == ""  # a pipe (Claude) gets nothing
+
+
+def test_live_spins_when_the_total_is_unknown(monkeypatch):
+    out = _TTY(tty=True)
+    monkeypatch.setattr(ui.sys, "stdout", out)
+    with ui.Live("Checking the providers…") as p:
+        p.step()
+        p.total(3)
+        p.step()
+    assert out.buf.count(ui.SPINNER[0]) == 1 and "Checking the providers… 1/3" in out.buf
+
+
+def test_plain_len_ignores_the_colour_codes(monkeypatch):
+    monkeypatch.setattr(ui.sys, "stdout", _Stream(tty=True))
+    coloured = ui.styled("✓", "green")
+    assert len(coloured) > 3 and ui.plain_len(coloured) == 1
+    assert ui.plain_len("plain") == 5
+
+
+def test_command_hint_is_a_runnable_command():
+    """The second line of an error must be a command a person can paste: backticks dropped, prose cut."""
+    from ahub import cli
+    from ahub.cliutil import command_hint
+
+    known = cli.command_names()
+    assert {"status", "models", "role", "providers", "enable", "task", "new", "setup"} <= known
+    assert command_hint("model codex: provider codex is off (ahub providers enable codex)", known) == \
+        "ahub providers enable codex"
+    assert command_hint("the fix: run `ahub doctor` and then retry", known) == "ahub doctor"
+    assert command_hint("run ahub setup . to rewrite", known) == "ahub setup"
+    assert command_hint("Run `ahub setup` to get started", known) == "ahub setup"
+    # a chain of commands: the last one is still a command, the prose around it is not
+    assert command_hint("roles need a free model; ahub models role scout --set-default spark-free", known) == \
+        "ahub models role scout --set-default spark-free"
+    # nothing runnable in the message — no hint line at all
+    for msg in ("no such task T99", "Telegram is not installed: pip install 'ahub[telegram]'",
+                "T1: the review has already started — it cannot be changed", "the hub runs the tasks"):
+        assert command_hint(msg, known) == "", msg
