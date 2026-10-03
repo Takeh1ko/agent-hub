@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ahub import accept, tasks
+from ahub import accept, reasons, tasks, views
 from ahub.engine import Engine
 from ahub.model import Kind, State
 from ahub.store import Store
@@ -62,7 +62,10 @@ def interrupted_accept(store, project, tmp_path, tid):
     service.Service(store, [project], spawn=lambda i: 1, proc_root=tmp_path / "proc",
                     lock_busy=lambda p: False).tick()
     after = store.get_task(tid)
-    assert after.state is State.NEEDS_DECISION and f"ahub accept {t.label}" in after.state_reason
+    # the reason is a code (ahub.reasons); the sentence with the way out is rendered at read time
+    assert after.state is State.NEEDS_DECISION
+    assert after.state_reason == '{"code":"orphan_accepting","label":"T1"}'
+    assert f"ahub accept {t.label}" in reasons.text(after.state_reason)
     return after
 
 
@@ -73,6 +76,10 @@ def test_merge_happy(store, project):
     assert msg.startswith(f"T{t.id} слита в main")
     t2 = store.get_task(t.id)
     assert t2.state is State.ACCEPTED and t2.accepted_sha
+    # the reason is a code + params; no push configured here, so the note is empty — and it still reads
+    assert t2.state_reason == '{"code":"merged","branch":"main","note":""}'
+    assert reasons.text(t2.state_reason) == "слита в main"
+    assert views.task_text(store, t2, now=0, w=100).count("слита в main") == 1
     assert (Path(project.root) / "core" / "b.py").read_text() == "Y = 2\n"
     assert f"merge T{t.id}" in root_log(project)
     assert not Path(t.worktree).exists()
@@ -118,6 +125,20 @@ def test_orchestrator_edit(store, project):
     accept.accept(store, project, t.id)
     assert (Path(project.root) / "core" / "b.py").read_text() == "Y = 3\n"
     assert "orch_edit" in [e.kind for e in store.events(task_id=t.id)]
+
+
+@pytest.mark.parametrize("code", ["ru", "en"])
+def test_orchestrator_edit_is_decided_by_the_problem_code(store, project, monkeypatch, code):
+    """The result.json problem is recognised by its code — the wording of the language must not matter."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", code)
+    _reset()
+    t, _, _ = done_code(store, project)
+    (Path(t.worktree) / "core" / "b.py").write_text("Y = 5\n")
+    git(t.worktree, "commit", "-qam", "правка оркестратора")
+    accept.accept(store, project, t.id)  # HEAD is not the commit in result.json — allowed after an edit
+    assert store.get_task(t.id).state is State.ACCEPTED
 
 
 def test_uncommitted_orch_edit_refused(store, project):

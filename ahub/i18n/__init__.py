@@ -69,6 +69,11 @@ def _reset() -> None:
     _lang = None
 
 
+def template(key: str) -> str | None:
+    """The template of the key in the current language (en as the fallback), or None if there is none."""
+    return _CATALOGS[lang()].get(key) or _EN.get(key)
+
+
 def t(key: str, **kw) -> str:
     """The current language's template, substitution through str.format(**kw)."""
     tpl = _CATALOGS[lang()].get(key) or _EN[key]  # missing everywhere — KeyError: a developer error

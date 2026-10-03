@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from ahub import archive, events, gates, prepare, registry, tasks, transitions, workspace
+from ahub import archive, events, gates, prepare, reasons, registry, tasks, transitions, workspace
 from ahub import log as hublog
 from ahub.config import ProjectConfig
 from ahub.engine import owner_token
@@ -38,7 +38,14 @@ RENEW_S = 20.0  # how often the lease is renewed during acceptance (minutes-long
 
 
 class DecisionError(RuntimeError):
-    """Action impossible (one line for the orchestrator)."""
+    """Action impossible (one line for the orchestrator).
+
+    `reason` — the stored form (a reason code blob); empty — the message itself goes on the task.
+    """
+
+    def __init__(self, message: str, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _get(store: Store, task_id: int) -> Task:
@@ -104,7 +111,7 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
     if t.kind not in CHANGES_FILES:
         if t.state not in (State.DONE, State.NEEDS_DECISION):
             raise DecisionError(_t("accept.can_accept", label=t.label, state=t.state.value))
-        transitions.move(store, t.id, State.ACCEPTED, reason=_t("accept.accepted"), by=by)
+        transitions.move(store, t.id, State.ACCEPTED, reason=reasons.dump("accepted"), by=by)
         events.ack_task(store, t.id)
         archive.write_task(store, project, t.id)
         workspace.remove(project, t.id, delete_branch=True)
@@ -117,7 +124,7 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
     _root_ready(project)
     owner = owner_token()
     if t.state is not State.ACCEPTING:
-        transitions.move(store, t.id, State.ACCEPTING, reason=_t("accept.accepting"), by=by,
+        transitions.move(store, t.id, State.ACCEPTING, reason=reasons.dump("accepting"), by=by,
                          expect_from={State.DONE, State.NEEDS_DECISION})
     if not transitions.acquire(store, t.id, owner, pid=os.getpid(), lease_ms=ACCEPT_LEASE_MS):
         raise DecisionError(_t("accept.busy", label=t.label))
@@ -125,11 +132,12 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
         with _keep_lease(store, t.id, owner, ACCEPT_LEASE_MS):
             return _merge(store, project, _get(store, t.id), owner, by, merged=merged)
     except DecisionError as e:
-        _back(store, t.id, owner, str(e))
+        _back(store, t.id, owner, e.reason or str(e))
         raise
     except Exception as e:
         _log.exception("accept T%d failed", t.id, extra={"task": t.id})
-        _back(store, t.id, owner, _t("accept.fail", err=f"{type(e).__name__}: {e}"))
+        detail = f"{type(e).__name__}: {e}"
+        _back(store, t.id, owner, reasons.dump("accept_failed", err=detail))
         raise DecisionError(_t("accept.fail", err=e)) from e
     finally:
         transitions.release(store, t.id, owner)
@@ -138,7 +146,8 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
 def _back(store: Store, task_id: int, owner: str, reason: str) -> None:
     t = store.get_task(task_id)
     if t is not None and t.state is State.ACCEPTING:
-        transitions.move(store, task_id, State.NEEDS_DECISION, reason=reason[:500], by="accept", owner=owner)
+        stored = reason if reasons.load(reason) else reason[:500]
+        transitions.move(store, task_id, State.NEEDS_DECISION, reason=stored, by="accept", owner=owner)
         events.ack_task(store, task_id)  # the orchestrator saw the refusal in the command output
 
 
@@ -151,15 +160,22 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *
             store.add_event(Ev.ORCH_EDIT, task_id=t.id, project=t.project,
                             payload={"head": head[:12], "worker_commit": str(res.get("commit", ""))[:12], "by": by})
         g = gates.check(project, t, run_tests=False, orch_edit=orch_edit)
-        problems = g.fatal + [p for p in g.repairable if not (orch_edit and p.startswith("result.json"))]
+        # a result.json problem after an orchestrator edit is expected — decide by the problem code, not by
+        # its text (the text is translated)
+        problems = g.fatal + [p for p in g.repairable
+                              if not (orch_edit and isinstance(p, gates.Problem)
+                                      and p.code in gates.RESULT_JSON_CODES)]
         if problems:
-            raise DecisionError(_t("accept.gates_head", problems="; ".join(problems)))
+            raise DecisionError(_t("accept.gates_head", problems="; ".join(problems)),
+                                reasons.dump("accept_gates", problems=gates.codes(problems)))
         title = t.title.replace('"', "'")[:100]
         r = workspace.git(project.root, "merge", "--no-ff", "-m", f"merge {t.label}: {title}", t.branch, check=False)
         if r.returncode != 0:
-            conflicts = workspace.git(project.root, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
+            listing = workspace.git(project.root, "diff", "--name-only", "--diff-filter=U", check=False)
+            conflicts = listing.stdout.split()
             workspace.git(project.root, "merge", "--abort", check=False)
-            raise DecisionError(_t("accept.conflict", info=", ".join(conflicts[:10]) or (r.stderr or r.stdout)[-300:]))
+            files = ", ".join(conflicts[:10]) or (r.stderr or r.stdout)[-300:]
+            raise DecisionError(_t("accept.conflict", info=files), reasons.dump("merge_conflict", files=files))
         merged = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
     else:
         _log.info("T%d is already merged into %s (%s) — acceptance on HEAD", t.id, project.work_branch, merged[:10])
@@ -169,19 +185,23 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *
         if not ok:
             head_now = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
             if head_now != merged:  # someone committed into the work branch meanwhile — leave foreign commits alone
-                raise DecisionError(_t("accept.root_moved", now=head_now[:10], merged=merged[:10]))
+                raise DecisionError(_t("accept.root_moved", now=head_now[:10], merged=merged[:10]),
+                                    reasons.dump("root_moved", now=head_now[:10], merged=merged[:10]))
             workspace.git(project.root, "reset", "--keep", "HEAD~1", check=False)  # --keep leaves foreign dirt alone
-            raise DecisionError(_t("accept.red_rolled_back", cmd=cmd, tail=tail[-600:]))
-    note = ""
+            raise DecisionError(_t("accept.red_rolled_back", cmd=cmd, tail=tail[-600:]),
+                                reasons.dump("red_rolled_back", cmd=cmd))
+    push_error = ""
     if project.push.strip():
         parts = project.push.split()
         pr = workspace.git(project.root, "push", *parts, check=False, timeout=300)
         if pr.returncode != 0:
-            note = _t("accept.push_fail", err=(pr.stderr or pr.stdout).strip()[-200:])
-            _log.warning("push T%d: %s", t.id, note, extra={"task": t.id})
-    transitions.move(store, t.id, State.ACCEPTED, reason=_t("accept.merged_reason", branch=project.work_branch,
-                                                             note=note), by=by, owner=owner,
-                     fields={"accepted_sha": merged})
+            push_error = (pr.stderr or pr.stdout).strip()[-200:]
+            _log.warning("push T%d: %s", t.id, push_error, extra={"task": t.id})
+    note = _t("accept.push_fail", err=push_error) if push_error else ""
+    transitions.move(store, t.id, State.ACCEPTED,
+                     reason=reasons.dump("merged", branch=project.work_branch,
+                                         note=reasons.part("push_failed", err=push_error) if push_error else ""),
+                     by=by, owner=owner, fields={"accepted_sha": merged})
     events.ack_task(store, t.id)
     try:
         prepare.run_hook(project, "task_cleanup", t, t.worktree)
@@ -196,7 +216,7 @@ def reject(store: Store, project: ProjectConfig, task_id: int, *, reason: str = 
            keep: bool = False) -> str:
     t = _get(store, task_id)
     try:
-        transitions.move(store, t.id, State.REJECTED, reason=reason or _t("accept.rejected_default"), by=by)
+        transitions.move(store, t.id, State.REJECTED, reason=reason or reasons.dump("rejected"), by=by)
     except (transitions.TransitionError, transitions.ConflictError) as e:
         raise DecisionError(f"{e}{_t('accept.active_first')}") from e
     events.ack_task(store, t.id)
@@ -216,7 +236,7 @@ def rework(store: Store, task_id: int, notes: str, *, by: str = "orchestrator") 
     lim = dict(t.limits)
     lim["rework_notes"] = notes.strip()
     store.update_task(t.id, limits=lim)
-    transitions.move(store, t.id, State.QUEUED, reason=_t("accept.rework"), by=by, fields={"round": t.round + 1},
+    transitions.move(store, t.id, State.QUEUED, reason=reasons.dump("rework"), by=by, fields={"round": t.round + 1},
                      payload={"notes": notes[:500]})
     events.ack_task(store, t.id)
     return _t("accept.rework_msg", label=t.label, round=t.round + 1)
@@ -226,7 +246,7 @@ def continue_task(store: Store, task_id: int, *, by: str = "orchestrator") -> st
     t = _get(store, task_id)
     if t.state not in (State.STOPPED, State.ERROR, State.NEEDS_DECISION):
         raise DecisionError(_t("accept.continue_state", label=t.label, state=t.state.value))
-    transitions.move(store, t.id, State.QUEUED, reason=_t("accept.continue"), by=by)
+    transitions.move(store, t.id, State.QUEUED, reason=reasons.dump("continue_task"), by=by)
     events.ack_task(store, t.id)
     return _t("accept.continued_msg", label=t.label)
 
@@ -297,7 +317,7 @@ def extend_budget(store: Store, task_id: int, *, add: float | None = None, set_t
         _t("accept.budget_usd", old=f"{t.budget_usd:g}", new=f"{new_usd:g}")
         if new_usd != t.budget_usd else "")
     if t.state is State.NEEDS_DECISION and _stopped_by_budget(store, t.id):
-        transitions.move(store, t.id, State.QUEUED, reason=_t("accept.budget_long"), by=by)
+        transitions.move(store, t.id, State.QUEUED, reason=reasons.dump("budget_extended"), by=by)
         events.ack_task(store, t.id)
         msg += _t("accept.budget_resumed")
     return msg

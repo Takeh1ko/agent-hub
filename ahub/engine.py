@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ahub import gates, prepare, prompts, providers, registry, review, transcript, transitions, workspace
+from ahub import gates, prepare, prompts, providers, reasons, registry, review, transcript, transitions, workspace
 from ahub import log as hublog
 from ahub.config import ProjectConfig
 from ahub.i18n import t as _t
@@ -71,13 +71,29 @@ class LeaseLost(RuntimeError):
     """Lease taken away: stop work, leave state alone."""
 
 
+UNFIXABLE_SCOUT = ("scout_files", "scout_commits")  # a scout that touched files — a repair prompt cannot fix it
+
+
+def _problem(code: str, **params) -> gates.Problem:
+    """One scout-result problem: the text for a repair prompt, the code for the task reason."""
+    return gates.Problem(_t("engine." + code, **params), code, params)
+
+
+def _gate_problems(g: gates.GateResult) -> list[dict]:
+    """The gate problems as sub-reasons — to store on the task, not translated text."""
+    items = gates.codes(g.repairable)
+    if g.tests_ok is False:
+        items.append(reasons.part("gate_accept_red"))
+    return items
+
+
 def owner_token() -> str:
     return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
 
 @dataclass
 class Settled:
-    """How an engine step ended (for tests and logs)."""
+    """How an engine step ended (for tests and logs). `reason` — the text, in the current language."""
 
     state: State
     reason: str = ""
@@ -121,7 +137,7 @@ class Engine:
         if not transitions.acquire(self.store, self.task_id, self.owner, pid=os.getpid(), lease_ms=self.lease_ms):
             self.log.info("task owned by another owner — exiting")
             t = self.store.get_task(self.task_id)
-            return Settled(t.state if t else State.ERROR, _t("engine.busy"))
+            return Settled(t.state if t else State.ERROR, reasons.text(reasons.dump("busy")))
         done = threading.Event()
         keeper = threading.Thread(target=self._keeper, args=(done,), daemon=True)
         keeper.start()
@@ -129,16 +145,17 @@ class Engine:
             return self._run()
         except LeaseLost:
             t = self.store.get_task(self.task_id)
-            return Settled(t.state if t else State.ERROR, _t("engine.lease_lost"))
+            return Settled(t.state if t else State.ERROR, reasons.text(reasons.dump("lease_lost")))
         except PollFailed:
             raise  # the task stays active; the worker exits non-zero and the service re-picks it
         except workspace.WorkspaceError as e:
             self.log.error("worktree: %s", e)
-            return self._settle(State.ERROR, _t("engine.workspace_fail", err=e))
+            return self._settle(State.ERROR, reasons.dump("prepare_failed", err=e))
         except Exception as e:
             self.log.exception("engine crashed")
             try:
-                return self._settle(State.ERROR, _t("engine.hub_fail", typ=type(e).__name__, err=e)[:500])
+                # an exception message is technical detail — stored as text, not as a reason code
+                return self._settle(State.ERROR, f"hub failure: {type(e).__name__}: {e}")
             except Exception:
                 self.log.exception("failed to record error")
                 raise
@@ -167,16 +184,18 @@ class Engine:
         return transitions.move(self.store, self.task_id, to, reason=reason, by="engine", owner=self.owner, **kw)
 
     def _settle(self, to: State, reason: str = "", payload: dict | None = None) -> Settled:
+        """Finish the task in `to` with this reason (a code blob or free text). Returns what a reader sees."""
         t = self.task()
         if t.state is to:
-            return Settled(to, reason)
+            return Settled(to, reasons.text(reason))
         if t.state not in ACTIVE and t.state is not State.QUEUED:
-            return Settled(t.state, t.state_reason)  # already decided (e.g. stopped)
+            return Settled(t.state, reasons.text(t.state_reason))  # already decided (e.g. stopped)
+        stored = reason if reasons.load(reason) else reason[:500]  # free text is clipped, a code is not
         cost = self.task_cost()
         body = {"cost_go": round(cost[0], 4), "cost_usd": round(cost[1], 4)}
         body.update(payload or {})
-        self.move(to, reason[:500], payload=body)
-        self.log.info("settled: %s%s", to.value, f" ({reason[:200]})" if reason else "")
+        self.move(to, stored, payload=body)
+        self.log.info("settled: %s%s", to.value, f" ({reasons.text(stored)[:200]})" if stored else "")
         lim = self.task().limits
         if lim.get("orphans"):  # episode done — orphan counter restarts
             lim = dict(lim)
@@ -185,7 +204,7 @@ class Engine:
         from ahub import archive
 
         archive.write_task(self.store, self.project, self.task_id)
-        return Settled(to, reason)
+        return Settled(to, reasons.text(stored))
 
     def stop_requested(self) -> bool:
         """The turn must stop: the lease is lost, the budget is spent, a stop was requested.
@@ -436,18 +455,18 @@ class Engine:
     def _run(self) -> Settled:
         t = self.task()
         if t.state is State.QUEUED:
-            t = self.move(State.PREPARING, _t("engine.taken"))
+            t = self.move(State.PREPARING, reasons.dump("taken"))
         elif t.state not in ACTIVE:
-            return Settled(t.state, _t("engine.not_active"))
+            return Settled(t.state, reasons.text(reasons.dump("not_active")))
         limit_min = int(t.limits.get("time_limit_min") or 60)
         self._deadline_ms = now_ms() + limit_min * 60_000
         if self.over_budget():
-            return self._settle(State.NEEDS_DECISION, _t("engine.budget_before"))
+            return self._settle(State.NEEDS_DECISION, reasons.dump("budget_before"))
         if t.kind is Kind.SCOUT:
             return self._scout(t)
         if t.kind in (Kind.CODE, Kind.ROUTINE):
             return self._code(t)
-        return self._settle(State.NEEDS_DECISION, _t("engine.unsupported", kind=t.kind.value))
+        return self._settle(State.NEEDS_DECISION, reasons.dump("unsupported_kind", kind=t.kind.value))
 
     def _prepare(self, t: Task) -> Task:
         if t.state is State.PREPARING:
@@ -455,7 +474,7 @@ class Engine:
             fields = {"worktree": ws.path, "branch": ws.branch}
             if not t.base_sha:
                 fields["base_sha"] = ws.base_sha
-            t = self.move(State.WORKING, _t("engine.worker_started"), fields={**fields, "round": max(1, t.round)})
+            t = self.move(State.WORKING, reasons.dump("worker_started"), fields={**fields, "round": max(1, t.round)})
         return t
 
     def _outcome_to_state(self, r: RunResult) -> tuple[State, str] | None:
@@ -464,16 +483,16 @@ class Engine:
             if self.lost.is_set():
                 raise LeaseLost()
             if self.budget_hit:
-                return State.NEEDS_DECISION, _t("engine.budget_gone")
-            return State.STOPPED, _t("engine.stopped")
+                return State.NEEDS_DECISION, reasons.dump("budget_gone")
+            return State.STOPPED, reasons.dump("stopped")
         if r.outcome is Outcome.TIMEOUT:
-            return State.NEEDS_DECISION, _t("engine.time_limit", err=r.error)
+            return State.NEEDS_DECISION, reasons.dump("time_limit", err=r.error)
         if r.outcome is Outcome.QUOTA:
-            return State.NEEDS_DECISION, _t("engine.quota", err=r.error[:300])
+            return State.NEEDS_DECISION, reasons.dump("quota", err=r.error[:300])
         if r.outcome is Outcome.TRANSIENT:
-            return State.NEEDS_DECISION, _t("engine.transient_out", err=r.error[:300])
+            return State.NEEDS_DECISION, reasons.dump("transient_out", err=r.error[:300])
         if r.outcome in (Outcome.NO_ACCESS, Outcome.MODEL_ERROR, Outcome.CRASH, Outcome.NOT_STARTED):
-            return State.ERROR, _t("engine.step_fail", outcome=r.outcome.value, err=r.error[:400])
+            return State.ERROR, reasons.dump("step_failed", outcome=r.outcome.value, err=r.error[:400])
         return None
 
     def _step_with_continue(self, role: Role, alias: str, prompt: str, *, session_id: str | None,
@@ -489,7 +508,7 @@ class Engine:
                              log_name=log_name, prompt_kind="continue")
             r = self._take_nudge(role, alias, r, session_id, log_name)
             if r.outcome is Outcome.SILENCE:
-                return r, (State.NEEDS_DECISION, _t("engine.silence_twice", secs=r.silence_s))
+                return r, (State.NEEDS_DECISION, reasons.dump("silence_twice", secs=r.silence_s))
         return r, self._outcome_to_state(r)
 
     def _take_nudge(self, role: Role, alias: str, r: RunResult, session_id: str | None,
@@ -523,21 +542,24 @@ class Engine:
                                             prompt_kind="continue" if resume_sid else "start")
         if final is not None:
             return self._settle(*final)
-        problem = self._check_scout(t)
-        if problem and not problem.startswith("!"):
-            r, final = self._step_with_continue(Role.SCOUT, t.executor, prompts.repair_prompt(problem),
+        problems = self._check_scout(t)
+        if problems and not any(p.code in UNFIXABLE_SCOUT for p in problems):
+            r, final = self._step_with_continue(Role.SCOUT, t.executor,
+                                                prompts.repair_prompt("; ".join(problems)),
                                                 session_id=r.session_id, log_name="scout", prompt_kind="repair")
             if final is not None:
                 return self._settle(*final)
-            problem = self._check_scout(t)
-        if problem:
-            return self._settle(State.NEEDS_DECISION, _t("engine.scout_bad", problem=problem.lstrip("!")))
+            problems = self._check_scout(t)
+        if problems:
+            return self._settle(State.NEEDS_DECISION,
+                                reasons.dump("scout_bad", problems=gates.codes(problems, prefix="")))
         res = self._result(t)
         if res.get("status") == "blocked":
-            return self._settle(State.NEEDS_DECISION, _t("engine.blocked", summary=res.get("summary", ""))[:500],
-                                payload={"summary": res.get("summary", "")})
+            summary = str(res.get("summary", ""))
+            return self._settle(State.NEEDS_DECISION, reasons.dump("blocked", summary=summary),
+                                payload={"summary": summary})
         report = Path(t.worktree) / workspace.AHUB_DIR / "report.md"
-        return self._settle(State.DONE, _t("engine.report_done"),
+        return self._settle(State.DONE, reasons.dump("report_ready"),
                             payload={"summary": str(res.get("summary", ""))[:500],
                                      "report_bytes": report.stat().st_size})
 
@@ -549,32 +571,32 @@ class Engine:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def _check_scout(self, t: Task) -> str:
-        """Empty — result matches the form. "!…" — unfixable via repair (scout touched files)."""
+    def _check_scout(self, t: Task) -> list[gates.Problem]:
+        """What is wrong with the scout result — empty list when it matches the form."""
+        problems: list[gates.Problem] = []
         changed = workspace.changed_files(t.worktree)
         if changed:
-            return "!" + _t("engine.scout_files", files=", ".join(changed[:10]))
+            problems.append(_problem("scout_files", files=", ".join(changed[:10])))
         if workspace.commits_since(t.worktree, t.base_sha):
-            return "!" + _t("engine.scout_commits")
+            problems.append(_problem("scout_commits"))
         base = Path(t.worktree) / workspace.AHUB_DIR
-        problems = []
         res_path = base / "result.json"
         if not res_path.exists():
-            problems.append(_t("engine.no_result"))
+            problems.append(_problem("no_result"))
         else:
             res = self._result(t)
             if not res:
-                problems.append(_t("engine.result_not_json"))
+                problems.append(_problem("result_not_json"))
             else:
                 if not str(res.get("summary", "")).strip():
-                    problems.append(_t("engine.empty_summary"))
+                    problems.append(_problem("empty_summary"))
                 if res.get("status") not in ("done", "blocked"):
-                    problems.append(_t("engine.bad_status"))
+                    problems.append(_problem("bad_status"))
         report = base / "report.md"
         if not report.exists() or not report.read_text(encoding="utf-8", errors="replace").strip():
             if self._result(t).get("status") != "blocked":
-                problems.append(_t("engine.no_report"))
-        return "; ".join(problems)
+                problems.append(_problem("no_report"))
+        return problems
 
     # --- code and routine ---
 
@@ -588,20 +610,20 @@ class Engine:
         self.store.add_event("budget_hard", task_id=self.task_id, project=self.project.name,
                              payload={"go": round(go, 4), "usd": round(usd, 4)})
         t = self.task()
-        return self._settle(State.NEEDS_DECISION, _t("engine.budget_spent", go=f"{go:.3f}",
-                                                     budget=f"{t.budget_go:g}"))
+        return self._settle(State.NEEDS_DECISION, reasons.dump("budget_spent", go=f"{go:.3f}",
+                                                               budget=f"{t.budget_go:g}"))
 
     def _prepare_code(self, t: Task) -> Task:
         if t.state is State.PREPARING:
             try:
                 p = prepare.prepare(self.project, t)
             except prepare.PrepareError as e:
-                raise _Settle(State.ERROR, _t("engine.prepare_fail", err=e)) from e
+                raise _Settle(State.ERROR, reasons.dump("prepare_failed", err=e)) from e
             fields = {"worktree": p.workspace.path, "branch": p.workspace.branch, "round": max(1, t.round)}
             if not t.base_sha:
                 fields["base_sha"] = p.workspace.base_sha
             to = State.FIXING if t.round > 1 else State.WORKING
-            t = self.move(to, _t("engine.worker_started"), fields=fields)
+            t = self.move(to, reasons.dump("worker_started"), fields=fields)
         return t
 
     def _code(self, t: Task) -> Settled:
@@ -643,13 +665,14 @@ class Engine:
                 return self._settle(*final)
             blocked = self._blocked(t)
             if blocked:
-                return self._settle(State.NEEDS_DECISION, _t("engine.blocked", summary=blocked)[:500])
-            t = self.move(State.CHECKING, _t("engine.checking"))
+                return self._settle(State.NEEDS_DECISION, reasons.dump("blocked", summary=blocked[:400]))
+            t = self.move(State.CHECKING, reasons.dump("gates"))
             g = self._gate(t)
             fixed_once = False
             while True:
                 if g.fatal:
-                    return self._settle(State.NEEDS_DECISION, "; ".join(g.fatal)[:500],
+                    return self._settle(State.NEEDS_DECISION,
+                                        reasons.dump("gates_blocked", problems=gates.codes(g.fatal)),
                                         payload={"diffstat": g.diffstat})
                 problem = "; ".join(g.repairable) if g.repairable else ""
                 if not problem and g.tests_ok is False:
@@ -658,7 +681,7 @@ class Engine:
                     break
                 if fixed_once:
                     return self._settle(State.NEEDS_DECISION,
-                                        _t("engine.gates_retry_fail", problem=problem)[:500],
+                                        reasons.dump("gates_failed", problems=_gate_problems(g)),
                                         payload={"tests_tail": g.tests_tail[-800:]})
                 fixed_once = True
                 red_tests = g.tests_ok is False and not g.repairable
@@ -675,11 +698,11 @@ class Engine:
             payload = {"summary": str(summary)[:500], "diffstat": g.diffstat,
                        "tests": "green" if g.tests_ok else ("none" if g.tests_ok is None else "red")}
             if not models:
-                return self._settle(State.DONE, _t("engine.gates_passed") + (
-                    "" if t.kind is Kind.ROUTINE else _t("engine.gates_passed_tests")), payload=payload)
+                code = "gates_passed" if t.kind is Kind.ROUTINE else "gates_passed_tests"
+                return self._settle(State.DONE, reasons.dump(code), payload=payload)
             if self.over_budget():
                 return self._budget_stop(role, t.executor, sid)
-            t = self.move(State.REVIEWING, _t("engine.review_round", round=round_no))
+            t = self.move(State.REVIEWING, reasons.dump("review_round", round=round_no))
             decision, reason, findings = self._review_round(t, g, models, round_no, max_rounds)
             if decision == "done":
                 return self._settle(State.DONE, reason, payload=payload)
@@ -764,7 +787,8 @@ class Engine:
             return None
         if self.lost.is_set():
             raise LeaseLost()
-        return "decision", _t("engine.review_budget" if self.budget_hit else "engine.review_stopped"), []
+        code = "review_budget" if self.budget_hit else "review_stopped"
+        return "decision", reasons.dump(code), []
 
     def _revert_reviewer(self, t: Task) -> None:
         """Reviewer must not touch files — revert."""

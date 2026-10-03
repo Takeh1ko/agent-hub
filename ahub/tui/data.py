@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ahub import archive, comms, config, events, pulse, views
+from ahub import archive, comms, config, events, pulse, reasons, ui, views
 from ahub.i18n import Words
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION, Ev, State
@@ -142,11 +142,11 @@ def feed(store: Store, limit: int = 12) -> list[str]:
             out.append(f"{when} {events.format_line(e, t)}")
         elif e.kind == Ev.STATE.value and e.payload.get("to"):
             to = archive.STATE_WORDS.get(e.payload["to"], e.payload["to"])
-            reason = f" ({e.payload['reason'][:60]})" if e.payload.get("reason") else ""
-            out.append(f"{when} T{e.task_id} → {to}" + reason)
+            why = reasons.text(e.payload.get("reason", ""))
+            out.append(f"{when} T{e.task_id} → {to}" + (f" ({ui.clip(why, 60)})" if why else ""))
         elif e.kind in EV_WORDS:
             txt = e.payload.get("text") or EV_WORDS[e.kind]
-            out.append(f"{when} T{e.task_id or '-'}: {str(txt)[:90]}")
+            out.append(f"{when} T{e.task_id or '-'}: {ui.clip(txt, 90)}")
     return out[-limit:]
 
 

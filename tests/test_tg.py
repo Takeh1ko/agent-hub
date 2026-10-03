@@ -272,7 +272,7 @@ def test_help_and_card_en(store, monkeypatch):
     assert "working and waiting" in rep.text and "recent" in rep.text
     card = core.task_detail(store, tid)
     assert "pay button" in card.text and "created" in card.text
-    assert "state: done" in card.text
+    assert "State  done" in card.text
     assert not _re.search(r"[а-яА-ЯёЁ]", rep.text + card.text)
     assert card.buttons[0][0].data == "tasks"  # button codes are not translated
     _reset()

@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ahub import archive, workspace
+from ahub import archive, reasons, workspace
 from ahub.config import ProjectConfig
 from ahub.i18n import t as _t
 from ahub.model import Kind
@@ -34,6 +34,31 @@ from ahub.store import Task
 TEST_TIMEOUT_S = 30 * 60
 LOCK_WAIT_S = 30 * 60
 TAIL_LINES = 15
+# the shape of .ahub/result.json — a problem an orchestrator's own edit over the result may cause
+RESULT_JSON_CODES = frozenset({"result_commit", "result_files", "no_result"})
+
+
+class Problem(str):
+    """A gate problem: the localized text (it is a str — prompts and summaries use it as is) plus the
+    reason code and params, so what goes on the task is data, not translated text."""
+
+    __slots__ = ("code", "params")
+
+    def __new__(cls, text: str, code: str, params: dict) -> "Problem":
+        p = super().__new__(cls, text)
+        p.code = code
+        p.params = params
+        return p
+
+
+def problem(code: str, **params) -> Problem:
+    """One gate problem, e.g. problem("no_commit") — text for a prompt, code for the task reason."""
+    return Problem(_t("gates." + code, **params), code, params)
+
+
+def codes(items: list[str], prefix: str = "gate_") -> list[dict]:
+    """The problems as sub-reasons (to store); plain text items are skipped."""
+    return [reasons.part(prefix + p.code, **p.params) for p in items if isinstance(p, Problem)]
 
 
 @dataclass
@@ -164,29 +189,29 @@ def check(project: ProjectConfig, task: Task, *, run_tests: bool = True, orch_ed
     head = workspace.head(path)
     g = GateResult(base=base, head=head)
     if workspace.commits_since(path, base) == 0:
-        g.repairable.append(_t("gates.no_commit"))
+        g.repairable.append(problem("no_commit"))
     dirty = workspace.changed_files(path)
     if dirty:
-        g.repairable.append(_t("gates.dirty", files=", ".join(dirty[:10])))
+        g.repairable.append(problem("dirty", files=", ".join(dirty[:10])))
     g.diff_files = diff_files(path, base) if base else []
     stat = workspace.git(path, "diff", "--shortstat", f"{base}..HEAD", check=False).stdout.strip()
     g.diffstat = stat
     globs = list(task.limits.get("paths") or [])
     outside = [f for f in g.diff_files if not allowed(f, globs)]
     if outside:
-        g.fatal.append(_t("gates.outside", files=", ".join(outside[:10])))
+        g.fatal.append(problem("outside", files=", ".join(outside[:10])))
     if not orch_edit:
         res = archive.read_json(Path(path) / workspace.AHUB_DIR / "result.json")
         if not res:
-            g.repairable.append(_t("gates.no_result"))
+            g.repairable.append(problem("no_result"))
         else:
             if str(res.get("commit", ""))[:7] != head[:7] or not str(res.get("commit", "")).strip():
-                g.repairable.append(_t("gates.result_commit", got=str(res.get("commit", ""))[:10] or "—",
-                                         head=head[:10]))
+                g.repairable.append(problem("result_commit", got=str(res.get("commit", ""))[:10] or "—",
+                                            head=head[:10]))
             files = res.get("files") or []
             extra = [f for f in files if f not in g.diff_files]
             if extra:
-                g.repairable.append(_t("gates.result_files", files=", ".join(map(str, extra[:10]))))
+                g.repairable.append(problem("result_files", files=", ".join(map(str, extra[:10]))))
     if run_tests and task.kind is Kind.CODE and not g.repairable and not g.fatal:
         nodes = list(task.limits.get("accept") or [])
         if nodes:

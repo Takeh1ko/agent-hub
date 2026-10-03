@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 
-from ahub import archive, events, tasks, transitions, views
+from ahub import events, tasks, transitions, views
 from ahub.cliutil import CliError, add_project_arg, emit, resolve_project
 from ahub.model import ACTIVE, WAITING_DECISION, Kind, State, parse_task_id
 from ahub.service import live_workers
@@ -79,18 +79,26 @@ def cmd_status(args) -> int:
     if args.task:
         t = _task(store, args.task)
         events.ack_task(store, t.id)
-        emit(args, {"task": asdict(t), "live": t.id in live}, views.task_text(store, t, live=live))
+        from ahub import reasons
+
+        emit(args, {"task": asdict(t), "live": t.id in live,
+                    "state_reason_text": reasons.text(t.state_reason)},
+             views.task_text(store, t, live=live))
         return 0
     project = None
     if args.project:
         project = resolve_project(args).name
-    from ahub import config, pulse
+    from ahub import config, pulse, reasons
 
     projects, _errs = config.load_projects()
     pulses = pulse.all_pulses(store, live=live, projects=projects)
     text = views.status_text(store, project=project, live=live, pulses=pulses)
+    queued = store.list_tasks(states={State.QUEUED}, project=project)
     data = {"active": [asdict(t) for t in store.list_tasks(states=ACTIVE, project=project)],
             "waiting": [asdict(t) for t in store.list_tasks(states=WAITING_DECISION, project=project)],
+            "queued": [{"id": t.id, "label": t.label, "state": t.state.value,
+                        "reason": t.state_reason,
+                        "reason_text": reasons.text(t.state_reason)} for t in queued],
             "live": live}
     emit(args, data, text)
     return 0
@@ -115,10 +123,12 @@ def cmd_log(args) -> int:
 def cmd_stop(args) -> int:
     store = Store()
     t = _task(store, args.task)
+    from ahub import reasons
     from ahub.i18n import t as _t
 
     try:
-        how = transitions.request_stop(store, t.id, reason=args.reason or _t("trans.stop_default"), by=args.by)
+        how = transitions.request_stop(store, t.id, reason=args.reason or reasons.dump("stop_command"),
+                                       by=args.by)
     except transitions.TransitionError as e:
         raise CliError(str(e)) from e
     if how == "stopped":
@@ -227,23 +237,11 @@ def cmd_diff(args) -> int:
 
 
 def cmd_history(args) -> int:
-    from ahub.i18n import t as _t
-
     store = Store()
     project = resolve_project(args).name if args.project else None
-    done = [t for t in store.list_tasks(project=project, newest_first=True) if t.state.value in
-            ("accepted", "rejected", "done", "needs_decision", "error", "stopped")][: args.n]
-    lines = []
-    for t in done:
-        go, usd = archive.task_cost(store, t.id)
-        dur = ""
-        if t.finished_at:
-            dur = _t("task.history_dur", age=views._age(t.created_at, t.finished_at))
-        lines.append(_t("task.history_line", label=t.label, kind=t.kind.value,
-                        title=views._short(t.title, 45),
-                        state=archive.STATE_WORDS.get(t.state.value, t.state.value),
-                        round=t.round, cost=f"{go + usd:.3f}", dur=dur))
-    emit(args, {"tasks": [asdict(t) for t in done]}, "\n".join(lines) or _t("task.history_empty"))
+    done = [t for t in store.list_tasks(project=project, newest_first=True)
+            if t.state in views.HISTORY_STATES][: args.n]
+    emit(args, {"tasks": [asdict(t) for t in done]}, views.history_text(store, project=project, limit=args.n))
     return 0
 
 

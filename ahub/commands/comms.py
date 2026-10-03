@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from ahub import comms, events
+from ahub import comms, events, views
 from ahub.cliutil import CliError, emit
 from ahub.store import Store
 from ahub.time import parse_duration as _parse_duration
@@ -73,11 +73,8 @@ def cmd_ack(args) -> int:
 
 
 def cmd_inbox(args) -> int:
-    from ahub.i18n import t
-
     rows = comms.inbox(Store(), mark=not args.peek)
-    text = "\n".join(f"#{r['id']} {r['text']}" for r in rows) or t("comms.inbox_empty")
-    emit(args, {"messages": rows}, text)
+    emit(args, {"messages": rows}, views.inbox_text(rows))
     return 0
 
 
@@ -103,12 +100,8 @@ def cmd_ask(args) -> int:
 
 
 def cmd_questions(args) -> int:
-    from ahub.i18n import t
-
     rows = comms.open_questions(Store())
-    text = "\n".join(f"#{r['id']} {r['text']}" + (f" [{', '.join(r['options'])}]" if r['options'] else "")
-                     for r in rows) or t("comms.questions_empty")
-    emit(args, {"questions": rows}, text)
+    emit(args, {"questions": rows}, views.questions_text(rows))
     return 0
 
 

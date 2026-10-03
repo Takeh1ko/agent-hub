@@ -30,9 +30,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ahub import config, paths, procs, transitions
+from ahub import config, paths, procs, reasons, transitions
 from ahub import log as hublog
-from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Ev, State
 from ahub.store import Store, Task
 from ahub.time import now_ms
@@ -99,6 +98,18 @@ def external_lock_busy(path: str) -> bool:
         os.close(fd)
 
 
+def hub_env() -> dict[str, str]:
+    """The environment of a process this hub starts: ours, plus this hub on PYTHONPATH.
+
+    Such a process must run the code that started it, not whatever `ahub` the environment happens to
+    import: with an editable install of another checkout that other code wins (its schema is not ours).
+    """
+    env = dict(os.environ)
+    root = str(Path(__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = f"{root}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else root
+    return env
+
+
 def spawn_worker(task_id: int) -> int:
     """Start a task process detached from the service. Output — state_dir/workers/T<id>.log."""
     d = paths.state_dir() / "workers"
@@ -107,7 +118,7 @@ def spawn_worker(task_id: int) -> int:
     try:
         p = subprocess.Popen([sys.executable, "-m", "ahub.worker", f"T{task_id}"], stdout=out, stderr=out,
                              stdin=subprocess.DEVNULL, start_new_session=True, cwd=str(paths.data_dir()),
-                             env=dict(os.environ))
+                             env=hub_env())
     finally:
         out.close()
     return p.pid
@@ -153,12 +164,13 @@ class Service:
         return self.store.meta_get(PAUSE_KEY) == "1"
 
     def _deps_ok(self, t: Task) -> str:
+        """Why the task cannot start yet (a reason code blob), or "" — all its "after X" are accepted."""
         for a in t.after:
             dep = self.store.get_task(a)
             if dep is None:
-                return _t("trans.no_task", id=a)
+                return reasons.dump("dep_missing", task=f"T{a}")
             if dep.state is not State.ACCEPTED:
-                return _t("service.wait_dep", id=a, state=dep.state.value)
+                return reasons.dump("wait_accept", task=dep.label, state=dep.state.value)
         return ""
 
     def _set_wait(self, t: Task, reason: str) -> None:
@@ -193,25 +205,25 @@ class Service:
             for t in queued:
                 reason = ""
                 if paused:
-                    reason = _t("service.paused_on")
+                    reason = reasons.dump("queue_paused")
                 if not reason:
                     reason = self._deps_ok(t)
                 if not reason and slots <= 0:
-                    reason = _t("service.wait_slot", running=len(running), max=project.max_parallel)
+                    reason = reasons.dump("wait_slot", running=len(running), max=project.max_parallel)
                 if not reason:
                     for r in t.limits.get("resources") or []:
                         spec = project.resources.get(r)
                         if spec is None:
-                            reason = _t("service.no_resource", name=r)
+                            reason = reasons.dump("no_resource", name=r)
                             break
                         if res_use.get(r, 0) >= spec.capacity:
-                            reason = _t("service.wait_resource", name=r)
+                            reason = reasons.dump("wait_resource", name=r)
                             break
                         if spec.lock and self.lock_busy(spec.lock):
-                            reason = _t("service.wait_resource_busy", name=r)
+                            reason = reasons.dump("wait_resource_busy", name=r)
                             break
                 if reason:
-                    pl.waiting[t.id] = reason
+                    pl.waiting[t.id] = reasons.text(reason)
                     self._set_wait(t, reason)
                     continue
                 self._set_wait(t, "")
@@ -219,7 +231,7 @@ class Service:
                     pid = self.spawn(t.id)
                 except OSError as e:
                     self.log.error("worker process T%d failed to start: %s", t.id, e, extra={"task": t.id})
-                    pl.waiting[t.id] = _t("service.spawn_fail", err=e)
+                    pl.waiting[t.id] = reasons.text(reasons.dump("spawn_failed", err=e))
                     continue
                 self.recent[t.id] = time.monotonic()
                 spawned.append(t.id)
@@ -253,14 +265,14 @@ class Service:
             self.store.update_task(t.id, limits=lim)
             try:
                 if t.state is State.ACCEPTING:
-                    to, reason = State.NEEDS_DECISION, _t("service.orphan_accepting", label=t.label)
+                    to, reason = State.NEEDS_DECISION, reasons.dump("orphan_accepting", label=t.label)
                 elif count > MAX_ORPHANS:
-                    to, reason = State.NEEDS_DECISION, _t("service.orphan_repeat", n=count)
+                    to, reason = State.NEEDS_DECISION, reasons.dump("orphan_repeat", n=count)
                 else:
-                    to, reason = State.QUEUED, _t("service.orphan_once")
+                    to, reason = State.QUEUED, reasons.dump("orphan_once")
                 self.store.add_event(Ev.ORPHAN, task_id=t.id, project=t.project,
                                      payload={"from": t.state.value, "to": to.value, "count": count,
-                                              "text": f"{t.label}: {reason}"})
+                                              "text": f"{t.label}: {reasons.text(reason)}"})
                 transitions.move(self.store, t.id, to, reason=reason, by="service", owner=token)
                 self.log.warning("orphan T%d (%s) → %s", t.id, t.state.value, to.value, extra={"task": t.id})
                 handled.append(t.id)
@@ -350,7 +362,7 @@ def new_code_healthy() -> tuple[bool, str]:
     try:
         r = subprocess.run([sys.executable, "-c", "import ahub.service, ahub.engine, ahub.worker, ahub.cli;"
                             "from ahub.store import Store; Store()"],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, timeout=60, env=hub_env())
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, str(e)
     if r.returncode != 0:
