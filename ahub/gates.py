@@ -98,12 +98,12 @@ def diff_files(path: str, base: str) -> list[str]:
 
 
 def diff_text(path: str, base: str, limit: int = DIFF_LIMIT) -> str:
-    return rev_diff_text(path, f"{base}..HEAD", limit)
+    return rev_diff_text(path, f"{base}..HEAD", limit=limit)
 
 
-def rev_diff_text(path: str, revs: str, limit: int = DIFF_LIMIT) -> str:
-    """The diff of any range of commits — the base..HEAD of a code task, the input of a review task."""
-    r = workspace.git(path, "diff", revs, check=False)
+def rev_diff_text(path: str, *revs: str, limit: int = DIFF_LIMIT) -> str:
+    """The diff of any commits — the base..HEAD of a code task, the input of a review task."""
+    r = workspace.git(path, "diff", *revs, check=False)
     out = r.stdout
     return out if len(out) <= limit else out[:limit] + "\n" + _t("gates.diff_cut", size=len(out))
 
