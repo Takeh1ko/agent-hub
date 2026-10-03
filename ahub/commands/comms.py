@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from ahub import comms, events, scope, views
+from ahub import comms, events, log, scope, views
 from ahub.cliutil import CliError, add_scope_args, emit
 from ahub.store import Store
 from ahub.time import parse_duration as _parse_duration
@@ -38,6 +38,7 @@ def cmd_watch(args) -> int:
     """Endless line stream for Monitor: each line is work for the orchestrator."""
     from ahub.i18n import t
 
+    _log = log.get("watch")
     store = Store()
     sc = scope.resolve(args)
     pending = events.watch_start_summary(store, who=args.who, scope=sc)
@@ -45,11 +46,13 @@ def cmd_watch(args) -> int:
         tail = "; ".join(events.lines(store, pending[:3]))[:180]
         print(t("comms.unread", n=len(pending), text=tail), flush=True)
     last_touch = 0.0
-    try:
-        while True:
+    names = events.presence_projects(sc)  # the owner's projects are read from the config once, not per touch
+    while True:
+        try:
             now = time.monotonic()
             if now - last_touch >= events.PRESENCE_TOUCH_S:
-                events.touch_scope(store, sc, args.who, via="watch")
+                # a failed presence stamp is a log line, never the end of the stream
+                events.touch_scope(store, sc, args.who, via="watch", names=names)
                 last_touch = now
             batch = events.ready_batch(store, scope=sc)
             if batch:
@@ -57,8 +60,11 @@ def cmd_watch(args) -> int:
                 for ln in events.lines(store, batch):
                     print(ln, flush=True)
             time.sleep(args.poll)
-    except (KeyboardInterrupt, BrokenPipeError):
-        return 0
+        except (KeyboardInterrupt, BrokenPipeError):
+            return 0
+        except Exception as e:  # the Monitor must survive a broken turn, not die with it
+            _log.warning("watch: %s", e)
+            time.sleep(args.poll)
 
 
 def cmd_ack(args) -> int:

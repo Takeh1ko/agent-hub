@@ -113,6 +113,18 @@ def test_touch_scope_of_the_owner_stamps_every_project(store, tmp_path, monkeypa
     assert events.present(store, project="A", now=2000) and events.present(store, project="B", now=2000)
 
 
+def test_a_failed_presence_stamp_is_only_a_log_line(store, monkeypatch, caplog):
+    """A presence stamp must never raise: the Monitor is the one thing that must not die (T70)."""
+    with store.tx() as c:
+        c.execute("DROP TABLE presence_project")  # e.g. a migration under an old process
+    with caplog.at_level("WARNING", logger="events"):
+        events.touch(store, project="A", via="watch", now=1000)  # no exception
+        events.touch_scope(store, None, via="watch", now=1000)
+    assert len(caplog.records) == 2
+    assert all(r.message.startswith("presence touch failed") for r in caplog.records)
+    assert not events.presence(store, project="A")  # nothing was stamped
+
+
 def test_wait_returns_batch_and_marks(store):
     clock = {"t": 0.0}
     done_task(store, now=0)  # old — the window passed long ago

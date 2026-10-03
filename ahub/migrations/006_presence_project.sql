@@ -1,15 +1,14 @@
--- presence per project: the key is (who, project) — a live `ahub watch` in A stops the launcher in A only.
--- The old rows keep their project as they are; a row with project='' is the owner's presence.
-CREATE TABLE presence_new (
+-- presence per project: presence_project is keyed by (who, project) — a live `ahub watch` in A stops the
+-- launcher in A only.
+-- Additive on purpose: the old `presence` (one row per who) stays exactly as it was, because a process on the
+-- previous code writes it during a live reload and its upsert must keep working. The new code writes both
+-- tables and reads presence_project, falling back to the old one while it has rows.
+CREATE TABLE presence_project (
   who TEXT NOT NULL,
   project TEXT NOT NULL DEFAULT '',
   last_seen INTEGER NOT NULL,
   session_id TEXT NOT NULL DEFAULT '',
-  via TEXT NOT NULL DEFAULT '',
+  via TEXT NOT NULL DEFAULT '',              -- wait | watch | launched
   PRIMARY KEY (who, project)
 );
-INSERT INTO presence_new(who, project, last_seen, session_id, via)
-  SELECT who, project, last_seen, session_id, via FROM presence;
-DROP TABLE presence;
-ALTER TABLE presence_new RENAME TO presence;
-CREATE INDEX idx_presence_seen ON presence(last_seen);
+CREATE INDEX idx_presence_project_seen ON presence_project(last_seen);
