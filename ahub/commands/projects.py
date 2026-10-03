@@ -140,8 +140,9 @@ def cmd_projects(args) -> int:
                              "problems": problems, "errors": errors,
                              "month": to_local(month0).strftime("%Y-%m-%d"),
                              "projects": []}
-    for name, cells in rows:  # the JSON is the same set as the table, a project without a config too
-        cfg = dict(asdict(known[name])) if name in known else {"name": name, "root": cells["path"]}
+    for name, _cells in rows:  # the JSON is the same set as the table, a project without a config too
+        # root of a project the hub does not know — null in the JSON, not the "—" of the table cell
+        cfg = dict(asdict(known[name])) if name in known else {"name": name, "root": None}
         data_["projects"].append(cfg | asdict(every.get(name, Stat())))
     emit(args, data_, "\n".join(lines))
     return 1 if errors or any(problems.values()) else 0

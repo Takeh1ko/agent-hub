@@ -124,7 +124,11 @@ def test_projects_marks_a_project_with_tasks_but_no_config(hub, store, capsys):
     rc, out, _ = ahub(capsys, "--lang", "en", "projects")
     assert rc == 1
     assert "! Ghost" in out and "not connected to the hub" in out
-    assert json.loads(ahub(capsys, "--json", "projects")[1])["unconnected"] == ["Ghost"]
+    data_ = json.loads(ahub(capsys, "--json", "projects")[1])
+    assert data_["unconnected"] == ["Ghost"]
+    # the JSON has no root for it — never the "—" that stands in for it in the table
+    ghost = next(p for p in data_["projects"] if p["name"] == "Ghost")
+    assert ghost["root"] is None and "—" not in json.dumps(ghost, ensure_ascii=False)
 
 
 def test_projects_marks_a_project_with_a_problem_on_disk(hub, store, capsys):
