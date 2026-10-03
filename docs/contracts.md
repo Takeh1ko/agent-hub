@@ -74,13 +74,15 @@ A log event (`event`): `id, ts, task_id, project, kind, payload, needs_reaction,
 
 ### Wakeup line (L0) — one per thing, ≤ 200 bytes
 ```
-DONE T12 scout «find the leak» — report 2.1 KB, $0.04
-DECISION T13 code «the payment button» — review rounds are over (2 high findings)
-ERROR T14 code «migration» — preparation: the tests do not collect
+DONE T12 scout «find the leak» — report 2.1 KB; the leak is add(); $0.04
+DECISION T13 code «the payment button» — review rounds are exhausted (2 findings, high: 1)
+ERROR T14 code «migration» — prepare: the tests do not collect
 OWNER «how is the payment going?»
 ANSWER #5 «merge T12?» → yes
 ALARM! opencode is unreachable for 12 min (3 tasks are waiting)
 ```
+A `done` line carries what is there and drops what is not: the report size, the summary of `.ahub/result.json`
+(clipped) and the money, in that order; the two kinds of money never become one number (`$0.04, $1.20 real`).
 The codes at the start of a line are stable English and are never translated. Events written before the switch may
 start with the old Russian words ГОТОВО/РЕШЕНИЕ/ОШИБКА/ВЛАДЕЛЕЦ/ОТВЕТ/ТРЕВОГА — the same events.
 
@@ -89,41 +91,135 @@ start with the old Russian words ГОТОВО/РЕШЕНИЕ/ОШИБКА/ВЛА
 | Level | Command | Limit | What |
 |---|---|---|---|
 | L0 | `ahub wait`, `ahub watch` | 200 B/line | §4 |
-| L1 | `ahub status` | 1500 B total | active (phase, pulse, model, round, $), waiting for a decision, open questions, unread; on overflow — counters "N more" |
-| L2 | `ahub status T12`, `ahub result T12` | 4000 B | task: goal, state/reason, the worker's result, checks (a diff summary, a test tail ≤ 10 lines), findings without duplicates (≤ 10), cost on one line |
-| L3 | `ahub result T12 --full`, `ahub diff T12`, `ahub log T12` | explicit; paged with `--max-bytes` (20000 by default; `ahub log` — 8000) | the full report, the diff, the session log |
+| L1 | `ahub status` | 1500 B total | a counts line (active / waiting for a decision / queued), the active tasks as a table, then what is not active (waiting and queued) under one heading, and the counters — open questions, unread messages, unread events; on overflow a group is cut after a whole row and the rest counted — `+5 more tasks — ahub top, ahub service status` |
+| L2 | `ahub status T12`, `ahub result T12` | 4000 B | task: goal, state/reason, the worker's result (summary 900 B, open points, report 700 B), the review findings (deduplicated, `low` dropped, at most 6 that fit the block's own 1200 B), cost on one line, and the `Next` line — it is booked before the clip, so a full screen gives up the tail of a block, never the way out |
+| L3 | `ahub result T12 --full`, `ahub diff T12`, `ahub log T12`, `ahub follow T12` | explicit; paged with `--max-bytes` (20000 by default; `ahub log` — 8000) | the full report, the diff, the session log |
 
-All commands: `--json` — the same data machine-readable (no clipping of the text to the limit, the same set of fields).
+All commands: `--json` — the same data machine-readable (no clipping of the text to the limit, the same set of
+fields; a task view adds the raw reason next to its rendered `state_reason_text`).
 
 ## 6. Waiting and presence
 
-- `ahub wait [--timeout 30m] [--project P]` — blocks until an event that needs a reaction (respecting the grouping
-  window); prints L0 lines of unacknowledged events, marks them delivered; exit code 0. A timeout — empty output,
-  exit code 3.
-- `ahub watch [--project P]` — for the Monitor: an endless stream of L0 lines; the position is the delivered marks in
-  the database (there is no state file: a Monitor restart neither loses nor repeats anything); at the start — one
-  summary line about what is delivered but unacknowledged (not the whole tail).
-- **Presence**: `wait` and `watch` update `presence(who, project, last_seen, via)` at least once every 60 s.
-  Claude "is there" if `last_seen` is younger than 180 s. The observer's escalation and launching Claude from
-  Telegram are built on that.
+- `ahub wait [--timeout 30m] [--project P | --all] [--who W]` — blocks until an event that needs a reaction
+  (respecting the grouping window); prints L0 lines of unacknowledged events, marks them delivered; exit code 0.
+  A timeout — empty output, exit code 3. A broken poll is retried (1 s apart) and a streak of the same error is one
+  log line, not one per poll; after `MAX_POLL_FAILURES` (20) failures in a row the wait gives up with one line on
+  stderr (`wait failed 20 times in a row: <error> — giving up`) and exit code 4. A poll that works resets the count.
+- `ahub watch [--project P | --all] [--poll 3] [--who W]` — for the Monitor: an endless stream of L0 lines; the
+  position is the delivered marks in the database (there is no state file: a Monitor restart neither loses nor
+  repeats anything); at the start — one summary line about what is delivered but unacknowledged
+  (`UNREAD 3: <lines>`; not the whole tail), remembered per consumer and per scope, so one project does not
+  re-announce another's. The same give-up rule as `wait`, with the same exit code 4.
+- **Presence**: `wait` and `watch` stamp `presence_project(who, project, last_seen, via, session_id)` at least once
+  every 60 s — **one row per (who, project)**, because an orchestrator session works in one repository: Claude "is
+  there" for a project when its row is younger than 180 s, and a live session in A says nothing about B. The owner's
+  scope (`--all`, or a directory outside every project) stamps a row for every project of the hub config — the names
+  are read once per `wait`/`watch`, not per stamp. The one-row-per-`who` table of before the migration (`presence`)
+  is written too and read as a fallback, so a process on the previous code (a live reload) neither breaks nor looks
+  absent; its row with an empty project is that code's owner-mode stream and counts for every project.
+  The observer's escalation and launching Claude from Telegram are built on this.
 - `who` is `claude` by default (`--who` for other orchestrators).
 
 ## 7. Orchestrator commands (CLI, M2)
 
+Every command has its own `--help`, and `--json` gives the same data machine-readable (§5). Where a scope makes sense
+there is `--project X` / `--all` (architecture §9); `ahub --help` groups the commands (Tasks, Watching, Setup, Models
+and providers, Integrations). The pinned handles:
+
 ```
 ahub task new --kind scout|code|review|routine --title "goal" (--spec "text" | --spec-file F)
-              [--model spark] [--review "spark,mimo-flash" --rounds 2 | --no-review]
-              [--paths "core/**,tests/**"] [--accept "tests/test_x.py::test_y"] [--budget 1.5]
-              [--after T3] [--resources test_db] [--input <branch|sha|a..b|files>] [--key K] [--draft]
-   → "T12 queued (code, spark)" (one line); --key is idempotency (a repeat returns the same task)
+              [--model spark] [--level 0-4] [--review "spark,mimo-flash" --rounds 2 | --no-review]
+              [--paths "core/**,tests/**"] [--accept "tests/test_x.py::test_y"] [--read "…"] [--format "…"]
+              [--budget 1.5] [--budget-usd 0] [--time-limit 30] [--after T3] [--resources test_db]
+              [--input <branch|sha|a..b|files>] [--key K] [--draft] [--no-collect] [--by who]
+   → two lines, see below; --key is idempotency (a repeat returns the same task), --draft stops at "T12 draft (…)"
 ahub status [T12]            L1 / L2
 ahub result T12 [--full]     L2 / L3
-ahub accept T12 | reject T12 [--reason] | rework T12 --notes "…" | stop T12 | continue T12
-ahub wait | watch | ack | inbox | say "text" | ask "question" --options "yes,no" [--task T12] | alarms
-ahub models [--role R] | models add … | models role … | models enable|disable <alias>   (registry; it does not
-   lift project bans)
+ahub diff T12 | log T12      L3 (the readable transcript of a session is `ahub follow T12 [--role] [--round] [--full]
+                                       [--no-follow]` — it follows the log until the task leaves an active state)
+ahub accept T12 | reject T12 [--reason] | rework T12 --notes "…" | continue T12 | stop T12 [--reason]
+ahub nudge T12 "…" | task edit T12 [--spec|--spec-file|--title] [--review …] [--rounds N] [--model alias]
+ahub extend T12 --paths "…" | budget T12 --add N [--set N] | model T12 <alias>
+ahub wait | watch | ack <id…|all> | inbox [<id>] [--peek] [--full] | questions [<id>] | alarms [--ack] [--acked]
+ahub say "text" | ask "question" --options "yes,no" [--task T12]
+ahub history [-n 20] | projects | cost [--project X|--all] [--since 30d] | doctor | top
+ahub service {run,install,status,pause,resume,start,stop} | setup [path] | providers | draft "…" | bot run | mcp
+ahub models [--role R] | models add … | models role … | models check | models enable|disable <alias>
+   (the registry; it does not lift project bans)
 ```
-Exit codes: 0 — success, 2 — refusal (one "error: …" line on stderr), 3 — a waiting timeout.
+`ahub projects` and `ahub cost` are the owner's glance at the whole hub — they do not follow the directory's scope;
+`ahub cost` takes a scope and a period of its own.
+
+### What a command prints
+
+A command that changed something prints its result and, usually, a **second line** — the `Next` line: the commands
+that follow for this task (picked by the state — a decision, a resume, the new task, the task itself). `inbox <id>`
+and `questions <id>` read one row in full (the lists cut the text to a cell) and mark nothing read — only the inbox
+list does. A refusal is one `error: …` line on stderr plus a `hint:` line with the way out when it is known.
+
+```
+$ ahub task new --kind code --title "add sub()" --paths "src/**" --accept "tests/test_app.py"
+T2 queued (code, spark, review spark×2)
+Next  ahub status · ahub follow T2
+
+$ ahub status
+webapp · 0 active · 4 waiting · 12 queued
+Waiting
+  T2   needs decision  gates still failing after the fix: no commit from the base
+  T3   error           hub failure: IntegrityError: UNIQUE constraint failed: session.provider, session.external_id
+  T7   queued
++5 more tasks — ahub top, ahub service status
+open owner questions 1 · unread events 2
+
+$ ahub status T2
+T2  code  add sub()
+───────────────────
+State  needs decision · review rounds are exhausted (2 findings, high: 1)
+Model  spark  Review  spark ×2  Round  2
+Cost   $0.020 Go of $1.50 budget
+Age    4 min
+Summary
+  added sub() to src/app.py
+Review findings
+  medium src/app.py:5
+          sub() has no test, so a regression would not be caught
+          fix: add a test for sub()
+Next  ahub accept T2 · ahub rework T2 --notes "…" · ahub reject T2
+
+$ ahub accept T6
+T6 merged into main (9b2454976d)
+Next  ahub status · ahub task new --kind scout --title "…"
+
+$ ahub task new --kind code --title "x" --paths "src/**/*.py"
+error: task not created: files src/**/*.py are outside the project-allowed ones (ahub/**, tests/**); acceptance (--accept pytest nodes) is required for a code task
+  hint: ahub task new --help
+
+$ ahub wait --timeout 5
+OWNER «how is the payment going?>
+ANSWER #5 «merge T12?» → yes
+
+$ ahub inbox 12
+#12
+───
+When     01:23
+Project  webapp
+  how is the payment going?
+
+$ ahub projects
+  project      path                     active  queued  decision  questions  go $   usd $  last
+   webapp      /home/me/Projects/webapp     1       0         1           2  0.310  0.000  14:02
+  ! other      —                           0       2         0           0  0.000  0.000  —
+      project other has tasks but is not connected to the hub
+
+$ ahub cost --all
+  project  model  sessions  go $   usd $
+  webapp   spark       12  0.310  0.000
+all projects · since 2026-10-01
+go $0.310 · usd $0.000 · sessions 12
+```
+
+Exit codes: 0 — success, 2 — refusal (`error: …` on stderr), 3 — a waiting timeout, 4 — `wait`/`watch` gave up
+after `MAX_POLL_FAILURES` poll failures in a row (§6, `ahub/commands/comms.py`).
 
 ## 8. Project resources
 
