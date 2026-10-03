@@ -39,6 +39,8 @@ class State(StrEnum):
 # Task owned by a task process (has an owner and a pulse).
 ACTIVE = frozenset({State.PREPARING, State.WORKING, State.CHECKING, State.REVIEWING, State.FIXING,
                     State.ACCEPTING})
+# The task process runs the worker here — a message from the orchestrator (nudge) can be delivered.
+NUDGEABLE = ACTIVE - {State.ACCEPTING}
 # Waits for a human/orchestrator; can be resumed or decided.
 WAITING_DECISION = frozenset({State.DONE, State.NEEDS_DECISION, State.ERROR, State.STOPPED})
 FINAL = frozenset({State.ACCEPTED, State.REJECTED})
@@ -108,6 +110,7 @@ class Ev(StrEnum):
     SESSION = "session"  # worker session started/resumed: {role, model, session_id}
     RETRY = "retry"  # retry after a provider failure: {reason, attempt, pause_s}
     SILENCE = "silence"  # worker stayed silent: {secs, action}
+    NUDGE = "nudge"  # message from the orchestrator into the worker's session: {text, by}
     BUDGET_SOFT = "budget_soft"  # 80 %: to the log, doesn't wake
     BUDGET_HARD = "budget_hard"
     ORPHAN = "orphan"  # task without a process returned to queue

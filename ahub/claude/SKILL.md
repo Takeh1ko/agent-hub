@@ -36,6 +36,9 @@ ahub task new --kind review  --title "check the branch" --input "main..feature"
 - `DECISION T12 …` → read the reason (`ahub status T12`): rounds over, budget (`ahub budget T12 --add 1` —
   the task resumes itself), files outside allowed paths, failure. Resume — `ahub continue T12`, change model —
   `ahub model T12 mimo-flash`, new spec — `ahub task edit T12 --spec-file …`.
+- `ahub nudge T12 "why did you stop? keep going"` — a message into the session of a task that is still working
+  (stuck, silent, off-track): the turn is interrupted and the same session continues with your text. Prefer it
+  over stop+continue. A queued or finished task — refused in one line.
 - `ERROR T12 …` → reason is in the line; usually `ahub continue` after fixing the environment or `ahub reject`.
 
 Old events may start with Russian words ГОТОВО/РЕШЕНИЕ/ОШИБКА/ВЛАДЕЛЕЦ/ОТВЕТ/ТРЕВОГА instead of codes — same events.

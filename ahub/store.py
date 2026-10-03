@@ -68,7 +68,8 @@ class Task:
     owner_pid: int | None = None
     lease_until: int | None = None
     version: int = 0
-    request: str = ""  # owner request: '' | stop
+    request: str = ""  # owner request: '' | stop | nudge
+    request_text: str = ""  # the text of the request (nudge message)
     after: list[int] = field(default_factory=list)
 
     @property

@@ -123,6 +123,11 @@ def stop_prompt() -> str:
             f"{reply_language_line()} {final_line()}")
 
 
+def nudge_prompt(text: str) -> str:
+    """Message of the orchestrator (`ahub nudge T12 "…"`) into the worker's own session."""
+    return f"Message from the orchestrator:\n{(text or '').strip()}"
+
+
 def code_delivery(task: Task) -> str:
     paths = ", ".join(f"`{p}`" for p in task.limits.get("paths") or [])
     accept = task.limits.get("accept") or []

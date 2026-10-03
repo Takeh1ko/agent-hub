@@ -26,7 +26,7 @@ from ahub.providers.base import Act, Activity, Provider, Usage
 from ahub.time import now_ms, to_local
 
 PROMPT_SUFFIX = ".prompts.jsonl"
-PROMPT_KINDS = ("start", "continue", "repair", "rework", "stop", "review")
+PROMPT_KINDS = ("start", "continue", "repair", "rework", "stop", "review", "nudge")
 PROMPT_LINES = 20  # lines of the prompt shown without --full
 RESULT_LINES = 6  # lines of a tool result
 RESULT_COLS = 120  # width of a result line
