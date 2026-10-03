@@ -125,6 +125,65 @@ def test_request_stop(store):
         tr.request_stop(store, d)
 
 
+def test_request_nudge_into_the_running_session(store):
+    a = _task(store)
+    tr.move(store, a, State.PREPARING)
+    tr.acquire(store, a, "own", pid=5, now=100)
+    store.add_session(task_id=a, provider="fake", role="executor", model="fake", external_id="ses_x", now=100)
+    assert tr.request_nudge(store, a, text="хватит думать, почини\n", by="human", now=110) == "requested"
+    t = store.get_task(a)
+    assert t.request == "nudge" and t.request_text == "хватит думать, почини"  # the line is normalized
+    assert t.state is State.PREPARING  # the owner decides, nobody else
+    ev = store.events(task_id=a)[-1]
+    assert ev.kind == "nudge" and ev.payload == {"text": "хватит думать, почини", "by": "human"}
+    assert not ev.needs_reaction  # a journal entry, not a wake-up
+
+    assert tr.clear_request(store, a, kind="nudge", text="другое") is False  # a newer message is not eaten
+    assert tr.clear_request(store, a, kind="nudge", text="хватит думать, почини") is True
+    assert store.get_task(a).request == "" and store.get_task(a).request_text == ""
+
+
+def test_request_nudge_refused(store):
+    q = _task(store)  # queued: no process, nothing to message
+    with pytest.raises(tr.TransitionError, match="написать ему некого"):
+        tr.request_nudge(store, q, text="почини")
+    with pytest.raises(tr.TransitionError, match="сообщение пустое"):
+        tr.request_nudge(store, q, text="  ")
+
+    a = _task(store)
+    tr.move(store, a, State.PREPARING)
+    with pytest.raises(tr.TransitionError, match="нет живого процесса"):
+        tr.request_nudge(store, a, text="почини", now=10)
+    tr.acquire(store, a, "own", pid=5, now=100)
+    with pytest.raises(tr.TransitionError, match="сессии ещё нет"):
+        tr.request_nudge(store, a, text="почини", now=110)
+
+    store.add_session(task_id=a, provider="fake", role="executor", model="fake", external_id="ses_x")
+    assert tr.request_stop(store, a, now=110) == "requested"
+    with pytest.raises(tr.TransitionError, match="остановка уже запрошена"):
+        tr.request_nudge(store, a, text="почини", now=111)
+
+    d = _task(store)
+    tr.move(store, d, State.PREPARING)
+    tr.move(store, d, State.WORKING)
+    tr.move(store, d, State.DONE)  # finished: the worker is not there anymore
+    with pytest.raises(tr.TransitionError, match="написать ему некого"):
+        tr.request_nudge(store, d, text="почини")
+    with pytest.raises(tr.TransitionError):
+        tr.request_nudge(store, 999, text="почини")
+
+
+def test_nudge_cleared_when_the_task_leaves_active(store):
+    """The engine did not take the message — the task went on to "Needs decision"; the row is clean."""
+    a = _task(store)
+    tr.move(store, a, State.PREPARING)
+    tr.acquire(store, a, "own", pid=5, now=100)
+    store.add_session(task_id=a, provider="fake", role="executor", model="fake", external_id="ses_x")
+    tr.request_nudge(store, a, text="почини", by="human", now=110)
+    t = tr.move(store, a, State.NEEDS_DECISION, owner="own", reason="тишина", now=120)
+    assert t.request == "" and t.request_text == ""
+
+
 def test_cascade_on_reject(store):
     x = _task(store)
     y = _task(store, after=[x])

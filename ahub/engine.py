@@ -5,8 +5,8 @@ One engine instance = one task process (ahub.worker). It:
 - tracks phases and records them in the store (the owner is the only writer of an active task);
 - runs provider sessions via the shared runner and decides what to do with each step result (architecture §6.3):
   network failure → retry with pause (same session when known); silence → one same-session nudge, then
-  "Needs decision"; quota/timeout → "Needs decision"; no access/model error/crash → "Error";
-  requested stop → "Stopped".
+  "Needs decision"; a message from the orchestrator (ahub nudge) → the same session continues with it;
+  quota/timeout → "Needs decision"; no access/model error/crash → "Error"; requested stop → "Stopped".
 V08: scout. Code/routine/review (gates, panel, merge) — M3.
 """
 
@@ -35,6 +35,7 @@ from ahub.time import now_ms
 
 LEASE_MS = 90_000
 STOP_POLL_S = 3.0
+NUDGE_MAX = 8  # messages from the orchestrator in a row per step (each one is a whole turn)
 BUDGET_POLL_S = 30.0
 REPORT_MAX_BYTES = 18_000  # 12 KB per contract plus margin; over that is flagged, not rejected
 
@@ -178,20 +179,43 @@ class Engine:
     def stop_requested(self) -> bool:
         if self.lost.is_set() or self.budget_hit:
             return True
+        req = self._poll_request()
+        if req == "nudge":
+            return True  # the turn is interrupted; the text goes into the next turn of the same session
+        if req == "stop":
+            return True
+        now = time.monotonic()
+        if now - self._budget_at >= BUDGET_POLL_S:
+            self._budget_at = now
+            if self.over_budget(live=True):
+                self.budget_hit = True
+                return True
+        return False
+
+    def _poll_request(self) -> str:
+        """Owner request from the task row ('stop' | 'nudge' | ''), at most once in STOP_POLL_S."""
         now = time.monotonic()
         at, val = self._stop_cache
         if now - at >= STOP_POLL_S:
             try:
-                val = self.task().request == "stop"
+                val = self.task().request
             except (sqlite3.Error, RuntimeError):
-                val = False
+                val = ""
             self._stop_cache = (now, val)
-            if not val and now - self._budget_at >= BUDGET_POLL_S:
-                self._budget_at = now
-                if self.over_budget(live=True):
-                    self.budget_hit = True
-                    return True
         return val
+
+    def pending_nudge(self) -> str:
+        """Text of an undelivered nudge ('' — nothing to deliver)."""
+        try:
+            t = self.task()
+        except (sqlite3.Error, RuntimeError):
+            return ""
+        return t.request_text if t.request == "nudge" else ""
+
+    def _take_request_back(self, kind: str, text: str = "") -> None:
+        """The owner took its request from the row: the poll cache must not serve it to the turn it was for."""
+        transitions.clear_request(self.store, self.task_id, kind=kind, text=text)
+        self._stop_cache = (time.monotonic(), "")
 
     def over_budget(self, *, live: bool = False) -> bool:
         """Task budget (whole task incl. review): 80% — journal event; 100% — True."""
@@ -268,7 +292,7 @@ class Engine:
     def _note_prompt(self, log_path: str, kind: str, prompt: str) -> None:
         """The prompt of the turn into the sidecar next to the log — `ahub follow` reads it.
 
-        The kinds are transcript.PROMPT_KINDS: start | continue | repair | rework | stop | review.
+        The kinds are transcript.PROMPT_KINDS: start | continue | repair | rework | stop | review | nudge.
         """
         try:
             path = transcript.prompts_path(log_path)
@@ -288,7 +312,7 @@ class Engine:
                 cwd: str | None = None, prompt_kind: str = "start") -> RunResult:
         """One worker step with retries on network failure (architecture §6.3).
 
-        `prompt_kind` says what the prompt is (start | continue | repair | rework | stop | review) and goes
+        `prompt_kind` says what the prompt is (start | continue | repair | rework | stop | review | nudge) and goes
         into the prompts sidecar, which is what `ahub follow` shows as the turn header. One call is one
         turn: a network retry repeats the run of the same prompt, not the turn.
         """
@@ -395,17 +419,36 @@ class Engine:
 
     def _step_with_continue(self, role: Role, alias: str, prompt: str, *, session_id: str | None,
                             log_name: str, prompt_kind: str = "start") -> tuple[RunResult, tuple[State, str] | None]:
-        """Worker step; silence → one same-session nudge."""
+        """Worker step; silence → one same-session nudge; a nudge from the orchestrator → the same session."""
         r = self.session(role, alias, prompt, session_id=session_id, log_name=log_name, prompt_kind=prompt_kind)
+        r = self._take_nudge(role, alias, r, session_id, log_name)
         if r.outcome is Outcome.SILENCE:
             self.store.add_event("silence", task_id=self.task_id, project=self.project.name,
                                  payload={"secs": r.silence_s, "action": "continue",
                                           "text": _t("engine.silence_text", secs=r.silence_s)})
             r = self.session(role, alias, prompts.CONTINUE_PROMPT, session_id=r.session_id or session_id,
                              log_name=log_name, prompt_kind="continue")
+            r = self._take_nudge(role, alias, r, session_id, log_name)
             if r.outcome is Outcome.SILENCE:
                 return r, (State.NEEDS_DECISION, _t("engine.silence_twice", secs=r.silence_s))
         return r, self._outcome_to_state(r)
+
+    def _take_nudge(self, role: Role, alias: str, r: RunResult, session_id: str | None,
+                    log_name: str) -> RunResult:
+        """Deliver what the orchestrator asked into the same session (the turn was interrupted for it).
+
+        The message is taken from the task row before the turn, so a nudge that comes during the turn
+        itself is not eaten by it. Round, budget and gates are untouched — this is one more turn.
+        """
+        for _ in range(NUDGE_MAX):
+            text = self.pending_nudge()
+            if not text:
+                return r
+            self._take_request_back("nudge", text)
+            self.log.info("nudge into the %s session: %s", role.value, text[:200])
+            r = self.session(role, alias, prompts.nudge_prompt(text), session_id=r.session_id or session_id,
+                             log_name=log_name, prompt_kind="nudge")
+        return r
 
     # --- scout ---
 
