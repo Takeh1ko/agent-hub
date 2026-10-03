@@ -247,6 +247,26 @@ def check_agy() -> Check:
     return Check("agy", False, _t("doctor.health_bad", problems=problems), fix)
 
 
+APPARMOR_USERNS_FLAG = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+
+
+def apparmor_blocks_userns() -> bool:
+    """AppArmor forbids unprivileged user namespaces on this host (the Ubuntu 24.04 default) — that is
+    why the codex/bubblewrap sandbox cannot start. No such file — AppArmor is not in the kernel."""
+    try:
+        return APPARMOR_USERNS_FLAG.read_text(encoding="utf-8").strip() == "1"
+    except OSError:
+        return False
+
+
+def codex_sandbox_fix() -> str:
+    """Fix for a codex sandbox that does not start: allow user namespaces (the admin's decision) or
+    drop the OS sandbox in the hub config. The hub never changes system settings itself."""
+    if apparmor_blocks_userns():
+        return f"{_t('doctor.codex_fix_userns')} {_t('doctor.codex_fix_no_sandbox')}"
+    return _t("doctor.codex_fix_no_sandbox")
+
+
 def check_codex() -> Check:
     """codex (Codex CLI): found — ok True/False per the provider's health(); not found — None."""
     from ahub import providers
@@ -267,6 +287,8 @@ def check_codex() -> Check:
     except Exception:
         logged_in = False
     fix = "" if logged_in else _t("doctor.codex_fix_login")
+    if h.details.get("sandbox_ok") is False:  # every command would fail silently — both fixes in one hint
+        fix = f"{fix} {codex_sandbox_fix()}".strip()
     return Check("codex", False, _t("doctor.health_bad", problems=problems), fix)
 
 
@@ -402,7 +424,7 @@ def provider_proxy_detail(name: str) -> str:
     from ahub.observer import proxy_problem
 
     try:
-        p = config.load_hub().provider_proxy(name)
+        p = config.load_hub().provider(name)
     except config.ConfigError:
         return ""
     if p.proxy is None:
@@ -503,4 +525,4 @@ __all__ = ["Check", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_PROMPT", "auth_provid
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
            "check_opencode_health", "check_opencode_auth", "check_agy", "check_codex", "check_models",
            "check_network", "check_claude", "check_claude_skill", "check_telegram", "provider_proxy_detail",
-           "skill_path"]
+           "skill_path", "apparmor_blocks_userns", "codex_sandbox_fix"]

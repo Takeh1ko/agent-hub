@@ -21,12 +21,20 @@ Non-interactive: `-c approval_policy="never"` (the flag that keeps exec from wai
 stdin=DEVNULL, which the shared runner already gives the process; `--skip-git-repo-check` is added when
 the working copy is not a git repo (codex stops to ask about the trust otherwise — on resume too). `-s workspace-write` is the OS sandbox
 (Landlock inside bubblewrap on Linux, Seatbelt on macOS): the tools may read everything but write only
-the working copy, and they never ask. The sandbox is worth probing on the host (`codex sandbox <mode>
+the working copy, and they never ask. The mode comes from `[providers.codex] sandbox` in the hub config
+(read-only | workspace-write | danger-full-access; absent — workspace-write) and is passed to both `exec`
+(`-s`) and `exec resume` (`-c sandbox_mode=…`, which has no -s).
+
+The sandbox is worth probing on the host (`codex sandbox <mode>
 -- true` — no model, no network): when it cannot initialize, codex fails every command silently (the
 JSONL stream shows nothing, the reason goes only to the model) and the turn comes out empty, so
 health() runs the probe and reports the reason (checked live 2026-10-03: in a container without user
 namespaces bubblewrap cannot set a uid map — `bwrap: loopback: Failed RTM_NEWADDR` — and the probe
-catches exactly that).
+catches exactly that). On Ubuntu 24.04 it is AppArmor that blocks it by default
+(`kernel.apparmor_restrict_unprivileged_userns = 1`): the probe fails the same way and `ahub doctor` says
+so. The hub never changes system settings — the fixes are the admin's (`sysctl`) or the config
+(`sandbox = "danger-full-access"`, no OS sandbox, the task copy and the gates hold the worker like they
+hold opencode and agy). `danger-full-access` is not probed at all: there is no sandbox to start.
 
 Errors (real forms): 400 with an unsupported model for a ChatGPT account, 401 without a login
 (`turn.failed`), reconnects on a dead network (`error` events, then it keeps retrying — the silence
@@ -70,11 +78,29 @@ _TOOL_TYPES = {"command_execution", "file_change", "mcp_tool_call", "web_search"
                "tool_call", "dynamic_tool"}
 _SANDBOX_TIMEOUT_S = 30
 _CATALOG_TIMEOUT_S = 30  # `codex debug models` may hit the network (the observer calls it in its loop)
+DEFAULT_SANDBOX = "workspace-write"  # reads anything, writes the working copy — the isolation of the task
+NO_SANDBOX_MODES = frozenset({"danger-full-access"})  # no OS sandbox — nothing to probe, only copy and gates
 
 
 def codex_bin() -> str:
     """codex executable: which → ~/.local/bin/codex."""
     return shutil.which("codex") or str(Path.home() / ".local" / "bin" / "codex")
+
+
+def sandbox_mode(configured: str | None = None) -> str:
+    """OS sandbox for the turns: the explicit mode → `[providers.codex] sandbox` → workspace-write.
+
+    A broken hub config must not stop the provider: the default keeps the isolation.
+    """
+    if configured is not None:
+        return configured
+    from ahub import config
+
+    try:
+        return config.load_hub().provider("codex").sandbox or DEFAULT_SANDBOX
+    except config.ConfigError as e:
+        _log.warning("hub config, own sandbox ignored: %s", str(e)[:200])
+        return DEFAULT_SANDBOX
 
 
 def classify_text(text: str) -> dict:
@@ -203,10 +229,12 @@ class CodexProvider(Provider):
                               Cap.CATALOG, Cap.HEALTH})
 
     def __init__(self, binary: str | None = None, env: dict[str, str] | None = None,
-                 sandbox: str = "workspace-write", approvals: str = "never") -> None:
+                 sandbox: str | None = None, approvals: str = "never") -> None:
         self.binary = binary
         self.extra_env = dict(env or {})  # environment for helper calls (models/--version/login status)
-        self.sandbox = sandbox  # "" — no -s (the user's config decides); this is the isolation, keep it
+        # None — the hub config decides ([providers.codex] sandbox); "" — no -s (the user's config decides);
+        # keep the isolation, so the default is workspace-write
+        self.sandbox = sandbox_mode(sandbox)
         self.approvals = approvals  # "never" — exec must not wait for a human
 
     def _bin(self) -> str:
@@ -355,8 +383,8 @@ class CodexProvider(Provider):
     def sandbox_ok(self) -> tuple[bool, str]:
         """Can the OS sandbox start at all? codex fails commands silently when it cannot (checked
         live 2026-10-03 inside a container: bubblewrap has no uid map → every command fails)."""
-        if not self.sandbox:
-            return True, ""
+        if not self.sandbox or self.sandbox in NO_SANDBOX_MODES:
+            return True, ""  # no OS sandbox to start — the task copy and the gates hold the worker
         try:
             rc, _out, err = run_capture([self._bin(), "sandbox", self.sandbox, "--", "true"],
                                         timeout=_SANDBOX_TIMEOUT_S, env=self.extra_env)
@@ -391,6 +419,7 @@ class CodexProvider(Provider):
             problems.append(_t("codex.no_models"))
         ok, why = self.sandbox_ok()
         details["sandbox"] = self.sandbox if ok else f"{self.sandbox}: {why}"
+        details["sandbox_ok"] = ok
         if not ok:  # commands would fail silently — the worker would do nothing
             problems.append(_t("codex.sandbox_broken", mode=self.sandbox, err=why))
         return Health(not problems, tuple(problems), details)

@@ -38,16 +38,17 @@ STOP_POLL_S = 3.0
 BUDGET_POLL_S = 30.0
 REPORT_MAX_BYTES = 18_000  # 12 KB per contract plus margin; over that is flagged, not rejected
 
-_WRITE_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch",
+_WRITE_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch", "file_change",
                 "write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file"}
 _READ_TOOLS = {"read", "grep", "glob", "list", "webfetch", "websearch",
                "view_file", "list_dir", "grep_search", "find_by_name"}
-_CMD_TOOLS = {"bash", "run_command"}  # opencode bash; agy run_command
+_CMD_TOOLS = {"bash", "run_command", "command_execution"}  # opencode bash; agy run_command; codex
 _CMD_KEYS = {"command", "commandline", "cmd"}  # agy keeps the command in the parameter CommandLine
 
 
 def _tool_command(data: dict) -> str:
-    """Command line of a tool call: opencode `command`, agy `CommandLine` inside tool parameters."""
+    """Command line of a tool call: opencode `command`, agy `CommandLine` inside tool parameters,
+    codex `command` (`/bin/bash -lc '…'`)."""
     inp = data.get("input") if isinstance(data, dict) else None
     if not isinstance(inp, dict):
         return ""

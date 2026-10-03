@@ -114,7 +114,7 @@ def hub_proxy(name: str) -> tuple[str | None, str | None]:
     from ahub import config
 
     try:
-        p = config.load_hub().provider_proxy(name)
+        p = config.load_hub().provider(name)
     except config.ConfigError as e:
         _log.warning("hub config, own proxy ignored: %s", str(e)[:200])
         return None, None
