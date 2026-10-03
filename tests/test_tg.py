@@ -282,6 +282,24 @@ def test_the_owner_group_without_any_project_is_reported_once(store, caplog):
     assert sp.calls == []
 
 
+def test_every_group_without_a_directory_is_reported(store, monkeypatch, caplog):
+    """'' and a project that left the hub both have nowhere to run: each is reported once, not only the first."""
+    monkeypatch.setattr(launcher, "_no_dir", {})  # the once-in-a-while memory starts empty
+    comms.owner_message(store, "всем сразу", project="")
+    comms.owner_message(store, "по Z: в никуда", project="Z")  # Z is not a project of this hub
+    sp = Spawner()
+    with caplog.at_level("WARNING", logger="launcher"):
+        first = launcher.tick(store, projects=[], spawn=sp, binary="claude")
+        second = launcher.tick(store, projects=[], spawn=sp, binary="claude")
+        third = launcher.tick(store, projects=[], spawn=sp, binary="claude")
+    assert [first, second] == ["nodir:", "nodir:Z"]  # one per tick — the older group first
+    assert third == "idle"  # both said once
+    assert [r.message for r in caplog.records] == [
+        "cannot launch Claude: no directory for the hub-wide group — no projects in the hub config",
+        "cannot launch Claude: no directory for project Z — no such project in the hub config"]
+    assert sp.calls == []
+
+
 def _messages_block(prompt: str) -> str:
     """The owner messages of a launch prompt — the part that must not leak between projects."""
     return prompt.split("Owner messages:\n")[1].split("\n\nHub summary")[0]

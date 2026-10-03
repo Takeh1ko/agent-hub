@@ -145,6 +145,24 @@ def test_wait_gives_up_after_the_failure_cap(env, capsys, monkeypatch, caplog):
     assert len([r for r in caplog.records if r.name == "ahub.wait"]) == 1  # once per distinct error
 
 
+def test_wait_polls_once_with_a_zero_timeout(env, capsys, monkeypatch):
+    """`--timeout 0` is a poll of what is there right now, not a refusal: a pending event is delivered."""
+    store, _ = env
+    comms.owner_message(store, "как там оплата?", project="P")
+    seen, real = [], events.wait
+
+    def once(store_, *, timeout_s, **kw):
+        seen.append(timeout_s)
+        return real(store_, timeout_s=timeout_s, **kw)
+
+    monkeypatch.setattr(events, "wait", once)
+    rc, out, err = ahub(capsys, "wait", "--timeout", "0")
+    assert rc == 0 and out == "OWNER «как там оплата?»" and err == ""
+    assert seen == [0.0]  # exactly one poll, and nothing to wait for
+    assert ahub(capsys, "wait", "--timeout", "0") == (3, "", "")  # nothing left — but it did poll
+    assert seen == [0.0, 0.0]
+
+
 def test_wait_keeps_its_deadline(env, capsys, monkeypatch):
     """`--timeout` is the deadline: no poll starts past it — not even a zero-length one after a failure
     that ate the whole timeout."""
@@ -212,6 +230,29 @@ def test_watch_gives_up_after_the_failure_cap(env, capsys, monkeypatch, caplog):
     assert rc == 4 and out == ""
     assert err.count("\n") == 0 and f"{comms_cmd.MAX_POLL_FAILURES} раз" in err and "database is locked" in err
     assert len([r for r in caplog.records if r.name == "ahub.watch"]) == 1  # once per distinct error, not per poll
+
+
+def test_watch_counts_failures_again_after_a_working_poll(env, capsys, monkeypatch, caplog):
+    """The cap counts a streak, not the total: a poll that works starts a new one (else a Monitor with two
+    short hiccups would be killed by MAX_POLL_FAILURES of them together)."""
+    cap = comms_cmd.MAX_POLL_FAILURES
+    real, state = events.ready_batch, {"n": 0}
+
+    def fake(store, *, now=None, scope=None, window_ms=events.GROUP_WINDOW_MS):
+        state["n"] += 1
+        if state["n"] == 3:
+            return real(store, now=now, scope=scope, window_ms=window_ms)  # the stream recovers
+        if state["n"] > 3 + cap:
+            raise KeyboardInterrupt  # the cap of the second streak must fire before this
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(events, "ready_batch", fake)
+    with caplog.at_level("WARNING", logger="watch"):
+        rc, out, err = ahub(capsys, "watch", "--poll", "0")
+    assert rc == 4 and out == "" and state["n"] == 3 + cap  # 2 + cap failures, counted from zero
+    assert err.count("\n") == 0 and f"{cap} раз" in err and "database is locked" in err
+    assert [r.message for r in caplog.records if r.name == "ahub.watch"] == [
+        "watch: OperationalError: database is locked"] * 2  # one line per streak, not per poll
 
 
 def test_say_ask_answer_alarms(env, capsys):
