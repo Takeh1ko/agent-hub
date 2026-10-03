@@ -82,7 +82,7 @@ def verdict_repair_prompt(round_no: int, model: str) -> str:
 
 
 def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResult, round_no: int,
-                  model: str) -> str:
+                  model: str, *, notes: str = "") -> str:
     """The prompt of one reviewer.
 
     A review task has no allowed files, no acceptance and no gates — its input is what is under review, so
@@ -96,6 +96,8 @@ def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResul
     if task.kind is Kind.REVIEW:
         sections.append(f"## Under review\n`{task.limits.get('input') or ''}`")
         sections.append("## Material under review\n```\n" + diff + "\n```")
+        if notes:
+            sections.append(f"{orchestrator_heading(rework=True)}\n{notes.strip()}")
     else:
         sections.append(f"## Allowed files\n{', '.join(task.limits.get('paths') or [])}\n"
                         f"## Acceptance\n{', '.join(task.limits.get('accept') or []) or '—'}")

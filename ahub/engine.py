@@ -18,6 +18,7 @@ as an orphan, on the current code). Never a busy loop.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -34,7 +35,7 @@ from typing import Any
 from ahub import gates, prepare, prompts, providers, reasons, registry, review, transcript, transitions, workspace
 from ahub import log as hublog
 from ahub.config import ProjectConfig
-from ahub.i18n import t as _t
+from ahub.i18n import plural, t as _t
 from ahub.model import ACTIVE, Kind, Phase, Role, State
 from ahub.providers.base import Act, Activity, Outcome, RunResult, RunSpec
 from ahub.providers.runner import PollFailed
@@ -89,36 +90,72 @@ def _ref(worktree: str, spec: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
-def _file_of_copy(worktree: str, name: str) -> bool:
-    """The name is a file of the copy — a review never reads outside its worktree."""
+def _file_of_copy(worktree: str, name: str, project: ProjectConfig | None = None) -> bool:
+    """The name is a file of the copy — a review never reads outside its worktree or secret excludes."""
     p = Path(name)
-    return not p.is_absolute() and ".." not in p.parts and (Path(worktree) / p).is_file()
+    if p.is_absolute() or ".." in p.parts:
+        return False
+    full = Path(worktree) / p
+    if not full.is_file():
+        return False
+    try:
+        resolved = full.resolve(strict=True)
+        resolved.relative_to(Path(worktree).resolve(strict=True))
+    except (ValueError, OSError):
+        return False
+    if project and any(fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(p.name, pat) for pat in project.secret_excludes):
+        return False
+    return True
 
 
 def review_material(project: ProjectConfig, worktree: str, spec: str) -> str:
     """What the panel reads for a review task: the diff of a branch/commit/range, or the content of files.
 
-    A branch is read from its merge-base with the work branch, a commit as `sha^!` (what that commit changed),
-    an `a..b` range as it is. Files are read as they are in the copy — there is no diff of them. Everything
-    is capped like the diff of a code task.
+    A branch is read from its merge-base with the work branch, a commit as `sha^1 sha` for a merge or
+    against the empty tree for a root commit, an `a..b` range as it is. Files are read as they are in the
+    copy — there is no diff of them. Everything is capped like the diff of a code task, and secret excludes
+    are filtered out.
     """
     spec = (spec or "").strip()
     if ".." in spec:
         left, right = spec.split("..", 1)
         if not (_ref(worktree, left) and _ref(worktree, right)):
             raise ReviewInputError(_t("engine.review_input_bad", input=spec))
-        return gates.rev_diff_text(worktree, spec)
+        diff = gates.rev_diff_text(worktree, spec, exclude=project.secret_excludes)
+        if not diff.strip():
+            raise ReviewInputError(_t("engine.review_empty", input=spec))
+        return diff
     names = [n for n in re.split(r"[,\s]+", spec) if n]
-    if names and all(_file_of_copy(worktree, n) for n in names):
-        return "\n\n".join(_file_text(worktree, n) for n in names)
+    if names and all(_file_of_copy(worktree, n, project) for n in names):
+        files_text = [_file_text(worktree, n) for n in names]
+        text = "\n\n".join(t for t in files_text if t.strip())
+        if not text.strip():
+            raise ReviewInputError(_t("engine.review_empty", input=spec))
+        if len(text) > gates.DIFF_LIMIT:
+            text = text[:gates.DIFF_LIMIT] + "\n" + _t("engine.review_cut_total", size=len(text))
+        return text
     sha = _ref(worktree, spec)
     if sha:
         if _SHA.fullmatch(spec):  # a commit — what it itself changed
-            return gates.rev_diff_text(worktree, f"{sha}^!")
+            parents = workspace.git(worktree, "rev-list", "--parents", "-n1", sha, check=False).stdout.split()
+            if len(parents) <= 1:  # root commit — diff against the empty tree
+                empty_tree = workspace.git(worktree, "hash-object", "-t", "tree", "/dev/null",
+                                           check=False).stdout.strip() or "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+                diff = gates.rev_diff_text(worktree, empty_tree, sha, exclude=project.secret_excludes)
+            elif len(parents) > 2:  # merge commit — diff against first parent
+                diff = gates.rev_diff_text(worktree, f"{sha}^1", sha, exclude=project.secret_excludes)
+            else:
+                diff = gates.rev_diff_text(worktree, f"{parents[1]}..{sha}", exclude=project.secret_excludes)
+            if not diff.strip():
+                raise ReviewInputError(_t("engine.review_empty", input=spec))
+            return diff
         base = workspace.git(worktree, "merge-base", project.work_branch, sha, check=False).stdout.strip()
         if not base:  # unrelated histories — nothing to count the branch from
             raise ReviewInputError(_t("engine.review_input_bad", input=spec))
-        return gates.rev_diff_text(worktree, f"{base}..{sha}")
+        diff = gates.rev_diff_text(worktree, f"{base}..{sha}", exclude=project.secret_excludes)
+        if not diff.strip():
+            raise ReviewInputError(_t("engine.review_empty", input=spec))
+        return diff
     raise ReviewInputError(_t("engine.review_input_bad", input=spec))
 
 
@@ -135,7 +172,9 @@ def _findings_summary(findings: list[review.Finding]) -> str:
     if not findings:
         return _t("engine.findings_none")
     counts = {s: sum(1 for f in findings if f.severity == s) for s in ("high", "medium", "low")}
-    return _t("engine.findings_line", n=len(findings), parts=", ".join(f"{n} {s}" for s, n in counts.items() if n))
+    parts = ", ".join(f"{n} {s}" for s, n in counts.items() if n)
+    return plural(len(findings), "engine.findings_one", "engine.findings_few", "engine.findings_many",
+                  parts=parts)
 
 
 def _problem(code: str, **params) -> gates.Problem:
@@ -537,6 +576,7 @@ class Engine:
     def _prepare(self, t: Task) -> Task:
         if t.state is State.PREPARING:
             ws = workspace.ensure(self.project, t.id)
+            prepare.hide_secrets(self.project, ws.path)
             fields = {"worktree": ws.path, "branch": ws.branch}
             if not t.base_sha:
                 fields["base_sha"] = ws.base_sha
@@ -674,18 +714,27 @@ class Engine:
         like a scout's.
         """
         t = self._prepare(t)
+        inp = str(t.limits.get("input") or "")
         try:
-            material = review_material(self.project, t.worktree, str(t.limits.get("input") or ""))
+            material = review_material(self.project, t.worktree, inp)
+            if not material.strip():
+                return self._settle(State.NEEDS_DECISION,
+                                    reasons.dump("review_input", err=_t("engine.review_empty", input=inp)))
         except ReviewInputError as e:
             return self._settle(State.NEEDS_DECISION, reasons.dump("review_input", err=e))
         models = list(t.review.get("models") or []) or [t.executor]
         round_no = max(1, t.round)
+        rework_notes = str(t.limits.get("rework_notes") or "")
+        if rework_notes:
+            lim = dict(t.limits)
+            lim.pop("rework_notes", None)
+            self.store.update_task(t.id, limits=lim)
         self.set_phase(Phase.STUDYING)
         t = self.move(State.REVIEWING, reasons.dump("review_round", round=round_no))
         # no gates of a code task here: an empty result, so nothing pretends a test ran
         decision, reason, findings = self._review_round(t, gates.GateResult(base="", head=""), models, round_no,
                                                         max(1, int(t.review.get("rounds") or 1)),
-                                                        material=material, rework=False)
+                                                        material=material, rework=False, notes=rework_notes)
         if decision == "decision":  # a reviewer without a verdict, a stop, the budget
             return self._settle(State.NEEDS_DECISION, reason, payload={"findings": len(findings)})
         summary = _findings_summary(findings)
@@ -702,8 +751,11 @@ class Engine:
         base = Path(t.worktree) / workspace.AHUB_DIR
         sections = [f"{prompts.report_heading()}\n{summary}"]
         if findings:
+            def _loc(f: review.Finding) -> str:
+                return f"`{f.file}:{f.line}`" if f.line is not None else f"`{f.file}`"
+
             by_sev = [f"### {s}\n" + "\n".join(
-                f"- `{f.file}:{f.line}` — {f.issue}" + (f"\n  fix: {f.fix}" if f.fix else "")
+                f"- {_loc(f)} — {f.issue}" + (f"\n  fix: {f.fix}" if f.fix else "")
                 for f in findings if f.severity == s)
                 for s in ("high", "medium", "low") if any(f.severity == s for f in findings)]
             sections.append(f"## {_t('engine.findings_head')}\n" + "\n\n".join(by_sev))
@@ -851,7 +903,7 @@ class Engine:
 
     def _review_round(self, t: Task, g: gates.GateResult, models: list[str], round_no: int,
                       max_rounds: int, *, material: str | None = None,
-                      rework: bool = True) -> tuple[str, str, list]:
+                      rework: bool = True, notes: str = "") -> tuple[str, str, list]:
         """One round of the panel: the reviewer sessions, the verdict repair retry, the decision.
 
         `material` — what is under review (None — the diff of the copy, a code task's own);
@@ -864,7 +916,7 @@ class Engine:
             review.review_path(t.worktree, round_no, m).unlink(missing_ok=True)
 
         def one(m: str):
-            prompt = review.review_prompt(self.project, t, diff, g, round_no, m)
+            prompt = review.review_prompt(self.project, t, diff, g, round_no, m, notes=notes)
             # a reviewer is not interrupted by a nudge: the message waits for the executor's next turn
             return self.session(Role.REVIEWER, m, prompt, keep_session_on_retry=False,
                                 log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review",

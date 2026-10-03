@@ -96,6 +96,32 @@ def test_sha_input(store, project):
     assert "diff --git" in fake.calls[0]["prompt"] and "Y = 2" in fake.calls[0]["prompt"]
 
 
+def test_sha_merge_commit_input(store, project):
+    root = project.root
+    git(root, "checkout", "-q", "-b", "side")
+    (Path(root) / "core" / "side.py").write_text("SIDE = True\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "side commit")
+    git(root, "checkout", "-q", project.work_branch)
+    git(root, "merge", "--no-ff", "-q", "-m", "merge side", "side")
+    merge_sha = git_out(root, "rev-parse", "HEAD")
+    fake = install_fake(store, [verdict()])
+    t = review_task(store, project, merge_sha)
+    assert run(store, project, t.id).state is State.DONE
+    prompt = fake.calls[0]["prompt"]
+    assert "diff --git" in prompt and "SIDE = True" in prompt
+
+
+def test_sha_root_commit_input(store, project):
+    root = project.root
+    root_sha = git_out(root, "rev-list", "--max-parents=0", "HEAD")
+    fake = install_fake(store, [verdict()])
+    t = review_task(store, project, root_sha)
+    assert run(store, project, t.id).state is State.DONE
+    prompt = fake.calls[0]["prompt"]
+    assert "diff --git" in prompt and "X = 1" in prompt
+
+
 def test_range_input(store, project):
     first = git_out(project.root, "rev-parse", "HEAD")
     sha = branch_with_work(project)
@@ -120,11 +146,69 @@ def test_input_the_copy_cannot_resolve(store, project):
     assert res.state is State.NEEDS_DECISION and "вход ревью непригоден" in res.reason
 
 
-def test_input_never_leaves_the_copy(store, project):
-    """`--input ../../etc/hosts` is not a review — nothing outside the worktree is read."""
+def test_input_never_leaves_the_copy(store, project, tmp_path):
+    """`--input ../../etc/hosts` or symlinks pointing outside are not read."""
     install_fake(store, [verdict()])
     t = review_task(store, project, "../../etc/hosts")
     assert run(store, project, t.id).state is State.NEEDS_DECISION
+
+    outside = tmp_path / "outside.py"
+    outside.write_text("OUTSIDE = True\n")
+    sym = Path(project.root) / "core" / "sym.py"
+    sym.symlink_to(outside)
+    git(project.root, "add", "-A")
+    git(project.root, "commit", "-q", "-m", "symlink outside")
+
+    t2 = review_task(store, project, "core/sym.py")
+    res = run(store, project, t2.id)
+    assert res.state is State.NEEDS_DECISION
+
+
+def test_empty_material_needs_decision(store, project):
+    install_fake(store, [verdict()])
+    t = review_task(store, project, project.work_branch)
+    res = run(store, project, t.id)
+    assert res.state is State.NEEDS_DECISION
+    assert "нечего проверять" in res.reason or "nothing to review" in res.reason
+
+
+def test_secrets_excluded_from_diff_and_files(store, project):
+    root = project.root
+    git(root, "checkout", "-q", "-b", "sec_branch")
+    (Path(root) / "core" / "secret.key").write_text("SECRET_TOKEN = 12345\n")
+    (Path(root) / "core" / "public.py").write_text("PUBLIC = True\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "with secret")
+    git(root, "checkout", "-q", project.work_branch)
+
+    fake = install_fake(store, [verdict()])
+    t = review_task(store, project, "sec_branch")
+    assert run(store, project, t.id).state is State.DONE
+    prompt = fake.calls[0]["prompt"]
+    assert "PUBLIC = True" in prompt
+    assert "SECRET_TOKEN" not in prompt
+
+    # Files input with secret file only is refused
+    t2 = review_task(store, project, "core/secret.key")
+    res = run(store, project, t2.id)
+    assert res.state is State.NEEDS_DECISION
+
+
+def test_files_input_total_cap(store, project, monkeypatch):
+    from ahub import gates
+    root = project.root
+    f1 = Path(root) / "core" / "big1.txt"
+    f2 = Path(root) / "core" / "big2.txt"
+    f1.write_text("A" * 50_000)
+    f2.write_text("B" * 50_000)
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "big files")
+    fake = install_fake(store, [verdict()])
+    monkeypatch.setattr(gates, "DIFF_LIMIT", 60_000)
+    t = review_task(store, project, "core/big1.txt, core/big2.txt")
+    assert run(store, project, t.id).state is State.DONE
+    prompt = fake.calls[0]["prompt"]
+    assert "обрезан" in prompt or "truncated" in prompt
 
 
 def test_material_of_the_review_input(project, tmp_path):
@@ -165,12 +249,31 @@ def test_findings_become_the_report(store, project):
 def test_summary_line_in_both_languages():
     from ahub.engine import _findings_summary
 
-    findings = [review.Finding("high", "core/a.py", 1, "ошибка"), review.Finding("low", "core/a.py", 2, "вкусно")]
+    f1 = [review.Finding("low", "core/a.py", 1, "вкусно")]
+    f2 = [review.Finding("high", "core/a.py", 1, "ошибка"), review.Finding("low", "core/a.py", 2, "вкусно")]
+    f5 = [review.Finding("low", "core/a.py", i, "вкусно") for i in range(1, 6)]
+
     set_lang("en")
-    assert _findings_summary(findings) == "2 findings: 1 high, 1 low"
     assert _findings_summary([]) == "no findings"
+    assert _findings_summary(f1) == "1 finding: 1 low"
+    assert _findings_summary(f2) == "2 findings: 1 high, 1 low"
+    assert _findings_summary(f5) == "5 findings: 5 low"
+
     set_lang("ru")
     assert _findings_summary([]) == "замечаний нет"
+    assert _findings_summary(f1) == "1 замечание: 1 low"
+    assert _findings_summary(f2) == "2 замечания: 1 high, 1 low"
+    assert _findings_summary(f5) == "5 замечаний: 5 low"
+
+
+def test_finding_without_line_renders_file_only(store, project):
+    finding_no_line = [{"severity": "low", "file": "core/a.py", "line": None, "issue": "нет докстринга"}]
+    install_fake(store, [verdict(findings=finding_no_line)])
+    t = review_task(store, project, "core/a.py")
+    assert run(store, project, t.id).state is State.DONE
+    report = (Path(store.get_task(t.id).worktree) / ".ahub" / "report.md").read_text(encoding="utf-8")
+    assert "- `core/a.py` — нет докстринга" in report
+    assert "None" not in report
 
 
 def test_no_findings(store, project):
@@ -234,3 +337,28 @@ def test_accept_closes_the_task_without_a_merge(store, project):
     row = store.get_task(t.id)
     assert row.state is State.ACCEPTED and git_out(project.root, "rev-parse", "HEAD") == before
     assert not Path(row.worktree).exists()
+
+
+def test_rework_notes_passed_to_reviewers(store, project):
+    fake = install_fake(store, [verdict(round_no=1), verdict(round_no=2, session="ses_2")])
+    t = review_task(store, project, "core/a.py")
+    assert run(store, project, t.id).state is State.DONE
+    accept.rework(store, t.id, "проверь безопасность внимательнее")
+    assert run(store, project, t.id).state is State.DONE
+    assert len(fake.calls) == 2
+    prompt2 = fake.calls[1]["prompt"]
+    assert "проверь безопасность внимательнее" in prompt2
+    assert "Указания оркестратора (доработка)" in prompt2 or "Orchestrator notes (rework)" in prompt2
+
+
+def test_task_edit_input(store, project):
+    install_fake(store, [verdict()])
+    t = review_task(store, project, "no-such-branch")
+    res = run(store, project, t.id)
+    assert res.state is State.NEEDS_DECISION
+    accept.edit(store, project, t.id, input="core/a.py")
+    assert store.get_task(t.id).limits["input"] == "core/a.py"
+    from ahub import transitions
+    transitions.move(store, t.id, State.QUEUED)
+    res2 = run(store, project, t.id)
+    assert res2.state is State.DONE

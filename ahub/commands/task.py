@@ -181,7 +181,7 @@ def cmd_edit(args) -> int:
     review = _csv(args.review) or None
     return _decide(args, lambda s, t: accept.edit(s, _project_of(s, t), t.id, spec=spec, title=args.title,
                                                   review=review, rounds=args.rounds, model=args.model,
-                                                  by=args.by))
+                                                  input=args.input, by=args.by))
 
 
 def cmd_extend(args) -> int:
@@ -339,6 +339,7 @@ def register(subparsers) -> None:
     ed.add_argument("--review", help=t("help.task_edit_review"))
     ed.add_argument("--rounds", type=int, help=t("help.task_edit_rounds"))
     ed.add_argument("--model", help=t("help.task_edit_model"))
+    ed.add_argument("--input", help=t("help.task_new_input"))
     ed.add_argument("--by", default="orchestrator")
     add_scope_args(ed)
     ed.set_defaults(func=cmd_edit)

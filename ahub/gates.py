@@ -20,7 +20,7 @@ import fnmatch
 import os
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -101,9 +101,12 @@ def diff_text(path: str, base: str, limit: int = DIFF_LIMIT) -> str:
     return rev_diff_text(path, f"{base}..HEAD", limit=limit)
 
 
-def rev_diff_text(path: str, *revs: str, limit: int = DIFF_LIMIT) -> str:
+def rev_diff_text(path: str, *revs: str, limit: int = DIFF_LIMIT, exclude: Sequence[str] = ()) -> str:
     """The diff of any commits — the base..HEAD of a code task, the input of a review task."""
-    r = workspace.git(path, "diff", *revs, check=False)
+    args = ["diff", *revs]
+    if exclude:
+        args += ["--", ".", *[f":(top,exclude){pat}" for pat in exclude]]
+    r = workspace.git(path, *args, check=False)
     out = r.stdout
     return out if len(out) <= limit else out[:limit] + "\n" + _t("gates.diff_cut", size=len(out))
 
