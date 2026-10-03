@@ -122,6 +122,25 @@ def test_tx_rolls_back(store):
     assert store.list_tasks() == []
 
 
+def test_rows_tolerate_columns_of_a_newer_schema(store):
+    """A migration adds a column under a live process — the old code still reads every row type."""
+    tid = store.create_task(project="P", kind=Kind.CODE, title="x", now=1000)
+    sid = store.add_session(task_id=tid, provider="fake", role="executor", now=1000)
+    store.update_session(sid, external_id="ses_1", tokens={"input": 10})
+    eid = store.add_event("created", task_id=tid, project="P", payload={"k": 1}, now=1000)
+    with store.tx() as c:  # what a newer code does to the shared database
+        for table in ("task", "session", "event"):
+            c.execute(f"ALTER TABLE {table} ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+
+    t = store.get_task(tid)
+    assert t.id == tid and t.kind is Kind.CODE and t.state is State.QUEUED and t.request_text == ""
+    assert [x.id for x in store.list_tasks()] == [tid]
+    s = store.get_session(sid)
+    assert s.id == sid and s.external_id == "ses_1" and s.tokens == {"input": 10}
+    assert [x.id for x in store.list_sessions(tid)] == [sid]
+    assert [e.payload for e in store.events() if e.id == eid] == [{"k": 1}]
+
+
 def test_transition_table_consistent():
     for src, dsts in TRANSITIONS.items():
         assert src not in dsts, f"петля {src}"

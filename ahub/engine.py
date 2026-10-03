@@ -9,6 +9,10 @@ One engine instance = one task process (ahub.worker). It:
   session continues with it (gates and reviewers are not interrupted by a message — they carry the result of
   the turn); quota/timeout → "Needs decision"; no access/model error/crash → "Error"; requested stop → "Stopped".
 V08: scout. Code/routine/review (gates, panel, merge) — M3.
+Robustness of a live code reload: the owner poll (stop/budget/request) reads the task row through the dataclass
+of this code. Old code on a newer schema cannot — POLL_FAIL_MAX failures in a row give the process up: the
+provider session is stopped, the task stays active, and the worker exits non-zero (the service re-picks it
+as an orphan, on the current code). Never a busy loop.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ahub import gates, prepare, prompts, providers, registry, review, transcript, transitions, workspace
 from ahub import log as hublog
@@ -30,6 +35,7 @@ from ahub.config import ProjectConfig
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Kind, Phase, Role, State
 from ahub.providers.base import Act, Activity, Outcome, RunResult, RunSpec
+from ahub.providers.runner import PollFailed
 from ahub.providers.runner import run as run_session
 from ahub.store import Store, Task
 from ahub.time import now_ms
@@ -38,6 +44,7 @@ LEASE_MS = 90_000
 STOP_POLL_S = 3.0
 NUDGE_MAX = 8  # messages from the orchestrator in a row per step (each one is a whole turn)
 BUDGET_POLL_S = 30.0
+POLL_FAIL_MAX = 3  # owner poll failures in a row — the process gives up (a live reload broke its schema)
 REPORT_MAX_BYTES = 18_000  # 12 KB per contract plus margin; over that is flagged, not rejected
 
 _WRITE_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch", "file_change",
@@ -87,6 +94,7 @@ class Engine:
         self.lease_ms = lease_ms
         self.lost = threading.Event()
         self._stop_cache: tuple[float, bool] = (0.0, False)
+        self._poll_fails = 0
         self._phase: str = ""
         self._deadline_ms: int | None = None
         self.budget_hit = False
@@ -122,6 +130,8 @@ class Engine:
         except LeaseLost:
             t = self.store.get_task(self.task_id)
             return Settled(t.state if t else State.ERROR, _t("engine.lease_lost"))
+        except PollFailed:
+            raise  # the task stays active; the worker exits non-zero and the service re-picks it
         except workspace.WorkspaceError as e:
             self.log.error("worktree: %s", e)
             return self._settle(State.ERROR, _t("engine.workspace_fail", err=e))
@@ -200,25 +210,45 @@ class Engine:
         """A worker turn is interrupted by a stop and by a nudge: the text goes into the next turn."""
         return self.stop_requested() or self._poll_request() == "nudge"
 
+    def _poll(self, what: str, read: Callable[[], Any], default: Any) -> tuple[bool, Any]:
+        """(read ok, value) of one owner poll (the task row, the budget).
+
+        A couple of failures are tolerated and the default is returned; POLL_FAIL_MAX in a row mean this
+        code cannot read its own schema (a live reload added columns): log once and raise PollFailed — the
+        caller stops the provider session and the process gives the task back to the service.
+        """
+        try:
+            val = read()
+        except Exception as e:
+            self._poll_fails += 1
+            if self._poll_fails < POLL_FAIL_MAX:
+                self.log.debug("%s poll failed (%d/%d): %s", what, self._poll_fails, POLL_FAIL_MAX, e)
+                return False, default
+            self.log.error("%s poll failed %d times in a row (%s: %s) — the task is left to the service",
+                           what, self._poll_fails, type(e).__name__, str(e)[:200])
+            raise PollFailed(f"{what}: {type(e).__name__}: {e}") from e
+        self._poll_fails = 0
+        return True, val
+
     def _poll_request(self) -> str:
         """Owner request from the task row ('stop' | 'nudge' | ''), at most once in STOP_POLL_S."""
         now = time.monotonic()
         at, val = self._stop_cache
-        if now - at >= STOP_POLL_S:
-            try:
-                val = self.task().request
-            except (sqlite3.Error, RuntimeError):
-                val = ""
-            self._stop_cache = (now, val)
-        return val
+        if now - at < STOP_POLL_S:
+            return val
+        ok, fresh = self._poll("request", lambda: self.task().request, "")
+        if ok:  # a failed read is not cached — the next poll tries again at once
+            self._stop_cache = (now, fresh)
+        return fresh
 
     def pending_nudge(self) -> str:
         """Text of an undelivered nudge ('' — nothing to deliver)."""
-        try:
+        def _read() -> str:
             t = self.task()
-        except (sqlite3.Error, RuntimeError):
-            return ""
-        return t.request_text if t.request == "nudge" else ""
+            return t.request_text if t.request == "nudge" else ""
+
+        _, text = self._poll("nudge", _read, "")
+        return text
 
     def _take_request_back(self, kind: str, text: str = "") -> None:
         """The owner took its request from the row: the poll cache must not serve it to the turn it was for."""
@@ -227,6 +257,10 @@ class Engine:
 
     def over_budget(self, *, live: bool = False) -> bool:
         """Task budget (whole task incl. review): 80% — journal event; 100% — True."""
+        _, over = self._poll("budget", lambda: self._over_budget(live), False)
+        return over
+
+    def _over_budget(self, live: bool) -> bool:
         t = self.task()
         go, usd = self.task_cost()
         if live:  # all running task sessions (reviewers run in parallel): provider usage minus recorded
@@ -298,6 +332,13 @@ class Engine:
         return self.store.add_session(task_id=self.task_id, provider=provider, role=role.value, model=alias,
                                       round=round_no, external_id=session_id or "", log_path=log_path)
 
+    def _close_session(self, row: int) -> None:
+        """The provider group is gone and the turn is lost — the row must not stay 'running'."""
+        try:
+            self.store.update_session(row, status="killed", outcome=Outcome.KILLED.value, ended_at=now_ms())
+        except sqlite3.Error:
+            self.log.exception("session %d not closed", row)
+
     def _note_prompt(self, log_path: str, kind: str, prompt: str) -> None:
         """The prompt of the turn into the sidecar next to the log — `ahub follow` reads it.
 
@@ -352,9 +393,13 @@ class Engine:
             spec = RunSpec(prompt=prompt, cwd=cwd, model_id=entry.model_id, variant=entry.variant,
                            session_id=session_id, log_path=log_path, timeout_s=self._remaining_s(),
                            idle_s=tmo.idle_s, schema=schema)
-            r = run_session(prov, spec, on_activity=self._on_activity, on_session=on_session,
-                            on_start=lambda pid, _row=row: self.store.update_session(_row, pid=pid),
-                            should_stop=should_stop)
+            try:
+                r = run_session(prov, spec, on_activity=self._on_activity, on_session=on_session,
+                                on_start=lambda pid, _row=row: self.store.update_session(_row, pid=pid),
+                                should_stop=should_stop)
+            except PollFailed:  # the runner killed the provider group — the row must not stay running
+                self._close_session(row)
+                raise
             u = r.usage
             fields: dict = {"status": "ok" if r.ok else ("killed" if r.outcome is Outcome.KILLED else "failed"),
                             "outcome": r.outcome.value, "ended_at": r.ended_ms}

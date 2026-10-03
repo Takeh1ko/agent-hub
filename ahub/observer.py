@@ -65,15 +65,20 @@ def _log_suspicions(since: int) -> list[Suspicion]:
 
 
 def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = None, now: int | None = None,
-                since: int | None = None, health: bool = True) -> list[Suspicion]:
-    """Code-only check. Returns suspicions (empty — all clean)."""
+                since: int | None = None, health: bool = True,
+                live: dict[int, int] | None = None) -> list[Suspicion]:
+    """Code-only check. Returns suspicions (empty — all clean).
+
+    live — the task processes the pulse sees (None — scan /proc; a test passes its own map, otherwise the
+    pulse of its task depends on what else runs on the machine).
+    """
     ts = now if now is not None else now_ms()
     if projects is None:
         projects, _ = config.load_projects()
     sus: list[Suspicion] = []
     from ahub.service import ORPHAN_GRACE_MS
 
-    for tid, pl in pulse.all_pulses(store, projects=projects, now=ts).items():
+    for tid, pl in pulse.all_pulses(store, projects=projects, now=ts, live=live).items():
         if pl.state in ("silent", "dead"):
             t = store.get_task(tid)
             if pl.state == "dead" and ((t.lease_until or 0) + ORPHAN_GRACE_MS > ts

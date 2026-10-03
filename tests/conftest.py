@@ -74,6 +74,27 @@ def write(path, text: str):
     return path
 
 
+@pytest.fixture(autouse=True)
+def _no_runner_stop():
+    """The runner's process-wide stop flag (set by request_stop) must not leak into the next test."""
+    from ahub.providers import runner
+
+    runner.reset_stop()
+    yield
+    runner.reset_stop()
+
+
+@pytest.fixture
+def own_signals():
+    """Signal handlers of the test process: a test that installs the worker's handlers puts them back."""
+    import signal
+
+    old = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+    yield
+    for s, handler in old.items():
+        signal.signal(s, handler)
+
+
 def pytest_collection_modifyitems(config, items):
     if os.environ.get("AHUB_LIVE") == "1":
         return

@@ -5,6 +5,8 @@ Rules:
 - Writes go in a BEGIN IMMEDIATE transaction (`tx()`), so check-and-change stays atomic.
 - Task state never changes here directly — only via ahub.transitions (V02b), with a log entry.
 - Time comes in as a `now` parameter (ms) where tests care; otherwise — ahub.time.now_ms().
+- A row becomes a dataclass by its own fields only (`from_row`): columns a newer schema added are dropped,
+  so a process on the old code keeps working after a migration (a live reload adds columns under it).
 """
 
 from __future__ import annotations
@@ -13,7 +15,8 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +39,25 @@ def _loads(text: str | None, default: Any) -> Any:
         return json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return default
+
+
+@lru_cache(maxsize=None)
+def _columns(cls: type) -> frozenset[str]:
+    """Dataclass field names — the columns a row may bring (`from_row`)."""
+    return frozenset(f.name for f in fields(cls))  # type: ignore[arg-type]
+
+
+def _row_kwargs(cls: type, row: sqlite3.Row, json_cols: dict[str, str]) -> dict[str, Any]:
+    """Row → dataclass kwargs: the dataclass fields and its JSON columns only.
+
+    A column a newer schema added (a migration under a live process) is dropped, not fatal.
+    json_cols — `{json column: dataclass field}`.
+    """
+    raw = dict(row)
+    d = {k: v for k, v in raw.items() if k in _columns(cls)}
+    for col, target in json_cols.items():
+        d[target] = _loads(raw.get(col), {})
+    return d
 
 
 @dataclass
@@ -78,9 +100,7 @@ class Task:
 
     @classmethod
     def from_row(cls, row: sqlite3.Row, after: list[int] | None = None) -> "Task":
-        d = dict(row)
-        d["review"] = _loads(d.pop("review_json"), {})
-        d["limits"] = _loads(d.pop("limits_json"), {})
+        d = _row_kwargs(cls, row, {"review_json": "review", "limits_json": "limits"})
         d["kind"] = Kind(d["kind"])
         d["state"] = State(d["state"])
         d["after"] = list(after or [])
@@ -112,8 +132,7 @@ class Event:
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Event":
-        d = dict(row)
-        d["payload"] = _loads(d.pop("payload_json"), {})
+        d = _row_kwargs(cls, row, {"payload_json": "payload"})
         d["needs_reaction"] = bool(d["needs_reaction"])
         d["critical"] = bool(d["critical"])
         return cls(**d)
@@ -141,8 +160,7 @@ class Session:
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Session":
-        d = dict(row)
-        d["tokens"] = _loads(d.pop("tokens_json"), {})
+        d = _row_kwargs(cls, row, {"tokens_json": "tokens"})
         return cls(**d)
 
 

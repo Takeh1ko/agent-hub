@@ -98,6 +98,8 @@ def run_hook(project: ProjectConfig, name: str, task: Task, worktree: str) -> No
                            timeout=HOOK_TIMEOUT_S)
     except subprocess.TimeoutExpired as e:
         raise PrepareError(_t("prepare.hook_timeout", name=name, timeout=HOOK_TIMEOUT_S)) from e
+    except OSError as e:  # the copy is gone (an accept resumed after the cleanup)
+        raise PrepareError(_t("prepare.hook_start", name=name, err=e)) from e
     if r.returncode != 0:
         tail = (r.stdout + "\n" + r.stderr).strip()[-600:]
         raise PrepareError(_t("prepare.hook_failed", name=name, code=r.returncode, tail=tail))

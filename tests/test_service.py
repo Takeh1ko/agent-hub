@@ -37,6 +37,16 @@ def test_live_workers(tmp_path):
     assert service.live_workers(root) == {7: 100}
 
 
+def test_live_workers_ignores_a_command_that_mentions_the_mark(tmp_path):
+    """A shell command, a grep or an agent prompt with the mark in it is not a task process."""
+    root = tmp_path / "proc"
+    fake_proc(root, 200, ["/bin/bash", "-c", "python -m ahub.worker T7 &  # a note"])
+    fake_proc(root, 201, ["/usr/bin/grep", "-rn", "ahub.worker", "T7", "/proc"])
+    fake_proc(root, 202, ["node", "opencode", "run", "task T70: how do I run python -m ahub.worker T7?"])
+    (root / "self").mkdir()
+    assert service.live_workers(root) == {}
+
+
 def scout(store, project, **kw):
     return tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.SCOUT, title="x", model="fake", **kw),
                         project, collect=False)
@@ -258,7 +268,9 @@ def test_orphan_accepting_is_decision(store, tmp_path):
     tid = _orphan_task(store, project, state=State.ACCEPTING)
     s, rec = svc(store, project, tmp_path)
     s.tick()
-    assert store.get_task(tid).state is State.NEEDS_DECISION and "принятие прервано" in store.get_task(tid).state_reason
+    reason = store.get_task(tid).state_reason
+    assert store.get_task(tid).state is State.NEEDS_DECISION and "прервана" in reason
+    assert f"ahub accept T{tid}" in reason  # the reason says how to finish it
 
 
 def test_code_fingerprint_and_health(tmp_path):

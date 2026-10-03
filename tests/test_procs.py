@@ -68,7 +68,7 @@ def test_psutil_no_data_without_psutil(monkeypatch):
 
 def test_psutil_live_workers_finds_marked():
     tid = 987654
-    s = _sleep(["ahub.worker", f"T{tid}"])
+    s = _sleep(["-m", "ahub.worker", f"T{tid}"])  # the shape the service spawns
     try:
         time.sleep(0.5)
         live = service.live_workers(NOPROC)
