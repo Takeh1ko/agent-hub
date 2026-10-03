@@ -316,6 +316,49 @@ def test_network_proxy_ok(monkeypatch):
         srv.close()
 
 
+def _opencode_line(monkeypatch, tmp_path, section: str) -> str:
+    """The opencode doctor line with [providers.opencode] in the config (the binary is a fake file)."""
+    fake = tmp_path / "opencode"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda name: str(fake) if name == "opencode" else None)
+    write(paths.global_config_path(), section)
+    return doctor.check_opencode().detail
+
+
+def test_provider_own_proxy_on_the_line(monkeypatch, tmp_path):
+    """A provider with [providers.<name>] — its line shows the proxy and whether it answers."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    assert doctor.provider_proxy_detail("opencode") == ""  # no section — nothing to say
+    assert _opencode_line(monkeypatch, tmp_path, "[usage]\ngo_month_limit = 5.0\n") == f"found {tmp_path / 'opencode'}"
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    port = srv.getsockname()[1]
+    srv.close()  # nothing listens there — the proxy does not answer
+    detail = _opencode_line(monkeypatch, tmp_path,
+                            f'[providers.opencode]\nproxy = "http://user:secret@127.0.0.1:{port}"\n')
+    assert f"127.0.0.1:{port}" in detail and "does not answer" in detail
+    assert "secret" not in detail  # only host:port — the URL may carry a password
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    live = srv.getsockname()[1]
+    try:
+        detail = _opencode_line(monkeypatch, tmp_path,
+                                f'[providers.opencode]\nproxy = "http://127.0.0.1:{live}"\n')
+        assert f"127.0.0.1:{live}" in detail and "answers" in detail
+    finally:
+        srv.close()
+
+    assert "none" in _opencode_line(monkeypatch, tmp_path, '[providers.opencode]\nproxy = ""\n')
+
+
 def test_claude_and_skill(monkeypatch, tmp_path):
     from ahub.tg import launcher
 

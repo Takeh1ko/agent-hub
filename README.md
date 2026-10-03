@@ -118,6 +118,27 @@ Plain-language tasks: `ahub draft new "what you want, in your words"` → previe
 
 Everything else: `ahub --help`.
 
+## Advanced: per-provider proxy
+
+By default every provider process inherits the hub's environment, so one system proxy (`HTTPS_PROXY` and friends)
+applies to all of them. In `~/.config/ahub/config.toml` a provider can get its own — one through a proxy, another
+direct:
+
+```toml
+[providers.opencode]
+proxy = "http://127.0.0.1:8080"      # https_proxy/http_proxy/all_proxy for this provider's process
+no_proxy = "localhost,127.0.0.1"
+
+[providers.agy]
+proxy = ""                            # empty string = explicitly no proxy (the inherited variables are dropped)
+```
+
+A key that is absent inherits the hub variable as it is, `""` means explicitly none (the variable is dropped), and a
+value sets it — `proxy` covers `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` and their lowercase twins, `no_proxy` covers
+`NO_PROXY`/`no_proxy`, and the two keys do not affect each other. Only http/https/socks5/socks5h URLs are accepted. The
+hub's own processes and the Telegram bot keep their behaviour (`[telegram] proxy` is separate). `ahub doctor` shows
+each provider's own proxy and whether it answers.
+
 ## Documentation
 
 - [docs/ARCHITECTURE.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/ARCHITECTURE.md) — code map, start here

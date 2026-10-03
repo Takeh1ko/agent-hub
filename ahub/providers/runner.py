@@ -3,6 +3,8 @@
 Same for all providers — the provider module only builds the command and parses lines.
 
 - The process starts in its own group (start_new_session): stopping kills it and its children (tests, locks).
+- Process env: the hub environment without its secrets, plus the provider's own proxy from the hub config
+  ([providers.<name>] in config.toml — the hub's own processes and the bot keep the hub environment).
 - Process stdout goes straight to the log file (not a pipe: opencode drops the tail output to a pipe on exit —
   verified 2026-09-30), the stream tails the file; each line is parsed by the provider into Activity →
   on_activity; the first session id → on_session (the caller links it into the DB immediately).
@@ -107,6 +109,18 @@ def reap(pgid: int | None, tracked: dict[int, int | None]) -> list[int]:
 TRACK_S = 2.0  # how often to snapshot agent descendants
 
 
+def hub_proxy(name: str) -> tuple[str | None, str | None]:
+    """The provider's own proxy from the hub config ([providers.<name>]). None — inherit the hub env."""
+    from ahub import config
+
+    try:
+        p = config.load_hub().provider_proxy(name)
+    except config.ConfigError as e:
+        _log.warning("hub config, own proxy ignored: %s", str(e)[:200])
+        return None, None
+    return p.proxy, p.no_proxy
+
+
 def run(provider: Provider, spec: RunSpec, *,
         on_activity: Callable[[Activity], None] | None = None,
         on_session: Callable[[str], None] | None = None,
@@ -116,9 +130,10 @@ def run(provider: Provider, spec: RunSpec, *,
     log_path = spec.log_path or str(Path(spec.cwd) / ".ahub" / f"{provider.name}_{started}.log")
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
     cmd = provider.build_command(spec)
-    from ahub.prepare import scrub_env
+    from ahub.prepare import apply_proxy, scrub_env
 
-    env = scrub_env(dict(os.environ))  # worker gets no hub tokens/passwords (model keys stay)
+    # the worker gets no hub tokens/passwords (model keys stay) and the provider's own proxy
+    env = apply_proxy(scrub_env(dict(os.environ)), *hub_proxy(provider.name))
     env.update(provider.env(spec))
     ctx = {"provider": provider.name, "model": spec.model_id, "cwd": spec.cwd}
 

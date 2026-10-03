@@ -21,6 +21,15 @@ Example ~/.config/ahub/config.toml:
     claude = "~/.claude/local/claude"
     opencode_db = "$HOME/.local/share/opencode/opencode.db"
 
+    [providers.opencode]                # optional; the provider's own proxy (advanced)
+    proxy = "http://127.0.0.1:8080"     # for this provider's process
+    no_proxy = "localhost,127.0.0.1"
+
+    [providers.agy]
+    proxy = ""                          # explicitly no proxy (the inherited variables are dropped)
+
+    # per key: absent — inherited as is, "" — explicitly none, a value — set
+
 Example .hub.toml v2:
 
     schema_version = 2
@@ -71,6 +80,7 @@ from ahub.i18n import t as _t
 PROJECT_FILE = ".hub.toml"
 SCHEMA_VERSION = 2
 DEFAULT_SECRET_EXCLUDES = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*")
+PROXY_SCHEMES = ("http://", "https://", "socks5://", "socks5h://")  # the providers are separate programs
 
 
 class ConfigError(ValueError):
@@ -148,6 +158,18 @@ class ProjectConfig:
 
 
 @dataclass(frozen=True)
+class ProviderProxy:
+    """The provider's own proxy — [providers.<name>] in the hub config.
+
+    Per key: None — the key is absent, the provider process inherits the hub environment; "" — explicitly
+    none (the inherited variables are dropped); a value — for this provider's process.
+    """
+
+    proxy: str | None = None
+    no_proxy: str | None = None
+
+
+@dataclass(frozen=True)
 class HubConfig:
     projects: tuple[str, ...] = ()  # paths to project roots (or to their .hub.toml)
     source: str = ""
@@ -159,11 +181,16 @@ class HubConfig:
     opencode: str = ""  # [paths] opencode; empty — which/known location
     claude: str = ""  # [paths] claude; empty — which/known location
     opencode_db: str = ""  # [paths] opencode_db; empty — XDG/known location
+    provider_proxies: dict[str, ProviderProxy] = field(default_factory=dict)  # [providers.<name>]
 
     @property
     def telegram_enabled(self) -> bool:
         """Bot enabled: token present."""
         return bool(self.tg_token)
+
+    def provider_proxy(self, name: str) -> ProviderProxy:
+        """The provider's own proxy; no section — both keys stay inherited from the hub environment."""
+        return self.provider_proxies.get(name) or ProviderProxy()
 
 
 class _Reader:
@@ -236,6 +263,27 @@ def _resources(r: _Reader, raw: dict) -> dict[str, Resource]:
             capacity=r.int_(spec, "capacity", 1, where, minimum=1),
             lock=expand(r.str_(spec, "lock", "", where)),
         )
+    return out
+
+
+def _provider_proxies(r: _Reader, raw: dict) -> dict[str, ProviderProxy]:
+    """[providers.<name>] → the provider's own proxy. An absent key stays inherited; "" means explicitly none."""
+    out: dict[str, ProviderProxy] = {}
+    for name, spec in raw.items():
+        if not isinstance(spec, dict):
+            r.errors.append(_t("config.expect_table", field=f"providers.{name}"))
+            continue
+        where = f"providers.{name}."
+        proxy: str | None = None
+        if "proxy" in spec:
+            proxy = r.str_(spec, "proxy", "", where).strip()
+            if proxy and not proxy.lower().startswith(PROXY_SCHEMES):
+                r.errors.append(_t("config.bad_provider_proxy", name=name, got=proxy))
+        no_proxy: str | None = None
+        if "no_proxy" in spec:
+            no_proxy = r.str_(spec, "no_proxy", "", where).strip()
+        if proxy is not None or no_proxy is not None:
+            out[name] = ProviderProxy(proxy=proxy, no_proxy=no_proxy)
     return out
 
 
@@ -409,6 +457,7 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
     opencode = expand(r.str_(pth, "opencode", "", "paths.").strip())
     claude = expand(r.str_(pth, "claude", "", "paths.").strip())
     opencode_db = expand(r.str_(pth, "opencode_db", "", "paths.").strip())
+    provider_proxies = _provider_proxies(r, r.table(data, "providers"))
     raw = data.get("lang", "")
     norm = raw.strip().lower() if isinstance(raw, str) else ""
     if isinstance(raw, str) and norm not in ("", "en", "ru"):
@@ -431,6 +480,7 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
         opencode=opencode,
         claude=claude,
         opencode_db=opencode_db,
+        provider_proxies=provider_proxies,
     )
 
 

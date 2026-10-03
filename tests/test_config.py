@@ -298,6 +298,62 @@ def test_hub_paths_bad_types(tmp_path, monkeypatch):
     assert "paths.opencode_db" in errs
 
 
+def test_hub_provider_proxy_set(tmp_path, monkeypatch):
+    """[providers.<name>] — the provider's own proxy; other providers keep inheriting."""
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    write(paths.global_config_path(), """
+[providers.opencode]
+proxy = "socks5h://127.0.0.1:1080"
+no_proxy = "localhost,127.0.0.1"
+
+[providers.agy]
+proxy = ""
+""")
+    hub = config.load_hub()
+    oc = hub.provider_proxy("opencode")
+    assert oc.proxy == "socks5h://127.0.0.1:1080" and oc.no_proxy == "localhost,127.0.0.1"
+    assert hub.provider_proxy("agy").proxy == ""  # explicitly no proxy
+    assert hub.provider_proxy("codex") == config.ProviderProxy()  # no section — inherit
+
+
+def test_hub_provider_proxy_absent_inherits(tmp_path, monkeypatch):
+    """Absent key — None (inherit), "" — explicitly none; the keys are independent."""
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy(None, None)
+    write(paths.global_config_path(), "[providers.opencode]\n")  # a section without keys
+    hub = config.load_hub()
+    assert hub.provider_proxies == {} and hub.provider_proxy("opencode") == config.ProviderProxy(None, None)
+    write(paths.global_config_path(), '[providers.opencode]\nno_proxy = "localhost"\n')
+    assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy(None, "localhost")
+    write(paths.global_config_path(), '[providers.opencode]\nno_proxy = ""\n')
+    assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy(None, "")
+    write(paths.global_config_path(), '[providers.opencode]\nproxy = "http://127.0.0.1:8080"\n')
+    assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy("http://127.0.0.1:8080", None)
+
+
+def test_hub_provider_proxy_bad_scheme(tmp_path, monkeypatch):
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    write(paths.global_config_path(), '[providers.agy]\nproxy = "ftp://127.0.0.1:8080"\n')
+    with pytest.raises(config.ConfigError, match=r"providers\.agy\.proxy"):
+        config.load_hub()
+    write(paths.global_config_path(), "[providers.opencode]\nproxy = 5\n[providers.agy]\nno_proxy = 7\n")
+    with pytest.raises(config.ConfigError) as ei:
+        config.load_hub()
+    errs = " | ".join(ei.value.errors)
+    assert "providers.opencode.proxy" in errs and "providers.agy.no_proxy" in errs
+
+
+def test_hub_provider_proxy_section_bad_types(tmp_path, monkeypatch):
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    write(paths.global_config_path(), "providers = 5\n")
+    with pytest.raises(config.ConfigError, match=r"\[providers\]"):
+        config.load_hub()
+
+
 def test_python_bin_explicit_venv_or_path(tmp_path):
     cfg = config.parse_project({"schema_version": 2, "name": "A"}, tmp_path)
     assert cfg.python_bin() == "python3"
