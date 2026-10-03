@@ -1,14 +1,16 @@
 """`ahub top` screen data — pure functions (tested without textual). Plain words, clear to non-programmers.
 
-The table shows the current work (active, waiting for a decision, queued); the key `h` adds the recent
-finished tasks (history) — the header says which view is on. The live transcript screen is ahub/tui/live.py.
+The table shows the current work (active, waiting for a decision, queued), grouped by project — a header
+row opens the group of each project when the hub serves more than one; the key `h` adds the recent finished
+tasks (history) and `o` narrows the table to one project — the header says which view is on. The live
+transcript screen is ahub/tui/live.py.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ahub import archive, comms, config, events, pulse, reasons, ui, views
+from ahub import archive, comms, config, cost, events, pulse, reasons, ui, views
 from ahub.i18n import Words
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION, Ev, State
@@ -20,6 +22,7 @@ from ahub.time import fmt_local, now_ms, to_local
 _UNSET: object = object()  # marker "limit not passed — take from config"
 PHASE = views.PHASE_WORDS
 CURRENT = ACTIVE | WAITING_DECISION | {State.QUEUED}  # the table by default: what is going on now
+GROUP_MARK = "▌"  # the header row of a project group (one row, no task under it)
 EV_WORDS: Words = Words("tui.ev_", ("created", "retry", "silence", "nudge", "orphan", "budget_soft", "budget_hard",
                                     "orch_edit", "paths_extended", "model_changed", "budget_extended"))
 
@@ -37,6 +40,10 @@ class Row:
     round: int
     age: str
     cost: str
+    project: str = ""
+    header: bool = False  # a project header row: the name and the money of the group, no task
+    go: float = 0.0  # the raw numbers behind the cell — a group sums them, the cell is rounded once
+    usd: float = 0.0
 
 
 @dataclass
@@ -44,6 +51,7 @@ class Screen:
     header: str
     rows: list[Row] = field(default_factory=list)
     feed: list[str] = field(default_factory=list)
+    projects: list[str] = field(default_factory=list)  # the projects of the table — the `o` key cycles them
 
 
 def _age(ms: int, now: int) -> str:
@@ -77,7 +85,7 @@ def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | No
     limit = _go_limit(go_limit)
     lt = to_local(now)
     day0 = int(lt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-    month0 = int(lt.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+    month0 = cost.month_start(now)
     try:
         today = opencode_db.totals(day0)
         month = opencode_db.totals(month0)
@@ -104,24 +112,52 @@ def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | No
     return " · ".join(parts) + "\n" + money
 
 
+def _task_row(store: Store, t: Task, pl, now: int) -> Row:
+    go, usd = archive.task_cost(store, t.id)
+    marks = {"done": "✅", "needs_decision": "❓", "error": "❌", "stopped": "⏹",
+             "queued": "⏳", "draft": "📝", "accepted": "✔", "rejected": "✖"}
+    mark = pl.mark if pl else marks.get(t.state.value, " ")
+    state_word = archive.STATE_WORDS.get(t.state.value, t.state.value)
+    return Row(t.id, mark, t.label, t.kind.value, t.title, state_word,
+               PHASE.get(t.phase, "") if t.state in ACTIVE else "", t.executor, t.round,
+               _age(t.updated_at, now), f"{go + usd:.3f}", t.project, go=go, usd=usd)
+
+
+def _group_row(project: str, items: list[Row]) -> Row:
+    """The header row of a project: its name, how many tasks are under it and what they cost.
+
+    The money is the sum of the sessions of the rows below — the hub sessions of what is shown, never
+    the machine-wide opencode.db (that one lives in the header line, against the Go month limit). It is
+    summed from the raw go/usd of those rows and rounded once here: a sum of the already rounded cells
+    would drift from the real one.
+    """
+    go = sum(r.go for r in items)
+    usd = sum(r.usd for r in items)
+    return Row(0, GROUP_MARK, project, "", _t("tui.group_tasks", n=len(items)), "", "", "", 0, "",
+               f"{go + usd:.3f}", project, header=True, go=go, usd=usd)
+
+
 def rows(store: Store, live: dict[int, int], pulses: dict, now: int, recent: int = 10, *,
-         history: bool = False) -> list[Row]:
+         history: bool = False, only: str = "") -> list[Row]:
     """The table: by default the current work (active, waiting for a decision, queued); with history
-    — the recent finished tasks as well (what the screen showed before the key `h`)."""
-    active = store.list_tasks(states=CURRENT)
-    done = [t for t in store.list_tasks(newest_first=True, limit=recent * 3)
+    — the recent finished tasks as well (what the screen showed before the key `h`).
+
+    Several projects in the data — a header row opens the group of each; one project — no header (the
+    name would say nothing new). `only` — one project: the rows of that project alone.
+    """
+    active = store.list_tasks(states=CURRENT, project=only or None)
+    done = [t for t in store.list_tasks(project=only or None, newest_first=True, limit=recent * 3)
             if t.state.value in ("accepted", "rejected")][:recent] if history else []
-    out = []
+    groups: dict[str, list[Row]] = {}
     for t in active + done:
-        pl = pulses.get(t.id)
-        marks = {"done": "✅", "needs_decision": "❓", "error": "❌", "stopped": "⏹",
-                 "queued": "⏳", "draft": "📝", "accepted": "✔", "rejected": "✖"}
-        mark = pl.mark if pl else marks.get(t.state.value, " ")
-        go, usd = archive.task_cost(store, t.id)
-        state_word = archive.STATE_WORDS.get(t.state.value, t.state.value)
-        out.append(Row(t.id, mark, t.label, t.kind.value, t.title, state_word,
-                       PHASE.get(t.phase, "") if t.state in ACTIVE else "", t.executor, t.round,
-                       _age(t.updated_at, now), f"{go + usd:.3f}"))
+        groups.setdefault(t.project, []).append(_task_row(store, t, pulses.get(t.id), now))
+    flat = [r for items in groups.values() for r in items]
+    if len(groups) < 2:
+        return flat
+    out: list[Row] = []
+    for project, items in groups.items():
+        out.append(_group_row(project, items))
+        out.extend(items)
     return out
 
 
@@ -160,11 +196,20 @@ def detail(store: Store, task_id: int, live: dict[int, int], pulses: dict) -> st
 
 
 def snapshot(store: Store, projects: list[config.ProjectConfig] | None = None, *,
-             history: bool = False) -> tuple[Screen, dict, dict]:
+             history: bool = False, only: str = "") -> tuple[Screen, dict, dict]:
+    """The whole screen: the header, the rows (grouped by project, `only` — one of them), the feed.
+
+    The filter goes down into rows() as the SQL condition of the task list, so a filtered table is
+    complete (a history of one project is not cut by the newer tasks of another). `Screen.projects` is
+    every project that has tasks — the `o` key of the screen cycles it; it comes from the task table,
+    not from the rows, so a filtered screen keeps the whole list.
+    """
     now = now_ms()
     live = live_workers()
     if projects is None:
         projects, _ = config.load_projects()
     pulses = pulse.all_pulses(store, live=live, projects=projects, now=now)
-    return (Screen(header(store, live, now, history=history),
-                   rows(store, live, pulses, now, history=history), feed(store)), live, pulses)
+    screen = Screen(header(store, live, now, history=history),
+                    rows(store, live, pulses, now, history=history, only=only),
+                    feed(store), store.task_projects())
+    return screen, live, pulses

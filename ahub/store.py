@@ -331,6 +331,12 @@ class Store:
                     deps.setdefault(tid, []).append(aid)
         return [Task.from_row(r, deps.get(r["id"])) for r in rows]
 
+    def task_projects(self) -> list[str]:
+        """Project names that have tasks — the hub config may not know one of them (ahub projects)."""
+        with self.read() as c:
+            return [str(r[0]) for r in
+                    c.execute("SELECT DISTINCT project FROM task WHERE project!='' ORDER BY project")]
+
     def update_task(self, task_id: int, *, now: int | None = None,
                     con: sqlite3.Connection | None = None, **fields: Any) -> None:
         """Plain task fields (not state, not ownership). Unknown field — error."""
