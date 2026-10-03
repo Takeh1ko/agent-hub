@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 
 from ahub import log as hublog
-from ahub import workspace
+from ahub import reasons, workspace
 from ahub.config import ProjectConfig
 from ahub.i18n import Words
 from ahub.i18n import t as _t
@@ -60,7 +60,7 @@ def _task_md(store: Store, t: Task) -> str:
     sessions = store.list_sessions(t.id)
     lines = [f"# {t.label} — {t.title}", "",
              _t("archive.type", kind=t.kind.value, state=STATE_WORDS.get(t.state.value, t.state.value))
-             + (f" — {t.state_reason}" if t.state_reason else ""),
+             + (f" — {reasons.text(t.state_reason)}" if t.state_reason else ""),
              _t("archive.model", executor=t.executor,
                review=', '.join(t.review.get('models', [])) or _t("archive.no_review"))
              + (f" × {t.review.get('rounds')}" if t.review else ""),

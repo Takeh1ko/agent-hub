@@ -16,6 +16,7 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
+from ahub import reasons
 from ahub.model import ACTIVE, FINAL, STATE_EVENT, WAITING_DECISION, Ev, State, can_move
 from ahub.i18n import t as _t
 from ahub.store import Store, Task, _dumps
@@ -45,6 +46,7 @@ def move(store: Store, task_id: int, to: State | str, *, reason: str = "", by: s
     owner — caller owner token (task process/service); None — client without ownership.
     expect_from — allowed source states (guard against "read then moved" races).
     fields — plain task fields changed by the same action (round, branch, base…).
+    reason — a reason code blob (ahub.reasons.dump) or free text (a human note); it is stored as it is.
     """
     ts = now if now is not None else now_ms()
     dst = State(to)
@@ -102,11 +104,9 @@ def _cascade(store: Store, c: sqlite3.Connection, task: Task, dst: State, ts: in
             continue
         if dep.state is State.DRAFT:
             continue  # still a draft — a human decides at launch
-        if dst is State.REJECTED:
-            reason = _t("trans.cascade_rejected", label=task.label)
-        else:
-            reason = _t("trans.cascade_error", label=task.label)
-        move(store, dep_id, State.NEEDS_DECISION, reason=reason, by="hub", now=ts, con=c)
+        code = "dep_rejected" if dst is State.REJECTED else "dep_error"
+        move(store, dep_id, State.NEEDS_DECISION, reason=reasons.dump(code, task=task.label), by="hub",
+             now=ts, con=c)
 
 
 # --- ownership ---
@@ -157,7 +157,7 @@ def request_stop(store: Store, task_id: int, *, reason: str | None = None, by: s
     """Stop a task. Returns 'stopped' (at once) or 'requested' (asked the owner)."""
     ts = now if now is not None else now_ms()
     if reason is None:
-        reason = _t("trans.stop_default")
+        reason = reasons.dump("stop_command")
     with store.tx() as c:
         task = store.get_task(task_id, con=c)
         if task is None:

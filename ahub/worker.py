@@ -10,6 +10,7 @@ import sys
 
 from ahub import config
 from ahub import log as hublog
+from ahub import reasons
 from ahub.engine import Engine
 from ahub.i18n import t as _t
 from ahub.model import parse_task_id
@@ -49,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     lg.info("task process starting")
     res = Engine(store, project, tid).run()
     lg.info("task process done: %s %s", res.state.value, res.reason[:200])
-    return 3 if res.reason == _t("engine.busy") else 0
+    return 3 if res.reason == reasons.text(reasons.dump("busy")) else 0
 
 
 if __name__ == "__main__":

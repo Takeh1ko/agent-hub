@@ -27,8 +27,7 @@ from pathlib import Path
 
 from ahub import config, paths, procs
 from ahub import log as hublog
-from ahub import transitions
-from ahub.i18n import t as _t
+from ahub import reasons, transitions
 from ahub.model import ACTIVE, Ev, State
 from ahub.store import Store, Task
 from ahub.time import now_ms
@@ -140,12 +139,13 @@ class Service:
         return self.store.meta_get(PAUSE_KEY) == "1"
 
     def _deps_ok(self, t: Task) -> str:
+        """Why the task cannot start yet (a reason code blob), or "" — all its "after X" are accepted."""
         for a in t.after:
             dep = self.store.get_task(a)
             if dep is None:
-                return _t("trans.no_task", id=a)
+                return reasons.dump("wait_accept", task=f"T{a}", state="error")
             if dep.state is not State.ACCEPTED:
-                return _t("service.wait_dep", id=a, state=dep.state.value)
+                return reasons.dump("wait_accept", task=dep.label, state=dep.state.value)
         return ""
 
     def _set_wait(self, t: Task, reason: str) -> None:
@@ -180,25 +180,25 @@ class Service:
             for t in queued:
                 reason = ""
                 if paused:
-                    reason = _t("service.paused_on")
+                    reason = reasons.dump("queue_paused")
                 if not reason:
                     reason = self._deps_ok(t)
                 if not reason and slots <= 0:
-                    reason = _t("service.wait_slot", running=len(running), max=project.max_parallel)
+                    reason = reasons.dump("wait_slot", running=len(running), max=project.max_parallel)
                 if not reason:
                     for r in t.limits.get("resources") or []:
                         spec = project.resources.get(r)
                         if spec is None:
-                            reason = _t("service.no_resource", name=r)
+                            reason = reasons.dump("no_resource", name=r)
                             break
                         if res_use.get(r, 0) >= spec.capacity:
-                            reason = _t("service.wait_resource", name=r)
+                            reason = reasons.dump("wait_resource", name=r)
                             break
                         if spec.lock and self.lock_busy(spec.lock):
-                            reason = _t("service.wait_resource_busy", name=r)
+                            reason = reasons.dump("wait_resource_busy", name=r)
                             break
                 if reason:
-                    pl.waiting[t.id] = reason
+                    pl.waiting[t.id] = reasons.text(reason)
                     self._set_wait(t, reason)
                     continue
                 self._set_wait(t, "")
@@ -206,7 +206,7 @@ class Service:
                     pid = self.spawn(t.id)
                 except OSError as e:
                     self.log.error("worker process T%d failed to start: %s", t.id, e, extra={"task": t.id})
-                    pl.waiting[t.id] = _t("service.spawn_fail", err=e)
+                    pl.waiting[t.id] = reasons.text(reasons.dump("spawn_failed", err=e))
                     continue
                 self.recent[t.id] = time.monotonic()
                 spawned.append(t.id)
@@ -238,14 +238,14 @@ class Service:
             self.store.update_task(t.id, limits=lim)
             try:
                 if t.state is State.ACCEPTING:
-                    to, reason = State.NEEDS_DECISION, _t("service.orphan_accepting")
+                    to, reason = State.NEEDS_DECISION, reasons.dump("orphan_accepting")
                 elif count > MAX_ORPHANS:
-                    to, reason = State.NEEDS_DECISION, _t("service.orphan_repeat", n=count)
+                    to, reason = State.NEEDS_DECISION, reasons.dump("orphan_repeat", n=count)
                 else:
-                    to, reason = State.QUEUED, _t("service.orphan_once")
+                    to, reason = State.QUEUED, reasons.dump("orphan_once")
                 self.store.add_event(Ev.ORPHAN, task_id=t.id, project=t.project,
                                      payload={"from": t.state.value, "to": to.value, "count": count,
-                                              "text": f"{t.label}: {reason}"})
+                                              "text": f"{t.label}: {reasons.text(reason)}"})
                 transitions.move(self.store, t.id, to, reason=reason, by="service", owner=token)
                 self.log.warning("orphan T%d (%s) → %s", t.id, t.state.value, to.value, extra={"task": t.id})
                 handled.append(t.id)

@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from ahub import procs, providers
+from ahub import procs, providers, reasons
 from ahub.config import ProjectConfig
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, State
@@ -109,7 +109,7 @@ def task_pulse(store: Store, t: Task, *, live: dict[int, int], project: ProjectC
         mins = (ts - tool_since) // 60000 if tool_since else age // 60000
         return Pulse(t.id, "waiting", _t("pulse.tool", tool=tool, mins=mins), last, tool, pid)
     if t.phase == "waiting":
-        why = t.state_reason or _t("pulse.waiting")
+        why = reasons.text(t.state_reason) or _t("pulse.waiting")
         if project is not None and project.test_resource in project.resources:
             lk = project.resources[project.test_resource].lock
             holder = lock_holder(lk, proc_root) if lk else None
