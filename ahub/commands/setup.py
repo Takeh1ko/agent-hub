@@ -409,11 +409,15 @@ def _ask_role_model(role, good, recommended: str) -> str:
 
 
 def _default_answers(store, role, results: dict) -> bool:
-    """The role already has a working default: it is set and it answered the probe (or was not probed)."""
+    """The role already has a working default: it is set and it answered the probe.
+
+    An alias that was not probed (disabled, or its provider is off or not logged in — the models are not
+    offered then) is not working: such a role follows the executor, otherwise its default stays unusable.
+    """
     from ahub import registry
 
     default = registry.role_default(store, role)
-    return default is not None and bool(results.get(default.alias, (True, ""))[0])
+    return default is not None and bool(results.get(default.alias, (False, ""))[0])
 
 
 def _first_free(store) -> str:

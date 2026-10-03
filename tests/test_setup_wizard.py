@@ -241,6 +241,36 @@ def test_a_provider_without_a_login_is_never_probed(tmp_path, monkeypatch, capsy
     assert _defaults()["executor"] == "spark"
 
 
+def test_roles_with_an_unoffered_default_follow_the_executor(tmp_path, monkeypatch, capsys):
+    """A role default that is not offered (its provider is off) is not working — the role follows the executor."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)  # opencode and agy are logged in, codex is missing
+    from ahub.tg import launcher
+
+    monkeypatch.setattr(launcher, "claude_bin", lambda: None)
+    tried = _probe_stub(monkeypatch, {"gemini"})
+    root = tmp_path / "roles"
+    make_repo(root)
+    _answers(monkeypatch, [
+        "", str(root),
+        "agy",  # providers: only agy — the opencode models are not offered
+        "", "",  # executor and reviewer: Enter (gemini answered)
+        "n", "n", "n",  # service install, service start, telegram: no
+    ])
+    assert cli.main(["setup"]) == 0
+    capsys.readouterr()
+    assert _enabled("opencode") is False and _enabled("agy") is True
+    assert tried and all(a.startswith("gemini") for a in tried)  # only the live provider is probed
+    # every role, including the ones whose default was spark/spark-high of a switched-off provider
+    assert set(_defaults().values()) == {"gemini"}
+    store = Store()
+    for role in Role:
+        assert registry.pick(store, role, None).alias == "gemini"
+        assert registry.menu(store, role), role.value  # the menu of every role has what it offers
+    assert doctor.check_models([]).ok is True
+
+
 def test_wizard_service_install_writes_units(tmp_path, monkeypatch, capsys):
     _tty(monkeypatch, True)
     _no_go(monkeypatch)
