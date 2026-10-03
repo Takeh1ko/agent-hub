@@ -332,7 +332,16 @@ Heavy session transcripts live in the hub's storage; the archive holds a link or
   fails every command *silently* (the JSONL stream shows nothing — the error goes only to the model), so the turn comes
   out empty. `check_codex`/`health()` therefore run this probe and report it as a problem (checked live
   2026-10-03: inside a container without user namespaces bubblewrap cannot set a uid map —
-  `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`; on a normal host the probe passes). Non-interactive
+  `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`; on a normal host the probe passes). The mode is the
+  admin's choice in the hub config — `[providers.codex] sandbox` (`read-only` | `workspace-write`, the default |
+  `danger-full-access`), passed to `exec` as `-s` and to `exec resume` as `-c sandbox_mode=…` (that one has no `-s`).
+  On Ubuntu 24.04 the probe fails out of the box: AppArmor restricts unprivileged user namespaces
+  (`kernel.apparmor_restrict_unprivileged_userns = 1`), so bubblewrap cannot start and every command of the turn fails
+  silently — the turn looks empty. `ahub doctor` detects exactly this case and gives both fixes in one hint: allow the
+  namespaces (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, kept by a file in `/etc/sysctl.d/` —
+  the admin's decision) or `sandbox = "danger-full-access"`, where the task copy and the gates hold codex as they hold
+  opencode and agy; the hub never changes system settings by itself. A mode without an OS sandbox is not probed (there
+  is nothing to start) and so cannot be reported as a failure. Non-interactive
   mode is `-c approval_policy="never"` (the worker never waits for a human) plus `stdin=/dev/null`, which the shared
   runner already gives the process; `--skip-git-repo-check` is added when the working copy is not a git repo
   (codex otherwise stops to ask about the trust — on `exec resume` too).

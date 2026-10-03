@@ -137,6 +137,20 @@ proxy = ""                            # пустая строка = явно б�
 Собственные процессы хаба и Telegram-бот работают как раньше (`[telegram] proxy` — отдельно). `ahub doctor`
 показывает свой прокси каждого провайдера и отвечает ли он.
 
+В этой же секции ключ `sandbox` для Codex — OS-песочница, в которой работает воркер:
+
+```toml
+[providers.codex]
+sandbox = "workspace-write"     # read-only | workspace-write (по умолчанию) | danger-full-access
+```
+
+В `workspace-write` инструменты читают всё, но пишут только в копию задачи (это обеспечивает ядро). На Ubuntu 24.04
+AppArmor запрещает непривилегированные user namespace, нужные bubblewrap, и тогда codex молча не выполняет ни одной
+команды, а ход выходит пустым — `ahub doctor` распознаёт этот случай и даёт обе починки в одной подсказке: разрешить
+namespace (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` и файл в `/etc/sysctl.d/`, чтобы
+навсегда — решение администратора) или поставить `sandbox = "danger-full-access"`, где codex держат копия задачи и
+ворота приёмки, как opencode и agy. Системные настройки хаб сам не меняет.
+
 ## Документация (на английском)
 
 - [docs/ARCHITECTURE.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/ARCHITECTURE.md) — карта кода, начинать с неё

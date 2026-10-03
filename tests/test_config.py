@@ -311,26 +311,26 @@ no_proxy = "localhost,127.0.0.1"
 proxy = ""
 """)
     hub = config.load_hub()
-    oc = hub.provider_proxy("opencode")
+    oc = hub.provider("opencode")
     assert oc.proxy == "socks5h://127.0.0.1:1080" and oc.no_proxy == "localhost,127.0.0.1"
-    assert hub.provider_proxy("agy").proxy == ""  # explicitly no proxy
-    assert hub.provider_proxy("codex") == config.ProviderProxy()  # no section — inherit
+    assert hub.provider("agy").proxy == ""  # explicitly no proxy
+    assert hub.provider("codex") == config.ProviderSettings()  # no section — inherit
 
 
 def test_hub_provider_proxy_absent_inherits(tmp_path, monkeypatch):
     """Absent key — None (inherit), "" — explicitly none; the keys are independent."""
     monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
     monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
-    assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy(None, None)
+    assert config.load_hub().provider("opencode") == config.ProviderSettings(None, None)
     write(paths.global_config_path(), "[providers.opencode]\n")  # a section without keys
     hub = config.load_hub()
-    assert hub.provider_proxies == {} and hub.provider_proxy("opencode") == config.ProviderProxy(None, None)
+    assert hub.provider_settings == {} and hub.provider("opencode") == config.ProviderSettings(None, None)
     write(paths.global_config_path(), '[providers.opencode]\nno_proxy = "localhost"\n')
-    assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy(None, "localhost")
+    assert config.load_hub().provider("opencode") == config.ProviderSettings(None, "localhost")
     write(paths.global_config_path(), '[providers.opencode]\nno_proxy = ""\n')
-    assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy(None, "")
+    assert config.load_hub().provider("opencode") == config.ProviderSettings(None, "")
     write(paths.global_config_path(), '[providers.opencode]\nproxy = "http://127.0.0.1:8080"\n')
-    assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy("http://127.0.0.1:8080", None)
+    assert config.load_hub().provider("opencode") == config.ProviderSettings("http://127.0.0.1:8080", None)
 
 
 def test_hub_provider_proxy_bad_scheme(tmp_path, monkeypatch):
@@ -351,6 +351,33 @@ def test_hub_provider_proxy_section_bad_types(tmp_path, monkeypatch):
     monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
     write(paths.global_config_path(), "providers = 5\n")
     with pytest.raises(config.ConfigError, match=r"\[providers\]"):
+        config.load_hub()
+
+
+def test_hub_codex_sandbox(tmp_path, monkeypatch):
+    """[providers.codex] sandbox — the codex OS sandbox; absent — the provider's default."""
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    assert config.load_hub().provider("codex").sandbox == ""
+    for mode in config.SANDBOX_MODES:
+        write(paths.global_config_path(), f'[providers.codex]\nsandbox = "{mode}"\n')
+        assert config.load_hub().provider("codex").sandbox == mode
+    write(paths.global_config_path(), '[providers.codex]\nsandbox = "workspace-write"\n'
+                                     '[providers.opencode]\nproxy = "http://127.0.0.1:8080"\n')
+    hub = config.load_hub()
+    assert hub.provider("codex").sandbox == "workspace-write"  # the same section keeps the proxy
+    assert hub.provider("opencode").proxy == "http://127.0.0.1:8080"
+
+
+def test_hub_codex_sandbox_bad_mode(tmp_path, monkeypatch):
+    """A typo must not silently drop the isolation — a config error instead."""
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    write(paths.global_config_path(), '[providers.codex]\nsandbox = "workspace-writee"\n')
+    with pytest.raises(config.ConfigError, match=r"providers\.codex\.sandbox"):
+        config.load_hub()
+    write(paths.global_config_path(), "[providers.codex]\nsandbox = 5\n")
+    with pytest.raises(config.ConfigError, match=r"providers\.codex\.sandbox"):
         config.load_hub()
 
 

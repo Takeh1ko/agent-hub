@@ -13,7 +13,7 @@ import pytest
 
 from ahub.providers.base import Act, Cap, Outcome, RunSpec
 from ahub.providers.codex import (CodexProvider, classify_text, error_text, parse_models, prompt_arg,
-                                  usage_of)
+                                   sandbox_mode, usage_of)
 
 DATA = Path(__file__).parent / "data" / "codex"
 SID = "01a0fec9-9da7-7c71-9fa0-cdba1d4bfc35"
@@ -187,6 +187,58 @@ def test_build_command_without_sandbox_or_approvals(tmp_path):
     assert "-s" not in cmd and "-c" not in cmd
 
 
+def test_sandbox_mode_default_config_and_explicit(tmp_path, monkeypatch):
+    """Absent key — workspace-write; the configured mode goes to exec (-s) and resume (-c sandbox_mode=)."""
+    from ahub import paths
+    from tests.conftest import write
+
+    assert sandbox_mode() == "workspace-write"  # no config — the default keeps the isolation
+    cfg = paths.global_config_path()
+    write(cfg, '[providers.codex]\nsandbox = "danger-full-access"\n')
+    assert sandbox_mode() == "danger-full-access"
+    assert CodexProvider(binary="/usr/bin/codex-fake").sandbox == "danger-full-access"
+    assert CodexProvider(binary="/usr/bin/codex-fake", sandbox="read-only").sandbox == "read-only"
+    assert CodexProvider(binary="/usr/bin/codex-fake", sandbox="").sandbox == ""
+
+    prov = CodexProvider(binary="/usr/bin/codex-fake")
+    spec = RunSpec(prompt="hi", cwd=str(tmp_path), model_id="m")
+    cmd = prov.build_command(spec)
+    assert cmd[cmd.index("-s") + 1] == "danger-full-access"
+    spec.session_id = SID
+    rcmd = prov.build_command(spec)
+    assert 'sandbox_mode="danger-full-access"' in rcmd and "-s" not in rcmd
+
+
+def test_sandbox_mode_survives_a_broken_config(monkeypatch):
+    """A config that does not parse must not stop the provider — the default isolation stands."""
+    from ahub import config, paths
+    from tests.conftest import write
+
+    write(paths.global_config_path(), "providers = 5\n")
+    with pytest.raises(config.ConfigError):
+        config.load_hub()
+    assert sandbox_mode() == "workspace-write"
+
+
+def test_danger_full_access_is_not_probed(tmp_path, monkeypatch):
+    """No OS sandbox — the probe is skipped, so health() cannot report it as a failure."""
+    from ahub.providers import codex as codex_mod
+
+    fake = _fake_codex(tmp_path)
+    env = {"AHUB_CODEX_FAKE_DATA": str(DATA)}
+    real = codex_mod.run_capture
+
+    def no_probe(cmd, **kw):
+        assert "sandbox" not in cmd, "the probe must not run when there is no OS sandbox"
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(codex_mod, "run_capture", no_probe)
+    prov = CodexProvider(binary=str(fake), env=env, sandbox="danger-full-access")
+    assert prov.sandbox_ok() == (True, "")
+    h = prov.health()
+    assert h.ok and h.details["sandbox"] == "danger-full-access" and h.details["sandbox_ok"] is True
+
+
 def test_env_isolates_the_hub(codex, tmp_path):
     env = codex.env(RunSpec(prompt="hi", cwd=str(tmp_path), model_id="m", env={"X": "1"}))
     assert env["AHUB_HOME"] == str(tmp_path / ".ahub" / "home") and env["X"] == "1"
@@ -238,7 +290,8 @@ def test_health_reports_login_models_and_sandbox(tmp_path):
     prov = CodexProvider(binary=str(fake), env={"AHUB_CODEX_FAKE_DATA": str(DATA)})
     h = prov.health()
     assert h.ok and h.details["models"] == 3 and h.details["login"].startswith("Logged in")
-    assert h.details["sandbox"] == "workspace-write" and h.details["version"].startswith("codex-cli")
+    assert h.details["sandbox"] == "workspace-write" and h.details["sandbox_ok"] is True
+    assert h.details["version"].startswith("codex-cli")
 
     # not logged in + a sandbox that cannot start — both visible, with the reason
     class _NoLogin(CodexProvider):
@@ -251,6 +304,7 @@ def test_health_reports_login_models_and_sandbox(tmp_path):
     h2 = _NoLogin(binary=str(fake), env={"AHUB_CODEX_FAKE_DATA": str(DATA)}).health()
     assert not h2.ok and len(h2.problems) == 2
     assert "codex login" in h2.problems[0] and "bwrap" in h2.problems[1]
+    assert h2.details["sandbox_ok"] is False  # the doctor shows the fix for exactly this
 
 
 def test_health_survives_a_broken_binary(tmp_path):

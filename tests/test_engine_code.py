@@ -12,6 +12,7 @@ from ahub.engine import Engine
 from ahub.model import Kind, Phase, State
 from ahub.providers.agy import AgyProvider
 from ahub.providers.base import Act, Activity
+from ahub.providers.codex import CodexProvider
 from ahub.store import Store
 from tests.enginekit import git, install_fake, make_project
 
@@ -220,6 +221,7 @@ def test_reviewer_no_retry_without_session(store, project):
 # --- phases by activity (opencode and agy tools) ---
 
 AGY_DATA = Path(__file__).parent / "data" / "agy"
+CODEX_DATA = Path(__file__).parent / "data" / "codex"
 
 
 class Phases(Engine):
@@ -254,6 +256,12 @@ def agy_tool(tool: str, params: dict | None = None):
         "conversation_id": "c1", "step_index": 1, "state": "ACTIVE", "step_type": "tool",
         "tool_name": tool, "tool_info": {"name": tool, "parameters": params or {}}}})
     return AgyProvider(binary="agy").parse_line(line, 1)
+
+
+def codex_item(itype: str, **fields):
+    """codex activity for a tool: `codex exec --json` reports tools as items, the command as `command`."""
+    item = {"id": "item_0", "type": itype, **fields}
+    return CodexProvider(binary="codex").parse_line(json.dumps({"type": "item.started", "item": item}), 1)
 
 
 def test_opencode_tool_phases(store, project):
@@ -317,3 +325,23 @@ def test_agy_tools_phases_end_to_end(store, project):
     assert eng.run().state is State.DONE
     assert phases_of(eng) == [Phase.WRITING.value, Phase.STUDYING.value, Phase.WRITING.value,
                               Phase.TESTING.value]
+
+
+def test_codex_write_and_command_tools(store, project):
+    """codex tools: file_change — writing, command_execution with pytest — testing, else studying."""
+    install_fake(store, [])
+    t = code_task(store, project)
+    eng = Phases(store, project, t.id, sleep=lambda s: None)
+    for line in (CODEX_DATA / "commands.ndjson").read_text(encoding="utf-8").splitlines():
+        feed(eng, CodexProvider(binary="codex").parse_line(line, 1))
+    assert phases_of(eng) == [Phase.STUDYING.value]  # `echo hello > sbox.txt` from the live sample
+
+    eng.seen.clear()
+    feed(eng, codex_item("file_change", changes=[{"path": "core/a.py", "kind": "modify"}]))
+    assert phases_of(eng) == [Phase.WRITING.value]
+    eng.seen.clear()
+    feed(eng, codex_item("command_execution", command="/bin/bash -lc '.venv/bin/python -m pytest -q tests'"))
+    assert phases_of(eng) == [Phase.TESTING.value]  # pytest inside the command line
+    eng.seen.clear()
+    feed(eng, codex_item("command_execution", command="/bin/bash -lc 'git status'"))
+    assert phases_of(eng) == [Phase.STUDYING.value]

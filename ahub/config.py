@@ -21,14 +21,19 @@ Example ~/.config/ahub/config.toml:
     claude = "~/.claude/local/claude"
     opencode_db = "$HOME/.local/share/opencode/opencode.db"
 
-    [providers.opencode]                # optional; the provider's own proxy (advanced)
+    [providers.opencode]                # optional; the provider's own settings (advanced)
     proxy = "http://127.0.0.1:8080"     # for this provider's process
     no_proxy = "localhost,127.0.0.1"
 
     [providers.agy]
     proxy = ""                          # explicitly no proxy (the inherited variables are dropped)
 
-    # per key: absent — inherited as is, "" — explicitly none, a value — set
+    # per proxy key: absent — inherited as is, "" — explicitly none, a value — set
+
+    [providers.codex]
+    sandbox = "workspace-write"         # codex OS sandbox: read-only | workspace-write | danger-full-access
+                                       # (absent — workspace-write; danger-full-access — no OS sandbox,
+                                       # only the task copy and the gates hold codex)
 
 Example .hub.toml v2:
 
@@ -81,6 +86,7 @@ PROJECT_FILE = ".hub.toml"
 SCHEMA_VERSION = 2
 DEFAULT_SECRET_EXCLUDES = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*")
 PROXY_SCHEMES = ("http://", "https://", "socks5://", "socks5h://")  # the providers are separate programs
+SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")  # `codex exec -s …`
 
 
 class ConfigError(ValueError):
@@ -158,15 +164,17 @@ class ProjectConfig:
 
 
 @dataclass(frozen=True)
-class ProviderProxy:
-    """The provider's own proxy — [providers.<name>] in the hub config.
+class ProviderSettings:
+    """A provider's own settings — [providers.<name>] in the hub config.
 
-    Per key: None — the key is absent, the provider process inherits the hub environment; "" — explicitly
-    none (the inherited variables are dropped); a value — for this provider's process.
+    Proxy, per key: None — the key is absent, the provider process inherits the hub environment; "" —
+    explicitly none (the inherited variables are dropped); a value — for this provider's process.
+    Sandbox: "" — the key is absent, the provider uses its own default.
     """
 
     proxy: str | None = None
     no_proxy: str | None = None
+    sandbox: str = ""
 
 
 @dataclass(frozen=True)
@@ -181,16 +189,16 @@ class HubConfig:
     opencode: str = ""  # [paths] opencode; empty — which/known location
     claude: str = ""  # [paths] claude; empty — which/known location
     opencode_db: str = ""  # [paths] opencode_db; empty — XDG/known location
-    provider_proxies: dict[str, ProviderProxy] = field(default_factory=dict)  # [providers.<name>]
+    provider_settings: dict[str, ProviderSettings] = field(default_factory=dict)  # [providers.<name>]
 
     @property
     def telegram_enabled(self) -> bool:
         """Bot enabled: token present."""
         return bool(self.tg_token)
 
-    def provider_proxy(self, name: str) -> ProviderProxy:
-        """The provider's own proxy; no section — both keys stay inherited from the hub environment."""
-        return self.provider_proxies.get(name) or ProviderProxy()
+    def provider(self, name: str) -> ProviderSettings:
+        """A provider's own settings; no section — the proxy keys stay inherited, the sandbox default."""
+        return self.provider_settings.get(name) or ProviderSettings()
 
 
 class _Reader:
@@ -266,9 +274,10 @@ def _resources(r: _Reader, raw: dict) -> dict[str, Resource]:
     return out
 
 
-def _provider_proxies(r: _Reader, raw: dict) -> dict[str, ProviderProxy]:
-    """[providers.<name>] → the provider's own proxy. An absent key stays inherited; "" means explicitly none."""
-    out: dict[str, ProviderProxy] = {}
+def _provider_settings(r: _Reader, raw: dict) -> dict[str, ProviderSettings]:
+    """[providers.<name>] → the provider's own settings. An absent proxy key stays inherited;
+    "" means explicitly none; an unknown sandbox mode is an error (a typo would silently drop the sandbox)."""
+    out: dict[str, ProviderSettings] = {}
     for name, spec in raw.items():
         if not isinstance(spec, dict):
             r.errors.append(_t("config.expect_table", field=f"providers.{name}"))
@@ -282,8 +291,12 @@ def _provider_proxies(r: _Reader, raw: dict) -> dict[str, ProviderProxy]:
         no_proxy: str | None = None
         if "no_proxy" in spec:
             no_proxy = r.str_(spec, "no_proxy", "", where).strip()
-        if proxy is not None or no_proxy is not None:
-            out[name] = ProviderProxy(proxy=proxy, no_proxy=no_proxy)
+        sandbox = r.str_(spec, "sandbox", "", where).strip()
+        if sandbox and sandbox not in SANDBOX_MODES:
+            r.errors.append(_t("config.bad_sandbox", name=name, got=sandbox))
+            sandbox = ""
+        if proxy is not None or no_proxy is not None or sandbox:
+            out[name] = ProviderSettings(proxy=proxy, no_proxy=no_proxy, sandbox=sandbox)
     return out
 
 
@@ -457,7 +470,7 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
     opencode = expand(r.str_(pth, "opencode", "", "paths.").strip())
     claude = expand(r.str_(pth, "claude", "", "paths.").strip())
     opencode_db = expand(r.str_(pth, "opencode_db", "", "paths.").strip())
-    provider_proxies = _provider_proxies(r, r.table(data, "providers"))
+    provider_settings = _provider_settings(r, r.table(data, "providers"))
     raw = data.get("lang", "")
     norm = raw.strip().lower() if isinstance(raw, str) else ""
     if isinstance(raw, str) and norm not in ("", "en", "ru"):
@@ -480,7 +493,7 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
         opencode=opencode,
         claude=claude,
         opencode_db=opencode_db,
-        provider_proxies=provider_proxies,
+        provider_settings=provider_settings,
     )
 
 

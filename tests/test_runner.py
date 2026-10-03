@@ -291,7 +291,7 @@ def test_provider_proxy_keys_independent(tmp_path, section, want):
     from ahub import config, prepare
 
     write(paths.global_config_path(), section)
-    p = config.load_hub().provider_proxy("opencode")
+    p = config.load_hub().provider("opencode")
     assert prepare.apply_proxy(dict(_INHERITED), p.proxy, p.no_proxy) == want
     assert _INHERITED["HTTPS_PROXY"] == "http://hub:1"  # the input is not touched
 
