@@ -12,7 +12,8 @@
 - Orphans (V20): an active task with no live process and an expired lease → back to queue with an event and
   resume in place (same session); repeated orphaning → "Needs decision"; interrupted acceptance → "Needs
   decision" with a reason that points at `ahub accept` (the merge may already be in the work branch — accept
-  skips the gates and the merge then and finishes the tail).
+  skips the gates and the merge then and finishes the tail). An "accepting" task whose owner process is alive is
+  never an orphan (acceptance is long; accept.py renews the lease while it runs).
 """
 
 from __future__ import annotations
@@ -237,6 +238,8 @@ class Service:
         for t in self.store.list_tasks(states=ACTIVE):
             if t.id in busy or t.id in live:
                 continue
+            if t.state is State.ACCEPTING and t.owner_pid and procs.alive(t.owner_pid, self.proc_root):
+                continue  # an `ahub accept` in progress: acceptance is long, its lease is renewed — never an orphan
             if t.owner and t.lease_until and t.lease_until + ORPHAN_GRACE_MS > now:
                 continue  # lease (or its grace) still alive — the owner may be outside the task process (CLI)
             if not t.owner and now - t.updated_at < ORPHAN_GRACE_MS:

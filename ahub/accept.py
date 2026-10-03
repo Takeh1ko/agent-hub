@@ -9,10 +9,18 @@ push per config → "accepted", task_cleanup hook, copy and branch removed, arch
 Resumable: if the task branch is already merged into the work branch (the accept was interrupted after the merge
 — the gates there see nothing but the merge commit), the gates and the merge are skipped: acceptance runs on HEAD
 (red — roll the merge back, as usual), then the same tail.
+
+The lease is taken with this process's pid and renewed in the background while the acceptance runs: a long
+acceptance is not an orphan, and `service` leaves an "accepting" task with a live owner process alone.
 """
 
 from __future__ import annotations
 
+import os
+import sqlite3
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from ahub import archive, events, gates, prepare, registry, tasks, transitions, workspace
@@ -24,6 +32,9 @@ from ahub.model import CHANGES_FILES, Ev, Kind, State
 from ahub.store import Store, Task
 
 _log = hublog.get("accept")
+
+ACCEPT_LEASE_MS = transitions.DEFAULT_LEASE_MS  # the accept process holds the lease while it runs
+RENEW_S = 20.0  # how often the lease is renewed during acceptance (minutes-long runs on a big repo)
 
 
 class DecisionError(RuntimeError):
@@ -60,6 +71,34 @@ def _root_ready(project: ProjectConfig) -> None:
         raise DecisionError(_t("accept.root_dirty", files=", ".join(x[3:] for x in dirty[:5])))
 
 
+@contextmanager
+def _keep_lease(store: Store, task_id: int, owner: str, lease_ms: int = ACCEPT_LEASE_MS) -> Iterator[None]:
+    """Renew the lease while acceptance runs — the gates and the test run outlive one lease.
+
+    Acceptance takes minutes; without this the service sees an expired lease and calls the live accept an orphan
+    (a false "acceptance interrupted"). A lost lease is only logged: the final move still writes the state, and the
+    pid on the row keeps the service off the task.
+    """
+    done = threading.Event()
+
+    def _renew() -> None:
+        while not done.wait(RENEW_S):
+            try:
+                if not transitions.renew(store, task_id, owner, lease_ms=lease_ms):
+                    _log.warning("accept T%d: lease lost", task_id, extra={"task": task_id})
+                    return
+            except sqlite3.Error:
+                _log.exception("lease renewal failed")
+
+    keeper = threading.Thread(target=_renew, name=f"accept-lease-T{task_id}", daemon=True)
+    keeper.start()
+    try:
+        yield
+    finally:
+        done.set()
+        keeper.join(timeout=5)
+
+
 def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orchestrator") -> str:
     t = _get(store, task_id)
     if t.kind not in CHANGES_FILES:
@@ -80,10 +119,11 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
     if t.state is not State.ACCEPTING:
         transitions.move(store, t.id, State.ACCEPTING, reason=_t("accept.accepting"), by=by,
                          expect_from={State.DONE, State.NEEDS_DECISION})
-    if not transitions.acquire(store, t.id, owner, pid=None):
+    if not transitions.acquire(store, t.id, owner, pid=os.getpid(), lease_ms=ACCEPT_LEASE_MS):
         raise DecisionError(_t("accept.busy", label=t.label))
     try:
-        return _merge(store, project, _get(store, t.id), owner, by, merged=merged)
+        with _keep_lease(store, t.id, owner, ACCEPT_LEASE_MS):
+            return _merge(store, project, _get(store, t.id), owner, by, merged=merged)
     except DecisionError as e:
         _back(store, t.id, owner, str(e))
         raise
