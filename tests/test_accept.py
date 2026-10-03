@@ -44,6 +44,28 @@ def git_out(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True).stdout
 
 
+def interrupted_accept(store, project, tmp_path, tid):
+    """The accept process dies right after the merge commit; the service sees the task as an orphan."""
+    from ahub import service, transitions
+    from ahub.engine import owner_token
+    from ahub.time import now_ms
+
+    t = store.get_task(tid)
+    transitions.move(store, tid, State.ACCEPTING, reason="приёмка")
+    assert transitions.acquire(store, tid, owner_token(), pid=999999)
+    git(project.root, "merge", "--no-ff", "-m", f"merge {t.label}: сделать b", t.branch)
+    old = now_ms() - 10 * 60_000  # the dead process took the lease with it
+    with store.tx() as c:
+        c.execute("UPDATE task SET owner='dead', owner_pid=999999, lease_until=?, updated_at=? WHERE id=?",
+                  (old, old, tid))
+    (tmp_path / "proc").mkdir(exist_ok=True)
+    service.Service(store, [project], spawn=lambda i: 1, proc_root=tmp_path / "proc",
+                    lock_busy=lambda p: False).tick()
+    after = store.get_task(tid)
+    assert after.state is State.NEEDS_DECISION and f"ahub accept {t.label}" in after.state_reason
+    return after
+
+
 def test_merge_happy(store, project):
     t, res, _ = done_code(store, project)
     assert res.state is State.DONE
@@ -202,3 +224,41 @@ def test_budget_extend_does_not_resume_other_decision(store, project):
     transitions.move(store, t.id, State.NEEDS_DECISION, reason="бюджет и круги ревью кончились")  # text does not matter
     accept.extend_budget(store, t.id, add=1.0)
     assert store.get_task(t.id).state is State.NEEDS_DECISION
+
+
+def test_accept_finishes_an_interrupted_merge(store, project, tmp_path):
+    """The merge is in the work branch, the accept process died: accept skips the gates and the merge."""
+    t, _, _ = done_code(store, project)
+    interrupted_accept(store, project, tmp_path, t.id)
+    merged = git_out(project.root, "rev-parse", "HEAD").strip()
+    msg = accept.accept(store, project, t.id)
+    assert msg.startswith(f"T{t.id} слита в main") and "(приёмка)" not in msg
+    after = store.get_task(t.id)
+    assert after.state is State.ACCEPTED and after.accepted_sha == merged
+    assert git_out(project.root, "rev-parse", "HEAD").strip() == merged  # no second merge
+    assert (Path(project.root) / "core" / "b.py").read_text() == "Y = 2\n"
+    assert not Path(after.worktree).exists() and t.branch not in git_out(project.root, "branch")
+    assert (Path(project.root) / ".agent-hub" / "tasks" / f"T{t.id}" / "diff.patch").exists()
+
+
+def test_resumed_accept_rolls_back_a_red_merge(store, project, tmp_path):
+    """Red on HEAD after an interrupted merge — the merge commit is rolled back, as in a normal accept."""
+    t, _, _ = done_code(store, project)
+    (Path(project.root) / "core" / "a.py").write_text("X = 5\n")  # a foreign commit in the work branch
+    git(project.root, "add", "-A")
+    git(project.root, "commit", "-q", "-m", "сломали X")
+    foreign = git_out(project.root, "rev-parse", "HEAD").strip()
+    interrupted_accept(store, project, tmp_path, t.id)
+    with pytest.raises(accept.DecisionError, match="приёмка красная — слияние откачено"):
+        accept.accept(store, project, t.id)
+    assert git_out(project.root, "rev-parse", "HEAD").strip() == foreign  # the merge is gone
+    assert store.get_task(t.id).state is State.NEEDS_DECISION
+
+
+def test_not_merged_still_needs_the_copy(store, project):
+    t, _, _ = done_code(store, project)
+    import shutil
+
+    shutil.rmtree(t.worktree)
+    with pytest.raises(accept.DecisionError, match="нет копии задачи"):
+        accept.accept(store, project, t.id)

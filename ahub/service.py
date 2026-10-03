@@ -8,7 +8,9 @@
   the wait reason is stored on the task.
 - The service never changes task states (except the queue wait reason): the task's own process claims it (lease).
 - Orphans (V20): an active task with no live process and an expired lease → back to queue with an event and
-  resume in place (same session); repeated orphaning → "Needs decision"; interrupted acceptance → "Needs decision".
+  resume in place (same session); repeated orphaning → "Needs decision"; interrupted acceptance → "Needs
+  decision" with a reason that points at `ahub accept` (the merge may already be in the work branch — accept
+  skips the gates and the merge then and finishes the tail).
 """
 
 from __future__ import annotations
@@ -238,7 +240,7 @@ class Service:
             self.store.update_task(t.id, limits=lim)
             try:
                 if t.state is State.ACCEPTING:
-                    to, reason = State.NEEDS_DECISION, _t("service.orphan_accepting")
+                    to, reason = State.NEEDS_DECISION, _t("service.orphan_accepting", label=t.label)
                 elif count > MAX_ORPHANS:
                     to, reason = State.NEEDS_DECISION, _t("service.orphan_repeat", n=count)
                 else:

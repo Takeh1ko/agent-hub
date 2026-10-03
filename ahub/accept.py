@@ -5,6 +5,10 @@ Merge: task → "accepting" (lease held by whoever accepts; a second "accept" is
 current HEAD (orchestrator edit — if HEAD ≠ worker result commit: legitimate, with an event) → in the project root
 `git merge --no-ff` into the work branch → acceptance under the test resource → red — roll the merge back →
 push per config → "accepted", task_cleanup hook, copy and branch removed, archived.
+
+Resumable: if the task branch is already merged into the work branch (the accept was interrupted after the merge
+— the gates there see nothing but the merge commit), the gates and the merge are skipped: acceptance runs on HEAD
+(red — roll the merge back, as usual), then the same tail.
 """
 
 from __future__ import annotations
@@ -33,6 +37,19 @@ def _get(store: Store, task_id: int) -> Task:
     return t
 
 
+def merged_sha(project: ProjectConfig, t: Task) -> str:
+    """The work branch HEAD when the task branch tip is already in it ('' — not merged yet).
+
+    That is the state of an accept interrupted after the merge: the gates on the copy see an empty diff.
+    """
+    if not t.branch:
+        return ""
+    r = workspace.git(project.root, "merge-base", "--is-ancestor", t.branch, project.work_branch, check=False)
+    if r.returncode != 0:
+        return ""
+    return workspace.git(project.root, "rev-parse", project.work_branch).stdout.strip()
+
+
 def _root_ready(project: ProjectConfig) -> None:
     cur = workspace.git(project.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     if cur != project.work_branch:
@@ -55,7 +72,8 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
         return _t("accept.accepted_msg", label=t.label)
     if t.state not in (State.DONE, State.NEEDS_DECISION, State.ACCEPTING):
         raise DecisionError(_t("accept.can_accept", label=t.label, state=t.state.value))
-    if not t.worktree or not Path(t.worktree).is_dir():
+    merged = merged_sha(project, t)  # an interrupted accept: the merge is already in the work branch
+    if not merged and (not t.worktree or not Path(t.worktree).is_dir()):
         raise DecisionError(_t("accept.no_worktree", label=t.label, wt=t.worktree or "—"))
     _root_ready(project)
     owner = owner_token()
@@ -65,7 +83,7 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
     if not transitions.acquire(store, t.id, owner, pid=None):
         raise DecisionError(_t("accept.busy", label=t.label))
     try:
-        return _merge(store, project, _get(store, t.id), owner, by)
+        return _merge(store, project, _get(store, t.id), owner, by, merged=merged)
     except DecisionError as e:
         _back(store, t.id, owner, str(e))
         raise
@@ -84,24 +102,27 @@ def _back(store: Store, task_id: int, owner: str, reason: str) -> None:
         events.ack_task(store, task_id)  # the orchestrator saw the refusal in the command output
 
 
-def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str) -> str:
-    res = archive.read_json(Path(t.worktree) / workspace.AHUB_DIR / "result.json")
-    head = workspace.head(t.worktree)
-    orch_edit = not res.get("commit") or not head.startswith(str(res.get("commit"))[:7])
-    if orch_edit and not t.limits.get("orch_edit"):
-        store.add_event(Ev.ORCH_EDIT, task_id=t.id, project=t.project,
-                        payload={"head": head[:12], "worker_commit": str(res.get("commit", ""))[:12], "by": by})
-    g = gates.check(project, t, run_tests=False, orch_edit=orch_edit)
-    problems = g.fatal + [p for p in g.repairable if not (orch_edit and p.startswith("result.json"))]
-    if problems:
-        raise DecisionError(_t("accept.gates_head", problems="; ".join(problems)))
-    title = t.title.replace('"', "'")[:100]
-    r = workspace.git(project.root, "merge", "--no-ff", "-m", f"merge {t.label}: {title}", t.branch, check=False)
-    if r.returncode != 0:
-        conflicts = workspace.git(project.root, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
-        workspace.git(project.root, "merge", "--abort", check=False)
-        raise DecisionError(_t("accept.conflict", info=", ".join(conflicts[:10]) or (r.stderr or r.stdout)[-300:]))
-    merged = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
+def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *, merged: str = "") -> str:
+    if not merged:  # an empty merged — the branch is not in the work branch yet: gates on the copy, then merge
+        res = archive.read_json(Path(t.worktree) / workspace.AHUB_DIR / "result.json")
+        head = workspace.head(t.worktree)
+        orch_edit = not res.get("commit") or not head.startswith(str(res.get("commit"))[:7])
+        if orch_edit and not t.limits.get("orch_edit"):
+            store.add_event(Ev.ORCH_EDIT, task_id=t.id, project=t.project,
+                            payload={"head": head[:12], "worker_commit": str(res.get("commit", ""))[:12], "by": by})
+        g = gates.check(project, t, run_tests=False, orch_edit=orch_edit)
+        problems = g.fatal + [p for p in g.repairable if not (orch_edit and p.startswith("result.json"))]
+        if problems:
+            raise DecisionError(_t("accept.gates_head", problems="; ".join(problems)))
+        title = t.title.replace('"', "'")[:100]
+        r = workspace.git(project.root, "merge", "--no-ff", "-m", f"merge {t.label}: {title}", t.branch, check=False)
+        if r.returncode != 0:
+            conflicts = workspace.git(project.root, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
+            workspace.git(project.root, "merge", "--abort", check=False)
+            raise DecisionError(_t("accept.conflict", info=", ".join(conflicts[:10]) or (r.stderr or r.stdout)[-300:]))
+        merged = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
+    else:
+        _log.info("T%d is already merged into %s (%s) — acceptance on HEAD", t.id, project.work_branch, merged[:10])
     nodes = list(t.limits.get("accept") or [])
     if t.kind is Kind.CODE and nodes:
         ok, tail, cmd = gates.run_acceptance(project, project.root, nodes, task_label=t.label)
