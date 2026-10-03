@@ -21,7 +21,7 @@ Issues = "https://github.com/Takeh1ko/agent-hub/issues"
 
 [project.optional-dependencies]
 telegram = ["aiogram>=3.13"]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "psutil>=5.9", "aiogram>=3.13"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "psutil>=5.9", "aiogram>=3.13", "ruff>=0.6", "build>=1.2"]
 
 [project.scripts]
 ahub = "ahub.cli:main"
@@ -40,3 +40,17 @@ ahub = ["migrations/*.sql", "claude/*.md"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = ["live: real providers (cost money), only with AHUB_LIVE=1"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# One line per message: it is a whole sentence, splitting it would only break the catalog.
+"ahub/i18n/en.py" = ["E501"]
+"ahub/i18n/ru.py" = ["E501"]
+# Prompts are read as text by a worker model; the lines are kept as written.
+"ahub/prompts.py" = ["E501"]

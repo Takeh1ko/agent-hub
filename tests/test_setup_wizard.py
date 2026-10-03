@@ -25,7 +25,7 @@ def _answers(monkeypatch, items: list[str]):
         try:
             return next(it)
         except StopIteration:
-            raise AssertionError("лишний input()")
+            raise AssertionError("лишний input()") from None
 
     monkeypatch.setattr("builtins.input", _fake)
 

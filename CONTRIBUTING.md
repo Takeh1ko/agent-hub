@@ -13,6 +13,16 @@ python -m venv .venv && .venv/bin/pip install -e '.[dev]'
 The suite takes about three minutes, needs no network and fakes `HOME`, so it never touches your real hub.
 Tests against real providers cost money and run only on request: `AHUB_LIVE=1 .venv/bin/python -m pytest -m live`.
 
+## Lint and smoke test
+
+Ruff is the linter (`[tool.ruff]` in `pyproject.toml`): `ruff check ahub tests`. It is installed with the dev
+extra; the CI `lint` job runs it on every push. `tools/smoke.sh` is the smoke test "as a new user": it builds the
+wheel, installs it into a fresh venv in a temp dir and runs `ahub version`, `ahub doctor --json`,
+`ahub setup --yes` in a clean `HOME` and one scout task end to end on the fake provider (`AHUB_FAKE_PROVIDER=1`,
+`AHUB_FAKE_QUEUE`). Only pip needs the network. Run it before a release and whenever packaging or the setup
+wizard changes — it catches a wheel without its data files, a wizard that crashes in a clean `HOME` and a task
+that never reaches `done`, which unit tests cannot see.
+
 ## Where things are
 
 Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — a one-page map of the modules and how a task flows

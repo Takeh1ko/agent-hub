@@ -9,7 +9,7 @@ from ahub import archive, events, workspace
 from ahub.events import EVENT_CODES
 from ahub.i18n import Words
 from ahub.i18n import t as _t
-from ahub.model import ACTIVE, Ev, State, WAITING_DECISION
+from ahub.model import ACTIVE, WAITING_DECISION, Ev, State
 from ahub.store import Store, Task
 from ahub.time import now_ms
 
@@ -57,8 +57,9 @@ def status_text(store: Store, *, project: str | None = None, live: dict[int, int
         why = f" · {_short(pl.reason, 50)}" if pl and pl.state != "working" and pl.reason else (
             "" if pl or t.id in live else _t("views.no_process"))
         phase = PHASE_WORDS.get(t.phase, t.state.value)
+        rnd = _t("views.round", round=t.round) if t.round > 1 else ""
         lines.append(f"{mark}{t.label} {t.kind.value} «{_short(t.title, 40)}» · {phase} · {t.executor}"
-                     f"{_t('views.round', round=t.round) if t.round > 1 else ''} · {_age(t.updated_at, ts)} · ${go + usd:.2f}{why}")
+                     f"{rnd} · {_age(t.updated_at, ts)} · ${go + usd:.2f}{why}")
     waiting = [t for t in store.list_tasks(states=WAITING_DECISION, project=project)]
     for t in waiting:
         lines.append(f"{DECISION_WORDS[t.state]} {t.label} «{_short(t.title, 40)}» — {_short(t.state_reason, 70)}")

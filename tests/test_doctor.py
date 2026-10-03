@@ -356,7 +356,7 @@ def test_provider_states_from_the_checks(monkeypatch, tmp_path):
     from ahub import providers
     from ahub.providers.agy import AgyProvider
     from ahub.providers.codex import CodexProvider
-    from tests.provider_contract import AGY_DATA, CODEX_DATA, fake_agy, fake_codex
+    from tests.provider_contract import CODEX_DATA, fake_codex
 
     opencode = tmp_path / "bin" / "opencode"
     opencode.parent.mkdir(parents=True)

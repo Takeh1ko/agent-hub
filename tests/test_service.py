@@ -124,7 +124,7 @@ def test_resources(store, tmp_path):
 
 
 def test_test_resource_not_held_by_the_queue(store, tmp_path):
-    """The project test resource is not added to a code task: two tasks run in parallel, acceptance queues on the lock."""
+    """The project test resource is not held by the queue: tasks run in parallel, acceptance takes the lock."""
     project = make_project(tmp_path, resources={"db": {"lock": str(tmp_path / "db.lock"), "capacity": 1}},
                            test_resource="db", max_parallel=2)
     install_fake(store, [])

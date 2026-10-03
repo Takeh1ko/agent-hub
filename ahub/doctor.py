@@ -450,7 +450,7 @@ def probe_models(entries, timeout_s: int = PROBE_WIZARD_S,
     out: dict[str, tuple[bool, str]] = {}
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(items)))) as pool:
         futures = [pool.submit(_probe_one, e, timeout_s) for e in items]
-        for entry, fut in zip(items, futures):
+        for entry, fut in zip(items, futures, strict=True):
             out[entry.alias] = fut.result()
     return out
 

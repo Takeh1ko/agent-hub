@@ -47,7 +47,7 @@ def test_tasks_view(store):
         transitions.move(store, b, st)
     rep = core.tasks_reply(store)
     labels = [row[0].label for row in rep.buttons]
-    assert any(l.startswith(f"T{b} · готово") for l in labels)
+    assert any(lbl.startswith(f"T{b} · готово") for lbl in labels)
     d = core.task_detail(store, b)
     assert "кнопка оплаты" in d.text and d.buttons[0][0].data == "tasks"
     assert "нет задачи" in core.task_detail(store, 999).text
@@ -105,7 +105,7 @@ def test_launcher_flow(store, tmp_path):
     sp.procs[0].wait()
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "finished"
     assert json.loads(store.meta_get(launcher.SESSION_KEY))["id"] == "sess-1"
-    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["ещё вопрос"]  # the first was passed on (a session existed)
+    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["ещё вопрос"]  # the first was passed on
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "launched"  # the backlog
     assert sp.calls[1][0][sp.calls[1][0].index("--resume") + 1] == "sess-1"  # the same TG session
     for p in sp.procs:

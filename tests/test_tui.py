@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ahub import comms, events, transitions, transcript
+from ahub import comms, events, transcript, transitions
 from ahub.model import State
 from ahub.service import PAUSE_KEY
 from ahub.store import Store
@@ -89,9 +89,8 @@ def test_money_limit_from_config(store, tmp_path, monkeypatch):
     from ahub import config, paths
     from ahub.providers import opencode_db
     from ahub.time import now_ms
-    from tests.conftest import write
-
     from ahub.tui import data as tuidata
+    from tests.conftest import write
 
     monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
     monkeypatch.delenv("AHUB_TG_CHAT", raising=False)

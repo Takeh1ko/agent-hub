@@ -5,7 +5,7 @@ import json
 import subprocess
 import sys
 
-from ahub import mcp, comms
+from ahub import comms, mcp
 from ahub.store import Store
 
 

@@ -114,9 +114,9 @@ def with_lock(path: str, fn: Callable[[], object], *, wait_s: float = LOCK_WAIT_
                     on_wait()
                 waited = True
                 if time.monotonic() >= deadline:
-                    raise LockTimeout(_t("gates.lock_busy", path=path, secs=int(wait_s)))
+                    raise LockTimeout(_t("gates.lock_busy", path=path, secs=int(wait_s))) from None
                 if should_stop is not None and should_stop():
-                    raise LockTimeout(_t("gates.lock_stopped"))
+                    raise LockTimeout(_t("gates.lock_stopped")) from None
                 time.sleep(1.0)
         try:
             return fn()

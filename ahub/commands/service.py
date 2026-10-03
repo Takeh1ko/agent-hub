@@ -10,9 +10,7 @@ import sys
 import time
 
 from ahub import log as hublog
-from ahub import model
-from ahub import paths
-from ahub import procs
+from ahub import model, paths, procs
 from ahub.cliutil import CliError, emit
 from ahub.service import HEARTBEAT_KEY, PAUSE_KEY, Service, live_workers
 from ahub.store import Store

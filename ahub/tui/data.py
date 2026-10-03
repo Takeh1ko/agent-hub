@@ -114,10 +114,12 @@ def rows(store: Store, live: dict[int, int], pulses: dict, now: int, recent: int
     out = []
     for t in active + done:
         pl = pulses.get(t.id)
-        mark = pl.mark if pl else {"done": "✅", "needs_decision": "❓", "error": "❌", "stopped": "⏹",
-                                   "queued": "⏳", "draft": "📝", "accepted": "✔", "rejected": "✖"}.get(t.state.value, " ")
+        marks = {"done": "✅", "needs_decision": "❓", "error": "❌", "stopped": "⏹",
+                 "queued": "⏳", "draft": "📝", "accepted": "✔", "rejected": "✖"}
+        mark = pl.mark if pl else marks.get(t.state.value, " ")
         go, usd = archive.task_cost(store, t.id)
-        out.append(Row(t.id, mark, t.label, t.kind.value, t.title, archive.STATE_WORDS.get(t.state.value, t.state.value),
+        state_word = archive.STATE_WORDS.get(t.state.value, t.state.value)
+        out.append(Row(t.id, mark, t.label, t.kind.value, t.title, state_word,
                        PHASE.get(t.phase, "") if t.state in ACTIVE else "", t.executor, t.round,
                        _age(t.updated_at, now), f"{go + usd:.3f}"))
     return out
@@ -140,7 +142,8 @@ def feed(store: Store, limit: int = 12) -> list[str]:
             out.append(f"{when} {events.format_line(e, t)}")
         elif e.kind == Ev.STATE.value and e.payload.get("to"):
             to = archive.STATE_WORDS.get(e.payload["to"], e.payload["to"])
-            out.append(f"{when} T{e.task_id} → {to}" + (f" ({e.payload['reason'][:60]})" if e.payload.get("reason") else ""))
+            reason = f" ({e.payload['reason'][:60]})" if e.payload.get("reason") else ""
+            out.append(f"{when} T{e.task_id} → {to}" + reason)
         elif e.kind in EV_WORDS:
             txt = e.payload.get("text") or EV_WORDS[e.kind]
             out.append(f"{when} T{e.task_id or '-'}: {str(txt)[:90]}")

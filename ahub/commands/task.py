@@ -8,9 +8,9 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 
-from ahub import archive, events, tasks, transitions, views, workspace
+from ahub import archive, events, tasks, transitions, views
 from ahub.cliutil import CliError, add_project_arg, emit, resolve_project
-from ahub.model import ACTIVE, CHANGES_FILES, Kind, State, WAITING_DECISION, parse_task_id
+from ahub.model import ACTIVE, WAITING_DECISION, Kind, State, parse_task_id
 from ahub.service import live_workers
 from ahub.store import Store, Task
 

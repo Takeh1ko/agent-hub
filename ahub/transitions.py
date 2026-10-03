@@ -16,8 +16,8 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
-from ahub.model import ACTIVE, FINAL, NUDGEABLE, STATE_EVENT, WAITING_DECISION, Ev, State, can_move
 from ahub.i18n import t as _t
+from ahub.model import ACTIVE, FINAL, NUDGEABLE, STATE_EVENT, WAITING_DECISION, Ev, State, can_move
 from ahub.store import Store, Task, _dumps
 from ahub.time import now_ms
 

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from ahub.config import ConfigError, HubConfig, ProjectConfig, load_hub
 from ahub.i18n import t as _t
 from ahub.model import Role
+from ahub.providers.fake import selectable_from_env
 from ahub.store import Store
 
 SPARK = "opencode-go/muse-spark-1.3-contributor"
@@ -26,7 +27,7 @@ DEFAULT_MODELS: dict[str, tuple[str, str, str, str]] = {
     "spark-high": ("opencode", SPARK, "high", "Spark 1.3, high reasoning"),
     "spark-medium": ("opencode", SPARK, "medium", "Spark 1.3, medium reasoning"),
     "mimo-flash": ("opencode", "opencode-go/mimo-v2.6-flash", "", "MiMo 2.6 Flash"),
-    "deepseek-flash": ("opencode", "opencode-go/deepseek-v4.1-flash", "high", "DeepSeek v4.1 Flash (pricier than Spark)"),
+    "deepseek-flash": ("opencode", "opencode-go/deepseek-v4.1-flash", "high", "DeepSeek v4.1 Flash (pricier)"),
     "spark-free": ("opencode", "opencode/muse-spark-1.3-contributor-free", "xhigh", "free Spark (slower)"),
     "bunny": ("opencode", "opencode/space-bunny-free", "", "Space Bunny free (opencode)"),
     "gemini": ("agy", "gemini-3.8-flash-high", "", "Gemini via agy (window quota)"),
@@ -75,6 +76,9 @@ def seed(store: Store) -> bool:
 
     A default model missing in an older hub (a new alias in the code) is added too: it is enabled,
     but in no role menu — nothing changes until a human picks it.
+
+    AHUB_FAKE_PROVIDER=1 (tests, tools/smoke.sh): the fake provider becomes a normal entry — the model
+    "fake" in every role menu and the default of every role, so a task runs with no network.
     """
     with store.tx() as c:
         seeded = not c.execute("SELECT COUNT(*) FROM model").fetchone()[0]
@@ -82,6 +86,8 @@ def seed(store: Store) -> bool:
             if not c.execute("SELECT 1 FROM model WHERE alias=?", (alias,)).fetchone():
                 c.execute("INSERT INTO model(alias, provider, model_id, variant, note) VALUES(?,?,?,?,?)",
                           (alias, prov, mid, var, note))
+        if selectable_from_env():
+            _seed_fake(c)
         if not seeded:
             return False
         for role, items in DEFAULT_MENUS.items():
@@ -89,6 +95,19 @@ def seed(store: Store) -> bool:
                 c.execute("INSERT INTO role_model(role, alias, position, is_default) VALUES(?,?,?,?)",
                           (role.value, alias, pos, 1 if is_def else 0))
         return True
+
+
+def _seed_fake(c) -> None:
+    """The fake provider as a registry entry (env: AHUB_FAKE_PROVIDER=1). Idempotent."""
+    from ahub.providers.fake import ALIAS, MODEL_ID
+
+    if not c.execute("SELECT 1 FROM model WHERE alias=?", (ALIAS,)).fetchone():
+        c.execute("INSERT INTO model(alias, provider, model_id, variant, note) VALUES(?,?,?,?,?)",
+                  (ALIAS, ALIAS, MODEL_ID, "", "fake provider (AHUB_FAKE_PROVIDER)"))
+    for role in Role:
+        c.execute("INSERT OR IGNORE INTO role_model(role, alias, position, is_default) VALUES(?,?,999,0)",
+                  (role.value, ALIAS))
+        c.execute("UPDATE role_model SET is_default=(alias=?) WHERE role=?", (ALIAS, role.value))
 
 
 def _entry(row) -> ModelEntry:

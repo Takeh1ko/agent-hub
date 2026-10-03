@@ -9,7 +9,7 @@ import pytest
 
 from ahub import cli, comms, events, paths, transitions
 from ahub.engine import Engine
-from ahub.model import Ev, State
+from ahub.model import State
 from ahub.store import Store
 from tests.enginekit import install_fake, make_project, scout_ok
 

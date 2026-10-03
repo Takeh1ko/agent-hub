@@ -27,18 +27,17 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ahub import config, paths, procs
+from ahub import config, paths, procs, transitions
 from ahub import log as hublog
-from ahub import transitions
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Ev, State
 from ahub.store import Store, Task
 from ahub.time import now_ms
 from ahub.worker import CMD_MARK
 
-SPAWN_GRACE_S = 30.0
+SPAWN_GRACE_S = 30.0  # after spawn the process may not be visible / may not have claimed the task yet
 ORPHAN_GRACE_MS = 60_000  # past lease expiry — another minute in case the process is just slow
-MAX_ORPHANS = 1  # one automatic pickup  # after spawn the process may not be visible / may not have claimed the task yet — do not spawn again
+MAX_ORPHANS = 1  # one automatic pickup
 HEARTBEAT_KEY = "service_heartbeat"
 CODE_CHECK_S = 10.0  # how often to compare code (self-update)
 PAUSE_KEY = "queue_paused"

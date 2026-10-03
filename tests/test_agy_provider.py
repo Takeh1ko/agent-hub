@@ -5,12 +5,11 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
 
-from ahub.providers.agy import (AgyProvider, classify_stderr, classify_text, parse_models, prompt_arg)
+from ahub.providers.agy import AgyProvider, classify_stderr, classify_text, parse_models, prompt_arg
 from ahub.providers.base import Act, Cap, Outcome, RunSpec
 
 DATA = Path(__file__).parent / "data" / "agy"

@@ -14,8 +14,7 @@ from ahub import comms, config
 from ahub import log as hublog
 from ahub.i18n import t as _t
 from ahub.store import Store
-from ahub.tg import core
-from ahub.tg import launcher
+from ahub.tg import core, launcher
 
 LOOP_S = 5
 LAUNCH_S = 10
