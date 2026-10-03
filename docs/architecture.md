@@ -157,8 +157,9 @@ Draft → Queued → Preparing → Studying → Writing → Checking → Reviewi
 ## 6. The task engine (how everything is kicked)
 
 A code task:
-1. **Intake and validation** (§5) → **Queue**: a free slot (the project's parallelism limit), "after X", conflicting
-   resources (a shared test database, an external service that is "strictly one at a time").
+1. **Intake and validation** (§5) → **Queue**: a free slot (the project's parallelism limit), "after X", the resources
+   the task names (a shared test database, an external service that is "strictly one at a time"). The project test
+   resource is not among them: acceptance takes its lock by itself (§5, gates), so code tasks are not serialized by it.
 2. **Preparation:** a separate copy of the project (without secrets) and a branch; the environment (tests collect,
    the project hooks have run, the lock is available). Preparation fails → Error with the reason, the model is not
    called.
@@ -192,6 +193,10 @@ Waiting for a quota window is "waiting for a reason", not an alarm.
 service that is "strictly one at a time"). Busyness is counted by the task processes actually running. Waiting for a
 slot or a resource is "waiting for a reason" with a cause, not an observer alarm. An "after X" task starts from the
 working branch that already contains X.
+The **test resource is not held by the queue**: a code task does not get it added to its resources, because acceptance
+takes the same flock only while the tests run (§5, gates) — code tasks go in parallel and their acceptance runs wait
+for the lock one after another (the phase "waiting for the test lock — held by T<n>", the holder is visible in the
+pulse). A task that needs exclusivity for its whole run names the resource itself (`--resources`).
 
 ## 7. Pulse
 

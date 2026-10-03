@@ -131,6 +131,9 @@ Exit codes: 0 — success, 2 — refusal (one "error: …" line on stderr), 3 �
 needs (`--resources`); the queue does not start a task while a resource is busy (busyness is the live task processes
 with that resource; `lock` is an external flock whose holder is visible in the pulse). Waiting for a slot or a resource
 is the phase `waiting` with a reason, not an alarm.
+The `test_resource` is not added to a code task's resources: acceptance takes its `lock` only while it runs (gates), so
+code tasks run in parallel and their acceptance runs wait for the lock one by one. Naming the resource in
+`--resources` gives the whole task (the old behaviour; tasks already stored that way are unaffected).
 
 ## 9. Default models (the registry at first start)
 
