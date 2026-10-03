@@ -10,6 +10,7 @@ Every table key waits behind that screen.
 
 from __future__ import annotations
 
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -23,6 +24,12 @@ from ahub.service import PAUSE_KEY
 from ahub.store import Store
 from ahub.tui import data
 from ahub.tui.live import LiveView
+
+
+def _plain(text: str) -> Text:
+    """Hub text for a Static: ANSI colours kept, never parsed as markup (a '[' in a report is just a bracket)."""
+    return Text.from_ansi(text)
+
 
 REFRESH_GAP_S = 0.05  # a kept refresh request runs this long after the one that was in flight
 TABLE_ONLY = ("toggle", "new", "stop", "accept", "reject", "rework", "nudge", "model", "budget", "pause",
@@ -154,7 +161,7 @@ class Transcript(Screen[None]):
         head = self.view.header(self._pulses())
         if head != self._head:
             self._head = head
-            self.query_one("#live-head", Static).update(head)
+            self.query_one("#live-head", Static).update(_plain(head))
         if not changed:
             return
         self.query_one("#live-log", Static).update("\n".join(self.view.lines) or _t("tui.loading"))
@@ -264,7 +271,7 @@ class TopApp(App):
         text = (_t("tui.mode_control") if self.control else _t("tui.mode_view"))
         if self.project:
             text += " · " + _t("tui.filter_project", name=self.project)
-        self.query_one("#mode", Static).update(text)
+        self.query_one("#mode", Static).update(_plain(text))
 
     @work(thread=True, exclusive=True, group="refresh")
     def refresh_data(self) -> None:
@@ -284,7 +291,7 @@ class TopApp(App):
     def _apply(self, screen: data.Screen, live: dict, pulses: dict) -> None:
         self._live, self._pulses = live, pulses
         self._names = screen.projects
-        self.query_one("#header", Static).update(screen.header)
+        self.query_one("#header", Static).update(_plain(screen.header))
         table = self.query_one("#tasks", DataTable)
         row_at = table.cursor_row
         cur = self.selected()
@@ -299,7 +306,7 @@ class TopApp(App):
                 table.move_cursor(row=self._ids.index(cur))
         elif self._ids and row_at:  # the cursor is on a project header row — keep its place, not the
             table.move_cursor(row=min(row_at, len(self._ids) - 1))  # first group (an empty table: the top)
-        self.query_one("#feed", Static).update("\n".join(screen.feed[-7:]) or _t("tui.no_events"))
+        self.query_one("#feed", Static).update(_plain("\n".join(screen.feed[-7:]) or _t("tui.no_events")))
         self._show_detail()
         if self._pending:  # a request that arrived while this refresh was running — serve it now
             self._pending = False
@@ -314,7 +321,7 @@ class TopApp(App):
     def _show_detail(self) -> None:
         tid = self.selected()
         text = data.detail(self.store, tid, self._live, self._pulses) if tid else _t("tui.no_tasks")
-        self.query_one("#detail", Static).update(text)
+        self.query_one("#detail", Static).update(_plain(text))
 
     def on_data_table_row_highlighted(self, ev) -> None:
         self._show_detail()

@@ -366,3 +366,19 @@ def test_screen_data_en(store, monkeypatch):
     events.touch(store)
     assert "Claude is here" in data.header(store, {}, now_ms())
     _reset()
+
+
+async def test_app_detail_shows_brackets_and_colours_as_text(store, monkeypatch):
+    """A '[' in a worker report is text, not markup; the colours of a TTY never crash the panel."""
+    monkeypatch.setattr("ahub.ui.colour_on", lambda: True)
+    tid = store.create_task(project="P", kind="scout", title="брекеты [--all? (оставить)]")
+    for st in (State.PREPARING, State.WORKING, State.DONE):
+        transitions.move(store, tid, st, reason="отчёт [x] готов")
+    app = TopApp(store=store, projects=[])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        app._show_detail()
+        await pilot.pause(0.1)
+        text = str(app.query_one("#detail").render())
+        assert "[--all? (оставить)]" in text
+        assert "\x1b[" not in text
