@@ -97,7 +97,8 @@ def cmd_status(args) -> int:
     data = {"active": [asdict(t) for t in store.list_tasks(states=ACTIVE, project=project)],
             "waiting": [asdict(t) for t in store.list_tasks(states=WAITING_DECISION, project=project)],
             "queued": [{"id": t.id, "label": t.label, "state": t.state.value,
-                        "reason": reasons.text(t.state_reason)} for t in queued],
+                        "reason": t.state_reason,
+                        "reason_text": reasons.text(t.state_reason)} for t in queued],
             "live": live}
     emit(args, data, text)
     return 0

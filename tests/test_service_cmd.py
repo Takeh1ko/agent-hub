@@ -192,3 +192,20 @@ def test_wait_for_heartbeat_timeout(monkeypatch):
     """T48: no tick — None after the timeout (mocked, no 15s sleep)."""
     monkeypatch.setattr(svccmd, "_heartbeat_age_s", lambda: None)
     assert svccmd.wait_for_heartbeat(timeout_s=0) is None
+
+
+def test_service_status_json_keeps_the_reason_and_renders_it(capsys):
+    """Machine-readable code and the sentence, like the task detail does."""
+    import json as _json
+
+    from ahub import reasons
+
+    store = Store()
+    tid = store.create_task(project="P", kind="scout", title="later", now=0)
+    store.update_task(tid, state_reason=reasons.dump("wait_accept", task="T1", state="queued"), now=0)
+    rc = cli.main(["--json", "service", "status"])
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    row = _json.loads(out.out)["queued"][0]
+    assert row["reason"] == '{"code":"wait_accept","task":"T1","state":"queued"}'  # the code, as stored
+    assert row["reason_text"] == "ждёт принятия T1 (в очереди)"  # and the sentence, in the reader's language

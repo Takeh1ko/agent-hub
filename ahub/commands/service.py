@@ -47,7 +47,8 @@ def cmd_status(args) -> int:
         reason = reasons.text(tq.state_reason)
         lines.append(ui.kv([(f"T{tq.id}", [views.state_word(tq.state), reason])], indent=2))
     emit(args, {"heartbeat_age_s": age, "paused": paused, "live": live,
-                "queued": [{"id": t.id, "reason": reasons.text(t.state_reason)} for t in queued],
+                "queued": [{"id": t.id, "reason": t.state_reason,
+                            "reason_text": reasons.text(t.state_reason)} for t in queued],
                 "heartbeat": fmt_local(int(hb)) if hb else None}, "\n".join(lines))
     return 0
 

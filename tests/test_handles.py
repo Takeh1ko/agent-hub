@@ -157,3 +157,26 @@ def test_watch_summary_once_new_and_ack(env, capsys, monkeypatch):
     assert "второе" in out and events.unacked(store) == []  # ack still works
     rc, out, _ = ahub(capsys, "watch", "--poll", "0")
     assert rc == 0 and out == ""
+
+
+def test_status_json_keeps_the_reason_and_renders_it(env, capsys, monkeypatch):
+    """The overview --json shows both forms, as the task detail does: the code and the sentence."""
+    import json as _json
+
+    from ahub import reasons
+    from ahub.i18n import _reset
+
+    store, _ = env
+    tid = store.create_task(project="P", kind="scout", title="later", now=0)
+    store.update_task(tid, state_reason=reasons.dump("wait_accept", task="T1", state="queued"), now=0)
+    raw = '{"code":"wait_accept","task":"T1","state":"queued"}'
+    rc, out, err = ahub(capsys, "--json", "status")
+    assert rc == 0, err
+    row = [q for q in _json.loads(out)["queued"] if q["id"] == tid][0]
+    assert row["reason"] == raw
+    assert row["reason_text"] == "ждёт принятия T1 (в очереди)"  # the language of the reader
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    row = [q for q in _json.loads(ahub(capsys, "--json", "status")[1])["queued"] if q["id"] == tid][0]
+    assert row["reason"] == raw
+    assert row["reason_text"] == "waiting for T1 to be accepted (queued)"

@@ -39,7 +39,7 @@ def test_width_explicit_env_and_fallback(monkeypatch):
     monkeypatch.setenv("COLUMNS", "72")
     assert ui.width() == 72
     assert ui.width(140) == 140
-    assert ui.width(10) == ui.MIN_WIDTH  # a terminal is never narrower than that
+    assert ui.width(0) == ui.MIN_WIDTH  # an explicit 0 is a width, not "not given"
     monkeypatch.delenv("COLUMNS")
     assert ui.width() >= ui.MIN_WIDTH
 
@@ -51,6 +51,8 @@ def test_pipe_gets_no_ansi(monkeypatch):
     assert ui.styled("hello", "bold") == "\033[1mhello\033[0m"
     monkeypatch.setenv("NO_COLOR", "1")
     assert ui.styled("hello", "bold") == "hello"  # NO_COLOR wins even on a terminal
+    monkeypatch.setenv("NO_COLOR", "")  # presence alone is the convention
+    assert ui.styled("hello", "bold") == "hello"
     monkeypatch.delenv("NO_COLOR")
 
 
@@ -123,13 +125,10 @@ def test_badge_and_section_are_colour_only_on_a_terminal(monkeypatch):
 DETAIL = """\
 T3  code  Setup wizard: choose providers and per-role models
 ────────────────────────────────────────────────────────────
-State   done · gates passed, acceptance is green · process alive
-Model   bunny
-Review  spark ×2
-Round   3
-Cost    $0.046 Go of $1.50 budget
-Age     4 h 0 min
-After   T2
+State  done · gates passed, acceptance is green · process alive
+Model  bunny  Review  spark ×2  Round  3
+Cost   $0.046 Go of $1.50 budget
+Age    4 h 0 min  After  T2
 Summary
   The wizard asks for every provider and probes its models once. The answer is stored in the hub
   config.

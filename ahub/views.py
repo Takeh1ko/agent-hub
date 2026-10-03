@@ -13,6 +13,7 @@ from ahub.i18n import t as _t
 from ahub.model import ACTIVE, State, WAITING_DECISION
 from ahub.store import Store, Task
 from ahub.time import now_ms
+from ahub.ui import Value
 
 L1_LIMIT = 1500
 L2_LIMIT = 4000
@@ -48,8 +49,8 @@ def _age(ms: int, now: int) -> str:
 
 
 def _short(s: str, n: int) -> str:
-    s = " ".join(s.split())
-    return s if len(s) <= n else s[: n - 1] + "…"
+    """Shorten to n characters — the same word-boundary rule as a table cell (ui.clip)."""
+    return ui.clip(s, n)
 
 
 def state_word(state: State | str) -> str:
@@ -179,17 +180,20 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
         state += " · " + PHASE_WORDS.get(t.phase, t.phase)
     if live and t.id in live:
         state += " · " + _t("views.alive")
-    facts: list[tuple[str, str]] = [(_t("views.lbl_state"), state), (_t("views.lbl_model"), t.executor or "—")]
+    groups: list[list[tuple[str, Value]]] = [[(_t("views.lbl_state"), state)]]
+    model: list[Any] = [t.executor or "—"]
     if t.review.get("models"):
-        facts.append((_t("views.lbl_review"), _review_cell(t)))
+        model.append((_t("views.lbl_review"), _review_cell(t)))
     if t.round > 1:
-        facts.append((_t("views.lbl_round"), str(t.round)))
+        model.append((_t("views.lbl_round"), str(t.round)))
+    groups.append([(_t("views.lbl_model"), model)])
     if go or usd or t.budget_go:
-        facts.append((_t("views.lbl_cost"), _cost_cell(go, usd, t.budget_go)))
-    facts.append((_t("views.lbl_age"), _age(t.created_at, ts)))
+        groups.append([(_t("views.lbl_cost"), _cost_cell(go, usd, t.budget_go))])
+    age: list[Any] = [_age(t.created_at, ts)]
     if t.after:
-        facts.append((_t("views.lbl_after"), ", ".join(f"T{a}" for a in t.after)))
-    out.append(ui.kv(facts, w=w))
+        age.append((_t("views.lbl_after"), ", ".join(f"T{a}" for a in t.after)))
+    groups.append([(_t("views.lbl_age"), age)])
+    out.extend(_facts(groups, w))
 
     rj, rp = _result_paths(t)
     if rj is not None and rj.exists():
@@ -215,6 +219,22 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
     elif t.state in RESUME_STATES:
         out.append(_next_line(t, "views.next_resume", w))
     return clip_bytes("\n".join(out), L2_LIMIT)
+
+
+def _facts(groups: list[list[tuple[str, Value]]], w: int | None) -> list[str]:
+    """The fact lines of a task: the pairs that belong together share one aligned line (Model/Review/Round,
+    Age/After), and a long value (the state, the cost) does not push the pair columns of another line.
+
+    Every group is its own kv block — that is what keeps its columns local — and every label is padded to
+    the width of the widest one, so the block has a single label column.
+    """
+    lw = max(len(label) for group in groups for label, _ in group)
+    out = []
+    for group in groups:
+        block = ui.kv([(label.ljust(lw), value) for label, value in group], w=w)
+        if block:
+            out.append(block)
+    return out
 
 
 def _next_line(t: Task, key: str, w: int | None) -> str:

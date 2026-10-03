@@ -116,6 +116,29 @@ def test_the_queue_wait_reason_is_a_code(tmp_path):
     assert svc._deps_ok(store.get_task(task)) == '{"code":"wait_accept","task":"T1","state":"queued"}'
 
 
+def test_a_dangling_dependency_has_its_own_code(tmp_path):
+    """After T99 that does not exist is not "waiting for T99 (error)" — it says the task is missing."""
+    store = Store()
+    task = store.get_task(store.create_task(project="P", kind="scout", title="b", now=0))
+    task.after = [99]
+    svc = service.Service(store, [], spawn=lambda tid: 1, proc_root=tmp_path, lock_busy=lambda p: False)
+    assert svc._deps_ok(task) == '{"code":"dep_missing","task":"T99"}'
+    assert reasons.text(svc._deps_ok(task)) == ("dependency T99 does not exist — drop it with ahub task edit, "
+                                                 "or recreate the task")
+
+
+def test_a_worker_filled_param_is_capped():
+    """A worker cannot bloat the column: every param a turn produced is clipped on the way in."""
+    long = "x " * 5000
+    stored = reasons.dump("blocked", summary=long)
+    assert len(reasons.load(stored)["summary"]) == reasons.PARAM_LIMIT
+    sub = reasons.dump("gates_failed", problems=[reasons.part("gate_dirty", files=long)])
+    assert len(reasons.load(sub)["problems"][0]["files"]) == reasons.PARAM_LIMIT
+    note = reasons.load(reasons.dump("merged", branch="main", note=reasons.part("push_failed", err=long)))
+    assert len(note["note"]["err"]) == reasons.PARAM_LIMIT
+    assert reasons.text(reasons.dump("blocked", summary=long))  # and it still reads
+
+
 def test_the_cascade_writes_a_code():
     store = Store()
     base = store.create_task(project="P", kind="scout", title="a", now=0)

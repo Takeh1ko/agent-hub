@@ -39,23 +39,23 @@ Value = str | Sequence[Any]  # a kv value: text, or the chunks of the line (a st
 
 def width(explicit: int | None = None) -> int:
     """The width to draw for: the explicit one, else COLUMNS/the terminal, else 100."""
-    if explicit:
+    if explicit is not None:
         return max(MIN_WIDTH, int(explicit))
     return max(MIN_WIDTH, shutil.get_terminal_size((DEFAULT_WIDTH, 24)).columns or DEFAULT_WIDTH)
 
 
-def colour() -> bool:
+def colour_on() -> bool:
     """True — a human at a terminal that wants colour. A pipe or NO_COLOR — plain text."""
     try:
         tty = sys.stdout.isatty()
     except (AttributeError, ValueError):  # a closed or exotic stream — treat it as a pipe
         tty = False
-    return bool(tty) and not os.environ.get("NO_COLOR")
+    return bool(tty) and "NO_COLOR" not in os.environ
 
 
 def styled(text: str, *styles: str) -> str:
     """Colour/bold the text when stdout can show it; otherwise — the text as it is."""
-    if not styles or not colour():
+    if not styles or not colour_on():
         return text
     codes = ";".join(_CODES[s] for s in styles if s in _CODES)
     return f"\033[{codes}m{text}\033[0m" if codes else text
