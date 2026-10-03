@@ -21,7 +21,7 @@ def test_initialize_and_list():
              {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])
     assert len(r) == 2 and r[0]["result"]["serverInfo"]["name"] == "ahub"
     names = {t["name"] for t in r[1]["result"]["tools"]}
-    assert {"task_new", "status", "result", "decide", "wait", "inbox", "say", "ask", "budget"} <= names
+    assert {"task_new", "status", "result", "decide", "wait", "inbox", "say", "ask", "budget", "nudge"} <= names
 
 
 def test_call_status_and_say():
@@ -31,6 +31,19 @@ def test_call_status_and_say():
                                                                            "arguments": {"text": "привет"}}}])
     assert r[0]["result"]["content"][0]["text"].startswith("тихо")
     assert not r[1]["result"]["isError"] and comms.outbox(store)[0]["text"] == "привет"
+
+
+def test_call_nudge_refuses_a_queued_task():
+    """The nudge tool is the same handle as the CLI: one line, code 2, nothing written."""
+    store = Store()
+    tid = store.create_task(project="P", kind="code", title="починить")
+    r = rpc([{"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+              "params": {"name": "nudge", "arguments": {"task": f"T{tid}", "text": "почини"}}},
+             {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+              "params": {"name": "nudge", "arguments": {"task": f"T{tid}"}}}])
+    assert r[0]["result"]["isError"] and "написать ему некого" in r[0]["result"]["content"][0]["text"]
+    assert r[1]["result"]["isError"] and "missing params: text" in r[1]["result"]["content"][0]["text"]
+    assert store.get_task(tid).request == ""  # a refusal writes nothing
 
 
 def test_errors():
