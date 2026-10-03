@@ -49,7 +49,7 @@ def cmd_watch(args) -> int:
         while True:
             now = time.monotonic()
             if now - last_touch >= events.PRESENCE_TOUCH_S:
-                events.touch(store, args.who, project=sc.name, via="watch")
+                events.touch_scope(store, sc, args.who, via="watch")
                 last_touch = now
             batch = events.ready_batch(store, scope=sc)
             if batch:

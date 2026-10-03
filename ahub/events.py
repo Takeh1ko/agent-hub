@@ -8,7 +8,8 @@
 - "Delivered" is set by wait/watch handoff; "acked" — ack (explicit, or implicit on reading the task/inbox).
 - Delivered but unacked is re-offered once after REDELIVER_MS — so nothing is lost
   if the orchestrator never picked it up, without waking it with the same thing in a loop.
-- Presence: wait/watch stamp `presence` at least every PRESENCE_TOUCH_S; "present" — younger than PRESENT_MS.
+- Presence: wait/watch stamp `presence` (one row per who+project) at least every PRESENCE_TOUCH_S; "present" —
+  younger than PRESENT_MS.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from ahub import reasons, ui
+from ahub import config, reasons, ui
 from ahub.i18n import t
 from ahub.model import Ev
 from ahub.scope import Scope, where
@@ -214,26 +215,51 @@ def lines(store: Store, evs: list[Event]) -> list[str]:
 
 
 # --- presence ---
+# One row per (who, project): an orchestrator session works in one repository, so a live session in A says
+# nothing about B. The owner's scope (every project) stamps a row for every project of the hub.
 
 def touch(store: Store, who: str = DEFAULT_WHO, *, project: str = "", via: str = "", session_id: str = "",
           now: int | None = None) -> None:
     ts = now if now is not None else now_ms()
     with store.tx() as c:
         c.execute("INSERT INTO presence(who, project, last_seen, session_id, via) VALUES(?,?,?,?,?)"
-                  " ON CONFLICT(who) DO UPDATE SET project=CASE WHEN excluded.project!='' THEN excluded.project"
-                  " ELSE presence.project END, last_seen=excluded.last_seen, via=excluded.via,"
+                  " ON CONFLICT(who, project) DO UPDATE SET last_seen=excluded.last_seen, via=excluded.via,"
                   " session_id=CASE WHEN excluded.session_id!='' THEN excluded.session_id ELSE presence.session_id END",
                   (who, project, ts, session_id, via))
 
 
-def presence(store: Store, who: str = DEFAULT_WHO) -> dict | None:
+def project_names() -> list[str]:
+    """Every project of the hub; none configured — one hub-wide name ('')."""
+    try:
+        projects, _ = config.load_projects()
+    except (config.ConfigError, OSError):
+        return [""]
+    return [p.name for p in projects] or [""]
+
+
+def touch_scope(store: Store, scope: Scope | None = None, who: str = DEFAULT_WHO, *, via: str = "",
+                now: int | None = None) -> None:
+    """Presence for the scope: its project, or every project of the hub (the owner works with all of them)."""
+    for name in (scope or Scope()).projects or project_names():
+        touch(store, who, project=name, via=via, now=now)
+
+
+def presence(store: Store, who: str = DEFAULT_WHO, project: str | None = None) -> dict | None:
+    """The presence row of one project; project=None — the freshest of any project."""
+    sql = "SELECT * FROM presence WHERE who=?"
+    args: list = [who]
+    if project is not None:
+        sql += " AND project=?"
+        args.append(project)
     with store.read() as c:
-        row = c.execute("SELECT * FROM presence WHERE who=?", (who,)).fetchone()
+        row = c.execute(sql + " ORDER BY last_seen DESC, project LIMIT 1", args).fetchone()
     return dict(row) if row else None
 
 
-def present(store: Store, who: str = DEFAULT_WHO, *, now: int | None = None, fresh_ms: int = PRESENT_MS) -> bool:
-    p = presence(store, who)
+def present(store: Store, who: str = DEFAULT_WHO, *, project: str | None = None, now: int | None = None,
+            fresh_ms: int = PRESENT_MS) -> bool:
+    """A live session: in that project, or (project=None) in any of them."""
+    p = presence(store, who, project)
     ts = now if now is not None else now_ms()
     return bool(p) and ts - int(p["last_seen"]) < fresh_ms
 
@@ -249,7 +275,7 @@ def wait(store: Store, *, timeout_s: float, scope: Scope | None = None, who: str
     while True:
         now_c = clock()
         if now_c - last_touch >= PRESENCE_TOUCH_S:
-            touch(store, who, project=(scope or Scope()).name, via="wait")
+            touch_scope(store, scope, who, via="wait")
             last_touch = now_c
         batch = ready_batch(store, scope=scope)
         if batch:

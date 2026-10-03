@@ -220,10 +220,34 @@ def test_question_project_is_backfilled_from_the_task(tmp_path):
     con.close()
 
     store = Store(db)
-    assert store.schema_version() == 5
+    assert store.schema_version() == 6
     with store.read() as c:
         rows = c.execute("SELECT text, project FROM question ORDER BY id").fetchall()
     assert [(r["text"], r["project"]) for r in rows] == [("с задачей", "B"), ("без задачи", "")]
+
+
+def test_presence_gets_a_project_key(tmp_path):
+    """Migration 006: one presence row per (who, project); an old row keeps its project."""
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    for num in range(1, 6):
+        f = next(p for p in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql")) if int(p.name[:3]) == num)
+        for stmt in _split_sql(f.read_text(encoding="utf-8")):
+            con.execute(stmt)
+    con.execute("PRAGMA user_version=5")
+    con.execute("INSERT INTO presence(who, project, last_seen, via) VALUES('claude', 'A', 10, 'watch')")
+    con.commit()
+    con.close()
+
+    store = Store(db)
+    assert store.schema_version() == 6
+    assert events.presence(store, "claude", "A")["last_seen"] == 10
+    assert not events.presence(store, "claude", "B")
+    events.touch(store, "claude", project="B", via="wait", now=20)
+    events.touch(store, "claude", project="A", via="wait", now=20)  # the key is (who, project) — no conflict
+    with store.read() as c:
+        rows = c.execute("SELECT project, last_seen FROM presence WHERE who='claude' ORDER BY project").fetchall()
+    assert [(r["project"], r["last_seen"]) for r in rows] == [("A", 20), ("B", 20)]
 
 
 def test_mcp_takes_the_scope_of_its_cwd(two_projects, monkeypatch):
