@@ -94,6 +94,9 @@ def build_parser():
                                  formatter_class=_formatter())
     ap.add_argument("--json", action="store_true", help=t("cli.help_json"))
     ap.add_argument("--lang", choices=("en", "ru"), default=None, help=t("cli.help_lang"))
+    # the home screen alone: --all — every project, --project — a named one (the scope of a handle, §9)
+    ap.add_argument("--all", action="store_true", help=t("cli.help_all"))
+    ap.add_argument("--project", "-P", default=None, help=t("cli.help_project"))
     # the subcommands are drawn by the formatter under their own headings (Tasks, Watching, …), so the
     # default "positional arguments" heading would be an empty section
     sub = ap.add_subparsers(dest="cmd", metavar="<command>", title=argparse.SUPPRESS)
@@ -124,8 +127,8 @@ def main(argv: list[str] | None = None) -> int:
 
         print(_t("cli.err_win"), file=sys.stderr)
         return 2
-    from ahub import log
-    from ahub.cliutil import CliError, command_hint
+    from ahub import log, scope
+    from ahub.cliutil import CliError, command_hint, emit
     from ahub.config import ConfigError
     from ahub.i18n import set_lang, t
 
@@ -139,9 +142,11 @@ def main(argv: list[str] | None = None) -> int:
             if getattr(args, "cmd", None):
                 ap.print_help()
                 return 2
-            from ahub.home import text
+            from ahub.home import data, text
 
-            print(text())  # the home screen reads the config, so it answers like any other command
+            sc = scope.resolve(args)
+            emit(args, data(all_projects=args.all, project=sc.name or None),
+                 text(all_projects=args.all, project=sc.name or None))
             return 0
         return int(func(args) or 0)
     except (ConfigError, CliError) as e:

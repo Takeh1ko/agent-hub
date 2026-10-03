@@ -13,13 +13,13 @@ from ahub.store import Store
 _MARKS = {True: "✓", False: "✗", None: "–"}
 
 
-def _cells(state, aliases: list[str], enabled: bool) -> list[str]:
-    """One provider row: the columns in the order of providers.head."""
+def _cells(state, enabled: bool) -> list[str]:
+    """One provider row: the columns in the order of providers.head. The models are not a column — a
+    provider has many of them, and a table cell is clipped: they go under the row, wrapped."""
     from ahub.i18n import t
 
     return [state.name, _MARKS[state.found], _MARKS[state.logged_in] if state.found else _MARKS[None],
-            t("providers.enabled_on") if enabled else t("providers.enabled_off"),
-            ", ".join(aliases) or t("providers.no_models")]
+            t("providers.enabled_on") if enabled else t("providers.enabled_off")]
 
 
 def cmd_providers(args) -> int:
@@ -30,14 +30,16 @@ def cmd_providers(args) -> int:
     rows = []
     for state in doctor.provider_states():
         aliases = [e.alias for e in registry.models(store) if e.provider == state.name]
-        rows.append((_cells(state, aliases, state.name not in off), state, aliases))
+        rows.append((_cells(state, state.name not in off), state, aliases))
     head = t("providers.head").split()
-    widths = [max([9] + [len(cells[i]) for cells, _s, _a in rows]) for i in range(len(head) - 1)] + [None]
-    table = ui.table(head, [cells for cells, _s, _a in rows], max_width=widths).split("\n")
-    # the table is a table; the note and the install/login hint of a provider are text under its row
+    table = ui.table(head, [cells for cells, _s, _a in rows], max_width=None).split("\n")
+    # the table is a table; the models of a provider, its note and its install/login hint are text under
+    # its row — all of them, wrapped (a cell would be clipped at the end of a long list)
     out: list[str] = [table[0]]
-    for i, (_row, state, _aliases) in enumerate(rows, start=1):
+    for i, (_row, state, aliases) in enumerate(rows, start=1):
         out.append(table[i])
+        out.append(ui.kv([(t("providers.lbl_models"),
+                           ", ".join(aliases) if aliases else t("providers.no_models"))], indent=2))
         if state.note:
             out.append(ui.para(f"· {state.note}", indent=2))
         if state.hint:

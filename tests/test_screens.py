@@ -127,7 +127,7 @@ def test_help_groups_the_subcommands(capsys):
     assert "  Tasks:\n" in out and "  Watching:\n" in out and "  Setup:\n" in out
     assert "  Models and providers:\n" in out and "  Integrations:\n" in out
     assert "positional arguments" not in out  # the groups replaced the flat list
-    assert "    accept        accept (merge code)" in out  # the column is aligned
+    assert "    accept              accept (merge code)" in out  # the column is aligned
     assert out.rstrip().endswith("Every command has its own help: ahub <command> --help")
 
 
@@ -206,12 +206,15 @@ def _provider_states() -> list[doctor.ProviderState]:
 
 
 PROVIDERS = """\
-name      found  login  enabled  models
-opencode  ✓      ✓      on       bunny, deepseek-flash, mimo-flash, spark, spark-free, spark-high…
+name      found  login  enabled
+opencode  ✓      ✓      on
+  models  bunny, deepseek-flash, mimo-flash, spark, spark-free, spark-high, spark-medium
   · opencode-go: paid Spark available
-agy       ✓      ✓      on       gemini, gemini-low
+agy       ✓      ✓      on
+  models  gemini, gemini-low
   · Gemini via Antigravity, window quota (no money)
-codex     ✗      –      on       codex, codex-fast
+codex     ✗      –      on
+  models  codex, codex-fast
   · uses your ChatGPT plan
   → install codex: npm i -g @openai/codex, then codex login
 """
@@ -446,6 +449,9 @@ def test_task_edit_changes_the_review_panel_and_the_executor(capsys, monkeypatch
     assert run(capsys, "task", "edit", t.label, "--model", "bunny")[1].strip() == f"{t.label}: nothing to change"
     assert cli.main(["task", "edit", t.label, "--rounds", "9"]) == 2
     assert "allowed 1-5" in capsys.readouterr().err  # MAX_ROUNDS
+    assert cli.main(["task", "edit", t.label, "--rounds", "0"]) == 2  # 0 rounds is a mistake, like -1
+    assert "rounds 0: allowed 1-5" in capsys.readouterr().err
+    assert cli.main(["task", "edit", t.label, "--rounds", "-1"]) == 2
     assert cli.main(["task", "edit", t.label, "--review", "no-such-model"]) == 2
     assert "no model" in capsys.readouterr().err
 
@@ -778,7 +784,7 @@ def test_a_broken_config_gives_one_error_line_not_a_traceback(capsys, monkeypatc
     """`ahub` with no arguments reads the config like every other command: one line + exit 2."""
     from ahub.cliutil import CliError
 
-    def broken() -> str:
+    def broken(**kw) -> str:
         raise CliError("T1: no such task", hint="ahub top")
 
     monkeypatch.chdir(tmp_path)
@@ -869,3 +875,67 @@ def test_one_problem_is_singular_in_english(capsys, monkeypatch, tmp_path):
     monkeypatch.setattr(cfgmod, "check_project", lambda cfg: ["python: not an executable file /nope/python"])
     rc, out = run(capsys, "config")
     assert rc == 1 and "! python: not an executable file" in out
+
+
+def test_the_home_screen_has_a_json_shape(capsys, monkeypatch, tmp_path):
+    """`ahub --json` with no subcommand: the raw fields of the screen, like every other command."""
+    import json as _json
+
+    from ahub import transitions
+    from ahub.model import Kind, State
+
+    monkeypatch.setattr("ahub.home.now_ms", lambda: NOW + 30_000)
+    write(paths.global_config_path(), "projects = []\n")
+    write(tmp_path / "shop" / ".hub.toml", 'schema_version = 2\nname = "shop"\n')
+    monkeypatch.chdir(tmp_path / "shop")
+    store = Store()
+    task = store.get_task(store.create_task(project="shop", kind=Kind.CODE, title="починить", now=NOW))
+    transitions.move(store, task.id, State.PREPARING, now=NOW)
+    rc = cli.main(["--json"])
+    data = _json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert data["project"] == "shop" and data["scope"] == {"all": False, "projects": ["shop"]}
+    assert [t["label"] for t in data["tasks"]] == [task.label]  # the raw fields, not the rendered table
+    assert data["tasks"][0]["state"] == "preparing" and "pulse" in data["tasks"][0]
+    assert data["waiting"] == [] and data["configured"] is True and data["version"]
+
+
+def test_the_home_screen_is_the_project_of_the_directory(capsys, monkeypatch, tmp_path):
+    """Like every handle, the home screen is scoped: the tasks of another project are not its rows
+    (architecture §9). `ahub --all` is the owner's view of the whole hub."""
+    from ahub import home, transitions
+    from ahub.model import Kind, State
+
+    monkeypatch.setattr("ahub.home.now_ms", lambda: NOW + 30_000)
+    write(paths.global_config_path(), "projects = []\n")
+    for name in ("shop", "blog"):
+        write(tmp_path / name / ".hub.toml", f'schema_version = 2\nname = "{name}"\n')
+    monkeypatch.chdir(tmp_path / "shop")
+    store = Store()
+    mine = store.get_task(store.create_task(project="shop", kind=Kind.CODE, title="моя задача", now=NOW))
+    transitions.move(store, mine.id, State.PREPARING, now=NOW)
+    other = store.get_task(store.create_task(project="blog", kind=Kind.CODE, title="чужая задача", now=NOW))
+    transitions.move(store, other.id, State.PREPARING, now=NOW)
+    lines = home.text(w=W).splitlines()
+    assert "моя задача" in "\n".join(lines) and "чужая задача" not in "\n".join(lines)
+    every = home.text(w=W, all_projects=True).splitlines()
+    assert "чужая задача" in "\n".join(every)  # --all — every project
+
+
+def test_providers_shows_every_model_of_a_provider(capsys, monkeypatch):
+    """The models are not a table cell: a long list is wrapped under the row, not clipped at the width."""
+    from ahub import registry
+
+    monkeypatch.setattr(doctor, "provider_states", lambda *a, **k: [
+        doctor.ProviderState("opencode", True, True, detail="found /bin/opencode", note="", hint="")])
+    aliases = [f"spark-{i:02d}" for i in range(24)]
+    monkeypatch.setattr(registry, "models", lambda store: [
+        type("E", (), {"provider": "opencode", "alias": a})() for a in aliases])
+    rc, out = run(capsys, "providers")
+    lines = out.splitlines()
+    models = [ln.strip() for ln in lines if "spark-" in ln]
+    assert rc == 0
+    assert sum(ln.count("spark-") for ln in models) == len(aliases)  # all of them, none cut
+    assert "…" not in "".join(models)
+    assert max(len(ln) for ln in lines) <= W  # and wrapped to the width
+    assert len(models) > 1  # wrapped over several lines under the row

@@ -289,7 +289,8 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
         count = int(rounds if rounds is not None else (t.review.get("rounds") or 0))
         if not models:
             raise DecisionError(_t("accept.need_review"), hint=_t("hint.models"))
-        count = count or 1
+        if rounds is None and not count:
+            count = 1  # nothing asked for yet — one round is the default; an explicit 0 is refused below
         if not 1 <= count <= tasks.MAX_ROUNDS:
             raise DecisionError(_t("accept.edit_rounds_bad", rounds=count, max=tasks.MAX_ROUNDS),
                                 hint=_t("hint.models"))

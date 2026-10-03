@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import ahub
-from ahub import config, paths, pulse, reasons, ui, views
+from ahub import config, paths, pulse, reasons, scope, ui, views
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION
 from ahub.service import HEARTBEAT_KEY, live_workers
@@ -38,13 +38,28 @@ def _configured() -> bool:
     return paths.global_config_path().is_file()
 
 
+def _scope(*, all_projects: bool, project: str | None) -> scope.Scope:
+    """`--all` — every project (the owner), `--project X` — that one, else the project of this
+    directory (outside every project — every project, like `ahub status` in the same place)."""
+    if all_projects:
+        return scope.OWNER
+    if project:
+        return scope.Scope((project,))
+    return scope.of_dir(Path.cwd())
+
+
 def _suggestions(*keys: str) -> str:
     """The 'Next' block: three or four commands, as one aligned column."""
     return ui.bullets([_t(k) for k in keys], indent=2)
 
 
-def text(*, w: int | None = None) -> str:
-    """The whole screen as one string (the caller prints it)."""
+def text(*, w: int | None = None, all_projects: bool = False, project: str | None = None) -> str:
+    """The whole screen as one string (the caller prints it).
+
+    The scope is the project's own, like every handle (architecture §9): the tasks of the directory's
+    project, `ahub --all` — every project.
+    """
+    sc = _scope(all_projects=all_projects, project=project)
     store = Store()
     now = now_ms()
     hb = store.meta_get(HEARTBEAT_KEY)
@@ -58,9 +73,9 @@ def text(*, w: int | None = None) -> str:
     live = live_workers()
     projects, _errors = config.load_projects()
     pulses = pulse.all_pulses(store, live=live, projects=projects, now=now)
-    active = store.list_tasks(states=ACTIVE)
+    active = store.list_tasks(states=ACTIVE, projects=sc.projects or None)
     shown, rest = active[:MAX_TASKS], max(0, len(active) - MAX_TASKS)
-    waiting = store.list_tasks(states=WAITING_DECISION)
+    waiting = store.list_tasks(states=WAITING_DECISION, projects=sc.projects or None)
     waiting_shown, waiting_rest = waiting[:MAX_TASKS], max(0, len(waiting) - MAX_TASKS)
 
     if shown:
@@ -85,6 +100,38 @@ def text(*, w: int | None = None) -> str:
     out.append(ui.section(_t("home.sec_next")))
     out.append(_suggestions(*_next_keys(alive, waiting)))
     return "\n".join(out)
+
+
+def data(*, all_projects: bool = False, project: str | None = None) -> dict:
+    """`ahub --json` with no subcommand: the raw fields of the screen (the text is for people)."""
+    sc = _scope(all_projects=all_projects, project=project)
+    store = Store()
+    now = now_ms()
+    hb = store.meta_get(HEARTBEAT_KEY)
+    live = live_workers()
+    projects, errors = config.load_projects()
+    pulses = pulse.all_pulses(store, live=live, projects=projects, now=now)
+    out: dict = {
+        "version": ahub.__version__,
+        "project": _project_here(),
+        "service": "alive" if (hb and now - int(hb) < 30_000) else "down",
+        "configured": _configured(),
+        "scope": {"all": sc.all, "projects": list(sc.projects)},
+        "live": sorted(live),
+        "config_errors": list(errors),
+        "tasks": [],
+        "waiting": [],
+    }
+    for task in store.list_tasks(states=ACTIVE, projects=sc.projects or None)[:MAX_TASKS]:
+        pl = pulses.get(task.id)
+        out["tasks"].append({"id": task.id, "label": task.label, "project": task.project,
+                             "kind": task.kind.value, "title": task.title, "state": task.state.value,
+                             "phase": task.phase, "model": task.executor, "pulse": pl.mark if pl else ""})
+    for task in store.list_tasks(states=WAITING_DECISION, projects=sc.projects or None)[:MAX_TASKS]:
+        out["waiting"].append({"id": task.id, "label": task.label, "project": task.project,
+                               "state": task.state.value, "state_reason_text": reasons.text(task.state_reason),
+                               "next": _t(views.next_key(_focus([task])), label=task.label)})
+    return out
 
 
 def _focus(waiting: list) -> Task:
