@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ahub import archive, comms, config, events, pulse, reasons, ui, views
+from ahub import archive, comms, config, cost, events, pulse, reasons, ui, views
 from ahub.i18n import Words
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION, Ev, State
@@ -42,6 +42,8 @@ class Row:
     cost: str
     project: str = ""
     header: bool = False  # a project header row: the name and the money of the group, no task
+    go: float = 0.0  # the raw numbers behind the cell — a group sums them, the cell is rounded once
+    usd: float = 0.0
 
 
 @dataclass
@@ -83,7 +85,7 @@ def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | No
     limit = _go_limit(go_limit)
     lt = to_local(now)
     day0 = int(lt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-    month0 = int(lt.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+    month0 = cost.month_start(now)
     try:
         today = opencode_db.totals(day0)
         month = opencode_db.totals(month0)
@@ -118,17 +120,21 @@ def _task_row(store: Store, t: Task, pl, now: int) -> Row:
     state_word = archive.STATE_WORDS.get(t.state.value, t.state.value)
     return Row(t.id, mark, t.label, t.kind.value, t.title, state_word,
                PHASE.get(t.phase, "") if t.state in ACTIVE else "", t.executor, t.round,
-               _age(t.updated_at, now), f"{go + usd:.3f}", t.project)
+               _age(t.updated_at, now), f"{go + usd:.3f}", t.project, go=go, usd=usd)
 
 
 def _group_row(project: str, items: list[Row]) -> Row:
     """The header row of a project: its name, how many tasks are under it and what they cost.
 
     The money is the sum of the sessions of the rows below — the hub sessions of what is shown, never
-    the machine-wide opencode.db (that one lives in the header line, against the Go month limit).
+    the machine-wide opencode.db (that one lives in the header line, against the Go month limit). It is
+    summed from the raw go/usd of those rows and rounded once here: a sum of the already rounded cells
+    would drift from the real one.
     """
+    go = sum(r.go for r in items)
+    usd = sum(r.usd for r in items)
     return Row(0, GROUP_MARK, project, "", _t("tui.group_tasks", n=len(items)), "", "", "", 0, "",
-               f"{sum(float(r.cost) for r in items):.3f}", project, header=True)
+               f"{go + usd:.3f}", project, header=True, go=go, usd=usd)
 
 
 def rows(store: Store, live: dict[int, int], pulses: dict, now: int, recent: int = 10, *,
@@ -193,18 +199,17 @@ def snapshot(store: Store, projects: list[config.ProjectConfig] | None = None, *
              history: bool = False, only: str = "") -> tuple[Screen, dict, dict]:
     """The whole screen: the header, the rows (grouped by project, `only` — one of them), the feed.
 
-    `Screen.projects` is the list of the projects in the data (before the filter) — the `o` key of the
-    screen cycles it.
+    The filter goes down into rows() as the SQL condition of the task list, so a filtered table is
+    complete (a history of one project is not cut by the newer tasks of another). `Screen.projects` is
+    every project that has tasks — the `o` key of the screen cycles it; it comes from the task table,
+    not from the rows, so a filtered screen keeps the whole list.
     """
     now = now_ms()
     live = live_workers()
     if projects is None:
         projects, _ = config.load_projects()
     pulses = pulse.all_pulses(store, live=live, projects=projects, now=now)
-    all_rows = rows(store, live, pulses, now, history=history)
-    names = list(dict.fromkeys(r.project for r in all_rows if not r.header))
-    shown = [r for r in all_rows if not only or r.project == only]
-    if len({r.project for r in shown}) < 2:  # one project left in the table — a header would say nothing
-        shown = [r for r in shown if not r.header]
-    screen = Screen(header(store, live, now, history=history), shown, feed(store), names)
+    screen = Screen(header(store, live, now, history=history),
+                    rows(store, live, pulses, now, history=history, only=only),
+                    feed(store), store.task_projects())
     return screen, live, pulses

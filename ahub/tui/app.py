@@ -24,6 +24,7 @@ from ahub.store import Store
 from ahub.tui import data
 from ahub.tui.live import LiveView
 
+REFRESH_GAP_S = 0.05  # a kept refresh request runs this long after the one that was in flight
 TABLE_ONLY = ("toggle", "new", "stop", "accept", "reject", "rework", "nudge", "model", "budget", "pause",
               "history", "transcript", "project")  # the keys of the table — they wait behind the transcript
               # screen (that screen has its own m: a message to the worker of the task it shows)
@@ -226,6 +227,7 @@ class TopApp(App):
         self.history = False  # the table by default shows the current work, not the finished ones
         self.project = ""  # "" — every project; `o` narrows the table to one of them
         self._busy = False
+        self._pending = False  # a refresh was asked for while one was running — it runs right after
         self._live: dict = {}
         self._pulses: dict = {}
         self._ids: list[int] = []
@@ -266,7 +268,10 @@ class TopApp(App):
 
     @work(thread=True, exclusive=True, group="refresh")
     def refresh_data(self) -> None:
+        """Rebuild the table. A refresh already running is not cancelled (it is mid-write on the screen):
+        the request is remembered and served the moment it ends — `o` must not leave the table stale."""
         if self._busy:
+            self._pending = True
             return
         self._busy = True
         try:
@@ -286,8 +291,8 @@ class TopApp(App):
         table.clear()
         self._ids = []
         for r in screen.rows:
-            table.add_row(r.mark, r.label, r.kind, r.title[:40], r.state, r.phase, r.model, str(r.round),
-                          r.age, r.cost)
+            table.add_row(r.mark, r.label, r.kind, r.title[:40], r.state, r.phase, r.model,
+                          "" if r.header else str(r.round), r.age, r.cost)
             self._ids.append(r.task_id)
         if cur:  # the same task stays picked when the rows move under it
             if cur in self._ids:
@@ -296,6 +301,9 @@ class TopApp(App):
             table.move_cursor(row=min(row_at, len(self._ids) - 1))
         self.query_one("#feed", Static).update("\n".join(screen.feed[-7:]) or _t("tui.no_events"))
         self._show_detail()
+        if self._pending:  # a request that arrived while this refresh was running — serve it now
+            self._pending = False
+            self.set_timer(REFRESH_GAP_S, self.refresh_data)
 
     def selected(self) -> int | None:
         table = self.query_one("#tasks", DataTable)
