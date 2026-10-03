@@ -22,11 +22,13 @@ Example ~/.config/ahub/config.toml:
     opencode_db = "$HOME/.local/share/opencode/opencode.db"
 
     [providers.opencode]                # optional; the provider's own proxy (advanced)
-    proxy = "http://127.0.0.1:8080"     # for this provider's process; absent — the hub environment
+    proxy = "http://127.0.0.1:8080"     # for this provider's process
     no_proxy = "localhost,127.0.0.1"
 
     [providers.agy]
-    proxy = ""                          # empty string — explicitly no proxy (inherited vars are dropped)
+    proxy = ""                          # explicitly no proxy (the inherited variables are dropped)
+
+    # per key: absent — inherited as is, "" — explicitly none, a value — set
 
 Example .hub.toml v2:
 
@@ -159,12 +161,12 @@ class ProjectConfig:
 class ProviderProxy:
     """The provider's own proxy — [providers.<name>] in the hub config.
 
-    proxy None — no key: the provider process inherits the hub environment; "" — explicitly no proxy
-    (the inherited variables are dropped); otherwise the URL for this provider's process.
+    Per key: None — the key is absent, the provider process inherits the hub environment; "" — explicitly
+    none (the inherited variables are dropped); a value — for this provider's process.
     """
 
     proxy: str | None = None
-    no_proxy: str = ""
+    no_proxy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -187,7 +189,7 @@ class HubConfig:
         return bool(self.tg_token)
 
     def provider_proxy(self, name: str) -> ProviderProxy:
-        """The provider's own proxy; no section — the hub environment is inherited."""
+        """The provider's own proxy; no section — both keys stay inherited from the hub environment."""
         return self.provider_proxies.get(name) or ProviderProxy()
 
 
@@ -265,7 +267,7 @@ def _resources(r: _Reader, raw: dict) -> dict[str, Resource]:
 
 
 def _provider_proxies(r: _Reader, raw: dict) -> dict[str, ProviderProxy]:
-    """[providers.<name>] → per-provider proxy. A section without a proxy key keeps the hub environment."""
+    """[providers.<name>] → the provider's own proxy. An absent key stays inherited; "" means explicitly none."""
     out: dict[str, ProviderProxy] = {}
     for name, spec in raw.items():
         if not isinstance(spec, dict):
@@ -277,8 +279,10 @@ def _provider_proxies(r: _Reader, raw: dict) -> dict[str, ProviderProxy]:
             proxy = r.str_(spec, "proxy", "", where).strip()
             if proxy and not proxy.lower().startswith(PROXY_SCHEMES):
                 r.errors.append(_t("config.bad_provider_proxy", name=name, got=proxy))
-        no_proxy = r.str_(spec, "no_proxy", "", where).strip()
-        if proxy is not None or no_proxy:
+        no_proxy: str | None = None
+        if "no_proxy" in spec:
+            no_proxy = r.str_(spec, "no_proxy", "", where).strip()
+        if proxy is not None or no_proxy is not None:
             out[name] = ProviderProxy(proxy=proxy, no_proxy=no_proxy)
     return out
 

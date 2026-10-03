@@ -23,8 +23,8 @@ from ahub.i18n import t as _t
 from ahub.store import Task
 
 HOOK_TIMEOUT_S = 600
-PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY")
 _PROXY_URL_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")  # what a proxy URL goes into
+_NO_PROXY_VARS = ("NO_PROXY",)
 _SECRET_ENV = re.compile(r"(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|TELEGRAM|BOT_|API_KEY|_KEY$)",
                          re.IGNORECASE)
 # What model providers need from the env, even if it looks like a secret.
@@ -51,24 +51,26 @@ def scrub_env(env: dict[str, str]) -> dict[str, str]:
     return out
 
 
-def apply_proxy(env: dict[str, str], proxy: str | None, no_proxy: str = "") -> dict[str, str]:
-    """Provider process env from its [providers.<name>] section (both letter cases are set/dropped).
+def apply_proxy(env: dict[str, str], proxy: str | None, no_proxy: str | None = None) -> dict[str, str]:
+    """Provider process env from its [providers.<name>] section, per key.
 
-    proxy None — no section/key: the inherited variables stay as they are. "" — explicitly no proxy: every
-    proxy variable is dropped. Otherwise the provider's own proxy replaces the inherited one, and no_proxy
-    (if given) replaces the inherited NO_PROXY.
+    A key is absent (None) — the inherited variables stay as they are; "" — explicitly none, they are
+    dropped; a value — set (proxy: HTTPS_PROXY/HTTP_PROXY/ALL_PROXY and the lowercase ones, no_proxy:
+    NO_PROXY/no_proxy). Both letter cases are set and dropped.
     """
-    out = {k: v for k, v in env.items() if k.upper() not in PROXY_VARS}
-    if proxy is None:
-        if not no_proxy:
-            return env
-        out["NO_PROXY"] = out["no_proxy"] = no_proxy
-        return out
-    if proxy:
-        for name in _PROXY_URL_VARS:
-            out[name] = out[name.lower()] = proxy
-    if no_proxy:
-        out["NO_PROXY"] = out["no_proxy"] = no_proxy
+    if proxy is None and no_proxy is None:
+        return dict(env)
+    out = dict(env)
+    if proxy is not None:
+        out = {k: v for k, v in out.items() if k.upper() not in _PROXY_URL_VARS}
+        if proxy:
+            for name in _PROXY_URL_VARS:
+                out[name] = out[name.lower()] = proxy
+    if no_proxy is not None:
+        out = {k: v for k, v in out.items() if k.upper() not in _NO_PROXY_VARS}
+        if no_proxy:
+            for name in _NO_PROXY_VARS:
+                out[name] = out[name.lower()] = no_proxy
     return out
 
 

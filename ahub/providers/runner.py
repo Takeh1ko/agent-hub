@@ -109,7 +109,7 @@ def reap(pgid: int | None, tracked: dict[int, int | None]) -> list[int]:
 TRACK_S = 2.0  # how often to snapshot agent descendants
 
 
-def hub_proxy(name: str) -> tuple[str | None, str]:
+def hub_proxy(name: str) -> tuple[str | None, str | None]:
     """The provider's own proxy from the hub config ([providers.<name>]). None — inherit the hub env."""
     from ahub import config
 

@@ -318,14 +318,19 @@ proxy = ""
 
 
 def test_hub_provider_proxy_absent_inherits(tmp_path, monkeypatch):
+    """Absent key — None (inherit), "" — explicitly none; the keys are independent."""
     monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
     monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
-    assert config.load_hub().provider_proxy("opencode").proxy is None
-    write(paths.global_config_path(), "[providers.opencode]\n")  # a section without a proxy key
+    assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy(None, None)
+    write(paths.global_config_path(), "[providers.opencode]\n")  # a section without keys
     hub = config.load_hub()
-    assert hub.provider_proxies == {} and hub.provider_proxy("opencode").proxy is None
+    assert hub.provider_proxies == {} and hub.provider_proxy("opencode") == config.ProviderProxy(None, None)
     write(paths.global_config_path(), '[providers.opencode]\nno_proxy = "localhost"\n')
     assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy(None, "localhost")
+    write(paths.global_config_path(), '[providers.opencode]\nno_proxy = ""\n')
+    assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy(None, "")
+    write(paths.global_config_path(), '[providers.opencode]\nproxy = "http://127.0.0.1:8080"\n')
+    assert config.load_hub().provider_proxy("opencode") == config.ProviderProxy("http://127.0.0.1:8080", None)
 
 
 def test_hub_provider_proxy_bad_scheme(tmp_path, monkeypatch):

@@ -239,8 +239,9 @@ no_proxy = "localhost"
 
 
 def test_provider_process_proxy_empty_means_none(tmp_path, monkeypatch):
+    """proxy = "" drops only the proxy URL variables; no_proxy is absent — it stays inherited."""
     env = _proxy_env_of_the_process(tmp_path, monkeypatch, '[providers.opencode]\nproxy = ""\n')
-    assert env == {}  # the inherited variables are dropped
+    assert env == {"NO_PROXY": "http://inherited-no_proxy:9", "no_proxy": "http://inherited-no_proxy:9"}
 
 
 def test_provider_process_without_section_inherits(tmp_path, monkeypatch):
@@ -248,6 +249,51 @@ def test_provider_process_without_section_inherits(tmp_path, monkeypatch):
     assert set(env.values()) == {f"http://inherited-{v}:9" for v in
                                  ("https_proxy", "http_proxy", "all_proxy", "no_proxy")}
     assert len(env) == 8  # both letter cases, as they were
+
+
+_INHERITED = {"HTTPS_PROXY": "http://hub:1", "https_proxy": "http://hub:1",
+              "HTTP_PROXY": "http://hub:1", "http_proxy": "http://hub:1",
+              "ALL_PROXY": "http://hub:1", "all_proxy": "http://hub:1",
+              "NO_PROXY": "hub.local", "no_proxy": "hub.local", "PATH": "/bin"}
+_URL_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
+_OWN_URL = {v: "http://127.0.0.1:8080" for v in _URL_VARS}
+
+
+def _inherited_without_no_proxy() -> dict[str, str]:
+    return {k: v for k, v in _INHERITED.items() if k.lower() != "no_proxy"}
+
+
+@pytest.mark.parametrize("section, want", [
+    # nothing configured — the whole hub environment is inherited
+    ('[usage]\n', _INHERITED),
+    ('[providers.opencode]\n', _INHERITED),
+    # proxy only — the URL variables are replaced, the inherited NO_PROXY stays
+    ('[providers.opencode]\nproxy = "http://127.0.0.1:8080"\n', {**_INHERITED, **_OWN_URL}),
+    # proxy = "" — no proxy at all, the inherited NO_PROXY stays
+    ('[providers.opencode]\nproxy = ""\n',
+     {"PATH": "/bin", "NO_PROXY": "hub.local", "no_proxy": "hub.local"}),
+    # no_proxy only — the proxy URL variables stay, NO_PROXY is replaced
+    ('[providers.opencode]\nno_proxy = "localhost"\n',
+     {**_inherited_without_no_proxy(), "NO_PROXY": "localhost", "no_proxy": "localhost"}),
+    # no_proxy = "" — no bypass list, the proxy URL variables stay
+    ('[providers.opencode]\nno_proxy = ""\n', _inherited_without_no_proxy()),
+    # both keys — each one on its own
+    ('[providers.opencode]\nproxy = "http://127.0.0.1:8080"\nno_proxy = "localhost"\n',
+     {**_OWN_URL, "NO_PROXY": "localhost", "no_proxy": "localhost", "PATH": "/bin"}),
+    ('[providers.opencode]\nproxy = "http://127.0.0.1:8080"\nno_proxy = ""\n',
+     {**_OWN_URL, "PATH": "/bin"}),
+    ('[providers.opencode]\nproxy = ""\nno_proxy = "localhost"\n',
+     {"PATH": "/bin", "NO_PROXY": "localhost", "no_proxy": "localhost"}),
+    ('[providers.opencode]\nproxy = ""\nno_proxy = ""\n', {"PATH": "/bin"}),
+])
+def test_provider_proxy_keys_independent(tmp_path, section, want):
+    """[providers.<name>] per key: absent — inherit, "" — explicitly none, a value — set."""
+    from ahub import config, prepare
+
+    write(paths.global_config_path(), section)
+    p = config.load_hub().provider_proxy("opencode")
+    assert prepare.apply_proxy(dict(_INHERITED), p.proxy, p.no_proxy) == want
+    assert _INHERITED["HTTPS_PROXY"] == "http://hub:1"  # the input is not touched
 
 
 def _sleepers(marker: str) -> list[int]:

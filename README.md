@@ -133,10 +133,11 @@ no_proxy = "localhost,127.0.0.1"
 proxy = ""                            # empty string = explicitly no proxy (the inherited variables are dropped)
 ```
 
-A missing section (or a missing `proxy` key) means the provider inherits the hub environment as before; `proxy = ""`
-means no proxy at all. Only http/https/socks5/socks5h URLs are accepted. The hub's own processes and the Telegram bot
-keep their behaviour (`[telegram] proxy` is separate). `ahub doctor` shows each provider's own proxy and whether it
-answers.
+A key that is absent inherits the hub variable as it is, `""` means explicitly none (the variable is dropped), and a
+value sets it — `proxy` covers `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` and their lowercase twins, `no_proxy` covers
+`NO_PROXY`/`no_proxy`, and the two keys do not affect each other. Only http/https/socks5/socks5h URLs are accepted. The
+hub's own processes and the Telegram bot keep their behaviour (`[telegram] proxy` is separate). `ahub doctor` shows
+each provider's own proxy and whether it answers.
 
 ## Documentation
 
