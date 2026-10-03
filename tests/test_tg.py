@@ -11,6 +11,7 @@ import pytest
 
 from ahub import comms, events, transitions
 from ahub.model import State
+from ahub.scope import Scope
 from ahub.store import Store
 from ahub.tg import core, launcher
 from ahub.time import now_ms
@@ -75,6 +76,20 @@ def test_alarm_text():
 
 # --- launching Claude ---
 
+def _forget_presence(store):
+    """No live session: both presence tables (presence_project and the pre-006 one)."""
+    with store.tx() as c:
+        c.execute("DELETE FROM presence")
+        c.execute("DELETE FROM presence_project")
+
+
+def _stale_presence(store, who: str = "claude"):
+    """A session that was there long ago — not "present" any more."""
+    with store.tx() as c:
+        c.execute("UPDATE presence SET last_seen=0 WHERE who=?", (who,))
+        c.execute("UPDATE presence_project SET last_seen=0 WHERE who=?", (who,))
+
+
 class Spawner:
     def __init__(self, session="sess-1"):
         self.calls = []
@@ -104,7 +119,7 @@ def test_launcher_flow(store, tmp_path):
     sp.procs[0].kill()
     sp.procs[0].wait()
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "finished"
-    assert json.loads(store.meta_get(launcher.SESSION_KEY))["id"] == "sess-1"
+    assert json.loads(store.meta_get(launcher.session_key("")))["id"] == "sess-1"
     assert [m["text"] for m in comms.inbox(store, mark=False)] == ["ещё вопрос"]  # the first was passed on
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "launched"  # the backlog
     assert sp.calls[1][0][sp.calls[1][0].index("--resume") + 1] == "sess-1"  # the same TG session
@@ -118,8 +133,8 @@ def test_launcher_respects_presence_and_limit(store, tmp_path):
     core.on_text(store, 1, "x", projects=[])
     events.touch(store)
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "idle"  # a live Claude exists
+    _forget_presence(store)
     with store.tx() as c:
-        c.execute("DELETE FROM presence")
         for _ in range(launcher.MAX_PER_HOUR):
             c.execute("INSERT INTO claude_launch(ts, project, status) VALUES(?,?, 'ok')", (now_ms(), "P"))
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "limit"
@@ -141,13 +156,199 @@ def test_project_choice(store, tmp_path):
     import dataclasses
     b = dataclasses.replace(make_project(tmp_path / "b"), name="B")
     events.touch(store, project="B")
-    with store.tx() as c:
-        c.execute("UPDATE presence SET last_seen=0")  # was there, but long ago — not "present"
+    _stale_presence(store)  # was there, but long ago — not "present"
     core.on_text(store, 1, "x", projects=["P", "B"])
     sp = Spawner()
     launcher.tick(store, projects=[a, b], spawn=sp, binary="claude")
     assert sp.calls[0][1] == b.root  # the last project of Claude
     sp.procs[0].kill()
+
+
+# --- presence and the launcher per project ---
+
+def two_projects(tmp_path):
+    import dataclasses
+
+    a = make_project(tmp_path / "a")
+    b = dataclasses.replace(make_project(tmp_path / "b"), name="B")
+    return a, b
+
+
+def test_live_session_in_a_does_not_block_a_launch_for_b(store, tmp_path):
+    a, b = two_projects(tmp_path)
+    core.on_text(store, 1, "по B: почини кнопку", projects=["P", "B"])
+    events.touch_scope(store, Scope(("P",)), via="watch")  # a live Claude in P — it is not B's
+    sp = Spawner()
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    cmd, cwd = sp.calls[0]
+    assert cwd == b.root and "почини кнопку" in cmd[cmd.index("-p") + 1]
+    assert "Project: B" in cmd[cmd.index("-p") + 1]
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "running"
+    for p in sp.procs:
+        p.kill()
+
+
+def test_prompt_of_b_carries_no_text_of_a(store, tmp_path):
+    a, b = two_projects(tmp_path)
+    core.on_text(store, 1, "по P: дело A", projects=["P", "B"])
+    core.on_text(store, 1, "по B: дело B", projects=["P", "B"])
+    events.touch_scope(store, Scope(("P",)), via="watch")  # A is read by a live session, B is not
+    sp = Spawner()
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    prompt = sp.calls[0][0][sp.calls[0][0].index("-p") + 1]
+    assert _messages_block(prompt).strip() == "- дело B"
+    assert "Project: B" in prompt
+    for p in sp.procs:
+        p.kill()
+
+    # a launch for B passes on its own messages only — A's stay for its Claude
+    sp.procs[-1].kill()
+    sp.procs[-1].wait()
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "finished"
+    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["дело A"]
+
+
+def test_every_project_without_a_live_session_gets_its_own_claude(store, tmp_path):
+    a, b = two_projects(tmp_path)
+    core.on_text(store, 1, "по P: дело A", projects=["P", "B"])
+    core.on_text(store, 1, "по B: дело B", projects=["P", "B"])
+    sp = Spawner()
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"  # the other project
+    assert [call[1] for call in sp.calls] == [a.root, b.root]
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "running"  # both are busy
+    with store.read() as c:
+        assert [r[0] for r in c.execute("SELECT project FROM claude_launch WHERE status='running'")] == ["P", "B"]
+    for p in sp.procs:
+        p.kill()
+
+
+def test_each_project_resumes_its_own_tg_session(store, tmp_path):
+    """The per-project session key: a launch in B must not resume A's conversation."""
+    a, b = two_projects(tmp_path)
+
+    class TwoSessions(Spawner):
+        """Each launch writes its own session id — P gets sess-A, B gets sess-B."""
+
+        def __call__(self, cmd, cwd, log):
+            self.session = "sess-" + {str(a.root): "A", str(b.root): "B"}[str(cwd)]
+            return super().__call__(cmd, cwd, log)
+
+    sp = TwoSessions()
+    core.on_text(store, 1, "по P: дело A", projects=["P", "B"])
+    core.on_text(store, 1, "по B: дело B", projects=["P", "B"])
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    sp.calls.clear()
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    sp.calls.clear()
+    for p in sp.procs:
+        p.kill()
+        p.wait()
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "finished"  # both ended
+
+    core.on_text(store, 1, "по P: ещё A", projects=["P", "B"])
+    core.on_text(store, 1, "по B: ещё B", projects=["P", "B"])
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    resumed = [c[0][c[0].index("--resume") + 1] if "--resume" in c[0] else None for c in sp.calls]
+    assert resumed == ["sess-A", "sess-B"], resumed  # each resumes its own session
+    assert store.meta_get(launcher.session_key("P")) != store.meta_get(launcher.session_key("B"))
+    assert len({launcher.session_key("P"), launcher.session_key("B"), launcher.session_key("")}) == 3
+    for p in sp.procs:
+        p.kill()
+
+
+def test_a_group_without_a_directory_is_reported_once(store, tmp_path, caplog):
+    a, _b = two_projects(tmp_path)
+    comms.owner_message(store, "по Z: в никуда", project="Z")  # Z is not a project of this hub
+    sp = Spawner()
+    with caplog.at_level("WARNING", logger="launcher"):
+        assert launcher.tick(store, projects=[a], spawn=sp, binary="claude") == "nodir:Z"
+        assert launcher.tick(store, projects=[a], spawn=sp, binary="claude") == "idle"  # said once
+    assert [r.message for r in caplog.records] == [
+        "cannot launch Claude: no directory for project Z — no such project in the hub config"]
+    assert sp.calls == []
+
+
+def _messages_block(prompt: str) -> str:
+    """The owner messages of a launch prompt — the part that must not leak between projects."""
+    return prompt.split("Owner messages:\n")[1].split("\n\nHub summary")[0]
+
+
+def test_hub_wide_messages_go_to_the_owner_only(store, tmp_path):
+    a, b = two_projects(tmp_path)
+    core.on_text(store, 1, "всем сразу", projects=["P", "B"])
+    core.on_text(store, 1, "по B: только B", projects=["P", "B"])
+    sp = Spawner()
+    launcher.tick(store, projects=[a, b], spawn=sp, binary="claude")  # the owner group is the older one
+    prompt = sp.calls[0][0][sp.calls[0][0].index("-p") + 1]
+    assert _messages_block(prompt).strip() == "- всем сразу"
+    assert "--all" in prompt  # the owner's Claude reads every project
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    prompt = sp.calls[1][0][sp.calls[1][0].index("-p") + 1]
+    assert _messages_block(prompt).strip() == "- только B"
+    assert "Project: B" in prompt
+    for p in sp.procs:
+        p.kill()
+
+
+def test_the_bot_picks_a_project(store):
+    names = ["P", "B"]
+    assert "все проекты" in core.on_text(store, 1, "без префикса", projects=names).text  # nothing picked yet
+    core.on_text(store, 1, "по B: первое", projects=names)
+    assert core.current_project(store, 1) == "B"  # the prefix is a pick
+    rep = core.on_text(store, 1, "второе", projects=names)
+    assert "проект: B" in rep.text
+    assert [m["project"] for m in comms.inbox(store, mark=False)] == ["", "B", "B"]
+
+    listed = core.project_reply(store, names, chat_id=1)
+    assert "сейчас проект: B" in listed.text
+    assert [b.data for row in listed.buttons for b in row] == ["proj:P", "proj:B", "proj:all"]
+    assert core.project_reply(store, names, chat_id=1).buttons[1][0].label == "✓ B"
+
+    assert "проект: P" in core.project_reply(store, names, "P", chat_id=1).text  # /project P
+    assert core.current_project(store, 1) == "P"
+    assert "нет" in core.project_reply(store, names, "нет такого", chat_id=1).text
+    assert core.current_project(store, 1) == "P"  # an unknown project changes nothing
+    assert "проектов здесь вообще нет" in core.project_reply(store, [], "что угодно", chat_id=1).text
+
+
+def test_the_pick_is_per_chat(store):
+    """A pick in one chat does not re-target the messages of another one."""
+    names = ["P", "B"]
+    core.project_reply(store, names, "B", chat_id=1)
+    assert core.current_project(store, 1) == "B" and core.current_project(store, 2) == ""
+    assert "все проекты" in core.on_text(store, 2, "из второго чата", projects=names).text
+    assert "проект: B" in core.on_text(store, 1, "из первого", projects=names).text
+    with store.read() as c:
+        rows = c.execute("SELECT chat_id, project FROM message WHERE direction='in' ORDER BY id").fetchall()
+    assert [(r["chat_id"], r["project"]) for r in rows] == [(2, ""), (1, "B")]
+
+
+def test_a_pick_of_a_project_that_left_the_hub_is_dropped(store):
+    """B is gone from the hub: the pick is dropped with a notice and the message goes to the hub."""
+    core.project_reply(store, ["P", "B"], "B", chat_id=1)
+    assert core.current_project(store, 1) == "B"
+    rep = core.on_text(store, 1, "почини", projects=["P"])  # B is no longer in the hub
+    assert "проекта B в хабе больше нет" in rep.text and "все проекты" in rep.text
+    assert core.current_project(store, 1) == ""
+    assert [m["project"] for m in comms.inbox(store, mark=False)] == [""]
+    assert "не выбран" in core.project_reply(store, ["P"], chat_id=1).text  # the list agrees with the routing
+
+
+def test_a_pick_can_be_cleared(store):
+    """`/project all` — back to the hub, so a plain message goes to the owner again."""
+    names = ["P", "B"]
+    core.on_text(store, 1, "по B: первое", projects=names)
+    assert core.current_project(store, 1) == "B"
+    assert "проект: B" in core.on_text(store, 1, "второе", projects=names).text
+
+    assert "не выбран" in core.project_reply(store, names, "all", chat_id=1).text
+    assert core.current_project(store, 1) == ""
+    assert [b.data for row in core.project_reply(store, names, chat_id=1).buttons for b in row] == ["proj:P", "proj:B"]
+    rep = core.on_text(store, 1, "всем сразу", projects=names)
+    assert "все проекты" in rep.text
+    assert [m["project"] for m in comms.inbox(store, mark=False)] == ["B", "B", ""]
 
 
 class FakeBot:
@@ -183,6 +384,26 @@ async def test_background_one_pass(store, monkeypatch):
     assert texts[0] == "T12 готова" and "сливать?" in texts[1] and texts[2].startswith("🚨")
     assert bot.sent[1][2] is not None  # the answer buttons
     assert comms.outbox(store) == [] and core.pending_questions(store) == [] and comms.alarms_for_tg(store) == []
+
+
+async def test_background_tells_the_owner_about_a_project_without_a_directory(store, monkeypatch):
+    """`nodir:B` — the launcher says it once, so the owner hears it once."""
+    import asyncio
+
+    from ahub.i18n import t
+    from ahub.tg import run as tgrun
+
+    core.remember_chat(store, 7)
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda s: "nodir:B")
+
+    async def stop(_):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", stop)
+    bot = FakeBot()
+    with pytest.raises(asyncio.CancelledError):
+        await tgrun.background(bot, store)
+    assert [text for _, text, _ in bot.sent] == [t("tg.launch_no_dir", name="B")]
 
 
 def test_dispatcher_builds(store):

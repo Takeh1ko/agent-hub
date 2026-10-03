@@ -47,6 +47,7 @@ Old events may start with Russian words ГОТОВО/РЕШЕНИЕ/ОШИБКА
 
 ## 4. Owner
 - `OWNER «…»` → `ahub inbox` (read), reply — `ahub say "short, in the owner's language"`.
+  A message is cut to two lines in the list: the whole text — `ahub inbox <id>`; a question — `ahub questions <id>`.
 - Need approval (merge, extend, spend) — `ahub ask "merge T12?" --options "yes,no"`; the answer comes as
   `ANSWER #N … → yes`. Merge code only with owner approval if they asked for it.
 - `ALARM …` → the observer found a problem with the hub itself: `ahub alarms`, `ahub service status`,

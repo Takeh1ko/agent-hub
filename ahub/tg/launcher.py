@@ -1,12 +1,17 @@
 """Claude Code launch from TG when no live session exists (V27, architecture §11; owner decision).
 
-- Trigger: unread human messages, Claude not marking presence (wait/watch), nothing running.
-- One Claude at a time: while one runs, new messages queue — it picks them up via `ahub inbox`
-  before finishing, the rest goes to the next launch.
-- Project: named in the message, else where Claude last worked (presence), else the hub's first project.
-- One resumable "TG session" (claude --resume) within a day and while turns stay under MAX_TURNS.
+- Trigger: unread human messages of a project, no live session in that project (wait/watch presence), nothing
+  the hub has started for it.
+- Per project: pending owner messages are grouped by project; a project with no live session gets Claude in its
+  own directory with its own messages only. A live session in A does not stop a launch for B.
+  Hub-wide messages (project='') are for the owner — one launch of its own, never mixed into a project's prompt.
+- One launched Claude per project: while one runs, new messages of that project queue — it picks them up via
+  `ahub inbox` before finishing, the rest goes to the next launch.
+- Directory of an owner launch: where Claude last worked (presence), else the hub's first project.
+- One resumable "TG session" (claude --resume) per project within a day and while turns stay under MAX_TURNS.
 - `--dangerously-skip-permissions` — same as the owner. Supervision: timeout, launch journal (claude_launch),
-  hourly limit.
+  hourly limit (MAX_PER_HOUR — still hub-wide: one launch per project spends it), and a group whose project has
+  no directory here is reported once (`nodir:<project>`, the bot tells the owner) instead of every tick.
 """
 
 from __future__ import annotations
@@ -21,15 +26,23 @@ from pathlib import Path
 
 from ahub import config, events, paths, procs, views
 from ahub import log as hublog
+from ahub.scope import Scope
 from ahub.store import Store
 from ahub.time import now_ms, to_local
 
 SESSION_KEY = "tg_claude_session"
 TIMEOUT_MS = 30 * 60_000
 MAX_TURNS = 30
-MAX_PER_HOUR = 6
+MAX_PER_HOUR = 6  # hub-wide — one launch per project spends it
 MIN_ALIVE_MS = 20_000  # lived too briefly with no session — messages stay undelivered (a restart picks them up)
+NO_DIR_MS = 15 * 60_000  # how often a project without a directory is reported again
+_no_dir: dict[str, int] = {}  # project → when it was last reported (this process)
 _log = hublog.get("launcher")
+
+
+def session_key(project: str = "") -> str:
+    """The resumable TG session of a launch: one per project (a session in A knows nothing about B)."""
+    return f"{SESSION_KEY}:{project}"
 
 
 def _owner_lang_line() -> str:
@@ -38,8 +51,10 @@ def _owner_lang_line() -> str:
     language = "Russian" if lang() == "ru" else "English"
     return f"Write all messages to the owner in {language}."
 
+
 PROMPT = """You are Claude, running development via agent-hub (`ahub` CLI). The owner is away from the computer
 and writes to you from Telegram, like to a senior in the office. You have no live session — the hub started you.
+{project_line}
 
 Owner messages:
 {messages}
@@ -56,6 +71,17 @@ How to work:
 - Before finishing, check `ahub inbox` — new messages may have arrived.
 {lang_line}
 """
+
+OWNER_LINE = ("You work with every project of this hub: pass `--all` (or `--project <name>`) to the `ahub` commands "
+              "that read everything — status, inbox, wait, history. The messages below are for all of them.")
+
+
+def project_line(project: str) -> str:
+    """The scope line of the prompt: one repository, or the whole hub (a hub-wide launch)."""
+    if project:
+        return (f"Project: {project} — this repository only; the `ahub` commands here see {project} and "
+                f"nothing else (no --all: another project's tasks are not yours).")
+    return OWNER_LINE
 
 
 def claude_bin() -> str | None:
@@ -80,13 +106,17 @@ class LaunchState:
     log: str
 
 
-def running(store: Store) -> LaunchState | None:
+def running(store: Store, project: str | None = None) -> list[LaunchState]:
+    """Every launch the hub started that is still marked running; project — of one project only."""
+    sql = "SELECT * FROM claude_launch WHERE status='running'"
+    args: list = []
+    if project is not None:
+        sql += " AND project=?"
+        args.append(project)
     with store.read() as c:
-        row = c.execute("SELECT * FROM claude_launch WHERE status='running' ORDER BY id DESC LIMIT 1").fetchone()
-    if row is None:
-        return None
-    log_path = str(paths.state_dir() / "claude" / f"launch_{row['id']}.log")
-    return LaunchState(row["id"], row["pid"], row["project"], row["ts"], row["session_id"], log_path)
+        rows = list(c.execute(sql + " ORDER BY id DESC", args))
+    return [LaunchState(r["id"], r["pid"], r["project"], r["ts"], r["session_id"],
+                        str(paths.state_dir() / "claude" / f"launch_{r['id']}.log")) for r in rows]
 
 
 def _pending(store: Store) -> list[dict]:
@@ -95,19 +125,27 @@ def _pending(store: Store) -> list[dict]:
             "SELECT id, ts, text, project FROM message WHERE direction='in' AND delivered_at IS NULL ORDER BY id")]
 
 
-def _pick_project(store: Store, msgs: list[dict], projects: list[config.ProjectConfig]) -> config.ProjectConfig | None:
-    by = {p.name: p for p in projects}
-    for m in reversed(msgs):
-        if m.get("project") in by:
-            return by[m["project"]]
+def _groups(store: Store) -> list[tuple[str, list[dict]]]:
+    """Undelivered owner messages by project, oldest group first ('' — hub-wide, for the owner)."""
+    groups: dict[str, list[dict]] = {}
+    for m in _pending(store):
+        groups.setdefault(m.get("project") or "", []).append(m)
+    return list(groups.items())
+
+
+def _root_for(target: str, projects: list[config.ProjectConfig], store: Store) -> Path | None:
+    """Where Claude runs for a launch: the project's directory; an owner launch — where Claude last worked."""
+    by = {p.name: p.root for p in projects}
+    if target:
+        return by.get(target)
     pres = events.presence(store)
     if pres and pres.get("project") in by:
         return by[pres["project"]]
-    return projects[0] if projects else None
+    return projects[0].root if projects else None
 
 
-def _session(store: Store, now: int) -> str | None:
-    raw = store.meta_get(SESSION_KEY)
+def _session(store: Store, now: int, target: str) -> str | None:
+    raw = store.meta_get(session_key(target))
     if not raw:
         return None
     try:
@@ -117,6 +155,16 @@ def _session(store: Store, now: int) -> str | None:
     if s.get("day") != to_local(now).date().isoformat() or int(s.get("turns", 0)) >= MAX_TURNS:
         return None
     return s.get("id") or None
+
+
+def _remember_session(store: Store, target: str, sid: str, now: int) -> None:
+    key = session_key(target)
+    try:
+        prev = json.loads(store.meta_get(key) or "{}")
+    except json.JSONDecodeError:
+        prev = {}
+    turns = int(prev.get("turns", 0)) + 1 if prev.get("id") == sid else 1
+    store.meta_set(key, json.dumps({"id": sid, "day": to_local(now).date().isoformat(), "turns": turns}))
 
 
 def _launches_last_hour(store: Store, now: int) -> int:
@@ -156,15 +204,13 @@ def session_id_from_log(path: str) -> str:
     return ""
 
 
-def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, now: int | None = None,
-         spawn=None, binary: str | None = None) -> str:
-    """One supervise/launch step. Returns what happened: idle | running | finished | killed | launched | limit."""
-    ts = now if now is not None else now_ms()
-    cur = running(store)
-    if cur is not None:
+def _reap(store: Store, ts: int) -> str | None:
+    """End every launch that is over: kill the alive ones past the timeout, deliver, remember the session."""
+    outcome = None
+    for cur in running(store):
         alive = procs.alive(cur.pid) if cur.pid else False
         if alive and ts - cur.ts < TIMEOUT_MS:
-            return "running"
+            continue
         status = "ok"
         if alive:
             try:
@@ -181,48 +227,78 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
             _deliver(store, ids, ts)
         store.meta_del(f"launch_msgs:{cur.id}")
         if sid:
-            prev = {}
-            try:
-                prev = json.loads(store.meta_get(SESSION_KEY) or "{}")
-            except json.JSONDecodeError:
-                prev = {}
-            turns = int(prev.get("turns", 0)) + 1 if prev.get("id") == sid else 1
-            store.meta_set(SESSION_KEY, json.dumps({"id": sid, "day": to_local(ts).date().isoformat(),
-                                                    "turns": turns}))
-        _log.info("launched Claude finished: %s", status)
-        return "killed" if status == "killed" else "finished"
-    msgs = _pending(store)
-    if not msgs or events.present(store, now=ts):
-        return "idle"
-    if _launches_last_hour(store, ts) >= MAX_PER_HOUR:
-        return "limit"
+            _remember_session(store, cur.project, sid, ts)
+        _log.info("launched Claude finished in %s: %s", cur.project or "(owner)", status)
+        outcome = "killed" if status == "killed" else "finished"
+    return outcome
+
+
+def _no_directory(store: Store, target: str, ts: int) -> bool:
+    """A group whose project is not in the hub: log it once in a while (not on every tick). True — tell the owner."""
+    if ts - _no_dir.get(target, 0) < NO_DIR_MS:
+        return False
+    _no_dir[target] = ts
+    _log.warning("cannot launch Claude: no directory for project %s — no such project in the hub config", target)
+    return True
+
+
+def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, now: int | None = None,
+         spawn=None, binary: str | None = None) -> str:
+    """One supervise/launch step.
+
+    Returns what happened: idle | running | finished | killed | launched | limit | nodir:<project>
+    (nothing will ever be launched for that project — said once in NO_DIR_MS).
+    """
+    ts = now if now is not None else now_ms()
+    ended = _reap(store, ts)
+    if ended is not None:
+        return ended
+    alive = {cur.project: cur for cur in running(store)}
     if projects is None:
         projects, _ = config.load_projects()
-    project = _pick_project(store, msgs, projects)
-    binary = binary or claude_bin()
-    if project is None or binary is None:
-        _log.error("cannot launch Claude: %s", "no project" if project is None else "no claude binary")
-        return "idle"
-    prompt = PROMPT.format(messages="\n".join(f"- {m['text']}" for m in msgs)[:6000],
-                           status=views.status_text(store, now=ts),
-                           lang_line=_owner_lang_line())
-    resume = _session(store, ts)
-    with store.tx() as c:
-        lid = int(c.execute("INSERT INTO claude_launch(ts, project, session_id, reason) VALUES(?,?,?,?)",
-                            (ts, project.name, resume or "", f"{len(msgs)} messages")).lastrowid)
-    log_path = paths.state_dir() / "claude" / f"launch_{lid}.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = build_command(binary, prompt, resume)
-    if spawn is None:
-        with open(log_path, "ab") as out:
-            p = subprocess.Popen(cmd, cwd=project.root, stdout=out, stderr=subprocess.STDOUT,
-                                 stdin=subprocess.DEVNULL, start_new_session=True)
-        pid = p.pid
-    else:
-        pid = spawn(cmd, project.root, str(log_path))
-    with store.tx() as c:
-        c.execute("UPDATE claude_launch SET pid=? WHERE id=?", (pid, lid))
-    # messages count as delivered once the launched Claude has lived a while (see MIN_ALIVE_MS) — not at once
-    store.meta_set(f"launch_msgs:{lid}", json.dumps([m["id"] for m in msgs]))
-    _log.info("launched Claude in %s (pid %s, %s)", project.name, pid, "resume" if resume else "new session")
-    return "launched"
+    targets = _groups(store)
+    nodir = ""
+    for target, msgs in targets:
+        if target in alive:
+            continue  # the Claude of this project is already on it
+        if events.present(store, project=target or None, now=ts):
+            continue  # a live session reads its own messages with `ahub inbox`
+        if _launches_last_hour(store, ts) >= MAX_PER_HOUR:
+            return "limit"
+        root = _root_for(target, projects, store)
+        binary = binary or claude_bin()
+        if binary is None:
+            _log.error("cannot launch Claude: no claude binary")
+            return "idle"
+        if root is None:
+            nodir = nodir or target
+            continue
+        scope = Scope((target,)) if target else Scope()
+        prompt = PROMPT.format(project_line=project_line(target),
+                               messages="\n".join(f"- {m['text']}" for m in msgs)[:6000],
+                               status=views.status_text(store, scope=scope, now=ts),
+                               lang_line=_owner_lang_line())
+        resume = _session(store, ts, target)
+        with store.tx() as c:
+            lid = int(c.execute("INSERT INTO claude_launch(ts, project, session_id, reason) VALUES(?,?,?,?)",
+                                (ts, target, resume or "", f"{len(msgs)} messages")).lastrowid)
+        log_path = paths.state_dir() / "claude" / f"launch_{lid}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = build_command(binary, prompt, resume)
+        if spawn is None:
+            with open(log_path, "ab") as out:
+                p = subprocess.Popen(cmd, cwd=root, stdout=out, stderr=subprocess.STDOUT,
+                                     stdin=subprocess.DEVNULL, start_new_session=True)
+            pid = p.pid
+        else:
+            pid = spawn(cmd, root, str(log_path))
+        with store.tx() as c:
+            c.execute("UPDATE claude_launch SET pid=? WHERE id=?", (pid, lid))
+        # messages count as delivered once the launched Claude has lived a while (see MIN_ALIVE_MS) — not at once
+        store.meta_set(f"launch_msgs:{lid}", json.dumps([m["id"] for m in msgs]))
+        _log.info("launched Claude in %s (pid %s, %s)", target or "the hub", pid,
+                  "resume" if resume else "new session")
+        return "launched"
+    if nodir and _no_directory(store, nodir, ts):
+        return f"nodir:{nodir}"
+    return "running" if alive else "idle"

@@ -152,6 +152,31 @@ def test_inbox_reads_only_its_scope(two_projects, capsys):
     assert len(comms.inbox(store, mark=False, scope=OWNER)) == 1  # and the hub-wide one was read
 
 
+def test_a_row_of_another_project_is_refused(two_projects, capsys):
+    """`ahub inbox <id>` / `ahub questions <id>` name one row — a row of another project is refused,
+    with the way out (the same rule as for a task)."""
+    store, _root_a, _root_b = two_projects
+    mid = comms.owner_message(store, "дело B подробно", project="B")
+    qid = comms.ask(store, "вопрос B подробно?", project="B")
+    ahub(capsys, "inbox")  # the inbox of A — B's message stays unread
+
+    rows = [(["inbox", str(mid)], "#1"), (["questions", str(qid)], "#1")]  # own numbers: message and question
+    for argv, ref in rows:
+        rc, out, err = ahub(capsys, *argv)
+        assert rc == 2 and out == ""
+        assert err.splitlines() == [f"ошибка: {ref} — строка проекта B",
+                                    "подсказка: запустите из того репозитория или добавьте --project B"]
+    for argv, ref in rows:
+        rc, out, err = ahub(capsys, "--lang", "en", *argv)
+        assert rc == 2 and out == ""
+        assert err.splitlines() == [f"error: {ref} belongs to project B",
+                                    "hint: run from that repo or add --project B"]
+
+    assert len(comms.inbox(store, mark=False)) == 1  # B's message is still unread
+    assert "дело B подробно" in ahub(capsys, "inbox", str(mid), "--project", "B")[1]  # the way out
+    assert "вопрос B подробно?" in ahub(capsys, "questions", str(qid), "--all")[1]
+
+
 def test_hub_wide_alarms_are_seen_by_every_scope(two_projects, capsys):
     store, _root_a, _root_b = two_projects
     comms.raise_alarm(store, "opencode недоступен", critical=True)  # the observer writes project=''
@@ -339,10 +364,71 @@ def test_question_project_is_backfilled_from_the_task(tmp_path):
     con.close()
 
     store = Store(db)
-    assert store.schema_version() == 5
+    assert store.schema_version() == 6
     with store.read() as c:
         rows = c.execute("SELECT text, project FROM question ORDER BY id").fetchall()
     assert [(r["text"], r["project"]) for r in rows] == [("с задачей", "B"), ("без задачи", "")]
+
+
+def test_presence_gets_its_own_table(tmp_path):
+    """Migration 006: additive — presence_project is keyed by (who, project), the old table is untouched."""
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    for num in range(1, 6):
+        f = next(p for p in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql")) if int(p.name[:3]) == num)
+        for stmt in _split_sql(f.read_text(encoding="utf-8")):
+            con.execute(stmt)
+    con.execute("PRAGMA user_version=5")
+    con.execute("INSERT INTO presence(who, project, last_seen, via) VALUES('claude', 'A', 10, 'watch')")
+    con.commit()
+    con.close()
+
+    store = Store(db)
+    assert store.schema_version() == 6
+    assert events.presence(store, "claude", "A")["last_seen"] == 10  # the old row is still read
+    assert not events.presence(store, "claude", "B")
+    events.touch(store, "claude", project="B", via="wait", now=20)
+    events.touch(store, "claude", project="A", via="wait", now=20)  # the key is (who, project) — no conflict
+    with store.read() as c:
+        rows = c.execute("SELECT project, last_seen FROM presence_project WHERE who='claude'"
+                         " ORDER BY project").fetchall()
+        old = c.execute("SELECT project, last_seen FROM presence WHERE who='claude'").fetchall()
+    assert [(r["project"], r["last_seen"]) for r in rows] == [("A", 20), ("B", 20)]
+    assert old  # the new code writes the old table too, so a bot on the previous code sees the session
+
+
+def test_presence_of_a_process_on_the_previous_code(tmp_path):
+    """During a live reload the old code still upserts `presence` on `who` — that must keep working,
+    and the new code must see such a session as present (T70: the live sessions must survive a migration)."""
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    for f in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql")):
+        for stmt in _split_sql(f.read_text(encoding="utf-8")):
+            con.execute(stmt)
+    con.execute("PRAGMA user_version=6")
+    con.commit()
+    con.close()
+    store = Store(db)
+
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO presence(who, project, last_seen, session_id, via) VALUES('claude', 'A', 50, 's', 'wait')"
+                " ON CONFLICT(who) DO UPDATE SET project=CASE WHEN excluded.project!='' THEN excluded.project"
+                " ELSE presence.project END, last_seen=excluded.last_seen, via=excluded.via,"
+                " session_id=CASE WHEN excluded.session_id!='' THEN excluded.session_id"
+                " ELSE presence.session_id END")
+    con.commit()
+    con.close()
+
+    # a session of a process on the previous code — the new code still sees it
+    assert events.presence(store, "claude", "A")["last_seen"] == 50
+    assert events.present(store, project="A", now=50 + 60_000)
+    assert not events.present(store, project="B", now=50 + 60_000)  # it worked in A
+    # a new-code session stamps both tables — a bot on the previous code sees it too
+    events.touch(store, "claude", project="B", via="watch", now=50)
+    assert events.presence(store, "claude", "B")["via"] == "watch"
+    with store.read() as c:
+        old = c.execute("SELECT project, last_seen FROM presence WHERE who='claude'").fetchone()
+    assert (old["project"], old["last_seen"]) == ("B", 50)
 
 
 def test_mcp_takes_the_scope_of_its_cwd(two_projects, monkeypatch):
