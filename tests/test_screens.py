@@ -538,7 +538,7 @@ def test_service_status_shows_the_queue_and_the_next_command(capsys, monkeypatch
     store.meta_set(HEARTBEAT_KEY, str(now_ms()))
     rc, out = run(capsys, "service", "status")
     assert rc == 0
-    assert out == (f"  Service  alive (tick 0s ago)\n"
+    assert out == ("  Service  alive (tick 0s ago)\n"
                    "Queue\n"
                    "  T1  queued  waiting for T1 to be accepted (queued)\n"
                    "  Next  ahub status · ahub top\n")

@@ -294,17 +294,16 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
             try:
                 registry.check(store, alias, project)
             except registry.RegistryError as e:
-                raise DecisionError(str(e)) from e
+                raise DecisionError(str(e), hint=_t("hint.models")) from e
         if t.kind is Kind.REVIEW:
             raise DecisionError(_t("tasks.review_self"), hint=_t("help.task_new_review"))
         fields["review"] = {"models": models, "rounds": count}
-        changes.append(_t("accept.review_msg", label=t.label, models="+".join(models), rounds=count)
-                       .removeprefix(t.label + ": "))
+        changes.append(_t("accept.review_msg", models="+".join(models), rounds=count))
     if model:
         try:
             registry.check(store, model, project)
         except registry.RegistryError as e:
-            raise DecisionError(str(e)) from e
+            raise DecisionError(str(e), hint=_t("hint.models")) from e
         if model != t.executor:
             changes.append(_t("accept.model_edit", old=t.executor or "—", new=model))
             fields["executor"] = model
@@ -317,11 +316,11 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
     if h != t.spec_hash:
         limits["fresh_session"] = True
         fields |= {"title": new.title, "spec": new.spec, "spec_hash": h}
-        changes.append(_t("accept.edit_msg", label=t.label).removeprefix(t.label + ": "))
+        changes.append(_t("accept.edit_msg"))
     if not changes:
         return _t("accept.edit_nothing", label=t.label)
     fields["limits"] = limits
-    store.update_task(t.id, now=now_ms(), **fields)
+    store.update_task(t.id, now=now_ms(), **fields)  # the parts of the one line the CLI prints
     store.add_event(Ev.STATE, task_id=t.id, project=t.project,
                     payload={"edit": ", ".join(changes), "by": by})
     return f"{t.label}: {', '.join(changes)}"
@@ -386,7 +385,7 @@ def change_model(store: Store, project: ProjectConfig, task_id: int, alias: str,
     try:
         registry.check(store, alias, project)
     except registry.RegistryError as e:
-        raise DecisionError(str(e)) from e
+        raise DecisionError(str(e), hint=_t("hint.models")) from e
     lim = dict(t.limits)
     lim["fresh_session"] = True  # never resume another model's session
     store.update_task(t.id, executor=alias, limits=lim)
