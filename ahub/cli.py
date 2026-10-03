@@ -23,7 +23,7 @@ GROUP_KEYS: dict[str, str] = {
     "ack": "watch", "inbox": "watch", "questions": "watch", "observer": "watch",
     # Setup
     "setup": "setup", "doctor": "setup", "service": "setup", "projects": "setup", "config": "setup",
-    "version": "setup",
+    "cost": "setup", "version": "setup",
     # Models and providers
     "models": "models", "providers": "models",
     # Integrations
@@ -94,14 +94,32 @@ def build_parser():
                                  formatter_class=_formatter())
     ap.add_argument("--json", action="store_true", help=t("cli.help_json"))
     ap.add_argument("--lang", choices=("en", "ru"), default=None, help=t("cli.help_lang"))
-    # the home screen alone: --all — every project, --project — a named one (the scope of a handle, §9)
-    ap.add_argument("--all", action="store_true", help=t("cli.help_all"))
-    ap.add_argument("--project", "-P", default=None, help=t("cli.help_project"))
+    # the scope of the home screen: --all — every project, --project — a named one (§9). Their own dests:
+    # a subparser's defaults (all=False, project=None) would otherwise win over `ahub --all status`.
+    ap.add_argument("--all", action="store_true", dest="root_all", help=t("cli.help_all"))
+    ap.add_argument("--project", "-P", default=None, dest="root_project", help=t("cli.help_project"))
     # the subcommands are drawn by the formatter under their own headings (Tasks, Watching, …), so the
     # default "positional arguments" heading would be an empty section
     sub = ap.add_subparsers(dest="cmd", metavar="<command>", title=argparse.SUPPRESS)
     _discover(sub)
     return ap
+
+
+def _merge_root_scope(args) -> None:
+    """The scope flags before a subcommand (`ahub --all status`, `ahub --project B status T2`).
+
+    argparse copies the subparser's namespace over the root one, so a subcommand's own defaults
+    (all=False, project=None) land on top of the root flags; the root values are merged back in, and a
+    flag given on the command itself (`ahub status --project B`) still wins.
+    """
+    if getattr(args, "root_all", False):
+        args.all = True
+    if getattr(args, "root_project", None) and not getattr(args, "project", None):
+        args.project = args.root_project
+    if not hasattr(args, "all"):
+        args.all = False
+    if not hasattr(args, "project"):
+        args.project = None
 
 
 def command_names(ap=None) -> frozenset[str]:
@@ -134,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = build_parser()
     args = ap.parse_args(argv)
+    _merge_root_scope(args)  # `ahub --all status` — the root flags before a subcommand are not lost
     if getattr(args, "lang", None):
         set_lang(args.lang)
     func = getattr(args, "func", None)
@@ -145,8 +164,8 @@ def main(argv: list[str] | None = None) -> int:
             from ahub.home import data, text
 
             sc = scope.resolve(args)
-            emit(args, data(all_projects=args.all, project=sc.name or None),
-                 text(all_projects=args.all, project=sc.name or None))
+            emit(args, data(all_projects=sc.all, project=sc.name or None),
+                 text(all_projects=sc.all, project=sc.name or None))
             return 0
         return int(func(args) or 0)
     except (ConfigError, CliError) as e:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 MESSAGES: dict[str, str] = {
+    "alarms.acked_few": "{n} alarms marked read",
     "alarms.acked_many": "{n} alarms marked read",
     "alarms.acked": "{n} alarm marked read",
     "alarms.col_age": "age",
@@ -260,6 +261,7 @@ MESSAGES: dict[str, str] = {
     "models.added": "added model {alias}",
     "models.check_bad": "{ok} of {total} answer — the rest are silent (ahub doctor)",
     "models.check_ok": "{ok} of {total} models answer",
+    "models.check_ok_one": "the only model answers",
     "models.checking": "Checking {n} models…",
     "models.col_default": "default",
     "models.col_model": "model",
@@ -512,10 +514,10 @@ MESSAGES: dict[str, str] = {
     "views.lbl_chat": "Chat",
     "views.lbl_cost": "Cost",
     "views.lbl_model": "Model",
-    "views.next_accept": "ahub status · ahub task new",
+    "views.next_accept": "ahub status · ahub task new --kind scout --title \"…\"",
     "views.next_continue": "ahub follow {label}",
     "views.next_new": "ahub status · ahub follow {label}",
-    "views.next_reject": "ahub status · ahub task new",
+    "views.next_reject": "ahub status · ahub task new --kind scout --title \"…\"",
     "views.next_rework": "ahub follow {label}",
     "views.next_task": "ahub status {label}",
     "views.lbl_next": "Next",
@@ -544,7 +546,8 @@ MESSAGES: dict[str, str] = {
     "views.sec_points": "Open points",
     "views.sec_report": "Report {kb} KB",
     "views.findings_more": "+{n} more findings — ahub log {label}",
-    "views.findings_more_one": "+1 more finding — ahub log {label}",
+    "views.findings_more_few": "+{n} more findings — ahub log {label}",
+    "views.findings_more_one": "+{n} more finding — ahub log {label}",
     "views.finding_fix": "fix: {fix}",
     "views.sec_findings": "Review findings",
     "views.sec_summary": "Summary",
@@ -1012,6 +1015,7 @@ MESSAGES: dict[str, str] = {
     "doctor.checking": "Checking the providers…",
     "doctor.ok_all": "everything works",
     "doctor.problems": "{n} problems — the fix is under each check",
-    "doctor.problem_one": "1 problem — the fix is under the check",
+    "doctor.problem_one": "{n} problem — the fix is under the check",
+    "doctor.problems_few": "{n} problems — the fix is under each check",
     "doctor.check_error": "check failed: {err}",
 }

@@ -27,7 +27,7 @@ _AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 def _lines(checks: list[doctor.Check], w: int | None) -> list[str]:
     """The screen: a heading per area, then `mark name  detail` and the fix under it."""
-    from ahub.i18n import t
+    from ahub.i18n import plural, t
 
     by_name = {c.name: c for c in checks}
     nw = max((len(t(f"doctor.name_{c.name}")) for c in checks), default=0)
@@ -49,8 +49,9 @@ def _lines(checks: list[doctor.Check], w: int | None) -> list[str]:
         for c in rest:
             out.append(f"  {_MARKS[c.ok]} {t(f'doctor.name_{c.name}')}: {c.detail}")
     bad = sum(1 for c in checks if c.ok is False)
-    out.append(ui.styled(t("doctor.problem_one") if bad == 1 else t("doctor.problems", n=bad) if bad
-    else t("doctor.ok_all"), "dim"))
+    # one / few / many — Russian inflects the noun by the count
+    out.append(ui.styled(plural(bad, "doctor.problem_one", "doctor.problems_few", "doctor.problems")
+                         if bad else t("doctor.ok_all"), "dim"))
     return out
 
 

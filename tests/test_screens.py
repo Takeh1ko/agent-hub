@@ -273,7 +273,7 @@ def test_models_check_probes_with_a_result_line(capsys, monkeypatch):
                    "1 of 2 answer — the rest are silent (ahub doctor)\n")
     assert run(capsys, "models", "check", "bunny") == (0, "     model  probe\n"
                                                       "  ✓  bunny  answered (OK)\n"
-                                                      "1 of 1 models answer\n")
+                                                      "the only model answers\n")
 
 
 def _setup_env(monkeypatch):
@@ -939,3 +939,43 @@ def test_providers_shows_every_model_of_a_provider(capsys, monkeypatch):
     assert "…" not in "".join(models)
     assert max(len(ln) for ln in lines) <= W  # and wrapped to the width
     assert len(models) > 1  # wrapped over several lines under the row
+
+
+def test_the_root_scope_flags_survive_a_subcommand(capsys, monkeypatch, tmp_path):
+    """`ahub --all status` / `ahub --project B status T2`: argparse copies the subparser's namespace over
+    the root one, so the root flags are merged back in — and a flag on the command itself still wins."""
+    from ahub import transitions
+    from ahub.model import Kind, State
+
+    monkeypatch.setattr("ahub.views.now_ms", lambda: NOW)
+    write(paths.global_config_path(), "projects = []\n")
+    for name in ("A", "B"):
+        write(tmp_path / name / ".hub.toml", f'schema_version = 2\nname = "{name}"\n')
+    monkeypatch.chdir(tmp_path / "A")
+    store = Store()
+    mine = store.get_task(store.create_task(project="A", kind=Kind.CODE, title="задача A", now=NOW))
+    transitions.move(store, mine.id, State.PREPARING, now=NOW)
+    other = store.get_task(store.create_task(project="B", kind=Kind.CODE, title="задача B", now=NOW))
+    transitions.move(store, other.id, State.PREPARING, now=NOW)
+    own = home_lines(capsys, monkeypatch, "--all", "status")
+    assert "задача A" in own and "задача B" in own  # --all before the subcommand — every project
+    assert "задача B" not in home_lines(capsys, monkeypatch, "status")  # the plain command — this project
+
+    # --project B before the subcommand names another project's task…
+    rc = cli.main(["--project", "B", "status", other.label])
+    assert rc == 0 and "задача B" in capsys.readouterr().out
+    # …and refuses one of this project, as every handle does in its own scope
+    rc = cli.main(["--project", "B", "status", mine.label])
+    assert rc == 2 and "belongs to A" in capsys.readouterr().err  # refused, with the way out
+    # a flag on the command itself wins over the root one — and --all still means every project
+    assert cli.main(["--project", "A", "status", "--project", "B"]) == 0
+    assert cli.main(["--project", "A", "status", "--project", "B", mine.label]) == 2
+    assert "belongs to A" in capsys.readouterr().err  # B on the command won over A on the root
+    assert cli.main(["--all", "status", "--project", "B"]) == 0
+    out = capsys.readouterr().out
+    assert "задача A" in out and "задача B" in out  # --all is the owner's view
+
+
+def home_lines(capsys, monkeypatch, *argv: str) -> str:
+    assert cli.main(list(argv)) == 0
+    return capsys.readouterr().out

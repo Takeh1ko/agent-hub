@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ahub import archive, events, reasons, ui, workspace
-from ahub.i18n import Words
+from ahub.i18n import Words, plural
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, FINAL, WAITING_DECISION, State
 from ahub.scope import OWNER, Scope
@@ -257,8 +257,8 @@ def _findings_lines(t: Task, w: int | None) -> list[str]:
         out += block
         used += size
     if more:
-        more_key = "views.findings_more_one" if more == 1 else "views.findings_more"
-        out.append(ui.para(_t(more_key, n=more, label=t.label), indent=2, w=w))
+        out.append(ui.para(plural(more, "views.findings_more_one", "views.findings_more_few",
+                                  "views.findings_more", label=t.label), indent=2, w=w))
     return out
 
 

@@ -433,3 +433,57 @@ def test_no_key_is_orphaned():
     orphans = sorted(k for k in en if k not in literal and not any(k.startswith(p) for p in prefixes))
     assert not orphans, orphans
     assert not sorted(set(ru) - set(en))  # the same list, the same way round
+
+
+def test_every_next_line_is_a_runnable_command():
+    """A Next line is pasted: every command on it must parse (`ahub task new` without --kind/--title does
+    not — it prints an argparse usage dump instead of doing something)."""
+    import shlex
+
+    from ahub import cli
+    from ahub.i18n.en import MESSAGES as en
+
+    parser = cli.build_parser()
+    keys = [k for k in en if k.startswith(("views.next_", "home.next_"))]
+    assert len(keys) > 5
+    for key in keys:
+        text = en[key].format(label="T1", n=2)
+        for part in text.split("·"):
+            part = part.strip()
+            if not part.startswith("ahub "):
+                continue  # a word that is not a command ("Run `ahub setup` to get started")
+            argv = shlex.split(part)
+            assert argv[0] == "ahub" and len(argv) > 1, key
+            args = parser.parse_args(argv[1:])  # a usage dump here means the line cannot be pasted
+            cli._merge_root_scope(args)
+            assert getattr(args, "func", None) is not None, f"{key}: {part}"
+
+
+def test_the_russian_count_has_three_forms(monkeypatch):
+    """Russian inflects by the count: 1 проблема, 2-4 проблемы, 5+ проблем (and 11-14 like 5+)."""
+    from ahub.i18n import _reset, plural, set_lang
+
+    monkeypatch.setenv("AHUB_LANG", "ru")
+    _reset()
+    try:
+        set_lang("ru")
+        args = ("doctor.problem_one", "doctor.problems_few", "doctor.problems")
+        assert plural(1, *args) == "1 проблема — исправление под проверкой"
+        assert plural(2, *args) == "2 проблемы — исправление под каждой проверкой"
+        assert plural(4, *args).startswith("4 проблемы")
+        assert plural(5, *args).startswith("5 проблем —")
+        assert plural(11, *args).startswith("11 проблем —")  # the teens take the many form
+        assert plural(12, *args).startswith("12 проблем —")
+        assert plural(21, *args).startswith("21 проблема")
+        assert plural(22, *args).startswith("22 проблемы")
+
+        alarms = ("alarms.acked", "alarms.acked_few", "alarms.acked_many")
+        assert plural(1, *alarms) == "1 тревога отмечена прочитанной"
+        assert plural(2, *alarms) == "2 тревоги отмечены прочитанными"
+        assert plural(5, *alarms) == "5 тревог отмечено прочитанными"
+
+        found = ("views.findings_more_one", "views.findings_more_few", "views.findings_more")
+        assert plural(2, *found, label="T1").startswith("ещё 2 находки")
+        assert plural(5, *found, label="T1").startswith("ещё 5 находок")
+    finally:
+        _reset()
