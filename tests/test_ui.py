@@ -248,6 +248,7 @@ def test_pipe_output_of_the_cli_has_no_ansi(tmp_path, monkeypatch, capsys):
     from ahub import cli
 
     monkeypatch.setenv("COLUMNS", "100")
+    monkeypatch.chdir(tmp_path)  # outside every project — the scope sees the tasks of project P
     ids = _fill(Store(), tmp_path)
     assert cli.main(["status"]) == 0
     assert cli.main(["status", f"T{ids['done']}"]) == 0

@@ -285,7 +285,14 @@ def make_session(store: Store, task_id: int, log: Path, *, role: str = "executor
     store.update_session(row, status=status, ended_at=1 if status != "running" else None)
 
 
-def test_follow_prints_the_last_session(capsys, tmp_path):
+@pytest.fixture
+def outside_project(tmp_path, monkeypatch):
+    """`ahub follow` is scoped by the current directory (ahub/scope.py); these tests are not about the
+    scope — they run outside every project, where every project is visible."""
+    monkeypatch.chdir(tmp_path)
+
+
+def test_follow_prints_the_last_session(capsys, tmp_path, outside_project):
     store = Store()
     project = make_project(tmp_path)
     install_fake(store, [scout_ok()])
@@ -300,7 +307,7 @@ def test_follow_prints_the_last_session(capsys, tmp_path):
     assert "\x1b[" not in out  # capsys is not a terminal
 
 
-def test_follow_no_follow_exits_without_an_active_task(capsys, tmp_path):
+def test_follow_no_follow_exits_without_an_active_task(capsys, tmp_path, outside_project):
     store = Store()
     tid = store.create_task(project="P", kind="scout", title="x", executor="fake")
     log = tmp_path / "executor.log"
@@ -313,7 +320,7 @@ def test_follow_no_follow_exits_without_an_active_task(capsys, tmp_path):
     assert "привет" in capsys.readouterr().out
 
 
-def test_follow_stops_when_the_session_ends(capsys, tmp_path, monkeypatch):
+def test_follow_stops_when_the_session_ends(capsys, tmp_path, monkeypatch, outside_project):
     """A running task: follow keeps printing and stops by itself when the task is done."""
     import os
 
@@ -347,7 +354,7 @@ def test_follow_stops_when_the_session_ends(capsys, tmp_path, monkeypatch):
     assert "follow закончился: сессия — ok" in out
 
 
-def test_follow_stops_when_the_owner_is_gone(capsys, tmp_path, monkeypatch):
+def test_follow_stops_when_the_owner_is_gone(capsys, tmp_path, monkeypatch, outside_project):
     """A worker that died leaves the task active — follow must not hang on it."""
     from ahub.commands import follow
 
@@ -368,7 +375,7 @@ def test_follow_stops_when_the_owner_is_gone(capsys, tmp_path, monkeypatch):
     assert "начали" in out and "follow закончился" in out
 
 
-def test_follow_role_and_round_filters(capsys, tmp_path):
+def test_follow_role_and_round_filters(capsys, tmp_path, outside_project):
     store = Store()
     tid = store.create_task(project="P", kind="code", title="x", executor="fake")
     ex = tmp_path / "executor.log"
@@ -385,7 +392,7 @@ def test_follow_role_and_round_filters(capsys, tmp_path):
     assert "сессий пока нет" in capsys.readouterr().err
 
 
-def test_follow_gone_worktree_names_the_archive(capsys, tmp_path, monkeypatch):
+def test_follow_gone_worktree_names_the_archive(capsys, tmp_path, monkeypatch, outside_project):
     project = make_project(tmp_path)
     monkeypatch.setattr("ahub.worker.find_project", lambda name: project)  # the project is in the hub config
     store = Store()
@@ -397,7 +404,7 @@ def test_follow_gone_worktree_names_the_archive(capsys, tmp_path, monkeypatch):
     assert "архив" in err and f".agent-hub/tasks/T{tid}" in err
 
 
-def test_follow_without_sessions(capsys, tmp_path):
+def test_follow_without_sessions(capsys, tmp_path, outside_project):
     store = Store()
     tid = store.create_task(project="P", kind="scout", title="x", executor="fake")
     assert cli.main(["follow", f"T{tid}"]) == 2
