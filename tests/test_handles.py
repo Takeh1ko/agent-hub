@@ -42,9 +42,11 @@ def test_scout_cycle(env, capsys):
     assert Engine(store, project, 1, sleep=lambda s: None).run().state is State.DONE
 
     rc, out, _ = ahub(capsys, "status")
-    assert out.startswith("DONE T1 «где утечка» — отчёт готов") and "непрочитано событий 1" in out
+    assert "Ждут" in out and "отчёт готов" in out and "непрочитано событий 1" in out
+    assert 'DONE T1 scout «где утечка» — отчёт' in out
     rc, out, _ = ahub(capsys, "status", "T1")
-    assert "итог работника: нашёл" in out and "утечка в core/a.py:1" in out and "Подробно" not in out
+    assert "Итог работника" in out and "нашёл" in out and "утечка в core/a.py:1" in out
+    assert "Подробно" not in out and "ahub accept T1" in out
     assert events.unacked(store) == []  # the task was read — the event is acked
     rc, out, _ = ahub(capsys, "result", "T1", "--full")
     assert "## Подробно" in out and '"summary"' in out
@@ -103,7 +105,8 @@ def test_say_ask_answer_alarms(env, capsys):
     assert comms.outbox(store)[0]["text"] == "T12 готова, смотрю"
     rc, out, _ = ahub(capsys, "ask", "сливать T12?", "--options", "да,нет")
     assert out.startswith("вопрос #1")
-    assert "сливать T12? [да, нет]" in ahub(capsys, "questions")[1]
+    questions = ahub(capsys, "questions")[1]
+    assert "#1" in questions and "сливать T12?" in questions and "да, нет" in questions
     assert comms.answer(store, 1, "да") and not comms.answer(store, 1, "нет")
     assert events.lines(store, events.unacked(store)) == ["ANSWER #1 «сливать T12?» → да"]
     comms.raise_alarm(store, "opencode недоступен 12 мин", critical=True)

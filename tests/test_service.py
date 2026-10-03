@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ahub import paths, service, tasks, transitions
+from ahub import paths, reasons, service, tasks, transitions
 from ahub.model import Kind, State
 from ahub.store import Store
 from tests.enginekit import install_fake, make_project, scout_ok
@@ -64,7 +64,7 @@ def test_slots_and_grace(store, tmp_path):
     s, rec = svc(store, project, tmp_path)
     r = s.tick()
     assert rec.spawned == ids[:2] and r.load["P"].waiting == {ids[2]: "ждёт места (2/2)"}
-    assert store.get_task(ids[2]).state_reason == "ждёт места (2/2)"
+    assert reasons.text(store.get_task(ids[2]).state_reason) == "ждёт места (2/2)"
     s.tick()  # the spawned ones are not in /proc yet — do not start them again
     assert rec.spawned == ids[:2]
 
@@ -79,7 +79,7 @@ def test_live_workers_of_previous_instance_take_slots(store, tmp_path):
     fake_proc(tmp_path / "proc", 555, ["python", "-m", "ahub.worker", f"T{old.id}"])
     r = s.tick()
     assert rec.spawned == [] and r.load["P"].running == [old.id]
-    assert "ждёт места" in store.get_task(new.id).state_reason
+    assert "ждёт места" in reasons.text(store.get_task(new.id).state_reason)
 
 
 def test_dependencies(store, tmp_path):
@@ -90,12 +90,12 @@ def test_dependencies(store, tmp_path):
     b = scout(store, project, after=[a.id])
     s, rec = svc(store, project, tmp_path)
     s.tick()
-    assert rec.spawned == [] and "ждёт принятия" in store.get_task(b.id).state_reason
+    assert rec.spawned == [] and "ждёт принятия" in reasons.text(store.get_task(b.id).state_reason)
     transitions.move(store, a.id, State.QUEUED)
     for st in (State.PREPARING, State.WORKING, State.DONE, State.ACCEPTED):
         transitions.move(store, a.id, st)
     s.tick()
-    assert rec.spawned == [b.id] and store.get_task(b.id).state_reason == ""
+    assert rec.spawned == [b.id] and reasons.text(store.get_task(b.id).state_reason) == ""
 
 
 def test_resources(store, tmp_path):
@@ -109,8 +109,8 @@ def test_resources(store, tmp_path):
     s, rec = svc(store, project, tmp_path, lock_busy=lambda p: busy["v"])
     s.tick()
     assert rec.spawned == [a.id]
-    assert store.get_task(b.id).state_reason == "ждёт ресурс api"
-    assert store.get_task(c.id).state_reason == "ждёт ресурс db (занят вне хаба)"
+    assert reasons.text(store.get_task(b.id).state_reason) == "ждёт ресурс api"
+    assert reasons.text(store.get_task(c.id).state_reason) == "ждёт ресурс db (занят вне хаба)"
     busy["v"] = False
     s.tick()
     assert rec.spawned == [a.id, c.id]
@@ -123,7 +123,8 @@ def test_pause(store, tmp_path):
     s, rec = svc(store, project, tmp_path)
     store.meta_set(service.PAUSE_KEY, "1")
     r = s.tick()
-    assert r.paused and rec.spawned == [] and store.get_task(t.id).state_reason == "очередь на паузе"
+    assert r.paused and rec.spawned == []
+    assert reasons.text(store.get_task(t.id).state_reason) == "очередь на паузе"
     store.meta_del(service.PAUSE_KEY)
     s.tick()
     assert rec.spawned == [t.id]
@@ -173,7 +174,7 @@ def test_end_to_end_real_worker(store, tmp_path, monkeypatch):
         time.sleep(0.1)
     final = store.get_task(t.id)
     log = (paths.state_dir() / "workers" / f"T{t.id}.log")
-    assert final.state is State.DONE, (final.state_reason, log.read_text() if log.exists() else "")
+    assert final.state is State.DONE, (reasons.text(final.state_reason), log.read_text() if log.exists() else "")
     assert store.list_sessions(t.id)[0].external_id == "ses_e2e"
 
 
@@ -206,7 +207,8 @@ def test_orphan_requeued_once_then_decision(store, tmp_path):
     with store.tx() as c:
         c.execute("UPDATE task SET state='working', owner='', lease_until=NULL, updated_at=0 WHERE id=?", (tid,))
     s.tick()
-    assert store.get_task(tid).state is State.NEEDS_DECISION and "повторно" in store.get_task(tid).state_reason
+    assert store.get_task(tid).state is State.NEEDS_DECISION
+    assert "повторно" in reasons.text(store.get_task(tid).state_reason)
 
 
 def test_orphan_live_lease_untouched(store, tmp_path):
@@ -224,7 +226,8 @@ def test_orphan_accepting_is_decision(store, tmp_path):
     tid = _orphan_task(store, project, state=State.ACCEPTING)
     s, rec = svc(store, project, tmp_path)
     s.tick()
-    assert store.get_task(tid).state is State.NEEDS_DECISION and "принятие прервано" in store.get_task(tid).state_reason
+    assert store.get_task(tid).state is State.NEEDS_DECISION
+    assert "принятие прервано" in reasons.text(store.get_task(tid).state_reason)
 
 
 def test_code_fingerprint_and_health(tmp_path):

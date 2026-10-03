@@ -153,9 +153,9 @@ def test_views_events_en(monkeypatch, tmp_path):
     queued = store.create_task(project="P", kind="scout", title="later", now=now)
     assert queued
 
-    l1 = views.status_text(store, now=now)
-    assert "studying" in l1 and "round 2" in l1
-    assert "queued 1" in l1 and "unread events" in l1
+    l1 = views.status_text(store, now=now, w=100)
+    assert "studying" in l1 and "1 queued" in l1
+    assert "unread events" in l1
     assert "DONE T2" in l1  # codes are not translated
 
     done_ev = [e for e in store.events(task_id=waiting, needs_reaction=True) if e.kind == "done"][0]
@@ -169,10 +169,10 @@ def test_views_events_en(monkeypatch, tmp_path):
     (wt / ".ahub" / "report.md").write_text("## Summary\nleak in core/a.py:1\n", encoding="utf-8")
     (wt / ".ahub" / "result.json").write_text('{"summary": "found it"}', encoding="utf-8")
     store.update_task(waiting, worktree=str(wt), now=now)
-    l2 = views.task_text(store, store.get_task(waiting), now=now)
-    assert "state: done" in l2 and "worker result: found it" in l2
-    assert "report" in l2 and "KB — summary:" in l2
-    assert "cost:" in l2 and "budget" in l2
+    l2 = views.task_text(store, store.get_task(waiting), now=now, w=100)
+    assert "State" in l2 and "done" in l2 and "Summary" in l2 and "found it" in l2
+    assert "Report" in l2 and "KB" in l2
+    assert "Next" in l2 and "ahub accept T2" in l2
 
     assert views.status_text(store, project="NOPE", now=now).startswith("quiet:")
     import re as _re
@@ -238,9 +238,13 @@ def test_step5_transitions_drafts_en(monkeypatch, tmp_path):
         raise AssertionError("must fail")
     except transitions.TransitionError as e:
         assert "no task T999" in str(e)
+    from ahub import reasons
+
     q = store.create_task(project="P", kind="scout", title="x")
     assert transitions.request_stop(store, q) == "stopped"
-    assert store.get_task(q).state_reason == "stopped by command"
+    stored = store.get_task(q).state_reason
+    assert stored == '{"code":"stop_command"}'  # a code, not translated text
+    assert reasons.text(stored) == "stopped by command"
     assert drafts.preview(store, 999) == "no draft #999"
     project = config.parse_project(
         {"schema_version": 2, "name": "P", "hooks": {"task_setup": "exit 3"}}, str(tmp_path))
@@ -278,7 +282,7 @@ def test_step6_engine_gates_en(monkeypatch, tmp_path):
     """Step 6: engine reasons and gates in English (AHUB_LANG=en)."""
     import re as _re
 
-    from ahub import config, gates
+    from ahub import config, gates, reasons
     from ahub.engine import Engine
     from ahub.model import State
     from ahub.providers.base import Outcome, RunResult
@@ -291,12 +295,13 @@ def test_step6_engine_gates_en(monkeypatch, tmp_path):
     project = config.parse_project({"schema_version": 2, "name": "P"}, str(tmp_path))
     eng = Engine(store, project, 999)
     st, reason = eng._outcome_to_state(RunResult(Outcome.QUOTA, None, error="boom"))
-    assert st is State.NEEDS_DECISION and reason == "provider quota: boom"
+    assert st is State.NEEDS_DECISION and reason == '{"code":"quota","err":"boom"}'
+    assert reasons.text(reason) == "provider quota: boom"
     st, reason = eng._outcome_to_state(RunResult(Outcome.TIMEOUT, None, error="60"))
-    assert "task time limit" in reason
+    assert "task time limit" in reasons.text(reason)
     g = gates.GateResult(base="b", head="h", tests_ok=False, diffstat="")
     assert "acceptance is red" in g.summary()
-    assert not _re.search(r"[а-яА-ЯёЁ]", reason + g.summary())
+    assert not _re.search(r"[а-яА-ЯёЁ]", reasons.text(reason) + g.summary())
 
 
 def test_step6_accept_service_en(monkeypatch, tmp_path):
@@ -305,7 +310,7 @@ def test_step6_accept_service_en(monkeypatch, tmp_path):
 
     import pytest
 
-    from ahub import accept, config, service, tasks, transitions
+    from ahub import accept, config, reasons, service, tasks, transitions
     from ahub.model import Kind, State
     from ahub.store import Store
 
@@ -328,8 +333,10 @@ def test_step6_accept_service_en(monkeypatch, tmp_path):
                           lock_busy=lambda p: False)
     (tmp_path / "proc").mkdir(exist_ok=True)
     svc.tick()
-    dep_reason = store.get_task(b.id).state_reason
+    stored = store.get_task(b.id).state_reason
+    dep_reason = reasons.text(stored)
     assert dep_reason.startswith("waiting for T") and "to be accepted" in dep_reason
+    assert stored == '{"code":"wait_accept","task":"T1","state":"stopped"}'
     assert not _re.search(r"[а-яА-ЯёЁ]", dep_reason)
 
 
