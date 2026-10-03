@@ -110,7 +110,7 @@ def test_home_screen_with_work_and_a_decision(capsys, monkeypatch, tmp_path):
     assert lines[2].split() == ["task", "kind", "title", "state", "model", "idle"]  # the table head
     row = lines[3].split()
     assert row[1:7] == ["T1", "code", "Setup", "wizard:", "choose", "providers"]  # the title, word by word
-    assert row[-3:] == ["spark", "30", "s"]  # the model and the idle age
+    assert row[-3:] == ["spark", "0", "min"]  # the model and the idle age (main's _age: minutes)
     assert lines[4] == "Waiting for your decision"
     assert " ".join(lines[5].split()) == "T2 done review rounds exhausted (2 findings, high: 1)"
     assert "ahub accept T2" in lines[6]

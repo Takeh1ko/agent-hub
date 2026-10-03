@@ -82,13 +82,47 @@ def test_lines_format(store):
     assert len(events.format_line(store.events(after_id=long - 1)[0], None)) <= events.LINE_LIMIT
 
 
-def test_presence(store):
+def test_presence_is_per_project(store):
     assert not events.present(store)
     events.touch(store, project="P", via="wait", now=1000)
-    assert events.present(store, now=1000 + 60_000)
-    assert not events.present(store, now=1000 + events.PRESENT_MS + 1)
-    events.touch(store, via="watch", now=2000)  # an empty touch does not clear the project
-    assert events.presence(store)["project"] == "P"
+    assert events.present(store, project="P", now=1000 + 60_000)  # a live session in P
+    assert not events.present(store, project="B", now=1000 + 60_000)  # … says nothing about B
+    assert not events.present(store, project="P", now=1000 + events.PRESENT_MS + 1)
+    events.touch(store, project="B", via="watch", now=1000 + 1000)  # two sessions of one `who`
+    assert events.present(store, project="P", now=1000 + 2000)
+    assert events.present(store, project="B", now=1000 + 2000)
+    assert events.present(store, now=1000 + 2000)  # no project — any of them
+    assert events.presence(store, project="P")["via"] == "wait" and events.presence(store)["project"] == "B"
+
+
+def test_touch_scope_of_the_owner_stamps_every_project(store, tmp_path, monkeypatch):
+    from ahub import paths
+    from ahub.scope import Scope
+    from tests.conftest import write
+
+    roots = {}
+    for name in ("A", "B"):
+        roots[name] = write(tmp_path / name.lower() / ".hub.toml",
+                            f'schema_version = 2\nname = "{name}"\n').parent
+    paths.global_config_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.global_config_path().write_text(f'projects = ["{roots["A"]}", "{roots["B"]}"]\n', encoding="utf-8")
+
+    events.touch_scope(store, Scope(("A",)), via="watch", now=1000)
+    assert events.present(store, project="A", now=1000) and not events.present(store, project="B", now=1000)
+    events.touch_scope(store, Scope(), via="watch", now=2000)  # the owner — every project
+    assert events.present(store, project="A", now=2000) and events.present(store, project="B", now=2000)
+
+
+def test_a_failed_presence_stamp_is_only_a_log_line(store, monkeypatch, caplog):
+    """A presence stamp must never raise: the Monitor is the one thing that must not die (T70)."""
+    with store.tx() as c:
+        c.execute("DROP TABLE presence_project")  # e.g. a migration under an old process
+    with caplog.at_level("WARNING", logger="events"):
+        events.touch(store, project="A", via="watch", now=1000)  # no exception
+        events.touch_scope(store, None, via="watch", now=1000)
+    assert len(caplog.records) == 2
+    assert all(r.message.startswith("presence touch failed") for r in caplog.records)
+    assert not events.presence(store, project="A")  # nothing was stamped
 
 
 def test_wait_returns_batch_and_marks(store):

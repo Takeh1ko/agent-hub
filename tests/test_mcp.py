@@ -57,6 +57,18 @@ def test_call_nudge_refuses_a_queued_task():
     assert store.get_task(tid).request == ""  # a refusal writes nothing
 
 
+def test_inbox_tool_reads_the_messages_in_full():
+    """An agent gets the whole text of every unread message — not the head a table cell holds."""
+    store = Store()
+    long = ("поручил " * 40).strip()
+    comms.owner_message(store, long, project="P")
+    r = rpc([{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "inbox", "arguments": {}}}])
+    text = r[0]["result"]["content"][0]["text"]
+    assert not r[0]["result"]["isError"] and long in " ".join(text.split())
+    assert "ahub inbox" not in text  # nothing is cut, so no hint
+    assert comms.inbox(store, mark=False) == []  # the tool read the inbox
+
+
 def test_errors():
     r = rpc([{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "nope"}},
              {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "result", "arguments": {}}},

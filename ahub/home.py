@@ -96,7 +96,7 @@ def _task_rows(tasks: list, live: dict[int, int], pulses: dict, now: int) -> lis
         pl = pulses.get(task.id)
         mark = ui.badge(pl.mark, "", pl.state) if pl else ("⚫" if task.id not in live else "")
         rows.append([mark, task.label, task.kind.value, task.title, _state_cell(task),
-                     task.executor or "—", views.age(task.updated_at, now)])
+                     task.executor or "—", views._age(task.updated_at, now)])
     return rows
 
 
