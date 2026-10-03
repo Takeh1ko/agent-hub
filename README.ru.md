@@ -106,6 +106,13 @@ Telegram — по желанию: `pipx install 'ahub[telegram]'`.
 
 В Claude Code (после того как `ahub setup` поставит навык):
 
+`ahub setup` даёт Claude Code всё нужное за один шаг: навык `ahub`, короткий блок в `CLAUDE.md` проекта и разрешение
+`Bash(ahub:*)` в `.claude/settings.json` — команда `ahub …` больше не спрашивает разрешения каждый раз
+(и то и другое показывает `ahub doctor`).
+
+Другие агенты говорят с тем же stdio-сервером по MCP: `claude mcp add ahub -- ahub mcp`, и тот же сервер `ahub mcp`
+в конфиге Codex или Cursor.
+
 ```
 ahub task new --kind code --title "добавить повтор в платёжный клиент" \
   --spec-file spec.md --paths "app/payments/**,tests/**" --accept "tests/test_payments.py"

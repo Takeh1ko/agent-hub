@@ -108,6 +108,13 @@ Platforms: Linux (systemd), macOS (launchd; tested in CI), Windows via WSL2 only
 
 In Claude Code (after `ahub setup` installs the skill):
 
+`ahub setup` gives Claude Code everything it needs in one step: the `ahub` skill, a short block in the project
+`CLAUDE.md` and the permission `Bash(ahub:*)` in `.claude/settings.json` — so `ahub …` runs without a question
+every time (`ahub doctor` shows both).
+
+Other agents talk to the same stdio server over MCP: `claude mcp add ahub -- ahub mcp`, and the same `ahub mcp`
+server in the Codex or Cursor config.
+
 ```
 ahub task new --kind code --title "add retry to the payment client" \
   --spec-file spec.md --paths "app/payments/**,tests/**" --accept "tests/test_payments.py"

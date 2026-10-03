@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 
-from ahub import cli, config, paths
+from ahub import cli, config, doctor, paths
+from tests.conftest import write
 from tests.enginekit import make_repo
 
 
@@ -22,6 +24,38 @@ def test_setup_new_project(tmp_path, capsys):
     assert "уже v2" in out and "блок уже есть" in out
     assert (root / "CLAUDE.md").read_text().count("ahub:begin") == 1
     assert paths.global_config_path().read_text().count(str(root)) == 1
+
+
+def test_setup_claude_permission(tmp_path, capsys):
+    """T51: --claude puts Bash(ahub:*) into .claude/settings.json — the file, the merge, no duplicates."""
+    root = tmp_path / "perm"
+    make_repo(root)
+    assert cli.main(["setup", str(root), "--claude"]) == 0
+    out = capsys.readouterr().out
+    settings = root / ".claude" / "settings.json"  # the file and the dir are created
+    assert settings.is_file()
+    assert json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"] == ["Bash(ahub:*)"]
+    assert '  "permissions"' in settings.read_text(encoding="utf-8")  # 2-space indent
+    assert "Bash(ahub:*)" in out and "claude mcp add ahub -- ahub mcp" in out  # + the MCP hint, not run
+    assert doctor.bash_allowed(root) is True
+    # a repeat: the rule is already there — one copy, everything else as is
+    assert cli.main(["setup", str(root), "--claude"]) == 0
+    assert "уже разрешён" in capsys.readouterr().out
+    assert settings.read_text(encoding="utf-8").count("Bash(ahub:*)") == 1
+    # an existing file keeps its content: other rules, other keys, its order
+    write(settings, json.dumps({"model": "opus", "permissions": {"allow": ["Bash(git:*)"],
+                                                                 "deny": ["Bash(rm:*)"]}}, indent=2) + "\n")
+    assert cli.main(["setup", str(root), "--claude"]) == 0
+    capsys.readouterr()
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert data == {"model": "opus",
+                    "permissions": {"allow": ["Bash(git:*)", "Bash(ahub:*)"], "deny": ["Bash(rm:*)"]}}
+    # a broken file is left as is and named in the output — setup does not refuse over it
+    write(settings, "{ not json\n")
+    assert cli.main(["setup", str(root), "--claude"]) == 0
+    out = capsys.readouterr().out
+    assert "оставлен как есть" in out
+    assert settings.read_text(encoding="utf-8") == "{ not json\n"
 
 
 def test_setup_converts_v1(tmp_path, capsys):
