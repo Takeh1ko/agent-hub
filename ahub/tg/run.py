@@ -85,7 +85,9 @@ async def background(bot, store: Store) -> None:
                 if res == "limit":
                     _log.warning("Claude launch hourly limit exhausted")
                 elif res.startswith("nodir:"):  # the launcher says it once — the owner hears it once
-                    await _send(bot, store, core.Reply(_t("tg.launch_no_dir", name=res.split(":", 1)[1])))
+                    name = res.split(":", 1)[1]
+                    await _send(bot, store, core.Reply(_t("tg.launch_no_dir", name=name) if name
+                                                       else _t("tg.launch_no_dir_hub")))
             await asyncio.to_thread(store.meta_set, HEARTBEAT_KEY, str(int(loop.time())))
         except Exception:
             _log.exception("bot background loop crashed")

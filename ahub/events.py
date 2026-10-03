@@ -277,7 +277,8 @@ def presence(store: Store, who: str = DEFAULT_WHO, project: str | None = None) -
     """The presence row of one project; project=None — the freshest of any project.
 
     presence_project first, then the old table (a process on the previous code writes only it); a database
-    without presence_project yet (a migration under a live process) falls back to the old one.
+    without presence_project yet (a migration under a live process) falls back to the old one. Its row with
+    project='' is that code's owner-mode stream — it counts for every project.
     """
     sql = "SELECT * FROM presence_project WHERE who=?"
     args: list = [who]
@@ -295,13 +296,19 @@ def presence(store: Store, who: str = DEFAULT_WHO, project: str | None = None) -
 
 
 def _legacy_presence(c: sqlite3.Connection, who: str, project: str | None) -> sqlite3.Row | None:
-    """The pre-006 row of `who`: one row per who, so it answers "is anyone live" and where that one worked last."""
+    """The pre-006 row of `who`: one row per who, so it answers "is anyone live" and where that one worked last.
+
+    That code stamped one row, so an owner-mode stream left project='' — that session covers every project and
+    must not look absent in any of them during the transition; a row with a name answers only for that project.
+    """
     try:
         row = c.execute("SELECT * FROM presence WHERE who=?", (who,)).fetchone()
     except sqlite3.Error:
         return None
-    if row is not None and project is not None and str(row["project"]) != project:
-        return None
+    if row is not None and project is not None:
+        name = str(row["project"])
+        if name and name != project:
+            return None
     return row
 
 

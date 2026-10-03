@@ -146,7 +146,11 @@ def on_text(store: Store, chat_id: int, text: str, *, projects: list[str], now: 
     comms.owner_message(store, body, project=project, chat_id=chat_id, now=now)
     online = events.present(store, project=project or None, now=now)
     line = _t("tg.sent") if online else _t("tg.launching")
-    notice = _t("tg.project_gone", name=cur) + " " if stale else ""
+    # the notice must say where the message actually went — a prefix may have named a project
+    notice = ""
+    if stale:
+        notice = (_t("tg.project_gone_to", name=cur, project=project) if project
+                  else _t("tg.project_gone", name=cur)) + " "
     return Reply(f"{notice}{line} · {_project_tag(project)}")
 
 

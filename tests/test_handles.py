@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from ahub import cli, comms, events, paths, transitions
+from ahub.commands import comms as comms_cmd
 from ahub.engine import Engine
 from ahub.model import State
 from ahub.store import Store
@@ -107,6 +109,44 @@ def test_wait_and_ack(env, capsys):
     rc, out, _ = ahub(capsys, "inbox")
     assert out.endswith("как там оплата?") and events.unacked(store) == []
     assert ahub(capsys, "inbox")[1] == "новых сообщений нет"
+
+
+def _scripted_polls(monkeypatch, plan):
+    """Drive the endless watch loop: `plan(poll)` returns None (a real poll), "raise" (a locked database)
+    or "stop" (a Ctrl-C, as a Monitor's would be)."""
+    real = events.ready_batch
+    state = {"n": 0}
+
+    def fake(store, *, now=None, scope=None, window_ms=events.GROUP_WINDOW_MS):
+        state["n"] += 1
+        step = plan(state["n"])
+        if step == "raise":
+            raise sqlite3.OperationalError("database is locked")
+        if step == "stop":
+            raise KeyboardInterrupt
+        return real(store, now=now, scope=scope, window_ms=window_ms)
+
+    monkeypatch.setattr(events, "ready_batch", fake)
+
+
+def test_watch_streams_and_survives_a_transient_failure(env, capsys, monkeypatch, caplog):
+    store, _ = env
+    comms.owner_message(store, "как там оплата?", project="P")
+    _scripted_polls(monkeypatch, lambda n: "raise" if n == 2 else ("stop" if n >= 4 else None))
+    with caplog.at_level("WARNING", logger="watch"):
+        rc, out, err = ahub(capsys, "watch", "--poll", "0")
+    assert rc == 0 and out == "OWNER «как там оплата?»" and err == ""
+    assert [r.message for r in caplog.records if r.name == "ahub.watch"] == [
+        "watch: OperationalError: database is locked"]  # one line for the whole streak
+
+
+def test_watch_gives_up_after_the_failure_cap(env, capsys, monkeypatch, caplog):
+    _scripted_polls(monkeypatch, lambda n: "raise")  # the database never opens
+    with caplog.at_level("WARNING", logger="watch"):
+        rc, out, err = ahub(capsys, "watch", "--poll", "0")
+    assert rc == 4 and out == ""
+    assert err.count("\n") == 0 and f"{comms_cmd.MAX_POLL_FAILURES} раз" in err and "database is locked" in err
+    assert len([r for r in caplog.records if r.name == "ahub.watch"]) == 1  # once per distinct error, not per poll
 
 
 def test_say_ask_answer_alarms(env, capsys):

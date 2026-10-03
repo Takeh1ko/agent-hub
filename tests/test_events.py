@@ -95,7 +95,7 @@ def test_presence_is_per_project(store):
     assert events.presence(store, project="P")["via"] == "wait" and events.presence(store)["project"] == "B"
 
 
-def test_touch_scope_of_the_owner_stamps_every_project(store, tmp_path, monkeypatch):
+def test_touch_scope_of_the_owner_stamps_every_project(store, tmp_path):
     from ahub import paths
     from ahub.scope import Scope
     from tests.conftest import write
@@ -113,7 +113,7 @@ def test_touch_scope_of_the_owner_stamps_every_project(store, tmp_path, monkeypa
     assert events.present(store, project="A", now=2000) and events.present(store, project="B", now=2000)
 
 
-def test_a_failed_presence_stamp_is_only_a_log_line(store, monkeypatch, caplog):
+def test_a_failed_presence_stamp_is_only_a_log_line(store, caplog):
     """A presence stamp must never raise: the Monitor is the one thing that must not die (T70)."""
     with store.tx() as c:
         c.execute("DROP TABLE presence_project")  # e.g. a migration under an old process
@@ -123,6 +123,19 @@ def test_a_failed_presence_stamp_is_only_a_log_line(store, monkeypatch, caplog):
     assert len(caplog.records) == 2
     assert all(r.message.startswith("presence touch failed") for r in caplog.records)
     assert not events.presence(store, project="A")  # nothing was stamped
+
+
+def test_a_legacy_row_of_an_owner_stream_is_present_everywhere(store):
+    """A process on the pre-006 code writes one row per who; in owner mode it has project='' — that stream
+    covers every project and must not look absent in any of them during the transition."""
+    with store.tx() as c:
+        c.execute("INSERT INTO presence(who, project, last_seen, session_id, via)"
+                  " VALUES('claude', '', 1000, '', 'watch')")
+    assert events.present(store, project="A", now=2000) and events.present(store, project="B", now=2000)
+    assert not events.present(store, project="A", now=1000 + events.PRESENT_MS + 1)  # it still goes stale
+
+    events.touch(store, project="A", via="watch", now=2000)  # a named row — only that project
+    assert events.present(store, project="A", now=3000) and not events.present(store, project="B", now=3000)
 
 
 def test_wait_returns_batch_and_marks(store):

@@ -3,16 +3,24 @@
 Every command here reads what an orchestrator reads, so every one of them is scoped by project
 (ahub/scope.py): the project of the current directory, --project X — X, --all — every project (the owner).
 `say`/`ask` write into the scope of the directory they were run from.
+`wait`/`watch` survive a broken poll (a Monitor must not die with a bad turn), but not endlessly: after
+MAX_POLL_FAILURES failures in a row the stream gives up with one line and exit code 4.
 """
 
 from __future__ import annotations
 
+import sys
 import time
+from dataclasses import dataclass
 
-from ahub import comms, events, log, scope, views
+from ahub import comms, events, log, scope, ui, views
 from ahub.cliutil import CliError, add_scope_args, emit
 from ahub.store import Store
 from ahub.time import parse_duration as _parse_duration
+
+MAX_POLL_FAILURES = 20  # consecutive failures of a poll before the stream gives up
+RETRY_S = 1.0  # sleep between retries of a failed poll
+FAILED_RC = 4  # the poll never worked — not a timeout (3), not a refusal (2)
 
 
 def parse_duration(text: str) -> float:
@@ -23,10 +31,53 @@ def parse_duration(text: str) -> float:
         raise CliError(str(e)) from e
 
 
+@dataclass
+class _Failures:
+    """Consecutive failures of a poll: one log line per distinct error, a cap instead of an endless loop.
+
+    A streak of the same error is one record in the log, not one per poll; a poll that works again resets the
+    streak. `note` returns '' while the stream may keep going, else the one line to exit with.
+    """
+    tag: str
+    limit: int = MAX_POLL_FAILURES
+    count: int = 0
+    last: str = ""
+
+    def __post_init__(self) -> None:
+        self._log = log.get(self.tag)
+
+    def note(self, error: Exception) -> str:
+        self.count += 1
+        text = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
+        if text != self.last:
+            self.last = text
+            self._log.warning("%s: %s", self.tag, text)  # once per distinct error, not per poll
+        if self.count < self.limit:
+            return ""
+        from ahub.i18n import t
+
+        return t("comms.poll_failed", n=self.count, cmd=self.tag, err=ui.clip(text, 120))
+
+    def reset(self) -> None:
+        self.count, self.last = 0, ""
+
+
 def cmd_wait(args) -> int:
+    """Block until an event or the timeout; a broken poll is retried until the cap (KeyboardInterrupt is not)."""
     store = Store()
     sc = scope.resolve(args)
-    got = events.wait(store, timeout_s=parse_duration(args.timeout), scope=sc, who=args.who)
+    fails = _Failures("wait")
+    deadline = time.monotonic() + parse_duration(args.timeout)
+    while True:
+        try:
+            got = events.wait(store, timeout_s=max(0.0, deadline - time.monotonic()), scope=sc, who=args.who)
+            break
+        except Exception as e:  # a broken poll must not kill the wait — until the cap says it is hopeless
+            line = fails.note(e)
+            if line:
+                print(line, file=sys.stderr, flush=True)
+                return FAILED_RC
+            time.sleep(RETRY_S)
     if not got:
         emit(args, {"events": []}, "")
         return 3
@@ -38,7 +89,6 @@ def cmd_watch(args) -> int:
     """Endless line stream for Monitor: each line is work for the orchestrator."""
     from ahub.i18n import t
 
-    _log = log.get("watch")
     store = Store()
     sc = scope.resolve(args)
     pending = events.watch_start_summary(store, who=args.who, scope=sc)
@@ -46,6 +96,7 @@ def cmd_watch(args) -> int:
         tail = "; ".join(events.lines(store, pending[:3]))[:180]
         print(t("comms.unread", n=len(pending), text=tail), flush=True)
     last_touch = 0.0
+    fails = _Failures("watch")
     names = events.presence_projects(sc)  # the owner's projects are read from the config once, not per touch
     while True:
         try:
@@ -59,11 +110,15 @@ def cmd_watch(args) -> int:
                 events.mark_delivered(store, [e.id for e in batch])
                 for ln in events.lines(store, batch):
                     print(ln, flush=True)
+            fails.reset()
             time.sleep(args.poll)
         except (KeyboardInterrupt, BrokenPipeError):
             return 0
         except Exception as e:  # the Monitor must survive a broken turn, not die with it
-            _log.warning("watch: %s", e)
+            line = fails.note(e)
+            if line:
+                print(line, file=sys.stderr, flush=True)
+                return FAILED_RC
             time.sleep(args.poll)
 
 
