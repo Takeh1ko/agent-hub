@@ -118,6 +118,8 @@ Claude keeps a Monitor on `ahub watch`; when a line like `DONE T12 …` arrives 
 
 You: `ahub top` to watch (press `c` for control mode, `?` for help), `ahub status`, `ahub history`.
 Plain-language tasks: `ahub draft new "what you want, in your words"` → preview → `ahub draft start N`.
+Live transcript of what the worker is doing right now — the prompt, its text, tool calls and results: `ahub follow T12`
+(`--role`, `--round`, `--full`, `--no-follow`; `ahub log T12` stays raw).
 
 Everything else: `ahub --help`.
 

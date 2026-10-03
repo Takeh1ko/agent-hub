@@ -165,6 +165,10 @@ class SessionState:
 class Provider(ABC):
     name: str = ""
     capabilities: frozenset[Cap] = frozenset()
+    # The stream events carry their own timestamps (opencode). False — parse_line gets `now` and every
+    # activity of a line has it; a reader that has to place activities in time (the transcript) splits
+    # the stream by the session id each process run starts with instead.
+    stamped: bool = False
 
     def has(self, cap: Cap) -> bool:
         return cap in self.capabilities
