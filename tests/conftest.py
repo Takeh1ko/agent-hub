@@ -52,20 +52,28 @@ def _real_db_untouched():
         finally:
             con.close()
 
+    def count_p():
+        if not real.exists():
+            return 0
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{real}?mode=ro", uri=True, timeout=5)
+        try:
+            return con.execute("SELECT COUNT(*) FROM task WHERE project='P'").fetchone()[0]
+        except sqlite3.Error:
+            return 0
+        finally:
+            con.close()
+
+    p_before = count_p()
     before = counts()
     yield
     after = counts()
     if before is not None and after is not None:
         # the live hub may have added rows of its own while we ran — tests only write to tmp; make sure
         # no test row leaked out (fake project "P")
-        import sqlite3
-
-        con = sqlite3.connect(f"file:{real}?mode=ro", uri=True, timeout=5)
-        try:
-            leaked = con.execute("SELECT COUNT(*) FROM task WHERE project='P'").fetchone()[0]
-        finally:
-            con.close()
-        assert leaked == 0, "тесты записали задачи в боевую базу хаба"
+        p_after = count_p()
+        assert p_after == p_before, "тесты записали задачи в боевую базу хаба"
 
 
 def write(path, text: str):

@@ -147,9 +147,29 @@ def test_projects_last_is_the_newest_touch_not_the_last_row_of_the_group_by(hub,
 
     by_name = {p["name"]: p for p in json.loads(ahub(capsys, "--json", "projects")[1])["projects"]}
     assert by_name["A"]["last"] == 3000 and by_name["B"]["last"] == 5000
+    assert by_name["B"]["active"] == 2
     lines = {ln.split()[0]: ln for ln in ahub(capsys, "projects")[1].splitlines()[1:]}  # the same moment
     assert lines["A"].rstrip().endswith(fmt_local(3000))
     assert lines["B"].rstrip().endswith(fmt_local(5000))
+
+
+def test_projects_counts_all_tasks_per_state(hub, store, capsys):
+    """Multiple tasks in the same state are counted as their total, not capped at 1 per group."""
+    def work(project: str) -> int:
+        return moved(store, store.create_task(project=project, kind="code", title="w"),
+                     (State.PREPARING, 10), (State.WORKING, 20))
+
+    work("A")
+    work("A")
+    store.create_task(project="A", kind="code", title="q1")
+    store.create_task(project="A", kind="code", title="q2")
+
+    by_name = {p["name"]: p for p in json.loads(ahub(capsys, "--json", "projects")[1])["projects"]}
+    assert by_name["A"]["active"] == 2
+    assert by_name["A"]["queued"] == 2
+
+    lines = {ln.split()[0]: ln for ln in ahub(capsys, "projects")[1].splitlines()[1:]}
+    assert lines["A"].split()[2:4] == ["2", "2"]
 
 
 def test_projects_marks_a_project_with_tasks_but_no_config(hub, store, capsys):
