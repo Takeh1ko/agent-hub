@@ -1,5 +1,7 @@
 """What the orchestrator sees: L1 (status), L2 (task detail), history, questions, inbox — the levels and
-byte limits of contracts §5. The drawing primitives live in ahub/ui.py, the reason codes in ahub/reasons.py.
+byte limits of contracts §5. Every block is scoped by project (ahub/scope.py): `scope` — the project of the
+orchestrator's repository, None — every project (the owner). The drawing primitives live in ahub/ui.py, the
+reason codes in ahub/reasons.py.
 """
 
 from __future__ import annotations
@@ -12,6 +14,8 @@ from ahub import archive, events, reasons, ui, workspace
 from ahub.i18n import Words
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION, State
+from ahub.scope import OWNER, Scope
+from ahub.scope import where as scope_where
 from ahub.store import Store, Task
 from ahub.time import now_ms
 from ahub.ui import Value
@@ -114,19 +118,26 @@ def _active_table(store: Store, active: list[Task], live: dict[int, int], pulses
     return lines[0], lines[1:]
 
 
-def status_text(store: Store, *, project: str | None = None, live: dict[int, int] | None = None,
+def status_text(store: Store, *, scope: Scope | None = None, live: dict[int, int] | None = None,
                 now: int | None = None, pulses: dict | None = None, w: int | None = None) -> str:
-    """L1: the counts, the active tasks as a table, what waits, the unread. ≤ 1500 bytes."""
+    """L1: the counts, the active tasks as a table, what waits, the unread — of the scope. ≤ 1500 bytes."""
+    sc = scope or OWNER
     ts = now if now is not None else now_ms()
     live = live or {}
     pulses = pulses or {}
-    active = store.list_tasks(states=ACTIVE, project=project)
-    waiting = store.list_tasks(states=WAITING_DECISION, project=project)
-    queued = store.list_tasks(states={State.QUEUED}, project=project)
+    active = store.list_tasks(states=ACTIVE, projects=sc.projects)
+    waiting = store.list_tasks(states=WAITING_DECISION, projects=sc.projects)
+    queued = store.list_tasks(states={State.QUEUED}, projects=sc.projects)
+    cond, args = scope_where(sc)
     with store.read() as c:
-        q_open = c.execute("SELECT COUNT(*) FROM question WHERE status='open'").fetchone()[0]
-        msgs = c.execute("SELECT COUNT(*) FROM message WHERE direction='in' AND delivered_at IS NULL").fetchone()[0]
-    unacked = events.unacked(store, project)
+        q_sql = "SELECT COUNT(*) FROM question WHERE status='open'"
+        m_sql = "SELECT COUNT(*) FROM message WHERE direction='in' AND delivered_at IS NULL"
+        if cond:
+            q_sql += " AND " + cond
+            m_sql += " AND " + cond
+        q_open = c.execute(q_sql, args).fetchone()[0]
+        msgs = c.execute(m_sql, args).fetchone()[0]
+    unacked = events.unacked(store, sc)
     tail = []
     if q_open:
         tail.append(_t("views.q_open", n=q_open))
@@ -138,7 +149,7 @@ def status_text(store: Store, *, project: str | None = None, live: dict[int, int
         return _t("views.quiet")
     head = ""
     if active or waiting or queued:
-        head = ui.styled(_t("views.head", project=project or _t("views.all_projects"), active=len(active),
+        head = ui.styled(_t("views.head", project=sc.name or _t("views.all_projects"), active=len(active),
                              waiting=len(waiting), queued=len(queued)), "bold")
     groups: list[tuple[str, list[str]]] = []
     if active:
@@ -292,9 +303,9 @@ def log_text(store: Store, t: Task, *, max_bytes: int = L3_DEFAULT) -> str:
     return clip_bytes("\n".join(out) or _t("views.no_logs", label=t.label), max_bytes)
 
 
-def history_text(store: Store, *, project: str | None = None, limit: int = 20, w: int | None = None) -> str:
-    """The recently finished tasks as a table."""
-    done = [t for t in store.list_tasks(project=project, newest_first=True)
+def history_text(store: Store, *, scope: Scope | None = None, limit: int = 20, w: int | None = None) -> str:
+    """The recently finished tasks of the scope as a table."""
+    done = [t for t in store.list_tasks(projects=(scope or OWNER).projects, newest_first=True)
             if t.state in HISTORY_STATES][:limit]
     if not done:
         return _t("task.history_empty")

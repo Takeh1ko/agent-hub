@@ -14,7 +14,8 @@ MIN = 60_000
 
 
 def _history_text(capsys, n: int = 20) -> str:
-    args = SimpleNamespace(project=None, n=n, json=False)
+    # all=True — the owner's scope: the suite runs in the hub's own repo, the tasks belong to "P"
+    args = SimpleNamespace(project=None, all=True, n=n, json=False)
     assert cmd_history(args) == 0
     return capsys.readouterr().out
 

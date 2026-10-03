@@ -3,6 +3,9 @@
 The TG bridge (V26) writes incoming human messages: a message(direction=in) row + owner_message event.
 Outgoing from the orchestrator (`ahub say`) — message(direction=out); the bridge sends it and stamps delivered_at.
 Question (`ahub ask`) — question(open); human answer (button/text) → answered + answer event.
+
+Every row an orchestrator reads carries its project (ahub/scope.py): the message, the question and the event
+of the answer. A question about a task belongs to the task's project; a question without one is hub-wide.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import json
 
 from ahub import events
 from ahub.model import Ev
+from ahub.scope import Scope, where
 from ahub.store import Store
 from ahub.time import now_ms
 
@@ -26,17 +30,20 @@ def owner_message(store: Store, text: str, *, project: str = "", chat_id: int | 
     return mid
 
 
-def inbox(store: Store, *, mark: bool = True, now: int | None = None) -> list[dict]:
-    """Unread human messages; mark — mark read and ack their events."""
+def inbox(store: Store, *, mark: bool = True, scope: Scope | None = None, now: int | None = None) -> list[dict]:
+    """Unread human messages of the scope; mark — mark them read and ack their events (of the same scope)."""
     ts = now if now is not None else now_ms()
+    cond, args = where(scope)
     with store.tx() as c:
-        rows = [dict(r) for r in c.execute(
-            "SELECT id, ts, text, project FROM message WHERE direction='in' AND delivered_at IS NULL ORDER BY id")]
+        sql = "SELECT id, ts, text, project FROM message WHERE direction='in' AND delivered_at IS NULL"
+        if cond:
+            sql += " AND " + cond
+        rows = [dict(r) for r in c.execute(sql + " ORDER BY id", args)]
         if mark and rows:
             c.execute(f"UPDATE message SET delivered_at=? WHERE id IN ({','.join('?' * len(rows))})",
                       (ts, *[r["id"] for r in rows]))
-    if mark:
-        events.ack(store, kinds=(Ev.OWNER_MESSAGE.value,))
+    if mark and rows:
+        events.ack(store, kinds=(Ev.OWNER_MESSAGE.value,), scope=scope)
     return rows
 
 
@@ -58,11 +65,16 @@ def mark_sent(store: Store, message_id: int, *, now: int | None = None) -> None:
 
 
 def ask(store: Store, text: str, options: list[str] | None = None, *, task_id: int | None = None,
-        asked_by: str = "orchestrator", now: int | None = None) -> int:
+        project: str = "", asked_by: str = "orchestrator", now: int | None = None) -> int:
+    """A question to the human. A question about a task belongs to the task's project."""
     with store.tx() as c:
-        return int(c.execute("INSERT INTO question(ts, task_id, asked_by, text, options_json) VALUES(?,?,?,?,?)",
-                             (now if now is not None else now_ms(), task_id, asked_by, text,
-                              json.dumps(options or [], ensure_ascii=False))).lastrowid)
+        if task_id is not None and not project:
+            row = c.execute("SELECT project FROM task WHERE id=?", (task_id,)).fetchone()
+            project = str(row["project"]) if row else ""
+        return int(c.execute(
+            "INSERT INTO question(ts, task_id, project, asked_by, text, options_json) VALUES(?,?,?,?,?,?)",
+            (now if now is not None else now_ms(), task_id, project, asked_by, text,
+             json.dumps(options or [], ensure_ascii=False))).lastrowid)
 
 
 def answer(store: Store, question_id: int, text: str, *, via: str = "tg", now: int | None = None) -> bool:
@@ -74,15 +86,19 @@ def answer(store: Store, question_id: int, text: str, *, via: str = "tg", now: i
             return False
         c.execute("UPDATE question SET status='answered', answer=?, answered_via=?, answered_at=? WHERE id=?",
                   (text, via, ts, question_id))
-        store.add_event(Ev.ANSWER, task_id=row["task_id"], payload={"question_id": question_id,
-                                                                    "question": row["text"], "answer": text},
+        store.add_event(Ev.ANSWER, task_id=row["task_id"], project=row["project"],
+                        payload={"question_id": question_id, "question": row["text"], "answer": text},
                         now=ts, con=c)
     return True
 
 
-def open_questions(store: Store) -> list[dict]:
+def open_questions(store: Store, scope: Scope | None = None) -> list[dict]:
+    cond, args = where(scope)
     with store.read() as c:
-        rows = [dict(r) for r in c.execute("SELECT * FROM question WHERE status='open' ORDER BY id")]
+        sql = "SELECT * FROM question WHERE status='open'"
+        if cond:
+            sql += " AND " + cond
+        rows = [dict(r) for r in c.execute(sql + " ORDER BY id", args)]
     for r in rows:
         r["options"] = json.loads(r.pop("options_json") or "[]")
     return rows
@@ -100,8 +116,10 @@ def raise_alarm(store: Store, text: str, *, critical: bool = False, project: str
                            payload={"text": text, **(details or {})}, now=now)
 
 
-def alarms(store: Store, *, unacked_only: bool = True) -> list:
-    return [e for e in store.events(needs_reaction=True, unacked=unacked_only) if e.kind == Ev.ALARM.value]
+def alarms(store: Store, *, unacked_only: bool = True, scope: Scope | None = None) -> list:
+    """Alarms of the scope (the observer writes most of them hub-wide — those are in every scope)."""
+    return [e for e in store.events(needs_reaction=True, unacked=unacked_only)
+            if e.kind == Ev.ALARM.value and (scope is None or e.project in scope)]
 
 
 ESCALATE_MS = 15 * 60_000
