@@ -5,8 +5,9 @@ One engine instance = one task process (ahub.worker). It:
 - tracks phases and records them in the store (the owner is the only writer of an active task);
 - runs provider sessions via the shared runner and decides what to do with each step result (architecture §6.3):
   network failure → retry with pause (same session when known); silence → one same-session nudge, then
-  "Needs decision"; a message from the orchestrator (ahub nudge) → the same session continues with it;
-  quota/timeout → "Needs decision"; no access/model error/crash → "Error"; requested stop → "Stopped".
+  "Needs decision"; a message from the orchestrator (ahub nudge) → the worker turn is interrupted and the same
+  session continues with it (gates and reviewers are not interrupted by a message — they carry the result of
+  the turn); quota/timeout → "Needs decision"; no access/model error/crash → "Error"; requested stop → "Stopped".
 V08: scout. Code/routine/review (gates, panel, merge) — M3.
 """
 
@@ -177,12 +178,15 @@ class Engine:
         return Settled(to, reason)
 
     def stop_requested(self) -> bool:
+        """The turn must stop: the lease is lost, the budget is spent, a stop was requested.
+
+        A nudge is NOT here: it is a message, not a reason to kill what is running — it is delivered in
+        the next worker turn (`_step_with_continue`). So the gates and the reviewer sessions, which
+        carry the result of the turn, wait for the message instead of being cut short by it.
+        """
         if self.lost.is_set() or self.budget_hit:
             return True
-        req = self._poll_request()
-        if req == "nudge":
-            return True  # the turn is interrupted; the text goes into the next turn of the same session
-        if req == "stop":
+        if self._poll_request() == "stop":
             return True
         now = time.monotonic()
         if now - self._budget_at >= BUDGET_POLL_S:
@@ -191,6 +195,10 @@ class Engine:
                 self.budget_hit = True
                 return True
         return False
+
+    def interrupt_requested(self) -> bool:
+        """A worker turn is interrupted by a stop and by a nudge: the text goes into the next turn."""
+        return self.stop_requested() or self._poll_request() == "nudge"
 
     def _poll_request(self) -> str:
         """Owner request from the task row ('stop' | 'nudge' | ''), at most once in STOP_POLL_S."""
@@ -239,11 +247,12 @@ class Engine:
                                  payload={"go": round(go, 4), "budget_go": t.budget_go})
         return over
 
-    def _pause(self, secs: float) -> bool:
+    def _pause(self, secs: float, should_stop: Callable[[], bool] | None = None) -> bool:
         """Interruptible pause. False — a stop was requested while waiting."""
+        stop = should_stop or self.interrupt_requested
         end = time.monotonic() + secs
         while time.monotonic() < end:
-            if self.stop_requested():
+            if stop():
                 return False
             self.sleep(min(1.0, max(0.0, end - time.monotonic())))
         return True
@@ -309,12 +318,16 @@ class Engine:
 
     def session(self, role: Role, alias: str, prompt: str, *, session_id: str | None = None,
                 keep_session_on_retry: bool = True, log_name: str = "", schema: dict | None = None,
-                cwd: str | None = None, prompt_kind: str = "start") -> RunResult:
+                cwd: str | None = None, prompt_kind: str = "start",
+                stop_predicate: Callable[[], bool] | None = None) -> RunResult:
         """One worker step with retries on network failure (architecture §6.3).
 
         `prompt_kind` says what the prompt is (start | continue | repair | rework | stop | review | nudge) and goes
         into the prompts sidecar, which is what `ahub follow` shows as the turn header. One call is one
         turn: a network retry repeats the run of the same prompt, not the turn.
+
+        `stop_predicate` — what interrupts this turn. By default a nudge does (a worker turn carries the
+        message); a reviewer or a save-and-stop turn passes `self.stop_requested` and waits for its turn.
         """
         entry = registry.get(self.store, alias)
         prov = providers.get(entry.provider)
@@ -322,6 +335,7 @@ class Engine:
         cwd = cwd or t.worktree
         tmo = self.project.timeouts
         self._check_lease()
+        should_stop = stop_predicate or self.interrupt_requested
         log_path = str(Path(cwd) / workspace.AHUB_DIR / "logs" / f"{log_name or role.value}.log")
         self._note_prompt(log_path, prompt_kind, prompt)
         attempt = 0
@@ -340,7 +354,7 @@ class Engine:
                            idle_s=tmo.idle_s, schema=schema)
             r = run_session(prov, spec, on_activity=self._on_activity, on_session=on_session,
                             on_start=lambda pid, _row=row: self.store.update_session(_row, pid=pid),
-                            should_stop=self.stop_requested)
+                            should_stop=should_stop)
             u = r.usage
             fields: dict = {"status": "ok" if r.ok else ("killed" if r.outcome is Outcome.KILLED else "failed"),
                             "outcome": r.outcome.value, "ended_at": r.ended_ms}
@@ -365,7 +379,7 @@ class Engine:
                 self.log.warning("provider failure: %s → retry %d/%d in %d s", r.error[:200], attempt,
                                  tmo.retry_max, pause)
                 self.set_phase(Phase.WAITING)
-                if not self._pause(pause):
+                if not self._pause(pause, should_stop):
                     return RunResult(Outcome.KILLED, r.session_id, error=_t("engine.pause_killed"))
                 if keep_session_on_retry and r.session_id:
                     session_id = r.session_id
@@ -524,7 +538,7 @@ class Engine:
         self.budget_hit = False  # allow one short "save and stop" step
         if sid:
             self.session(role, alias, prompts.stop_prompt(), session_id=sid, log_name=role.value,
-                         prompt_kind="stop")
+                         prompt_kind="stop", stop_predicate=self.stop_requested)
         go, usd = self.task_cost()
         self.store.add_event("budget_hard", task_id=self.task_id, project=self.project.name,
                              payload={"go": round(go, 4), "usd": round(usd, 4)})
@@ -660,8 +674,10 @@ class Engine:
 
         def one(m: str):
             prompt = review.review_prompt(self.project, t, diff, g, round_no, m)
+            # a reviewer is not interrupted by a nudge: the message waits for the executor's next turn
             return self.session(Role.REVIEWER, m, prompt, keep_session_on_retry=False,
-                                log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review")
+                                log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review",
+                                stop_predicate=self.stop_requested)
 
         with ThreadPoolExecutor(max_workers=len(models)) as ex:
             results = list(ex.map(one, models))
@@ -679,7 +695,8 @@ class Engine:
             def retry_one(m: str):
                 return self.session(Role.REVIEWER, m, review.verdict_repair_prompt(round_no, m),
                                     session_id=by_model[m].session_id, keep_session_on_retry=False,
-                                    log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review")
+                                    log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review",
+                                    stop_predicate=self.stop_requested)
 
             with ThreadPoolExecutor(max_workers=len(missing)) as ex:
                 retries = list(ex.map(retry_one, missing))
