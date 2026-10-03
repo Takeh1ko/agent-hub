@@ -15,7 +15,7 @@ from ahub.i18n import Words
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION, State
 from ahub.scope import OWNER, Scope
-from ahub.scope import where as scope_where
+from ahub.scope import where as scope_where  # the SQL condition of a scope
 from ahub.store import Store, Task
 from ahub.time import now_ms
 from ahub.ui import Value

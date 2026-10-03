@@ -5,7 +5,7 @@ Outgoing from the orchestrator (`ahub say`) — message(direction=out); the brid
 Question (`ahub ask`) — question(open); human answer (button/text) → answered + answer event.
 
 Every row an orchestrator reads carries its project (ahub/scope.py): the message, the question and the event
-of the answer. A question about a task belongs to the task's project; a question without one is hub-wide.
+of the answer. A question asked without a project but about a task takes the task's one; without a task — hub-wide.
 """
 
 from __future__ import annotations
