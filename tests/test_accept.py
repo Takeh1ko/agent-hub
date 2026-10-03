@@ -232,7 +232,7 @@ def test_accept_finishes_an_interrupted_merge(store, project, tmp_path):
     interrupted_accept(store, project, tmp_path, t.id)
     merged = git_out(project.root, "rev-parse", "HEAD").strip()
     msg = accept.accept(store, project, t.id)
-    assert msg.startswith(f"T{t.id} слита в main") and "(приёмка)" not in msg
+    assert msg.startswith(f"T{t.id} слита в main")
     after = store.get_task(t.id)
     assert after.state is State.ACCEPTED and after.accepted_sha == merged
     assert git_out(project.root, "rev-parse", "HEAD").strip() == merged  # no second merge

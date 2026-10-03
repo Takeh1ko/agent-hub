@@ -41,6 +41,15 @@ def agent_of(worktree: str) -> bool:
     return any(procs.alive(p) and worktree in " ".join(procs.cmdline(p)) for p in procs.pids())
 
 
+def kill_agents(worktree: str) -> None:
+    """Cleanup: no provider process of that copy outlives the test (a failure may leave one behind)."""
+    for pid in [p for p in procs.pids() if worktree in " ".join(procs.cmdline(p))]:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def wait_agent(worktree: str, timeout: float = 20.0) -> bool:
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -50,7 +59,7 @@ def wait_agent(worktree: str, timeout: float = 20.0) -> bool:
     return False
 
 
-def test_poll_tolerates_two_failures_then_gives_up(store, project):
+def test_poll_tolerates_two_failures_then_gives_up(store, project, monkeypatch):
     """The stop poll cannot read the row: two failures are tolerated, the third one ends the process."""
     install_fake(store, [])
     t = scout(store, project)
@@ -62,16 +71,12 @@ def test_poll_tolerates_two_failures_then_gives_up(store, project):
         boom["n"] += 1
         raise TypeError("Task.__init__() got an unexpected keyword argument 'request_text'")
 
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(eng, "task", failing)
-    try:
-        for _ in range(POLL_FAIL_MAX - 1):
-            assert eng.stop_requested() is False
-        with pytest.raises(PollFailed, match="request: TypeError"):
-            eng.stop_requested()
-        assert boom["n"] == POLL_FAIL_MAX
-    finally:
-        monkey.undo()
+    monkeypatch.setattr(eng, "task", failing)
+    for _ in range(POLL_FAIL_MAX - 1):
+        assert eng.stop_requested() is False
+    with pytest.raises(PollFailed, match="request: TypeError"):
+        eng.stop_requested()
+    assert boom["n"] == POLL_FAIL_MAX
 
 
 def test_poll_failure_stops_provider_and_exits_nonzero(store, project, monkeypatch, own_signals):
@@ -88,13 +93,16 @@ def test_poll_failure_stops_provider_and_exits_nonzero(store, project, monkeypat
 
     monkeypatch.setattr(Engine, "task", flaky_task)
     monkeypatch.setattr(worker, "find_project", lambda name: project)
-    assert worker.main([f"T{t.id}"]) == 4
-    s = store.list_sessions(t.id)[0]
-    assert s.status == "killed" and s.outcome == "killed" and s.ended_at
-    time.sleep(0.5)
-    assert not agent_of(wt), "процесс провайдера пережил отказ опроса"
-    left = store.get_task(t.id)
-    assert left.state is State.WORKING and not left.owner  # left to the service (orphan pickup)
+    try:
+        assert worker.main([f"T{t.id}"]) == 4
+        s = store.list_sessions(t.id)[0]
+        assert s.status == "killed" and s.outcome == "killed" and s.ended_at
+        time.sleep(0.5)
+        assert not agent_of(wt), "процесс провайдера пережил отказ опроса"
+        left = store.get_task(t.id)
+        assert left.state is State.WORKING and not left.owner  # left to the service (orphan pickup)
+    finally:
+        kill_agents(wt)
 
 
 def test_sigterm_takes_the_provider_process_group_with_it(store, tmp_path, monkeypatch):
@@ -119,9 +127,10 @@ def test_sigterm_takes_the_provider_process_group_with_it(store, tmp_path, monke
         assert wait_agent(wt), "процесс провайдера не стартовал"
         p.send_signal(signal.SIGTERM)
         assert p.wait(timeout=30) == 0
+        time.sleep(0.5)
+        assert not agent_of(wt), "процесс провайдера остался сиротой после SIGTERM"
+        assert store.get_task(t.id).state is State.WORKING  # the task is left for the service
     finally:
         if p.poll() is None:
             p.kill()
-    time.sleep(0.5)
-    assert not agent_of(wt), "процесс провайдера остался сиротой после SIGTERM"
-    assert store.get_task(t.id).state is State.WORKING  # the task is left for the service
+        kill_agents(wt)

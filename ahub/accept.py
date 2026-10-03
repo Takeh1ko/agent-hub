@@ -37,7 +37,7 @@ def _get(store: Store, task_id: int) -> Task:
     return t
 
 
-def merged_sha(project: ProjectConfig, t: Task) -> str:
+def _merged_sha(project: ProjectConfig, t: Task) -> str:
     """The work branch HEAD when the task branch tip is already in it ('' — not merged yet).
 
     That is the state of an accept interrupted after the merge: the gates on the copy see an empty diff.
@@ -72,7 +72,7 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
         return _t("accept.accepted_msg", label=t.label)
     if t.state not in (State.DONE, State.NEEDS_DECISION, State.ACCEPTING):
         raise DecisionError(_t("accept.can_accept", label=t.label, state=t.state.value))
-    merged = merged_sha(project, t)  # an interrupted accept: the merge is already in the work branch
+    merged = _merged_sha(project, t)  # an interrupted accept: the merge is already in the work branch
     if not merged and (not t.worktree or not Path(t.worktree).is_dir()):
         raise DecisionError(_t("accept.no_worktree", label=t.label, wt=t.worktree or "—"))
     _root_ready(project)
