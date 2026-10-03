@@ -24,6 +24,7 @@ from ahub.time import fmt_local, now_ms
 MSG_LIMIT = 4000
 RECENT = 8
 PROJECT_KEY = "tg_project"  # the project the owner picked — until the next /project or prefix
+CLEAR_WORDS = ("all", "hub", "*", "none")  # /project all — back to the hub, no project picked
 
 
 @dataclass(frozen=True)
@@ -94,9 +95,18 @@ def pick_project(store: Store, want: str, projects: list[str]) -> str | None:
     return name
 
 
+def forget_project(store: Store) -> None:
+    """No project picked — a plain message goes to the hub again (the owner's session)."""
+    store.meta_del(PROJECT_KEY)
+
+
 def project_reply(store: Store, projects: list[str], want: str | None = None) -> Reply:
-    """`/project X` — switch to that project; `/project` (or a button) — the current one and the list."""
+    """`/project X` — switch to that project, `/project all|hub|*|none` — back to the hub;
+    `/project` (or a button) — the current one and the list."""
     if want:
+        if want.strip().lower() in CLEAR_WORDS:
+            forget_project(store)
+            return Reply(_t("tg.project_none"))
         name = pick_project(store, want, projects)
         if name:
             return Reply(_t("tg.project_set", name=name))
@@ -104,6 +114,8 @@ def project_reply(store: Store, projects: list[str], want: str | None = None) ->
     cur = current_project(store)
     head = _t("tg.project_now", name=cur) if cur in projects else _t("tg.project_none")
     rows = [[Button(_t("tg.project_mark", name=p) if p == cur else p, f"proj:{p}")] for p in projects]
+    if cur:
+        rows.append([Button(_t("tg.project_tag_any"), f"proj:{CLEAR_WORDS[0]}")])
     return Reply(head, rows or None)
 
 

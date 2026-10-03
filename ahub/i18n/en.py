@@ -503,7 +503,7 @@ MESSAGES: dict[str, str] = {
     "tg.empty": "empty message — not sent",
     "tg.sent": "sent to Claude — he's online",
     "tg.launching": "Claude is away — starting him, the answer will come here",
-    "tg.help": "I connect you with Claude, who runs tasks in agent-hub.\n• Write plain text — it goes to Claude (if he's away, I'll start him).\n• “for agent-hub: …” — for a specific project.\n• /project — whose Claude to write to: pick a project (your choice sticks until the next prefix).\n• /tasks — tasks: active and recent, tap a task for details.\n• /status — briefly, what's going on.\nYou can't manage tasks here — only through Claude.",
+    "tg.help": "I connect you with Claude, who runs tasks in agent-hub.\n• Write plain text — it goes to Claude (if he's away, I'll start him).\n• “for agent-hub: …” — for a specific project.\n• /project — whose Claude to write to: pick a project (the choice sticks until the next prefix; /project all — back to all of them).\n• /tasks — tasks: active and recent, tap a task for details.\n• /status — briefly, what's going on.\nYou can't manage tasks here — only through Claude.",
     "tg.project_set": "project: {name} — the next messages go there",
     "tg.project_unknown": "no project {name} in this hub{projects}",
     "tg.project_now": "current project: {name}",

@@ -243,13 +243,28 @@ def test_the_bot_picks_a_project(store):
 
     listed = core.project_reply(store, names)
     assert "сейчас проект: B" in listed.text
-    assert [b.data for row in listed.buttons for b in row] == ["proj:P", "proj:B"]
+    assert [b.data for row in listed.buttons for b in row] == ["proj:P", "proj:B", "proj:all"]
     assert core.project_reply(store, names).buttons[1][0].label == "✓ B"
 
     assert "проект: P" in core.project_reply(store, names, "P").text  # /project P
     assert core.current_project(store) == "P"
     assert "нет" in core.project_reply(store, names, "нет такого").text
     assert core.current_project(store) == "P"  # an unknown project changes nothing
+
+
+def test_a_pick_can_be_cleared(store):
+    """`/project all` — back to the hub, so a plain message goes to the owner again."""
+    names = ["P", "B"]
+    core.on_text(store, 1, "по B: первое", projects=names)
+    assert core.current_project(store) == "B"
+    assert "проект: B" in core.on_text(store, 1, "второе", projects=names).text
+
+    assert "не выбран" in core.project_reply(store, names, "all").text
+    assert core.current_project(store) == ""
+    assert [b.data for row in core.project_reply(store, names).buttons for b in row] == ["proj:P", "proj:B"]
+    rep = core.on_text(store, 1, "всем сразу", projects=names)
+    assert "все проекты" in rep.text
+    assert [m["project"] for m in comms.inbox(store, mark=False)] == ["B", "B", ""]
 
 
 class FakeBot:
