@@ -3,7 +3,8 @@
 Failed preparation — "Error" with a reason, the model is never called.
 - Secrets: untracked files (.env etc.) never land in a git worktree on their own; tracked files on the project's
   `[secrets] exclude` list stay out of the copy (sparse-checkout, remain indexed — diff never sees them).
-- Worker env: hub tokens/passwords/keys stripped (except what the model providers need).
+- Worker env: hub tokens/passwords/keys stripped (except what the model providers need), and the provider's own proxy
+  from `[providers.<name>]` in the hub config (see apply_proxy).
 - Hooks: project shell commands in the copy, env AHUB_TASK_ID / AHUB_WORKTREE / AHUB_PROJECT_ROOT.
 """
 
@@ -22,6 +23,8 @@ from ahub.i18n import t as _t
 from ahub.store import Task
 
 HOOK_TIMEOUT_S = 600
+PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY")
+_PROXY_URL_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")  # what a proxy URL goes into
 _SECRET_ENV = re.compile(r"(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|TELEGRAM|BOT_|API_KEY|_KEY$)",
                          re.IGNORECASE)
 # What model providers need from the env, even if it looks like a secret.
@@ -45,6 +48,27 @@ def scrub_env(env: dict[str, str]) -> dict[str, str]:
     for k, v in env.items():
         if KEEP_ENV.match(k) or not _SECRET_ENV.search(k):
             out[k] = v
+    return out
+
+
+def apply_proxy(env: dict[str, str], proxy: str | None, no_proxy: str = "") -> dict[str, str]:
+    """Provider process env from its [providers.<name>] section (both letter cases are set/dropped).
+
+    proxy None — no section/key: the inherited variables stay as they are. "" — explicitly no proxy: every
+    proxy variable is dropped. Otherwise the provider's own proxy replaces the inherited one, and no_proxy
+    (if given) replaces the inherited NO_PROXY.
+    """
+    out = {k: v for k, v in env.items() if k.upper() not in PROXY_VARS}
+    if proxy is None:
+        if not no_proxy:
+            return env
+        out["NO_PROXY"] = out["no_proxy"] = no_proxy
+        return out
+    if proxy:
+        for name in _PROXY_URL_VARS:
+            out[name] = out[name.lower()] = proxy
+    if no_proxy:
+        out["NO_PROXY"] = out["no_proxy"] = no_proxy
     return out
 
 

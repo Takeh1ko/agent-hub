@@ -2,7 +2,7 @@
 
 Checks live here so the `ahub setup` wizard (next task) can reuse them.
 Every user-visible string goes through t() (keys doctor.*); this module
-never logs secret values (auth.json values are never read into output).
+never logs secret values (auth.json values are never read into output, a proxy URL is shown as host:port).
 """
 
 from __future__ import annotations
@@ -114,7 +114,8 @@ def check_opencode() -> Check:
 
     binary = opencode_bin()
     if os.access(binary, os.X_OK):
-        return Check("opencode", True, _t("doctor.opencode_found", binary=binary), "")
+        return Check("opencode", True,
+                     _t("doctor.opencode_found", binary=binary) + provider_proxy_detail("opencode"), "")
     return Check("opencode", False, _t("doctor.opencode_missing", binary=binary),
                  _t("doctor.opencode_fix"))
 
@@ -232,7 +233,8 @@ def check_agy() -> Check:
     if h.ok:
         ver = str(h.details.get("version", "")).strip()[:40]
         suffix = _t("doctor.health_version", version=ver) if ver else ""
-        return Check("agy", True, _t("doctor.agy_found", binary=binary) + suffix, "")
+        return Check("agy", True, _t("doctor.agy_found", binary=binary) + suffix
+                     + provider_proxy_detail("agy"), "")
     problems = "; ".join(h.problems)[:500]
     fix = _t("doctor.agy_fix_login") if not agy_state_file().is_file() else ""
     return Check("agy", False, _t("doctor.health_bad", problems=problems), fix)
@@ -250,7 +252,8 @@ def check_codex() -> Check:
     if h.ok:
         ver = str(h.details.get("version", "")).strip()[:40]
         suffix = _t("doctor.health_version", version=ver) if ver else ""
-        return Check("codex", True, _t("doctor.codex_found", binary=binary) + suffix, "")
+        return Check("codex", True, _t("doctor.codex_found", binary=binary) + suffix
+                     + provider_proxy_detail("codex"), "")
     problems = "; ".join(h.problems)[:500]
     try:
         logged_in = providers.get("codex").login()[0]
@@ -318,9 +321,33 @@ def _proxy_env_url() -> str:
             or env.get("ALL_PROXY") or env.get("all_proxy") or "")
 
 
-def check_network() -> Check:
+def _proxy_host_port(url: str) -> tuple[str, int]:
     from urllib.parse import urlparse
 
+    u = urlparse(url if "://" in url else f"http://{url}")
+    return u.hostname or "127.0.0.1", u.port or 80
+
+
+def provider_proxy_detail(name: str) -> str:
+    """A provider's own proxy ([providers.<name>]) as part of its line: nothing without a section,
+    the proxy's state with one. Only host:port is shown (the URL may carry a password)."""
+    from ahub import config
+    from ahub.observer import proxy_problem
+
+    try:
+        p = config.load_hub().provider_proxy(name)
+    except config.ConfigError:
+        return ""
+    if p.proxy is None:
+        return ""
+    if not p.proxy:
+        return _t("doctor.provider_proxy_none")
+    host, port = _proxy_host_port(p.proxy)
+    key = "doctor.provider_proxy_down" if proxy_problem({"HTTPS_PROXY": p.proxy}) else "doctor.provider_proxy_ok"
+    return _t(key, host=host, port=port)
+
+
+def check_network() -> Check:
     from ahub.observer import proxy_problem
 
     problem = proxy_problem()
@@ -330,9 +357,8 @@ def check_network() -> Check:
     url = _proxy_env_url()
     if not url:
         return Check("network", True, _t("doctor.network_no_proxy"), "")
-    u = urlparse(url if "://" in url else f"http://{url}")
-    return Check("network", True,
-                 _t("doctor.network_ok", host=u.hostname or "127.0.0.1", port=u.port or 80), "")
+    host, port = _proxy_host_port(url)
+    return Check("network", True, _t("doctor.network_ok", host=host, port=port), "")
 
 
 def check_claude() -> Check:
@@ -408,4 +434,5 @@ def run_all() -> list[Check]:
 __all__ = ["Check", "TIMEOUT_S", "auth_providers", "auth_file_path", "has_go_login", "run_all",
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
            "check_opencode_health", "check_opencode_auth", "check_agy", "check_codex", "check_models",
-           "check_network", "check_claude", "check_claude_skill", "check_telegram", "skill_path"]
+           "check_network", "check_claude", "check_claude_skill", "check_telegram", "provider_proxy_detail",
+           "skill_path"]
