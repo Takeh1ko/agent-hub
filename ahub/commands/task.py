@@ -121,8 +121,6 @@ def cmd_log(args) -> int:
     return 0
 
 
-
-
 def _project_of(store: Store, t: Task):
     from ahub.worker import find_project
 

@@ -11,7 +11,7 @@ from typing import Any
 from ahub import archive, events, reasons, ui, workspace
 from ahub.i18n import Words
 from ahub.i18n import t as _t
-from ahub.model import ACTIVE, WAITING_DECISION, State
+from ahub.model import ACTIVE, FINAL, WAITING_DECISION, State
 from ahub.store import Store, Task
 from ahub.time import now_ms
 from ahub.ui import Value
@@ -196,11 +196,11 @@ def open_findings(t: Task, limit: int = 5) -> tuple[list, int]:
     """(blocking findings of the last review round, how many more there are).
 
     The verdict files live in the task copy (`.ahub/review_r<N>_<model>.json`) — the same files the
-    engine reads; an accepted task has no copy left, so nothing is shown for it.
+    engine reads; an accepted or rejected task has no copy left, so there is nothing to show.
     """
     from ahub import review
 
-    if not t.worktree or t.state not in (State.DONE, State.NEEDS_DECISION, State.REVIEWING, State.FIXING):
+    if not t.worktree or t.state in FINAL:
         return [], 0
     try:
         rounds = sorted((int(m.group(1)) for p in Path(t.worktree, workspace.AHUB_DIR).glob("review_r*_*.json")

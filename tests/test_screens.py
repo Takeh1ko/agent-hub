@@ -395,8 +395,15 @@ def test_no_findings_block_without_the_copy(tmp_path):
     store = Store()
     task = store.create_task(project="P", kind=Kind.CODE, title="x", executor="spark")
     assert views.open_findings(store.get_task(task)) == ([], 0)  # no copy, no verdicts
+    from ahub import transitions
+    from ahub.model import State
+
+    done = store.create_task(project="P", kind=Kind.SCOUT, title="y", executor="spark")
+    store.update_task(done, worktree=str(tmp_path))
+    for st in (State.PREPARING, State.WORKING, State.DONE, State.ACCEPTED):
+        transitions.move(store, done, st)
+    assert views.open_findings(store.get_task(done)) == ([], 0)  # nothing to review after accept
     assert Task(id=1, project="P", kind=Kind.CODE, title="x").worktree == ""
-    assert views.open_findings(Task(id=1, project="P", kind=Kind.CODE, title="x", worktree=str(tmp_path))) == ([], 0)
 
 
 def test_task_edit_changes_the_review_panel_and_the_executor(capsys, monkeypatch, tmp_path):
