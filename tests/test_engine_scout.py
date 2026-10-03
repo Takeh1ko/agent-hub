@@ -86,7 +86,8 @@ def test_scout_changed_files_no_repair(store, project):
 
 def test_blocked(store, project):
     blocked = {"session": "s", "steps": [
-        {"write": {"path": ".ahub/result.json", "text": json.dumps({"summary": "нет доступа к БД", "status": "blocked"})}}]}
+        {"write": {"path": ".ahub/result.json",
+                   "text": json.dumps({"summary": "нет доступа к БД", "status": "blocked"})}}]}
     install_fake(store, [blocked])
     t = new_scout(store, project)
     res = run(store, project, t.id)

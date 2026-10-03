@@ -222,9 +222,9 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
     for r in spec.resources:
         if r not in project.resources:
             errors.append(_t("tasks.no_resource", name=r))
+    # The project test resource is not added here: acceptance takes its lock itself (gates), so the queue
+    # does not hold it and code tasks run in parallel. Name it in --resources for whole-task exclusivity.
     resources = list(dict.fromkeys(spec.resources))
-    if kind is Kind.CODE and project.test_resource and project.test_resource not in resources:
-        resources.append(project.test_resource)  # acceptance runs under the test resource
     budget_go = project.budget_go if spec.budget_go is None else spec.budget_go
     budget_usd = project.budget_usd if spec.budget_usd is None else spec.budget_usd
     if budget_go < 0 or budget_usd < 0:

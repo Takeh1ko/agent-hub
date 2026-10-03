@@ -75,6 +75,12 @@ def _decide(a: dict) -> list[str]:
     return argv + ["--by", "mcp"]
 
 
+@tool("nudge", "Message a working agent in its own session (a stuck or off-track worker; prefer it over "
+      "stop+continue).", {"task": S, "text": S}, ["task", "text"])
+def _nudge(a: dict) -> list[str]:
+    return ["nudge", a["task"], a["text"], "--by", "mcp"]
+
+
 @tool("wait", "Wait for orchestrator events (DONE/DECISION/ERROR/OWNER/ALARM lines).",
       {"timeout": S, "project": S})
 def _wait(a: dict) -> list[str]:
@@ -92,8 +98,8 @@ def _say(a: dict) -> list[str]:
     return ["say", a["text"]]
 
 
-@tool("ask", "Question to the owner with options; the answer arrives as an ANSWER event.", {"text": S, "options": S, "task": S},
-      ["text"])
+@tool("ask", "Question to the owner with options; the answer arrives as an ANSWER event.",
+      {"text": S, "options": S, "task": S}, ["text"])
 def _ask(a: dict) -> list[str]:
     argv = ["ask", a["text"]]
     if a.get("options"):

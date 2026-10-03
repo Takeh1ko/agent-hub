@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 from ahub import archive, events, reasons, ui, workspace
 from ahub.i18n import Words
 from ahub.i18n import t as _t
-from ahub.model import ACTIVE, State, WAITING_DECISION
+from ahub.model import ACTIVE, WAITING_DECISION, State
 from ahub.store import Store, Task
 from ahub.time import now_ms
 from ahub.ui import Value
@@ -143,8 +144,11 @@ def status_text(store: Store, *, project: str | None = None, live: dict[int, int
     if active:
         table_head, rows = _active_table(store, active, live, pulses, ts, w)
         groups.append((table_head, rows))  # the column head is the heading of the group
-    waiting_rows = [ln for ln in ui.kv([(t.label, [state_word(t.state), reasons.text(t.state_reason)])
-                                       for t in waiting + queued], indent=2, w=w).split("\n")] if waiting or queued else []
+    waiting_rows = []
+    if waiting or queued:
+        block = ui.kv([(t.label, [state_word(t.state), reasons.text(t.state_reason)])
+                       for t in waiting + queued], indent=2, w=w)
+        waiting_rows = block.split("\n")
     if waiting_rows:
         groups.append((ui.section(_t("views.sec_waiting")), waiting_rows))
     if unacked:

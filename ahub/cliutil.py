@@ -52,5 +52,5 @@ def resolve_project(args, cwd: str | Path | None = None) -> config.ProjectConfig
         if cfg is None:
             from ahub.i18n import t
 
-            raise CliError(t("err.no_project_cwd", cwd=cwd, file=config.PROJECT_FILE))
+            raise CliError(t("err.no_project_cwd", cwd=cwd, file=config.PROJECT_FILE)) from None
         return cfg

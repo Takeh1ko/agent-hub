@@ -1,15 +1,18 @@
 """`ahub top` — human screen (architecture §10). Data — ahub.tui.data; actions — ahub.accept/drafts.
 
 "View / Control" toggle (c): no actions in view mode. Refresh every 2 s in the background
-(thread; a new refresh never starts before the previous one finishes).
+(thread; a new refresh never starts before the previous one finishes). The table shows the current
+work, `h` adds the history; `enter`/`t` — a live transcript of the task (ahub.tui.live): it reads the
+log and, in control mode, `m` messages the worker. Every table key waits behind that screen.
 """
 
 from __future__ import annotations
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Footer, Input, Label, Static
 
 from ahub import accept, config, drafts, transitions
@@ -17,6 +20,11 @@ from ahub.i18n import t as _t
 from ahub.service import PAUSE_KEY
 from ahub.store import Store
 from ahub.tui import data
+from ahub.tui.live import LiveView
+
+TABLE_ONLY = ("toggle", "new", "stop", "accept", "reject", "rework", "nudge", "model", "budget", "pause",
+              "history", "transcript")  # the keys of the table — they wait behind the transcript screen
+              # (that screen has its own m: a message to the worker of the task it shows)
 
 
 class Confirm(ModalScreen[bool]):
@@ -67,6 +75,117 @@ class Help(ModalScreen[None]):
         self.dismiss(None)
 
 
+class Prompt(ModalScreen[None]):
+    """`p` — the full prompt of the last turn of the session (in the log it is cut to a few lines)."""
+
+    BINDINGS = [("escape", "close", _t("tui.bind_close")), ("q", "close", _t("tui.bind_close"))]
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="prompt-box"):
+            yield Static(self.text, markup=False, id="prompt-text")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class Transcript(Screen[None]):
+    """Live transcript of a task: the lines of the session (ahub/tui/live.py), followed as they come.
+
+    Reads; the only thing it changes is a message to the worker (`m`, control mode). `r` — the other role
+    of the round, `[`/`]` — the previous/next round, `p` — the full prompt, `f` — the tail back to the end
+    after a scroll up, escape/q — back.
+    """
+
+    BINDINGS = [Binding("escape", "back", _t("tui.bind_back")), Binding("q", "back", _t("tui.bind_back")),
+                Binding("r", "role", _t("tui.bind_role")),
+                Binding("bracketleft", "round_prev", _t("tui.bind_round_prev"), key_display="["),
+                Binding("bracketright", "round_next", _t("tui.bind_round_next"), key_display="]"),
+                Binding("m", "nudge", _t("tui.bind_nudge")),
+                Binding("p", "prompt", _t("tui.bind_prompt")), Binding("f", "follow", _t("tui.bind_follow"))]
+    POLL_S = 1.5
+
+    def __init__(self, store: Store, task_id: int) -> None:
+        super().__init__()
+        self.view = LiveView(store, task_id)
+        self._busy = False
+        self._head = ""
+        self._resume = False  # `f` — the tail goes back to the end
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="live-head")
+        with VerticalScroll(id="live-box"):
+            yield Static("", markup=False, id="live-log")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.set_interval(self.POLL_S, self.refresh_live)
+        self._paint(True)
+
+    @work(thread=True, exclusive=True, group="live")
+    def refresh_live(self) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        try:
+            changed = self.view.update()
+        except OSError:  # the log or the database is not readable right now — try at the next tick
+            changed = False
+        finally:
+            self._busy = False
+        self.app.call_from_thread(self._paint, changed)
+
+    def _pulses(self) -> dict:
+        app = self.app
+        return app.pulses() if isinstance(app, TopApp) else {}
+
+    def _paint(self, changed: bool) -> None:
+        box = self.query_one("#live-box", VerticalScroll)
+        if self._resume:
+            self._resume, self.view.following = False, True
+        else:  # while the human reads above the end, the tail holds
+            self.view.following = box.is_vertical_scroll_end
+        head = self.view.header(self._pulses())
+        if head != self._head:
+            self._head = head
+            self.query_one("#live-head", Static).update(head)
+        if not changed:
+            return
+        self.query_one("#live-log", Static).update("\n".join(self.view.lines) or _t("tui.loading"))
+        if self.view.following:
+            box.call_after_refresh(box.scroll_end, animate=False)
+
+    def action_back(self) -> None:
+        self.dismiss(None)
+
+    def action_role(self) -> None:
+        if self.view.switch_role():
+            self._paint(True)
+
+    def action_round_prev(self) -> None:
+        if self.view.step_round(-1):
+            self._paint(True)
+
+    def action_round_next(self) -> None:
+        if self.view.step_round(1):
+            self._paint(True)
+
+    def action_prompt(self) -> None:
+        self.app.push_screen(Prompt(self.view.prompt()))
+
+    def action_nudge(self) -> None:
+        app = self.app
+        if isinstance(app, TopApp):
+            app.ask_nudge(self.view.task_id)
+
+    def action_follow(self) -> None:
+        self._resume = True
+        self._paint(True)
+
+
 class TopApp(App):
     CSS = """
     #header { height: 2; background: $boost; }
@@ -76,14 +195,24 @@ class TopApp(App):
     #detail { width: 2fr; border-left: solid $primary; padding: 0 1; }
     #feed { height: 8; border-top: solid $primary; }
     #dialog { width: 80; height: auto; border: thick $primary; background: $surface; padding: 1 2; }
+    #live-head { height: 1; background: $boost; }
+    #live-box { height: 1fr; border: round $primary; }
+    #live-log { width: 100%; }
+    #prompt-box { width: 90%; height: 80%; border: thick $primary; background: $surface; padding: 1 2; }
+    #prompt-text { width: 100%; }
     Confirm, Ask, Help { align: center middle; }
+    Prompt { align: center middle; }
+    Transcript { align: center middle; }
     """
     BINDINGS = [("q", "quit", _t("tui.bind_quit")), ("question_mark", "help", _t("tui.bind_help")),
                 ("c", "toggle", _t("tui.bind_toggle")), ("n", "new", _t("tui.bind_new")),
                 ("s", "stop", _t("tui.bind_stop")), ("a", "accept", _t("tui.bind_accept")),
                 ("x", "reject", _t("tui.bind_reject")), ("r", "rework", _t("tui.bind_rework")),
-                ("m", "model", _t("tui.bind_model")), ("b", "budget", _t("tui.bind_budget")),
-                ("p", "pause", _t("tui.bind_pause"))]
+                ("m", "nudge", _t("tui.bind_nudge")),
+                Binding("M", "model", _t("tui.bind_model")),
+                ("b", "budget", _t("tui.bind_budget")),
+                ("p", "pause", _t("tui.bind_pause")), ("h", "history", _t("tui.bind_history")),
+                ("t", "transcript", _t("tui.bind_transcript"))]
 
     def __init__(self, store: Store | None = None, projects: list[config.ProjectConfig] | None = None,
                  control: bool = False) -> None:
@@ -91,10 +220,15 @@ class TopApp(App):
         self.store = store or Store()
         self._projects = projects
         self.control = control
+        self.history = False  # the table by default shows the current work, not the finished ones
         self._busy = False
         self._live: dict = {}
         self._pulses: dict = {}
         self._ids: list[int] = []
+
+    def pulses(self) -> dict:
+        """The pulses of the last refresh (the transcript screen shows the pulse in its header)."""
+        return self._pulses
 
     def projects(self) -> list[config.ProjectConfig]:
         if self._projects is None:
@@ -129,7 +263,7 @@ class TopApp(App):
             return
         self._busy = True
         try:
-            screen, live, pulses = data.snapshot(self.store, self.projects())
+            screen, live, pulses = data.snapshot(self.store, self.projects(), history=self.history)
         finally:
             self._busy = False
         self.call_from_thread(self._apply, screen, live, pulses)
@@ -163,16 +297,39 @@ class TopApp(App):
     def on_data_table_row_highlighted(self, ev) -> None:
         self._show_detail()
 
+    def on_data_table_row_selected(self, ev) -> None:  # enter on a row
+        self.action_transcript()
+
     # --- actions ---
 
     def action_help(self) -> None:
         self.push_screen(Help())
 
+    def action_history(self) -> None:
+        self.history = not self.history
+        self.refresh_data()
+
+    def action_transcript(self) -> None:
+        tid = self.selected()
+        if tid is not None:
+            self.push_screen(Transcript(self.store, tid))
+
     def action_toggle(self) -> None:
         self.control = not self.control
         self._show_mode()
 
+    def _on_table(self) -> bool:
+        """False while the transcript screen is on top: the table actions wait behind it."""
+        return not isinstance(self.screen, Transcript)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """The keys of the table are not offered and not run while the transcript screen is open."""
+        return False if action in TABLE_ONLY and not self._on_table() else True
+
     def _guard(self) -> bool:
+        """Every action that changes something: the control mode is on and the transcript screen is closed."""
+        if not self._on_table():
+            return False
         if not self.control:
             self.notify(_t("tui.view_only"), severity="warning")
             return False
@@ -234,6 +391,23 @@ class TopApp(App):
             self._ask_then(_t("tui.ask_model", tid=tid),
                            lambda v: accept.change_model(self.store, p, tid, v, by="human"),
                            "spark / mimo-flash / deepseek-flash")
+
+    def ask_nudge(self, tid: int) -> None:
+        """A message to a working task (`m` — from the table and from the transcript screen)."""
+        if not self.control:
+            self.notify(_t("tui.view_only"), severity="warning")
+            return
+
+        def send(text: str) -> str:
+            transitions.request_nudge(self.store, tid, text=text, by="human")
+            return _t("task.nudge_requested", label=f"T{tid}")
+
+        self._ask_then(_t("tui.ask_nudge", tid=tid), send)
+
+    def action_nudge(self) -> None:
+        tid = self.selected()
+        if tid is not None:
+            self.ask_nudge(tid)
 
     def action_budget(self) -> None:
         tid = self.selected()

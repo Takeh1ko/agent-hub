@@ -41,7 +41,8 @@ def cmd_list(args) -> int:
     from ahub.i18n import t
 
     rows = drafts.list_drafts(Store())
-    emit(args, {"drafts": rows}, "\n".join(f"#{r['id']} {r['status']} {r['text'][:70]}" for r in rows) or t("draft.empty"))
+    lines = "\n".join(f"#{r['id']} {r['status']} {r['text'][:70]}" for r in rows)
+    emit(args, {"drafts": rows}, lines or t("draft.empty"))
     return 0
 
 

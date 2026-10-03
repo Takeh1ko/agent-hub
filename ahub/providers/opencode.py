@@ -22,7 +22,7 @@ from pathlib import Path
 
 from ahub import log as hublog
 from ahub.i18n import t as _t
-from ahub.providers.base import (Act, Activity, Cap, Health, ModelInfo, Provider, RunSpec, SessionState, Usage)
+from ahub.providers.base import Act, Activity, Cap, Health, ModelInfo, Provider, RunSpec, SessionState, Usage
 
 PROMPT_ARG_LIMIT = 60_000  # bytes; one Linux argument caps at 128 KB
 _log = hublog.get("opencode")

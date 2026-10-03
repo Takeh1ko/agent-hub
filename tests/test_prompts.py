@@ -128,9 +128,9 @@ def test_no_cyrillic_ru_except_allowed(tmp_path, monkeypatch):
 
 def test_drafts_kind_ru_en(tmp_path):
     """Draft parsing accepts kind in both languages, the codes are English."""
-    from ahub import config, drafts
-
     import sys
+
+    from ahub import config, drafts
 
     project = config.parse_project(
         {"schema_version": 2, "name": "P", "python": sys.executable}, str(tmp_path))

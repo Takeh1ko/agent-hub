@@ -31,6 +31,7 @@ PROBE_WIZARD_S = 45  # the wizard probes several models at once — a shorter tu
 PROBE_PROMPT = "Reply with exactly: OK"  # to the model (not the user) — not translated
 FALLBACK_FREE = "spark-free"  # when the registry knows no free alias at all
 PROBE_WORKERS = 4  # how many models the wizard probes at the same time
+BASH_RULE = "Bash(ahub:*)"  # the Claude Code permission rule `ahub setup --claude` writes
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -449,7 +450,7 @@ def probe_models(entries, timeout_s: int = PROBE_WIZARD_S,
     out: dict[str, tuple[bool, str]] = {}
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(items)))) as pool:
         futures = [pool.submit(_probe_one, e, timeout_s) for e in items]
-        for entry, fut in zip(items, futures):
+        for entry, fut in zip(items, futures, strict=True):
             out[entry.alias] = fut.result()
     return out
 
@@ -595,10 +596,38 @@ def skill_path() -> Path:
     return Path.home() / ".claude" / "skills" / "ahub" / "SKILL.md"
 
 
-def check_claude_skill() -> Check:
+def settings_path(root: Path | None = None) -> Path:
+    """The project .claude/settings.json — the file the Bash(ahub:*) permission lives in."""
+    return (root if root is not None else Path.cwd()) / ".claude" / "settings.json"
+
+
+def bash_allowed(root: Path | None = None) -> bool:
+    """Does the project allow `ahub …` without a question? An unreadable file — no."""
+    f = settings_path(root)
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    allow = data.get("permissions", {}).get("allow") if isinstance(data, dict) else None
+    return isinstance(allow, list) and BASH_RULE in allow
+
+
+def check_claude_skill(root: Path | None = None) -> Check:
+    """The skill in ~/.claude/skills/ahub and the Bash(ahub:*) rule in the project settings.json.
+
+    Both come from the same setup step: without the rule Claude Code asks for a permission on every command.
+    """
     path = skill_path()
+    settings = settings_path(root)
+    if path.is_file() and bash_allowed(root):
+        return Check("claude_skill", True,
+                     _t("doctor.skill_ok", path=str(path)) + ", "
+                     + _t("doctor.perm_ok", path=str(settings), rule=BASH_RULE), "")
     if path.is_file():
-        return Check("claude_skill", True, _t("doctor.skill_ok", path=str(path)), "")
+        return Check("claude_skill", False,
+                     _t("doctor.skill_ok", path=str(path)) + ", "
+                     + _t("doctor.perm_missing", path=str(settings), rule=BASH_RULE),
+                     _t("doctor.skill_fix"))
     return Check("claude_skill", False, _t("doctor.skill_missing", path=str(path)),
                  _t("doctor.skill_fix"))
 
@@ -626,8 +655,8 @@ def _safe(name: str, fn) -> Check:
         return _fail(name, e)
 
 
-def run_all() -> list[Check]:
-    """All checks in display order; never raises."""
+def run_all(root: Path | None = None) -> list[Check]:
+    """All checks in display order; never raises. root — the project of the claude_skill check, cwd by default."""
     providers: list[str] = []
     try:
         providers = auth_providers()
@@ -646,7 +675,7 @@ def run_all() -> list[Check]:
         _safe("models", lambda: check_models(providers)),
         _safe("network", check_network),
         _safe("claude", check_claude),
-        _safe("claude_skill", check_claude_skill),
+        _safe("claude_skill", lambda: check_claude_skill(root)),
         _safe("telegram", check_telegram),
     ]
     return checks
@@ -659,4 +688,4 @@ __all__ = ["Check", "ProviderState", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_WIZA
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
            "check_opencode_health", "check_opencode_auth", "check_agy", "check_codex", "check_models",
            "check_network", "check_claude", "check_claude_skill", "check_telegram", "provider_proxy_detail",
-           "skill_path", "apparmor_blocks_userns", "codex_sandbox_fix"]
+           "skill_path", "settings_path", "bash_allowed", "apparmor_blocks_userns", "codex_sandbox_fix"]

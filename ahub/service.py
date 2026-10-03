@@ -5,10 +5,15 @@
 - A task process runs in its own group, independent of the service: a service restart does not kill it.
 - A queued task launches when: the queue is not paused, all "after X" are accepted, the project has
   a free slot (max_parallel), and its resources are free (capacity + external flock not held). Otherwise —
-  the wait reason is stored on the task.
+  the wait reason is stored on the task. Resources are only those the task names: the project test resource is
+  not added implicitly (acceptance takes its lock by itself, gates) — code tasks run in parallel, and their
+  acceptance runs queue up on the lock.
 - The service never changes task states (except the queue wait reason): the task's own process claims it (lease).
 - Orphans (V20): an active task with no live process and an expired lease → back to queue with an event and
-  resume in place (same session); repeated orphaning → "Needs decision"; interrupted acceptance → "Needs decision".
+  resume in place (same session); repeated orphaning → "Needs decision"; interrupted acceptance → "Needs
+  decision" with a reason that points at `ahub accept` (the merge may already be in the work branch — accept
+  skips the gates and the merge then and finishes the tail). An "accepting" task whose owner process is alive is
+  never an orphan (acceptance is long; accept.py renews the lease while it runs).
 """
 
 from __future__ import annotations
@@ -25,40 +30,48 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ahub import config, paths, procs
+from ahub import config, paths, procs, reasons, transitions
 from ahub import log as hublog
-from ahub import reasons, transitions
 from ahub.model import ACTIVE, Ev, State
 from ahub.store import Store, Task
 from ahub.time import now_ms
 from ahub.worker import CMD_MARK
 
-SPAWN_GRACE_S = 30.0
+SPAWN_GRACE_S = 30.0  # after spawn the process may not be visible / may not have claimed the task yet
 ORPHAN_GRACE_MS = 60_000  # past lease expiry — another minute in case the process is just slow
-MAX_ORPHANS = 1  # one automatic pickup  # after spawn the process may not be visible / may not have claimed the task yet — do not spawn again
+MAX_ORPHANS = 1  # one automatic pickup
 HEARTBEAT_KEY = "service_heartbeat"
 CODE_CHECK_S = 10.0  # how often to compare code (self-update)
 PAUSE_KEY = "queue_paused"
 _TASK_ARG = re.compile(r"^[Tt]?(\d+)$")
 
 
+def _worker_task(args: list[str]) -> int | None:
+    """Task id of a `python -m ahub.worker T<n>` command line; None — anything else.
+
+    The mark must be an argument of its own, right after the module flag: a shell command, a grep pattern
+    or an agent prompt that merely mentions "ahub.worker T1" is not a task process — such a process once
+    hid a dead task from the pulse and took a slot in the queue.
+    """
+    for i, a in enumerate(args):
+        if a != CMD_MARK and not a.endswith(f"/{CMD_MARK}"):
+            continue
+        if i == 0 or args[i - 1] != "-m":  # the only form the service spawns: python -m ahub.worker T<n>
+            continue
+        for rest in args[i + 1:]:
+            m = _TASK_ARG.match(rest)
+            if m:
+                return int(m.group(1))
+    return None
+
+
 def live_workers(proc_root: str | Path = "/proc") -> dict[int, int]:
     """task_id → pid of live task processes on this machine."""
     out: dict[int, int] = {}
     for pid in procs.pids(proc_root):
-        args = procs.cmdline(pid, proc_root)
-        if not args or not any(CMD_MARK in a for a in args):
-            continue
-        try:
-            i = next(i for i, a in enumerate(args) if CMD_MARK in a)
-        except StopIteration:
-            continue
-        for a in args[i + 1:]:
-            m = _TASK_ARG.match(a)
-            if m:
-                if procs.alive(pid, proc_root):
-                    out[int(m.group(1))] = pid
-                break
+        tid = _worker_task(procs.cmdline(pid, proc_root))
+        if tid is not None and procs.alive(pid, proc_root):
+            out[tid] = pid
     return out
 
 
@@ -237,6 +250,8 @@ class Service:
         for t in self.store.list_tasks(states=ACTIVE):
             if t.id in busy or t.id in live:
                 continue
+            if t.state is State.ACCEPTING and t.owner_pid and procs.alive(t.owner_pid, self.proc_root):
+                continue  # an `ahub accept` in progress: acceptance is long, its lease is renewed — never an orphan
             if t.owner and t.lease_until and t.lease_until + ORPHAN_GRACE_MS > now:
                 continue  # lease (or its grace) still alive — the owner may be outside the task process (CLI)
             if not t.owner and now - t.updated_at < ORPHAN_GRACE_MS:
@@ -250,7 +265,7 @@ class Service:
             self.store.update_task(t.id, limits=lim)
             try:
                 if t.state is State.ACCEPTING:
-                    to, reason = State.NEEDS_DECISION, reasons.dump("orphan_accepting")
+                    to, reason = State.NEEDS_DECISION, reasons.dump("orphan_accepting", label=t.label)
                 elif count > MAX_ORPHANS:
                     to, reason = State.NEEDS_DECISION, reasons.dump("orphan_repeat", n=count)
                 else:

@@ -69,7 +69,8 @@ def mark_delivered(store: Store, ids: list[int], *, now: int | None = None) -> N
 def ack(store: Store, ids: list[int] | None = None, *, kinds: tuple[str, ...] | None = None,
         task_id: int | None = None, project: str | None = None, now: int | None = None) -> int:
     """Ack: by id, by kind and/or task. No filters — everything unacked. Returns the count."""
-    sql = "UPDATE event SET acked_at=?, delivered_at=COALESCE(delivered_at, ?) WHERE needs_reaction=1 AND acked_at IS NULL"
+    sql = ("UPDATE event SET acked_at=?, delivered_at=COALESCE(delivered_at, ?)"
+           " WHERE needs_reaction=1 AND acked_at IS NULL")
     ts = now if now is not None else now_ms()
     args: list = [ts, ts]
     if ids is not None:
@@ -181,7 +182,8 @@ def format_line(ev: Event, task: Task | None) -> str:
     elif k is Ev.OWNER_MESSAGE:
         line = f"{EVENT_CODES[k]} «{ui.clip(p.get('text', ''), 160)}»"
     elif k is Ev.ANSWER:
-        line = f"{EVENT_CODES[k]} #{p.get('question_id', '?')} «{ui.clip(p.get('question', ''), 60)}» → {ui.clip(p.get('answer', ''), 60)}"
+        line = (f"{EVENT_CODES[k]} #{p.get('question_id', '?')} «{ui.clip(p.get('question', ''), 60)}»"
+                f" → {ui.clip(p.get('answer', ''), 60)}")
     elif k is Ev.ALARM:
         line = (f"{EVENT_CODES[k]}! " if ev.critical else f"{EVENT_CODES[k]} ") + ui.clip(p.get("text", ""), 150)
     else:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -24,7 +25,7 @@ def _answers(monkeypatch, items: list[str]):
         try:
             return next(it)
         except StopIteration:
-            raise AssertionError("лишний input()")
+            raise AssertionError("лишний input()") from None
 
     monkeypatch.setattr("builtins.input", _fake)
 
@@ -95,17 +96,22 @@ def test_wizard_full_lang_project_free_telegram(tmp_path, monkeypatch, capsys):
         "n",  # service install: no
         "",  # service start: no (default)
         "",  # claude: yes (default)
+        "",  # ahub permission in .claude/settings.json: yes (default)
         "y",  # telegram: yes
         "tok123",  # token
         "77",  # chat id
     ])
     assert cli.main(["setup"]) == 0
-    capsys.readouterr()
+    out = capsys.readouterr().out
     hub = config.load_hub()
     assert hub.lang == "ru"
     assert str(root) in hub.projects
     assert (root / ".hub.toml").exists()
     assert config.load_project(root).name == "shop"
+    # the Claude Code step: skill, CLAUDE.md block and the permission (no question on every ahub command)
+    settings = json.loads((root / ".claude/settings.json").read_text(encoding="utf-8"))
+    assert settings["permissions"]["allow"] == ["Bash(ahub:*)"]
+    assert "claude mcp add ahub -- ahub mcp" in out  # the hint for the other agents — printed, not run
     # no Go login — the roles are on the free alias
     assert doctor.check_models([]).ok is True
     free = doctor._free_alias(Store())
@@ -123,6 +129,44 @@ def test_wizard_full_lang_project_free_telegram(tmp_path, monkeypatch, capsys):
     # the skill and the block
     assert (Path.home() / ".claude/skills/ahub/SKILL.md").exists()
     assert "ahub:begin" in (root / "CLAUDE.md").read_text(encoding="utf-8")
+
+
+def _wizard_claude_step(tmp_path, monkeypatch, capsys, answer: str) -> tuple[Path, str]:
+    """One wizard run with Claude Code found; `answer` goes to the Bash(ahub:*) question. → (root, output)."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)
+    _fake_claude(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "platform", "linux")
+    root = tmp_path / "perm"
+    make_repo(root)
+    _answers(monkeypatch, [
+        "", str(root), "", "",  # language, path, providers, models
+        "n", "n",  # service install, service start: no
+        "",  # claude: yes (default)
+        answer,  # Bash(ahub:*)
+        "n",  # telegram: no
+    ])
+    assert cli.main(["setup"]) == 0
+    return root, capsys.readouterr().out
+
+
+def test_wizard_permission_refused_writes_nothing(tmp_path, monkeypatch, capsys):
+    """T51: the Claude Code step asks about Bash(ahub:*) — a refusal writes nothing."""
+    root, out = _wizard_claude_step(tmp_path, monkeypatch, capsys, "n")
+    assert "Bash(ahub:*) не разрешён" in out
+    assert "Claude Code будет спрашивать" in out
+    assert not (root / ".claude" / "settings.json").exists()  # the refusal writes nothing
+    assert (root / "CLAUDE.md").exists()  # the skill and the block are still installed
+
+
+def test_wizard_permission_yes_is_the_default(tmp_path, monkeypatch, capsys):
+    """T51: Enter on the permission question — the rule lands in permissions.allow."""
+    root, out = _wizard_claude_step(tmp_path, monkeypatch, capsys, "")
+    data = json.loads((root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert data["permissions"]["allow"] == ["Bash(ahub:*)"]
+    assert "разрешение Bash(ahub:*) добавлено" in out
+    assert "claude mcp add ahub -- ahub mcp" in out  # the hint for the other agents — printed, not run
 
 
 def test_wizard_lists_every_provider_and_never_enables_a_missing_one(tmp_path, monkeypatch, capsys):

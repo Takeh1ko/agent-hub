@@ -5,9 +5,14 @@ One engine instance = one task process (ahub.worker). It:
 - tracks phases and records them in the store (the owner is the only writer of an active task);
 - runs provider sessions via the shared runner and decides what to do with each step result (architecture §6.3):
   network failure → retry with pause (same session when known); silence → one same-session nudge, then
-  "Needs decision"; quota/timeout → "Needs decision"; no access/model error/crash → "Error";
-  requested stop → "Stopped".
+  "Needs decision"; a message from the orchestrator (ahub nudge) → the worker turn is interrupted and the same
+  session continues with it (gates and reviewers are not interrupted by a message — they carry the result of
+  the turn); quota/timeout → "Needs decision"; no access/model error/crash → "Error"; requested stop → "Stopped".
 V08: scout. Code/routine/review (gates, panel, merge) — M3.
+Robustness of a live code reload: the owner poll (stop/budget/request) reads the task row through the dataclass
+of this code. Old code on a newer schema cannot — POLL_FAIL_MAX failures in a row give the process up: the
+provider session is stopped, the task stays active, and the worker exits non-zero (the service re-picks it
+as an orphan, on the current code). Never a busy loop.
 """
 
 from __future__ import annotations
@@ -22,20 +27,24 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from ahub import gates, prepare, prompts, providers, reasons, registry, review, transcript, transitions, workspace
 from ahub import log as hublog
-from ahub import gates, prepare, prompts, providers, reasons, registry, review, transitions, transcript, workspace
 from ahub.config import ProjectConfig
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Kind, Phase, Role, State
 from ahub.providers.base import Act, Activity, Outcome, RunResult, RunSpec
+from ahub.providers.runner import PollFailed
 from ahub.providers.runner import run as run_session
 from ahub.store import Store, Task
 from ahub.time import now_ms
 
 LEASE_MS = 90_000
 STOP_POLL_S = 3.0
+NUDGE_MAX = 8  # messages from the orchestrator in a row per step (each one is a whole turn)
 BUDGET_POLL_S = 30.0
+POLL_FAIL_MAX = 3  # owner poll failures in a row — the process gives up (a live reload broke its schema)
 REPORT_MAX_BYTES = 18_000  # 12 KB per contract plus margin; over that is flagged, not rejected
 
 _WRITE_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch", "file_change",
@@ -101,6 +110,7 @@ class Engine:
         self.lease_ms = lease_ms
         self.lost = threading.Event()
         self._stop_cache: tuple[float, bool] = (0.0, False)
+        self._poll_fails = 0
         self._phase: str = ""
         self._deadline_ms: int | None = None
         self.budget_hit = False
@@ -136,6 +146,8 @@ class Engine:
         except LeaseLost:
             t = self.store.get_task(self.task_id)
             return Settled(t.state if t else State.ERROR, reasons.text(reasons.dump("lease_lost")))
+        except PollFailed:
+            raise  # the task stays active; the worker exits non-zero and the service re-picks it
         except workspace.WorkspaceError as e:
             self.log.error("worktree: %s", e)
             return self._settle(State.ERROR, reasons.dump("prepare_failed", err=e))
@@ -195,25 +207,79 @@ class Engine:
         return Settled(to, reasons.text(stored))
 
     def stop_requested(self) -> bool:
+        """The turn must stop: the lease is lost, the budget is spent, a stop was requested.
+
+        A nudge is NOT here: it is a message, not a reason to kill what is running — it is delivered in
+        the next worker turn (`_step_with_continue`). So the gates and the reviewer sessions, which
+        carry the result of the turn, wait for the message instead of being cut short by it.
+        """
         if self.lost.is_set() or self.budget_hit:
             return True
+        if self._poll_request() == "stop":
+            return True
+        now = time.monotonic()
+        if now - self._budget_at >= BUDGET_POLL_S:
+            self._budget_at = now
+            if self.over_budget(live=True):
+                self.budget_hit = True
+                return True
+        return False
+
+    def interrupt_requested(self) -> bool:
+        """A worker turn is interrupted by a stop and by a nudge: the text goes into the next turn."""
+        return self.stop_requested() or self._poll_request() == "nudge"
+
+    def _poll(self, what: str, read: Callable[[], Any], default: Any) -> tuple[bool, Any]:
+        """(read ok, value) of one owner poll (the task row, the budget).
+
+        A couple of failures are tolerated and the default is returned; POLL_FAIL_MAX in a row mean this
+        code cannot read its own schema (a live reload added columns): log once and raise PollFailed — the
+        caller stops the provider session and the process gives the task back to the service.
+        """
+        try:
+            val = read()
+        except Exception as e:
+            self._poll_fails += 1
+            if self._poll_fails < POLL_FAIL_MAX:
+                self.log.debug("%s poll failed (%d/%d): %s", what, self._poll_fails, POLL_FAIL_MAX, e)
+                return False, default
+            self.log.error("%s poll failed %d times in a row (%s: %s) — the task is left to the service",
+                           what, self._poll_fails, type(e).__name__, str(e)[:200])
+            raise PollFailed(f"{what}: {type(e).__name__}: {e}") from e
+        self._poll_fails = 0
+        return True, val
+
+    def _poll_request(self) -> str:
+        """Owner request from the task row ('stop' | 'nudge' | ''), at most once in STOP_POLL_S."""
         now = time.monotonic()
         at, val = self._stop_cache
-        if now - at >= STOP_POLL_S:
-            try:
-                val = self.task().request == "stop"
-            except (sqlite3.Error, RuntimeError):
-                val = False
-            self._stop_cache = (now, val)
-            if not val and now - self._budget_at >= BUDGET_POLL_S:
-                self._budget_at = now
-                if self.over_budget(live=True):
-                    self.budget_hit = True
-                    return True
-        return val
+        if now - at < STOP_POLL_S:
+            return val
+        ok, fresh = self._poll("request", lambda: self.task().request, "")
+        if ok:  # a failed read is not cached — the next poll tries again at once
+            self._stop_cache = (now, fresh)
+        return fresh
+
+    def pending_nudge(self) -> str:
+        """Text of an undelivered nudge ('' — nothing to deliver)."""
+        def _read() -> str:
+            t = self.task()
+            return t.request_text if t.request == "nudge" else ""
+
+        _, text = self._poll("nudge", _read, "")
+        return text
+
+    def _take_request_back(self, kind: str, text: str = "") -> None:
+        """The owner took its request from the row: the poll cache must not serve it to the turn it was for."""
+        transitions.clear_request(self.store, self.task_id, kind=kind, text=text)
+        self._stop_cache = (time.monotonic(), "")
 
     def over_budget(self, *, live: bool = False) -> bool:
         """Task budget (whole task incl. review): 80% — journal event; 100% — True."""
+        _, over = self._poll("budget", lambda: self._over_budget(live), False)
+        return over
+
+    def _over_budget(self, live: bool) -> bool:
         t = self.task()
         go, usd = self.task_cost()
         if live:  # all running task sessions (reviewers run in parallel): provider usage minus recorded
@@ -234,11 +300,12 @@ class Engine:
                                  payload={"go": round(go, 4), "budget_go": t.budget_go})
         return over
 
-    def _pause(self, secs: float) -> bool:
+    def _pause(self, secs: float, should_stop: Callable[[], bool] | None = None) -> bool:
         """Interruptible pause. False — a stop was requested while waiting."""
+        stop = should_stop or self.interrupt_requested
         end = time.monotonic() + secs
         while time.monotonic() < end:
-            if self.stop_requested():
+            if stop():
                 return False
             self.sleep(min(1.0, max(0.0, end - time.monotonic())))
         return True
@@ -284,10 +351,17 @@ class Engine:
         return self.store.add_session(task_id=self.task_id, provider=provider, role=role.value, model=alias,
                                       round=round_no, external_id=session_id or "", log_path=log_path)
 
+    def _close_session(self, row: int) -> None:
+        """The provider group is gone and the turn is lost — the row must not stay 'running'."""
+        try:
+            self.store.update_session(row, status="killed", outcome=Outcome.KILLED.value, ended_at=now_ms())
+        except sqlite3.Error:
+            self.log.exception("session %d not closed", row)
+
     def _note_prompt(self, log_path: str, kind: str, prompt: str) -> None:
         """The prompt of the turn into the sidecar next to the log — `ahub follow` reads it.
 
-        The kinds are transcript.PROMPT_KINDS: start | continue | repair | rework | stop | review.
+        The kinds are transcript.PROMPT_KINDS: start | continue | repair | rework | stop | review | nudge.
         """
         try:
             path = transcript.prompts_path(log_path)
@@ -304,12 +378,16 @@ class Engine:
 
     def session(self, role: Role, alias: str, prompt: str, *, session_id: str | None = None,
                 keep_session_on_retry: bool = True, log_name: str = "", schema: dict | None = None,
-                cwd: str | None = None, prompt_kind: str = "start") -> RunResult:
+                cwd: str | None = None, prompt_kind: str = "start",
+                stop_predicate: Callable[[], bool] | None = None) -> RunResult:
         """One worker step with retries on network failure (architecture §6.3).
 
-        `prompt_kind` says what the prompt is (start | continue | repair | rework | stop | review) and goes
+        `prompt_kind` says what the prompt is (start | continue | repair | rework | stop | review | nudge) and goes
         into the prompts sidecar, which is what `ahub follow` shows as the turn header. One call is one
         turn: a network retry repeats the run of the same prompt, not the turn.
+
+        `stop_predicate` — what interrupts this turn. By default a nudge does (a worker turn carries the
+        message); a reviewer or a save-and-stop turn passes `self.stop_requested` and waits for its turn.
         """
         entry = registry.get(self.store, alias)
         prov = providers.get(entry.provider)
@@ -317,6 +395,7 @@ class Engine:
         cwd = cwd or t.worktree
         tmo = self.project.timeouts
         self._check_lease()
+        should_stop = stop_predicate or self.interrupt_requested
         log_path = str(Path(cwd) / workspace.AHUB_DIR / "logs" / f"{log_name or role.value}.log")
         self._note_prompt(log_path, prompt_kind, prompt)
         attempt = 0
@@ -333,9 +412,13 @@ class Engine:
             spec = RunSpec(prompt=prompt, cwd=cwd, model_id=entry.model_id, variant=entry.variant,
                            session_id=session_id, log_path=log_path, timeout_s=self._remaining_s(),
                            idle_s=tmo.idle_s, schema=schema)
-            r = run_session(prov, spec, on_activity=self._on_activity, on_session=on_session,
-                            on_start=lambda pid, _row=row: self.store.update_session(_row, pid=pid),
-                            should_stop=self.stop_requested)
+            try:
+                r = run_session(prov, spec, on_activity=self._on_activity, on_session=on_session,
+                                on_start=lambda pid, _row=row: self.store.update_session(_row, pid=pid),
+                                should_stop=should_stop)
+            except PollFailed:  # the runner killed the provider group — the row must not stay running
+                self._close_session(row)
+                raise
             u = r.usage
             fields: dict = {"status": "ok" if r.ok else ("killed" if r.outcome is Outcome.KILLED else "failed"),
                             "outcome": r.outcome.value, "ended_at": r.ended_ms}
@@ -360,7 +443,7 @@ class Engine:
                 self.log.warning("provider failure: %s → retry %d/%d in %d s", r.error[:200], attempt,
                                  tmo.retry_max, pause)
                 self.set_phase(Phase.WAITING)
-                if not self._pause(pause):
+                if not self._pause(pause, should_stop):
                     return RunResult(Outcome.KILLED, r.session_id, error=_t("engine.pause_killed"))
                 if keep_session_on_retry and r.session_id:
                     session_id = r.session_id
@@ -414,17 +497,36 @@ class Engine:
 
     def _step_with_continue(self, role: Role, alias: str, prompt: str, *, session_id: str | None,
                             log_name: str, prompt_kind: str = "start") -> tuple[RunResult, tuple[State, str] | None]:
-        """Worker step; silence → one same-session nudge."""
+        """Worker step; silence → one same-session nudge; a nudge from the orchestrator → the same session."""
         r = self.session(role, alias, prompt, session_id=session_id, log_name=log_name, prompt_kind=prompt_kind)
+        r = self._take_nudge(role, alias, r, session_id, log_name)
         if r.outcome is Outcome.SILENCE:
             self.store.add_event("silence", task_id=self.task_id, project=self.project.name,
                                  payload={"secs": r.silence_s, "action": "continue",
                                           "text": _t("engine.silence_text", secs=r.silence_s)})
             r = self.session(role, alias, prompts.CONTINUE_PROMPT, session_id=r.session_id or session_id,
                              log_name=log_name, prompt_kind="continue")
+            r = self._take_nudge(role, alias, r, session_id, log_name)
             if r.outcome is Outcome.SILENCE:
                 return r, (State.NEEDS_DECISION, reasons.dump("silence_twice", secs=r.silence_s))
         return r, self._outcome_to_state(r)
+
+    def _take_nudge(self, role: Role, alias: str, r: RunResult, session_id: str | None,
+                    log_name: str) -> RunResult:
+        """Deliver what the orchestrator asked into the same session (the turn was interrupted for it).
+
+        The message is taken from the task row before the turn, so a nudge that comes during the turn
+        itself is not eaten by it. Round, budget and gates are untouched — this is one more turn.
+        """
+        for _ in range(NUDGE_MAX):
+            text = self.pending_nudge()
+            if not text:
+                return r
+            self._take_request_back("nudge", text)
+            self.log.info("nudge into the %s session: %s", role.value, text[:200])
+            r = self.session(role, alias, prompts.nudge_prompt(text), session_id=r.session_id or session_id,
+                             log_name=log_name, prompt_kind="nudge")
+        return r
 
     # --- scout ---
 
@@ -503,7 +605,7 @@ class Engine:
         self.budget_hit = False  # allow one short "save and stop" step
         if sid:
             self.session(role, alias, prompts.stop_prompt(), session_id=sid, log_name=role.value,
-                         prompt_kind="stop")
+                         prompt_kind="stop", stop_predicate=self.stop_requested)
         go, usd = self.task_cost()
         self.store.add_event("budget_hard", task_id=self.task_id, project=self.project.name,
                              payload={"go": round(go, 4), "usd": round(usd, 4)})
@@ -516,7 +618,7 @@ class Engine:
             try:
                 p = prepare.prepare(self.project, t)
             except prepare.PrepareError as e:
-                raise _Settle(State.ERROR, reasons.dump("prepare_failed", err=e))
+                raise _Settle(State.ERROR, reasons.dump("prepare_failed", err=e)) from e
             fields = {"worktree": p.workspace.path, "branch": p.workspace.branch, "round": max(1, t.round)}
             if not t.base_sha:
                 fields["base_sha"] = p.workspace.base_sha
@@ -640,15 +742,17 @@ class Engine:
 
         def one(m: str):
             prompt = review.review_prompt(self.project, t, diff, g, round_no, m)
+            # a reviewer is not interrupted by a nudge: the message waits for the executor's next turn
             return self.session(Role.REVIEWER, m, prompt, keep_session_on_retry=False,
-                                log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review")
+                                log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review",
+                                stop_predicate=self.stop_requested)
 
         with ThreadPoolExecutor(max_workers=len(models)) as ex:
             results = list(ex.map(one, models))
         if (stop := self._review_interrupted(results)) is not None:
             return stop
         self._revert_reviewer(t)
-        by_model = dict(zip(models, results))
+        by_model = dict(zip(models, results, strict=True))
         found: dict[str, review.Review] = {}
         for m in models:
             rv = review.parse(review.review_path(t.worktree, round_no, m), m)
@@ -659,7 +763,8 @@ class Engine:
             def retry_one(m: str):
                 return self.session(Role.REVIEWER, m, review.verdict_repair_prompt(round_no, m),
                                     session_id=by_model[m].session_id, keep_session_on_retry=False,
-                                    log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review")
+                                    log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review",
+                                    stop_predicate=self.stop_requested)
 
             with ThreadPoolExecutor(max_workers=len(missing)) as ex:
                 retries = list(ex.map(retry_one, missing))

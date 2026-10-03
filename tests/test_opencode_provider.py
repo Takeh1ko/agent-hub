@@ -8,8 +8,7 @@ import os
 import pytest
 
 from ahub.providers.base import Act, Cap, Outcome, RunSpec
-from ahub.providers.opencode import (OpencodeProvider, classify_error, extract_json, parse_models_verbose,
-                                     prompt_arg)
+from ahub.providers.opencode import OpencodeProvider, classify_error, extract_json, parse_models_verbose, prompt_arg
 
 SID = "ses_f0d672de7ffesY3E6FxBC7787R"
 REAL = {

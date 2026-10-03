@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ahub import comms, config, events, paths, procs, providers, pulse, registry
 from ahub import log as hublog
 from ahub.i18n import t as _t
-from ahub.model import ACTIVE, Role, State
+from ahub.model import Role, State
 from ahub.providers.base import RunSpec
 from ahub.providers.opencode import extract_json
 from ahub.providers.runner import run as run_session
@@ -66,18 +65,24 @@ def _log_suspicions(since: int) -> list[Suspicion]:
 
 
 def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = None, now: int | None = None,
-                since: int | None = None, health: bool = True) -> list[Suspicion]:
-    """Code-only check. Returns suspicions (empty — all clean)."""
+                since: int | None = None, health: bool = True,
+                live: dict[int, int] | None = None) -> list[Suspicion]:
+    """Code-only check. Returns suspicions (empty — all clean).
+
+    live — the task processes the pulse sees (None — scan /proc; a test passes its own map, otherwise the
+    pulse of its task depends on what else runs on the machine).
+    """
     ts = now if now is not None else now_ms()
     if projects is None:
         projects, _ = config.load_projects()
     sus: list[Suspicion] = []
     from ahub.service import ORPHAN_GRACE_MS
 
-    for tid, pl in pulse.all_pulses(store, projects=projects, now=ts).items():
+    for tid, pl in pulse.all_pulses(store, projects=projects, now=ts, live=live).items():
         if pl.state in ("silent", "dead"):
             t = store.get_task(tid)
-            if pl.state == "dead" and ((t.lease_until or 0) + ORPHAN_GRACE_MS > ts or ts - t.updated_at < ORPHAN_GRACE_MS):
+            if pl.state == "dead" and ((t.lease_until or 0) + ORPHAN_GRACE_MS > ts
+                                       or ts - t.updated_at < ORPHAN_GRACE_MS):
                 continue  # service may still pick it up (orphan grace) — not an alarm
             sus.append(Suspicion(f"pulse:{tid}:{pl.state}", _t("observer.pulse", tid=tid, mark=pl.mark,
                                                                                    reason=pl.reason,
@@ -162,7 +167,7 @@ def _bot_pids(proc_root: str | Path = "/proc") -> list[int]:
     out = []
     for pid in procs.pids(proc_root):
         args = procs.cmdline(pid, proc_root)
-        if any(x == "bot" and y == "run" for x, y in zip(args, args[1:])) and procs.alive(pid, proc_root):
+        if any(x == "bot" and y == "run" for x, y in zip(args, args[1:], strict=False)) and procs.alive(pid, proc_root):
             out.append(pid)
     return out
 

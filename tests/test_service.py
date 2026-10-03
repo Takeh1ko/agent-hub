@@ -39,6 +39,16 @@ def test_live_workers(tmp_path):
     assert service.live_workers(root) == {7: 100}
 
 
+def test_live_workers_ignores_a_command_that_mentions_the_mark(tmp_path):
+    """A shell command, a grep or an agent prompt with the mark in it is not a task process."""
+    root = tmp_path / "proc"
+    fake_proc(root, 200, ["/bin/bash", "-c", "python -m ahub.worker T7 &  # a note"])
+    fake_proc(root, 201, ["/usr/bin/grep", "-rn", "ahub.worker", "T7", "/proc"])
+    fake_proc(root, 202, ["node", "opencode", "run", "task T70: how do I run python -m ahub.worker T7?"])
+    (root / "self").mkdir()
+    assert service.live_workers(root) == {}
+
+
 def test_a_worker_process_runs_the_code_that_started_it():
     """PYTHONPATH of a spawned process points at this hub: an editable install of another checkout
     (with another schema) must not win in the child."""
@@ -51,6 +61,13 @@ def test_a_worker_process_runs_the_code_that_started_it():
 
 def scout(store, project, **kw):
     return tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.SCOUT, title="x", model="fake", **kw),
+                        project, collect=False)
+
+
+def code(store, project, **kw):
+    kw.setdefault("paths", ["core/**", "tests/**"])
+    kw.setdefault("accept", ["tests/test_a.py::test_x"])
+    return tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.CODE, title="починить", model="fake", **kw),
                         project, collect=False)
 
 
@@ -128,6 +145,31 @@ def test_resources(store, tmp_path):
     assert rec.spawned == [a.id, c.id]
 
 
+def test_test_resource_not_held_by_the_queue(store, tmp_path):
+    """The project test resource is not held by the queue: tasks run in parallel, acceptance takes the lock."""
+    project = make_project(tmp_path, resources={"db": {"lock": str(tmp_path / "db.lock"), "capacity": 1}},
+                           test_resource="db", max_parallel=2)
+    install_fake(store, [])
+    a = code(store, project)
+    b = code(store, project)
+    assert a.limits["resources"] == [] and b.limits["resources"] == []
+    s, rec = svc(store, project, tmp_path)
+    report = s.tick()
+    assert rec.spawned == [a.id, b.id] and report.load["P"].waiting == {}
+
+
+def test_explicit_test_resource_blocks_the_queue(store, tmp_path):
+    """Named in --resources by hand — the queue holds it for the whole task, as before."""
+    project = make_project(tmp_path, resources={"db": {"capacity": 1}}, test_resource="db", max_parallel=5)
+    install_fake(store, [])
+    a = code(store, project, resources=["db"])
+    b = code(store, project, resources=["db"])
+    s, rec = svc(store, project, tmp_path)
+    s.tick()
+    assert rec.spawned == [a.id]
+    assert reasons.text(store.get_task(b.id).state_reason) == "ждёт ресурс db"
+
+
 def test_pause(store, tmp_path):
     project = make_project(tmp_path)
     install_fake(store, [])
@@ -175,6 +217,8 @@ def test_end_to_end_real_worker(store, tmp_path, monkeypatch):
     q.mkdir()
     (q / "001.json").write_text(json.dumps(scout_ok("ses_e2e")), encoding="utf-8")
     monkeypatch.setenv("AHUB_FAKE_QUEUE", str(q))
+    # the worker process must run the code of this checkout, not whatever `ahub` the environment has installed
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
     install_fake(store, [])  # the "fake" model in the shared registry
     t = scout(store, project)
     s = service.Service(store)
@@ -190,7 +234,7 @@ def test_end_to_end_real_worker(store, tmp_path, monkeypatch):
     assert store.list_sessions(t.id)[0].external_id == "ses_e2e"
 
 
-def _orphan_task(store, project, state=State.WORKING, lease_age_ms=10 * 60_000):
+def _orphan_task(store, project, state=State.WORKING, lease_age_ms=10 * 60_000, owner_pid=999999):
     from ahub.time import now_ms
     t = scout(store, project)
     for st in (State.PREPARING, State.WORKING):
@@ -200,8 +244,8 @@ def _orphan_task(store, project, state=State.WORKING, lease_age_ms=10 * 60_000):
         transitions.move(store, t.id, State.ACCEPTING)
     old = now_ms() - lease_age_ms
     with store.tx() as c:
-        c.execute("UPDATE task SET owner='dead', owner_pid=999999, lease_until=?, updated_at=? WHERE id=?",
-                  (old, old, t.id))
+        c.execute("UPDATE task SET owner='dead', owner_pid=?, lease_until=?, updated_at=? WHERE id=?",
+                  (owner_pid, old, old, t.id))
     return t.id
 
 
@@ -233,13 +277,28 @@ def test_orphan_live_lease_untouched(store, tmp_path):
 
 
 def test_orphan_accepting_is_decision(store, tmp_path):
+    """The accept process is gone (owner_pid 999999) and the lease expired — the way out is `ahub accept`."""
     project = make_project(tmp_path)
     install_fake(store, [])
     tid = _orphan_task(store, project, state=State.ACCEPTING)
     s, rec = svc(store, project, tmp_path)
     s.tick()
     assert store.get_task(tid).state is State.NEEDS_DECISION
-    assert "принятие прервано" in reasons.text(store.get_task(tid).state_reason)
+    reason = reasons.text(store.get_task(tid).state_reason)  # a code, rendered in the reader's language
+    assert "прервана" in reason
+    assert f"ahub accept T{tid}" in reason  # the reason says how to finish it
+
+
+def test_accepting_with_a_live_owner_process_is_not_an_orphan(store, tmp_path):
+    """Acceptance is long: the lease is stale, but the owner process lives — the service must not touch the task."""
+    project = make_project(tmp_path)
+    install_fake(store, [])
+    tid = _orphan_task(store, project, state=State.ACCEPTING, owner_pid=os.getpid())
+    s, rec = svc(store, project, tmp_path)
+    fake_proc(tmp_path / "proc", os.getpid(), ["python", "-m", "ahub", "accept", f"T{tid}"])
+    s.tick()
+    assert store.get_task(tid).state is State.ACCEPTING and rec.spawned == []
+    assert "orphan" not in [e.kind for e in store.events(task_id=tid)]
 
 
 def test_code_fingerprint_and_health(tmp_path):

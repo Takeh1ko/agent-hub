@@ -19,6 +19,17 @@ def _proj(deny=()):
     return config.parse_project({"schema_version": 2, "name": "webapp", "models": {"deny": list(deny)}}, "/tmp")
 
 
+def test_fake_provider_from_env(store, monkeypatch):
+    """AHUB_FAKE_PROVIDER=1 — the fake provider is selectable from the CLI (tools/smoke.sh)."""
+    assert registry.pick(store, Role.SCOUT, None).alias == "spark"  # without the flag
+    monkeypatch.setenv("AHUB_FAKE_PROVIDER", "1")
+    assert registry.get(store, "fake").provider == "fake"
+    for role in Role:
+        assert registry.pick(store, role, None).alias == "fake"
+        assert ("fake" in [e.alias for e, _ in registry.menu(store, role)])
+    assert registry.check(store, "fake", None).model_id == "fake/model"
+
+
 def test_seed_once(store):
     assert registry.seed(store)
     assert not registry.seed(store)
@@ -31,7 +42,8 @@ def test_seed_once(store):
 def test_pick_default_and_explicit(store):
     assert registry.pick(store, Role.EXECUTOR, None).alias == "spark"
     assert registry.pick(store, Role.EXECUTOR, None, explicit="deepseek-flash").alias == "deepseek-flash"
-    assert registry.pick(store, Role.EXECUTOR, None, explicit="spark-free").alias == "spark-free"  # outside the menu — explicit is fine
+    outside = registry.pick(store, Role.EXECUTOR, None, explicit="spark-free")  # outside the menu — explicit is fine
+    assert outside.alias == "spark-free"
     with pytest.raises(registry.RegistryError, match="нет модели"):
         registry.pick(store, Role.EXECUTOR, None, explicit="nope")
 

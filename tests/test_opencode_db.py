@@ -206,7 +206,7 @@ def test_find_session(tmp_path):
     assert odb.find_session("/wt/T", NOW - 60_000, db) == "new"  # child with parent_id skipped
     assert odb.find_session("/wt/X", NOW - 60_000, db) == "other"
     assert odb.find_session("/wt/T", NOW - 15_000, db) == "new"  # window is -5000
-    assert odb.find_session("/wt/T", NOW - 4_000, db) is None  # new is older than the window, child with a parent is skipped
+    assert odb.find_session("/wt/T", NOW - 4_000, db) is None  # new is older than the window
     assert odb.find_session("/wt/нет", 0, db) is None
 
 

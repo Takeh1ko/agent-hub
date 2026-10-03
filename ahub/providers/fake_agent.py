@@ -40,7 +40,8 @@ def main(argv: list[str]) -> int:
         elif "sleep" in step:
             time.sleep(float(step["sleep"]))
         elif "bg" in step:
-            # Abandoned background process (like an agent's `yes > /dev/null &`); detach — also leave the group (setsid).
+            # Abandoned background process (like an agent's `yes > /dev/null &`); detach — also leave the
+            # group (setsid).
             subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({float(step['bg'])})"],
                              start_new_session=bool(step.get("detach")), stdout=subprocess.DEVNULL)
             time.sleep(float(step.get("settle", 2.5)))  # let the watchdog notice the descendant

@@ -1,4 +1,8 @@
-"""`ahub top` screen data — pure functions (tested without textual). Plain words, clear to non-programmers."""
+"""`ahub top` screen data — pure functions (tested without textual). Plain words, clear to non-programmers.
+
+The table shows the current work (active, waiting for a decision, queued); the key `h` adds the recent
+finished tasks (history) — the header says which view is on. The live transcript screen is ahub/tui/live.py.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +19,8 @@ from ahub.time import fmt_local, now_ms, to_local
 
 _UNSET: object = object()  # marker "limit not passed — take from config"
 PHASE = views.PHASE_WORDS
-EV_WORDS: Words = Words("tui.ev_", ("created", "retry", "silence", "orphan", "budget_soft", "budget_hard",
+CURRENT = ACTIVE | WAITING_DECISION | {State.QUEUED}  # the table by default: what is going on now
+EV_WORDS: Words = Words("tui.ev_", ("created", "retry", "silence", "nudge", "orphan", "budget_soft", "budget_hard",
                                     "orch_edit", "paths_extended", "model_changed", "budget_extended"))
 
 
@@ -60,7 +65,8 @@ def _go_limit(hub_limit: float | None | object) -> float | None:
         return None
 
 
-def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | None | object = _UNSET) -> str:
+def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | None | object = _UNSET,
+           history: bool = False) -> str:
     hb = store.meta_get(HEARTBEAT_KEY)
     svc = _t("tui.svc_on") if hb and now - int(hb) < 30_000 else _t("tui.svc_off")
     claude = _t("tui.claude_on") if events.present(store, now=now) else _t("tui.claude_off")
@@ -88,7 +94,8 @@ def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | No
             money += _t("tui.money_real", usd=f"{month.cost_usd or 0:.2f}")
     except Exception:
         money = _t("tui.money_none")
-    parts = [svc, claude, _t("tui.working", n=len(active)), _t("tui.waiting", n=len(waiting)),
+    parts = [_t("tui.view_history") if history else _t("tui.view_current"),
+             svc, claude, _t("tui.working", n=len(active)), _t("tui.waiting", n=len(waiting)),
              _t("tui.queued", n=len(queued))]
     if store.meta_get(PAUSE_KEY) == "1":
         parts.append(_t("tui.paused"))
@@ -97,17 +104,22 @@ def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | No
     return " · ".join(parts) + "\n" + money
 
 
-def rows(store: Store, live: dict[int, int], pulses: dict, now: int, recent: int = 10) -> list[Row]:
-    active = store.list_tasks(states=ACTIVE | WAITING_DECISION | {State.QUEUED})
+def rows(store: Store, live: dict[int, int], pulses: dict, now: int, recent: int = 10, *,
+         history: bool = False) -> list[Row]:
+    """The table: by default the current work (active, waiting for a decision, queued); with history
+    — the recent finished tasks as well (what the screen showed before the key `h`)."""
+    active = store.list_tasks(states=CURRENT)
     done = [t for t in store.list_tasks(newest_first=True, limit=recent * 3)
-            if t.state.value in ("accepted", "rejected")][:recent]
+            if t.state.value in ("accepted", "rejected")][:recent] if history else []
     out = []
     for t in active + done:
         pl = pulses.get(t.id)
-        mark = pl.mark if pl else {"done": "✅", "needs_decision": "❓", "error": "❌", "stopped": "⏹",
-                                   "queued": "⏳", "draft": "📝", "accepted": "✔", "rejected": "✖"}.get(t.state.value, " ")
+        marks = {"done": "✅", "needs_decision": "❓", "error": "❌", "stopped": "⏹",
+                 "queued": "⏳", "draft": "📝", "accepted": "✔", "rejected": "✖"}
+        mark = pl.mark if pl else marks.get(t.state.value, " ")
         go, usd = archive.task_cost(store, t.id)
-        out.append(Row(t.id, mark, t.label, t.kind.value, t.title, archive.STATE_WORDS.get(t.state.value, t.state.value),
+        state_word = archive.STATE_WORDS.get(t.state.value, t.state.value)
+        out.append(Row(t.id, mark, t.label, t.kind.value, t.title, state_word,
                        PHASE.get(t.phase, "") if t.state in ACTIVE else "", t.executor, t.round,
                        _age(t.updated_at, now), f"{go + usd:.3f}"))
     return out
@@ -147,10 +159,12 @@ def detail(store: Store, task_id: int, live: dict[int, int], pulses: dict) -> st
     return head + views.task_text(store, t, live=live)
 
 
-def snapshot(store: Store, projects: list[config.ProjectConfig] | None = None) -> tuple[Screen, dict, dict]:
+def snapshot(store: Store, projects: list[config.ProjectConfig] | None = None, *,
+             history: bool = False) -> tuple[Screen, dict, dict]:
     now = now_ms()
     live = live_workers()
     if projects is None:
         projects, _ = config.load_projects()
     pulses = pulse.all_pulses(store, live=live, projects=projects, now=now)
-    return Screen(header(store, live, now), rows(store, live, pulses, now), feed(store)), live, pulses
+    return (Screen(header(store, live, now, history=history),
+                   rows(store, live, pulses, now, history=history), feed(store)), live, pulses)

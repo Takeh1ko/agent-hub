@@ -52,7 +52,7 @@ def test_retry_with_errors_then_fail(store, tmp_path):
     project = make_project(tmp_path)
     bad = dict(GOOD, paths=["bot/**"])
     fake = setup(store, [answer(bad), answer(GOOD)])
-    did = drafts.create(store, project, "x")
+    drafts.create(store, project, "x")
     assert "вне разрешённых" in fake.calls[1]["prompt"]
     assert drafts.list_drafts(store)[0]["status"] == "ready"
     setup(store, [answer(bad), answer(bad)])

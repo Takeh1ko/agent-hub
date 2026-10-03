@@ -44,6 +44,31 @@ def git_out(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True).stdout
 
 
+def interrupted_accept(store, project, tmp_path, tid):
+    """The accept process dies right after the merge commit; the service sees the task as an orphan."""
+    from ahub import service, transitions
+    from ahub.engine import owner_token
+    from ahub.time import now_ms
+
+    t = store.get_task(tid)
+    transitions.move(store, tid, State.ACCEPTING, reason="приёмка")
+    assert transitions.acquire(store, tid, owner_token(), pid=999999)
+    git(project.root, "merge", "--no-ff", "-m", f"merge {t.label}: сделать b", t.branch)
+    old = now_ms() - 10 * 60_000  # the dead process took the lease with it
+    with store.tx() as c:
+        c.execute("UPDATE task SET owner='dead', owner_pid=999999, lease_until=?, updated_at=? WHERE id=?",
+                  (old, old, tid))
+    (tmp_path / "proc").mkdir(exist_ok=True)
+    service.Service(store, [project], spawn=lambda i: 1, proc_root=tmp_path / "proc",
+                    lock_busy=lambda p: False).tick()
+    after = store.get_task(tid)
+    # the reason is a code (ahub.reasons); the sentence with the way out is rendered at read time
+    assert after.state is State.NEEDS_DECISION
+    assert after.state_reason == '{"code":"orphan_accepting","label":"T1"}'
+    assert f"ahub accept {t.label}" in reasons.text(after.state_reason)
+    return after
+
+
 def test_merge_happy(store, project):
     t, res, _ = done_code(store, project)
     assert res.state is State.DONE
@@ -220,3 +245,97 @@ def test_budget_extend_does_not_resume_other_decision(store, project):
     transitions.move(store, t.id, State.NEEDS_DECISION, reason="бюджет и круги ревью кончились")  # text does not matter
     accept.extend_budget(store, t.id, add=1.0)
     assert store.get_task(t.id).state is State.NEEDS_DECISION
+
+
+def test_accept_finishes_an_interrupted_merge(store, project, tmp_path):
+    """The merge is in the work branch, the accept process died: accept skips the gates and the merge."""
+    t, _, _ = done_code(store, project)
+    interrupted_accept(store, project, tmp_path, t.id)
+    merged = git_out(project.root, "rev-parse", "HEAD").strip()
+    msg = accept.accept(store, project, t.id)
+    assert msg.startswith(f"T{t.id} слита в main")
+    after = store.get_task(t.id)
+    assert after.state is State.ACCEPTED and after.accepted_sha == merged
+    assert git_out(project.root, "rev-parse", "HEAD").strip() == merged  # no second merge
+    assert (Path(project.root) / "core" / "b.py").read_text() == "Y = 2\n"
+    assert not Path(after.worktree).exists() and t.branch not in git_out(project.root, "branch")
+    assert (Path(project.root) / ".agent-hub" / "tasks" / f"T{t.id}" / "diff.patch").exists()
+
+
+def test_resumed_accept_rolls_back_a_red_merge(store, project, tmp_path):
+    """Red on HEAD after an interrupted merge — the merge commit is rolled back, as in a normal accept."""
+    t, _, _ = done_code(store, project)
+    (Path(project.root) / "core" / "a.py").write_text("X = 5\n")  # a foreign commit in the work branch
+    git(project.root, "add", "-A")
+    git(project.root, "commit", "-q", "-m", "сломали X")
+    foreign = git_out(project.root, "rev-parse", "HEAD").strip()
+    interrupted_accept(store, project, tmp_path, t.id)
+    with pytest.raises(accept.DecisionError, match="приёмка красная — слияние откачено"):
+        accept.accept(store, project, t.id)
+    assert git_out(project.root, "rev-parse", "HEAD").strip() == foreign  # the merge is gone
+    assert store.get_task(t.id).state is State.NEEDS_DECISION
+
+
+def test_not_merged_still_needs_the_copy(store, project):
+    t, _, _ = done_code(store, project)
+    import shutil
+
+    shutil.rmtree(t.worktree)
+    with pytest.raises(accept.DecisionError, match="нет копии задачи"):
+        accept.accept(store, project, t.id)
+
+
+def test_accept_renews_the_lease_during_acceptance(store, project, monkeypatch):
+    """Acceptance outlives the lease — the accept keeps the lease alive (engine-style keeper)."""
+    import time as _time
+
+    from ahub import gates as g
+
+    t, _, _ = done_code(store, project)
+    leases = []
+
+    def slow(project_, cwd, nodes, **kw):
+        first = store.get_task(t.id).lease_until
+        _time.sleep(0.3)  # longer than the renewal interval below
+        leases.append((first, store.get_task(t.id).lease_until))
+        return True, "", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", slow)
+    monkeypatch.setattr(accept, "RENEW_S", 0.05)
+    monkeypatch.setattr(accept, "ACCEPT_LEASE_MS", 200)
+    accept.accept(store, project, t.id)
+    assert leases[0][1] > leases[0][0]  # the lease moved forward while the tests ran
+    assert store.get_task(t.id).state is State.ACCEPTED
+
+
+def test_slow_acceptance_is_not_an_orphan(store, project, tmp_path, monkeypatch):
+    """A long acceptance with a stale lease and this process as the owner: the service leaves the accept alone."""
+    import os
+
+    from ahub import gates as g
+    from ahub import service
+    from ahub.time import now_ms
+    from tests.test_service import fake_proc
+
+    t, _, _ = done_code(store, project)
+    root = tmp_path / "proc"
+    root.mkdir(exist_ok=True)
+    fake_proc(root, os.getpid(), ["python", "-m", "ahub", "accept", f"T{t.id}"])  # the accept process, not a worker
+    seen = []
+
+    def slow(project_, cwd, nodes, **kw):
+        # acceptance longer than the lease + grace: the lease on the row is stale
+        old = now_ms() - 10 * 60_000
+        with store.tx() as c:
+            c.execute("UPDATE task SET lease_until=?, updated_at=? WHERE id=?", (old, old, t.id))
+        service.Service(store, [project], spawn=lambda i: 1, proc_root=root,
+                        lock_busy=lambda p: False).tick()
+        cur = store.get_task(t.id)
+        seen.append((cur.state, cur.owner_pid))
+        return True, "", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", slow)
+    accept.accept(store, project, t.id)
+    assert seen == [(State.ACCEPTING, os.getpid())]  # no orphan event, no "acceptance interrupted"
+    assert store.get_task(t.id).state is State.ACCEPTED
+    assert "orphan" not in [e.kind for e in store.events(task_id=t.id)]

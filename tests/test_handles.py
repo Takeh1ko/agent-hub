@@ -9,7 +9,7 @@ import pytest
 
 from ahub import cli, comms, events, paths, transitions
 from ahub.engine import Engine
-from ahub.model import Ev, State
+from ahub.model import State
 from ahub.store import Store
 from tests.enginekit import install_fake, make_project, scout_ok
 
@@ -84,6 +84,16 @@ def test_stop_continue_reject(env, capsys):
     assert rc == 2 and "продолжить можно" in err
     rc, _, err = ahub(capsys, "status", "T99")
     assert rc == 2 and "нет задачи" in err
+
+
+def test_nudge_refused_without_a_running_worker(env, capsys):
+    store, _ = env
+    install_fake(store, [])
+    ahub(capsys, "task", "new", "--kind", "scout", "--title", "x", "--model", "fake")
+    rc, out, err = ahub(capsys, "nudge", "T1", "хватит думать, почини")
+    assert rc == 2 and err.startswith("ошибка:") and "написать ему некого" in err and "Traceback" not in err
+    assert store.get_task(1).request == ""
+    assert ahub(capsys, "nudge", "T99", "x")[0] == 2
 
 
 def test_wait_and_ack(env, capsys):

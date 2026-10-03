@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from ahub import tasks
+from ahub import providers, registry, tasks, transcript, transitions
 from ahub.engine import Engine
 from ahub.model import Kind, Phase, State
 from ahub.providers.agy import AgyProvider
 from ahub.providers.base import Act, Activity
 from ahub.providers.codex import CodexProvider
 from ahub.store import Store
-from tests.enginekit import git, install_fake, make_project
+from tests.enginekit import ScriptedFake, git, install_fake, make_project
 
 
 @pytest.fixture
@@ -110,13 +112,16 @@ def test_outside_allowed_is_decision(store, project):
 
 
 def test_no_commit_repair(store, project):
-    nocommit = {"session": "ses_x", "steps": [{"write": {"path": "core/b.py", "text": "Y = 2\n"}},
-                                              {"event": {"type": "text", "text": "готово"}}]}
-    fix = {"session": "ses_x", "steps": [{"git_commit": "feat: b"}, {"result": {"summary": "ок", "files": ["core/b.py"]}}]}
+    nocommit = {"session": "ses_x", "steps": [
+        {"write": {"path": "core/b.py", "text": "Y = 2\n"}},
+        {"event": {"type": "text", "text": "готово"}}]}
+    fix = {"session": "ses_x", "steps": [{"git_commit": "feat: b"},
+                                         {"result": {"summary": "ок", "files": ["core/b.py"]}}]}
     fake = install_fake(store, [nocommit, fix])
     t = code_task(store, project)
     assert run(store, project, t.id).state is State.DONE
-    assert "Result is not in the required form" in fake.calls[1]["prompt"] and "незакоммиченные" in fake.calls[1]["prompt"]
+    repair = fake.calls[1]["prompt"]
+    assert "Result is not in the required form" in repair and "незакоммиченные" in repair
 
 
 def test_red_tests_fixed_once(store, project):
@@ -345,3 +350,114 @@ def test_codex_write_and_command_tools(store, project):
     eng.seen.clear()
     feed(eng, codex_item("command_execution", command="/bin/bash -lc 'git status'"))
     assert phases_of(eng) == [Phase.STUDYING.value]
+
+
+# --- a message from the orchestrator into a working session (ahub nudge) ---
+
+
+def slow_verdict(round_no=1, secs=4.0, model="fake", session="ses_rev"):
+    """A reviewer that writes its verdict and keeps thinking — long enough for the stop poll to go around."""
+    body = {"verdict": "approve", "summary": "ок", "findings": []}
+    return {"session": session, "steps": [
+        {"write": {"path": f".ahub/review_r{round_no}_{model}.json", "text": json.dumps(body, ensure_ascii=False)}},
+        {"sleep": secs},
+        {"event": {"type": "text", "text": "готово"}}]}
+
+
+def thinking(session="ses_x", text="думаю над задачей", secs=1.5):
+    """A turn that takes a while — the worker is inside it, not stuck yet."""
+    return {"session": session, "steps": [{"event": {"type": "text", "text": text}}, {"sleep": secs}]}
+
+
+def slow(session="ses_x", text="думаю над задачей"):
+    """A worker that never finishes the turn on its own — the orchestrator has to interrupt it."""
+    return thinking(session, text, secs=60)
+
+
+class NudgeWhileWorking(ScriptedFake):
+    """`ahub nudge T<id> "…"` while a turn is running: the request is written to the task row as soon
+    as a session id is known (what a human does from `ahub top`). `at` — which turn asks."""
+
+    def __init__(self, store: Store, task_id: int, scenarios: list[dict], text: str, at: int = 1) -> None:
+        super().__init__(scenarios)
+        self.store = store
+        self.task_id = task_id
+        self.text = text
+        self.at = at
+        self.turns = 0
+        self.asked = threading.Event()
+
+    def build_command(self, spec) -> list[str]:
+        cmd = super().build_command(spec)
+        self.turns += 1
+        if self.turns == self.at:
+            threading.Thread(target=self._ask, daemon=True).start()
+        return cmd
+
+    def _ask(self) -> None:
+        for _ in range(300):  # the session id appears when the fake prints it
+            if any(s.external_id for s in self.store.list_sessions(self.task_id)):
+                transitions.request_nudge(self.store, self.task_id, text=self.text, by="human")
+                self.asked.set()
+                return
+            time.sleep(0.05)
+
+
+def test_nudge_interrupts_the_turn_and_continues_the_same_session(store, project):
+    """The engine takes the message, interrupts the turn and continues the same session with it."""
+    registry.add_model(store, "fake", "fake", "fake/model")  # the model is what the task checks
+    t = code_task(store, project)
+    # 1 — a turn that never ends on its own; 2 — the turn with the message (long enough on its own: the
+    # request that caused it must not cut it short); 3 — the work is done
+    fake = NudgeWhileWorking(store, t.id, [slow(), thinking(), work(text="Y = 3\n")], "хватит думать, почини")
+    providers.register("fake", fake)
+    assert run(store, project, t.id).state is State.DONE
+    assert fake.asked.is_set()
+    assert [c["session_id"] for c in fake.calls] == [None, "ses_x", "ses_x"]  # the same session continues
+    assert fake.calls[1]["prompt"] == "Message from the orchestrator:\nхватит думать, почини"
+    t = store.get_task(t.id)
+    assert t.request == "" and t.request_text == "" and t.round == 1  # delivered, nothing else changed
+    # the prompt of the turn went into the sidecar with its kind; the gates still run and repair the work
+    logs = Path(t.worktree) / ".ahub" / "logs"
+    kinds = [(p.turn, p.kind) for p in transcript.read_prompts(transcript.prompts_path(logs / "executor.log"))]
+    assert kinds == [(1, "start"), (2, "nudge"), (3, "repair")]
+    # the journal has the nudge (the text, who) — and it does not wake the orchestrator
+    nudge = [e for e in store.events(task_id=t.id) if e.kind == "nudge"]
+    assert len(nudge) == 1 and nudge[0].payload == {"text": "хватит думать, почини", "by": "human"}
+    assert not nudge[0].needs_reaction
+
+
+def test_nudge_is_not_a_stop_for_the_gates_and_the_reviewers(store, project):
+    """A message is not a reason to kill what carries the result of the turn."""
+    registry.add_model(store, "fake", "fake", "fake/model")
+    t = code_task(store, project)
+    install_fake(store, [])
+    eng = Engine(store, project, t.id, sleep=lambda s: None)
+    transitions.move(store, t.id, State.PREPARING)
+    transitions.acquire(store, t.id, eng.owner, pid=7, lease_ms=eng.lease_ms)
+    transitions.move(store, t.id, State.WORKING, owner=eng.owner)
+    store.add_session(task_id=t.id, provider="fake", role="executor", model="fake", external_id="ses_x")
+    assert eng.stop_requested() is False
+    transitions.request_nudge(store, t.id, text="почини", by="human")
+    eng._stop_cache = (0.0, "")  # the next poll reads the row again (the cache lives STOP_POLL_S)
+    assert eng.stop_requested() is False  # gates.check and a reviewer session wait for the message
+    assert eng.interrupt_requested() is True  # the next worker turn carries it
+    assert eng.pending_nudge() == "почини"
+    transitions.request_stop(store, t.id, by="human")
+    eng._stop_cache = (0.0, "")
+    assert eng.stop_requested() is True  # a stop is still a stop
+
+
+def test_nudge_does_not_kill_a_reviewer_turn(store, project):
+    """The message waits for the worker's next turn; the verdict of the round is still read."""
+    registry.add_model(store, "fake", "fake", "fake/model")
+    t = code_task(store, project, review_models=["fake"], review_rounds=1)
+    # 1 — the work; 2 — the reviewer (the nudge arrives as it starts); 3 — a reviewer that is never needed
+    fake = NudgeWhileWorking(store, t.id, [work(), slow_verdict(), verdict(session="ses_left")],
+                             "допиши тест", at=2)
+    providers.register("fake", fake)
+    assert run(store, project, t.id).state is State.DONE  # not "needs decision" for a lost verdict
+    assert fake.asked.is_set() and len(fake.calls) == 2
+    assert [e.kind for e in store.events(task_id=t.id) if e.kind == "nudge"] == ["nudge"]
+    t = store.get_task(t.id)
+    assert t.request == "" and t.request_text == ""  # the task finished, the row is clean

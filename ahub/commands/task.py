@@ -1,4 +1,4 @@
-"""Task handles for the orchestrator: task new | status | result | log | stop | continue | accept | reject.
+"""Task handles for the orchestrator: task new | status | result | log | stop | nudge | continue | accept | reject.
 
 Compact output (contracts §5, §7); reading a task implicitly acks its events.
 """
@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ahub import events, tasks, transitions, views
 from ahub.cliutil import CliError, add_project_arg, emit, resolve_project
-from ahub.model import ACTIVE, Kind, State, WAITING_DECISION, parse_task_id
+from ahub.model import ACTIVE, WAITING_DECISION, Kind, State, parse_task_id
 from ahub.service import live_workers
 from ahub.store import Store, Task
 
@@ -136,6 +136,21 @@ def cmd_stop(args) -> int:
     else:
         text = _t("task.stop_requested", label=t.label)
     emit(args, {"id": t.id, "result": how}, text)
+    return 0
+
+
+def cmd_nudge(args) -> int:
+    """`ahub nudge T12 "text"` — a message to a working agent in its own session."""
+    store = Store()
+    t = _task(store, args.task)
+    from ahub.i18n import t as _t
+
+    try:
+        transitions.request_nudge(store, t.id, text=args.text, by=args.by)
+    except transitions.TransitionError as e:
+        raise CliError(str(e)) from e
+    emit(args, {"id": t.id, "result": "requested", "text": args.text},
+         _t("task.nudge_requested", label=t.label))
     return 0
 
 
@@ -276,6 +291,11 @@ def register(subparsers) -> None:
     lg.add_argument("task")
     lg.add_argument("--max-bytes", type=int, default=8000)
     lg.set_defaults(func=cmd_log)
+    nd = subparsers.add_parser("nudge", help=t("help.nudge"))
+    nd.add_argument("task")
+    nd.add_argument("text", help=t("help.nudge"))
+    nd.add_argument("--by", default="orchestrator")
+    nd.set_defaults(func=cmd_nudge)
     for name, fn, key in (("stop", cmd_stop, "help.stop"), ("continue", cmd_continue, "help.continue"),
                           ("accept", cmd_accept, "help.accept"), ("reject", cmd_reject, "help.reject")):
         x = subparsers.add_parser(name, help=t(key))
