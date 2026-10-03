@@ -59,12 +59,14 @@ _PROJECT = "COALESCE(t.project,'')"
 
 
 def _grouped(store: Store, with_model: bool, sc: Scope | None, since: int | None) -> list[sqlite3.Row]:
-    """Sum the sessions of the scope by (project, model); the priciest group first.
+    """Sum the sessions of the scope by project (and by model, when asked); the priciest group first.
 
     The project of a session is the project of its task — a session without a task comes under "".
+    Without the model the row carries a NULL, and the group is the project alone: grouping by the name
+    `model` as well would bind it to the session column and split a project into one group per model.
     """
     args: list[object] = []
-    sql = ("SELECT " + _PROJECT + " AS project, " + ("s.model" if with_model else "''") + " AS model,"
+    sql = ("SELECT " + _PROJECT + " AS project, " + ("s.model" if with_model else "NULL") + " AS model,"
            " COUNT(*) AS n, COALESCE(SUM(s.cost_go),0) AS go, COALESCE(SUM(s.cost_usd),0) AS usd"
            " FROM session s LEFT JOIN task t ON t.id=s.task_id WHERE 1=1")
     if since is not None:
@@ -74,7 +76,8 @@ def _grouped(store: Store, with_model: bool, sc: Scope | None, since: int | None
     if cond:
         sql += " AND " + cond
         args.extend(cond_args)
-    sql += " GROUP BY project, model ORDER BY go DESC, project, model"
+    sql += (" GROUP BY project, model ORDER BY go DESC, project, model" if with_model
+            else " GROUP BY project ORDER BY go DESC, project")
     with store.read() as c:
         return c.execute(sql, args).fetchall()
 

@@ -430,7 +430,7 @@ class TopApp(App):
 
     def action_nudge(self) -> None:
         tid = self.selected()
-        if tid is not None:
+        if tid:  # a project header row (0) has no worker to write to
             self.ask_nudge(tid)
 
     def action_budget(self) -> None:

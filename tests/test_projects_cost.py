@@ -186,6 +186,28 @@ def test_cost_counts_hub_sessions_only(hub, store, capsys, monkeypatch):
     assert "go $0.300" in ahub(capsys, "cost", "--all")[1]
 
 
+def test_two_models_of_one_project_are_summed(hub, store, capsys):
+    """The money of a project is the sum of its sessions whatever model they ran on.
+
+    The group of the per-project query is the project alone: grouping by the model name as well binds
+    it to the session column, splits the project into one group per model and leaves the cheapest one.
+    """
+    tid = working(store, "A", "pay button")
+    session(store, tid, "spark", 0.30, 0.05)
+    session(store, tid, "mimo-flash", 0.02)
+    session(store, tid, "spark", 0.40)
+    assert cost.by_project(store, scope=OWNER)["A"] == cost.Money(0.72, 0.05)
+    assert cost.by_project(store, scope=Scope(("A",))) == {"A": cost.Money(0.72, 0.05)}
+    assert cost.total(store, scope=Scope(("A",))) == cost.Money(0.72, 0.05)
+
+    line = {ln.split()[0]: ln for ln in ahub(capsys, "projects")[1].splitlines()[1:]}["A"]
+    assert line.split()[6:8] == ["0.720", "0.050"]
+    row = json.loads(ahub(capsys, "--json", "projects")[1])["projects"][0]
+    assert row["go"] == 0.72 and row["usd"] == 0.05
+    out = ahub(capsys, "--lang", "en", "cost", "--all")[1]
+    assert "go $0.720 · usd $0.050 · sessions 3" in out  # the totals too
+
+
 def test_cost_data_layer_groups_and_sums(hub, store):
     """ahub/cost.py: per project, per model, the whole scope; sessions without a task are the hub's."""
     filled(store)
@@ -288,6 +310,10 @@ async def test_top_header_row_opens_nothing(hub, store):
         await pilot.press("s")  # stop — nothing to stop
         await pilot.pause(0.3)
         assert store.get_task(1).state is State.WORKING
+        await pilot.press("m")  # a message to the worker of... no task
+        await pilot.pause(0.3)
+        assert app.screen.__class__.__name__ != "Ask"
+        assert not any("T0" in n.message for n in app._notifications._notifications)
 
 
 async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
