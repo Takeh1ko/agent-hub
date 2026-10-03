@@ -17,7 +17,7 @@ from ahub.i18n import t
 from ahub.model import State
 from ahub.scope import OWNER, Scope
 from ahub.store import Store
-from ahub.time import now_ms
+from ahub.time import fmt_local, now_ms
 from ahub.tui import data
 from tests.conftest import write
 
@@ -116,6 +116,40 @@ def test_projects_json_and_open_questions(hub, store, capsys):
     assert by_name["A"]["last"] > store.get_task(tids["a_done"]).updated_at
     assert data_["errors"] == [] and data_["problems"] == {"A": [], "B": []}
     assert data_["month"].count("-") == 2  # the first day of this month
+
+
+def moved(store: Store, tid: int, *steps: tuple[State, int]) -> int:
+    """Walk a task through the given states, each with its own timestamp."""
+    for state, ts in steps:
+        transitions.move(store, tid, state, now=ts)
+    return tid
+
+
+def test_projects_last_is_the_newest_touch_not_the_last_row_of_the_group_by(hub, store, capsys):
+    """`last` — the newest touch of the project, whatever the group-by loop hands out.
+
+    Two traps, both planted here: the newest touch of A is in the group SQLite sorts *first*
+    ('done' before 'queued' and 'working'), so "the last group wins" is wrong; and the two working
+    tasks of B are touched oldest-first, so a bare column instead of MAX inside the group is wrong too.
+    """
+    def work(project: str, ts: int) -> int:
+        return moved(store, store.create_task(project=project, kind="code", title="work"),
+                     (State.PREPARING, ts - 1), (State.WORKING, ts))
+
+    store.create_task(project="A", kind="scout", title="later", now=1000)  # queued, the oldest touch of A
+    work("A", 2000)
+    moved(store, store.create_task(project="A", kind="scout", title="ready"),
+          (State.PREPARING, 2999), (State.WORKING, 2999), (State.DONE, 3000))  # the newest touch of A
+    work("B", 4000)
+    work("B", 5000)  # the newest touch of B sits on the later id of its group
+    moved(store, store.create_task(project="B", kind="scout", title="ready"),
+          (State.PREPARING, 100), (State.WORKING, 100), (State.DONE, 100))
+
+    by_name = {p["name"]: p for p in json.loads(ahub(capsys, "--json", "projects")[1])["projects"]}
+    assert by_name["A"]["last"] == 3000 and by_name["B"]["last"] == 5000
+    lines = {ln.split()[0]: ln for ln in ahub(capsys, "projects")[1].splitlines()[1:]}  # the same moment
+    assert lines["A"].rstrip().endswith(fmt_local(3000))
+    assert lines["B"].rstrip().endswith(fmt_local(5000))
 
 
 def test_projects_marks_a_project_with_tasks_but_no_config(hub, store, capsys):
