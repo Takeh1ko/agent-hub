@@ -16,6 +16,7 @@ from ahub.time import now_ms
 from ahub.ui import Value
 
 L1_LIMIT = 1500
+L1_RESERVE = 120  # room for the "+N more" line and the counters under it
 L2_LIMIT = 4000
 L3_DEFAULT = 20000
 SUMMARY_BYTES = 900  # the byte budget of every block in L2 (the whole L2 stays under 4 KB)
@@ -59,17 +60,34 @@ def state_word(state: State | str) -> str:
     return archive.STATE_WORDS.get(value, value)
 
 
-def _cap(lines: list[str], limit: int) -> str:
-    """The L1 budget: whole lines, then the counter (contracts §5)."""
-    out, used = [], 0
-    for i, ln in enumerate(lines):
-        size = len(ln.encode("utf-8")) + 1
-        if used + size > limit - 40:
-            out.append(_t("views.more", n=len(lines) - i))
-            break
-        out.append(ln)
-        used += size
-    return "\n".join(out)
+def _cap(head: str, groups: list[tuple[str, list[str]]], tail: str) -> str:
+    """The L1 budget (contracts §5): the header, as many task rows of each group as fit, the counters.
+
+    A group that does not fit is cut after its last whole row and the rest is counted, not dropped
+    silently: `ahub top` shows every task, and the queued ones also in `ahub service status`.
+    """
+    out = [head] if head else []
+    more = 0
+    for title, rows in groups:
+        shown, used = [], 0
+        for row in rows:
+            size = len(row.encode("utf-8")) + 1 + (len(title.encode("utf-8")) + 1 if not shown else 0)
+            if used + size > L1_LIMIT - L1_RESERVE - _bytes(out):
+                break
+            shown.append(row)
+            used += size
+        more += len(rows) - len(shown)
+        if shown:
+            out += ([title] if title else []) + shown
+    if more:
+        out.append(_t("views.more_rows", n=more))
+    if tail:
+        out.append(tail)
+    return clip_bytes("\n".join(out), L1_LIMIT)
+
+
+def _bytes(lines: list[str]) -> int:
+    return sum(len(ln.encode("utf-8")) + 1 for ln in lines)
 
 
 def _state_cell(t: Task) -> str:
@@ -80,7 +98,8 @@ def _state_cell(t: Task) -> str:
 
 
 def _active_table(store: Store, active: list[Task], live: dict[int, int], pulses: dict, ts: int,
-                  w: int | None) -> str:
+                  w: int | None) -> tuple[str, list[str]]:
+    """The active tasks: the column head and the rows (one line per task) — the overview caps them itself."""
     head = ["", _t("views.col_id"), _t("views.col_kind"), _t("views.col_title"), _t("views.col_state"),
             _t("views.col_model"), _t("views.col_round"), _t("views.col_idle"), _t("views.col_cost")]
     rows = []
@@ -90,7 +109,8 @@ def _active_table(store: Store, active: list[Task], live: dict[int, int], pulses
         mark = ui.badge(pl.mark, "", pl.state) if pl else ("⚫" if t.id not in live else "")
         rows.append([mark, t.label, t.kind.value, t.title, _state_cell(t), t.executor or "—",
                      str(t.round), _age(t.updated_at, ts), f"${go + usd:.3f}"])
-    return ui.table(head, rows, max_width=[1, 6, 7, None, 13, 10, 5, 8, 10], indent=2, w=w)
+    lines = ui.table(head, rows, max_width=[1, 6, 7, None, 13, 10, 5, 8, 10], indent=2, w=w).split("\n")
+    return lines[0], lines[1:]
 
 
 def status_text(store: Store, *, project: str | None = None, live: dict[int, int] | None = None,
@@ -115,22 +135,22 @@ def status_text(store: Store, *, project: str | None = None, live: dict[int, int
         tail.append(_t("views.unacked", n=len(unacked)))
     if not (active or waiting or queued) and not tail:
         return _t("views.quiet")
-    out = []
+    head = ""
     if active or waiting or queued:
-        out.append(ui.styled(_t("views.head", project=project or _t("views.all_projects"), active=len(active),
-                                 waiting=len(waiting), queued=len(queued)), "bold"))
+        head = ui.styled(_t("views.head", project=project or _t("views.all_projects"), active=len(active),
+                             waiting=len(waiting), queued=len(queued)), "bold")
+    groups: list[tuple[str, list[str]]] = []
     if active:
-        out.append(_active_table(store, active, live, pulses, ts, w))
-    rows = [(t.label, [state_word(t.state), reasons.text(t.state_reason)]) for t in waiting + queued]
-    if rows:
-        out.append(ui.section(_t("views.sec_waiting")))
-        out.append(ui.kv(rows, indent=2, w=w))
+        table_head, rows = _active_table(store, active, live, pulses, ts, w)
+        groups.append((table_head, rows))  # the column head is the heading of the group
+    waiting_rows = [ln for ln in ui.kv([(t.label, [state_word(t.state), reasons.text(t.state_reason)])
+                                       for t in waiting + queued], indent=2, w=w).split("\n")] if waiting or queued else []
+    if waiting_rows:
+        groups.append((ui.section(_t("views.sec_waiting")), waiting_rows))
     if unacked:
-        out.append(ui.section(_t("views.sec_unread")))
-        out.extend("  " + ln for ln in events.lines(store, unacked[:UNREAD_LINES]))
-    if tail:
-        out.append(ui.styled(" · ".join(tail), "dim"))
-    return _cap([ln for ln in out if ln], L1_LIMIT)
+        lines = events.lines(store, unacked[:UNREAD_LINES])
+        groups.append((ui.section(_t("views.sec_unread")), ["  " + ln for ln in lines]))
+    return _cap(head, groups, ui.styled(" · ".join(tail), "dim") if tail else "")
 
 
 _SUT = re.compile(r"^##\s*(?:Суть|Summary)\s*$(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)

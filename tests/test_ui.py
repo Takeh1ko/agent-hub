@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -253,3 +254,23 @@ def test_pipe_output_of_the_cli_has_no_ansi(tmp_path, monkeypatch, capsys):
     assert cli.main(["history"]) == 0
     out = capsys.readouterr().out
     assert "\033[" not in out
+
+def test_a_crowded_overview_shows_the_rows_that_fit_and_counts_the_rest():
+    """L1 cuts after whole rows, never after a whole block: with 40 tasks you still see the tasks."""
+    store = Store()
+    for i in range(20):
+        tid = store.create_task(project="P", kind="code", title=f"active task number {i} with a long title",
+                                executor="bunny", now=NOW)
+        transitions.move(store, tid, State.PREPARING, now=NOW)
+        transitions.move(store, tid, State.WORKING, now=NOW)
+    for i in range(20):
+        store.create_task(project="P", kind="scout", title=f"queued {i}", executor="spark", now=NOW)
+    out = views.status_text(store, live={}, now=NOW, w=W)
+    lines = out.split("\n")
+    active = [ln for ln in lines if "active task number" in ln]
+    queued = [ln for ln in lines if re.match(r"\s+T\d+\s+queued", ln)]
+    more = int(re.search(r"\+(\d+) more tasks", out).group(1))
+    assert len(active) > 5 and queued  # both groups got whole rows before the counter
+    assert len(active) + len(queued) + more == 40  # nothing is dropped silently
+    assert "ahub top" in out
+    assert len(out.encode()) <= views.L1_LIMIT
