@@ -268,7 +268,7 @@ def review_started(store: Store, task_id: int) -> bool:
 
 def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None = None,
          title: str | None = None, review: list[str] | None = None, rounds: int | None = None,
-         model: str | None = None, by: str = "orchestrator") -> str:
+         model: str | None = None, input: str | None = None, by: str = "orchestrator") -> str:
     """New brief: on resume — a fresh executor session (different fingerprint).
 
     review/rounds — before the review starts: the panel decides what the task is checked against, so it
@@ -312,10 +312,19 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
             changes.append(_t("accept.model_edit", old=t.executor or "—", new=model))
             fields["executor"] = model
             limits["fresh_session"] = True  # never resume another model's session
+    cur_input = input.strip() if input is not None else str(t.limits.get("input") or "")
+    if input is not None:
+        if t.kind is not Kind.REVIEW:
+            raise DecisionError(_t("accept.input_not_review", label=t.label))
+        if not input.strip():
+            raise DecisionError(_t("tasks.need_input"))
+        if cur_input != str(t.limits.get("input") or ""):
+            limits["input"] = cur_input
+            changes.append(_t("accept.input_edit", input=cur_input))
     new = tasks.TaskSpec(project=t.project, kind=t.kind, title=title if title is not None else t.title,
-                             spec=spec if spec is not None else t.spec, result_format=t.result_format,
-                             paths=list(t.limits.get("paths") or []), accept=list(t.limits.get("accept") or []),
-                             review_input=str(t.limits.get("input") or ""))
+                         spec=spec if spec is not None else t.spec, result_format=t.result_format,
+                         paths=list(t.limits.get("paths") or []), accept=list(t.limits.get("accept") or []),
+                         review_input=cur_input)
     h = tasks.spec_hash(new)
     if h != t.spec_hash:
         limits["fresh_session"] = True
