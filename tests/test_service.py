@@ -221,7 +221,7 @@ def test_end_to_end_real_worker(store, tmp_path, monkeypatch):
     assert store.list_sessions(t.id)[0].external_id == "ses_e2e"
 
 
-def _orphan_task(store, project, state=State.WORKING, lease_age_ms=10 * 60_000):
+def _orphan_task(store, project, state=State.WORKING, lease_age_ms=10 * 60_000, owner_pid=999999):
     from ahub.time import now_ms
     t = scout(store, project)
     for st in (State.PREPARING, State.WORKING):
@@ -231,8 +231,8 @@ def _orphan_task(store, project, state=State.WORKING, lease_age_ms=10 * 60_000):
         transitions.move(store, t.id, State.ACCEPTING)
     old = now_ms() - lease_age_ms
     with store.tx() as c:
-        c.execute("UPDATE task SET owner='dead', owner_pid=999999, lease_until=?, updated_at=? WHERE id=?",
-                  (old, old, t.id))
+        c.execute("UPDATE task SET owner='dead', owner_pid=?, lease_until=?, updated_at=? WHERE id=?",
+                  (owner_pid, old, old, t.id))
     return t.id
 
 
@@ -263,6 +263,7 @@ def test_orphan_live_lease_untouched(store, tmp_path):
 
 
 def test_orphan_accepting_is_decision(store, tmp_path):
+    """The accept process is gone (owner_pid 999999) and the lease expired — the way out is `ahub accept`."""
     project = make_project(tmp_path)
     install_fake(store, [])
     tid = _orphan_task(store, project, state=State.ACCEPTING)
@@ -271,6 +272,20 @@ def test_orphan_accepting_is_decision(store, tmp_path):
     reason = store.get_task(tid).state_reason
     assert store.get_task(tid).state is State.NEEDS_DECISION and "прервана" in reason
     assert f"ahub accept T{tid}" in reason  # the reason says how to finish it
+
+
+def test_accepting_with_a_live_owner_process_is_not_an_orphan(store, tmp_path):
+    """Acceptance is long: the lease is stale, but the owner process lives — the service must not touch the task."""
+    import os
+
+    project = make_project(tmp_path)
+    install_fake(store, [])
+    tid = _orphan_task(store, project, state=State.ACCEPTING, owner_pid=os.getpid())
+    s, rec = svc(store, project, tmp_path)
+    fake_proc(tmp_path / "proc", os.getpid(), ["python", "-m", "ahub", "accept", f"T{tid}"])
+    s.tick()
+    assert store.get_task(tid).state is State.ACCEPTING and rec.spawned == []
+    assert "orphan" not in [e.kind for e in store.events(task_id=tid)]
 
 
 def test_code_fingerprint_and_health(tmp_path):

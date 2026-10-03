@@ -262,3 +262,59 @@ def test_not_merged_still_needs_the_copy(store, project):
     shutil.rmtree(t.worktree)
     with pytest.raises(accept.DecisionError, match="нет копии задачи"):
         accept.accept(store, project, t.id)
+
+
+def test_accept_renews_the_lease_during_acceptance(store, project, monkeypatch):
+    """Acceptance outlives the lease — the accept keeps the lease alive (engine-style keeper)."""
+    import time as _time
+
+    from ahub import gates as g
+
+    t, _, _ = done_code(store, project)
+    leases = []
+
+    def slow(project_, cwd, nodes, **kw):
+        first = store.get_task(t.id).lease_until
+        _time.sleep(0.3)  # longer than the renewal interval below
+        leases.append((first, store.get_task(t.id).lease_until))
+        return True, "", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", slow)
+    monkeypatch.setattr(accept, "RENEW_S", 0.05)
+    monkeypatch.setattr(accept, "ACCEPT_LEASE_MS", 200)
+    accept.accept(store, project, t.id)
+    assert leases[0][1] > leases[0][0]  # the lease moved forward while the tests ran
+    assert store.get_task(t.id).state is State.ACCEPTED
+
+
+def test_slow_acceptance_is_not_an_orphan(store, project, tmp_path, monkeypatch):
+    """A long acceptance with a stale lease and this process as the owner: the service leaves the accept alone."""
+    import os
+
+    from ahub import gates as g
+    from ahub import service
+    from ahub.time import now_ms
+    from tests.test_service import fake_proc
+
+    t, _, _ = done_code(store, project)
+    root = tmp_path / "proc"
+    root.mkdir(exist_ok=True)
+    fake_proc(root, os.getpid(), ["python", "-m", "ahub", "accept", f"T{t.id}"])  # the accept process, not a worker
+    seen = []
+
+    def slow(project_, cwd, nodes, **kw):
+        # acceptance longer than the lease + grace: the lease on the row is stale
+        old = now_ms() - 10 * 60_000
+        with store.tx() as c:
+            c.execute("UPDATE task SET lease_until=?, updated_at=? WHERE id=?", (old, old, t.id))
+        service.Service(store, [project], spawn=lambda i: 1, proc_root=root,
+                        lock_busy=lambda p: False).tick()
+        cur = store.get_task(t.id)
+        seen.append((cur.state, cur.owner_pid))
+        return True, "", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", slow)
+    accept.accept(store, project, t.id)
+    assert seen == [(State.ACCEPTING, os.getpid())]  # no orphan event, no "acceptance interrupted"
+    assert store.get_task(t.id).state is State.ACCEPTED
+    assert "orphan" not in [e.kind for e in store.events(task_id=t.id)]
