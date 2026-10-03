@@ -329,7 +329,7 @@ def provider_state(name: str, auth: list[str] | None = None) -> ProviderState:
     note = _t(_PROV_NOTES[name]) if name in _PROV_NOTES else (
         _t("doctor.prov_note_opencode_go") if has_go_login(provs)
         else _t("doctor.prov_note_opencode_free"))
-    hint = _t(f"doctor.prov_login_hint", name=name, cmd=fix) if (found and not logged and fix) \
+    hint = _t("doctor.prov_login_hint", name=name, cmd=fix) if (found and not logged and fix) \
         else ("" if found else install_hint(name))
     return ProviderState(name, found, logged, detail=detail, note=note, hint=hint)
 
@@ -432,23 +432,15 @@ def probe_models(entries, timeout_s: int = PROBE_WIZARD_S,
 def recommend_model(entries, results: dict[str, tuple[bool, str]]) -> str:
     """(alias) the recommended default: a paid model that answered, else the first free one that did.
 
-    Order of the candidates decides which paid model wins (the registry order, by alias). "" — none answered.
+    The candidate order decides which paid model wins (the registry order, by alias). "" — none answered.
     """
+    from ahub import registry
+
     answered = [e for e in entries if results.get(e.alias, (False, ""))[0]]
     if not answered:
         return ""
-    paid = [e for e in answered if not is_free_entry(e)]
-    pick = paid or answered
+    pick = [e for e in answered if not registry.is_free(e)] or answered
     return pick[0].alias
-
-
-def is_free_entry(entry) -> bool:
-    from ahub import registry
-
-    try:
-        return registry.is_free(entry)
-    except Exception:
-        return False
 
 
 def probe_none_warning(aliases) -> str:

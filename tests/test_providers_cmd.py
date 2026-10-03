@@ -143,6 +143,18 @@ def test_json_of_enable_and_unknown_provider(capsys):
     assert "no-such" in err and "opencode" in err
 
 
+def test_the_switch_keeps_the_other_keys_of_the_section(capsys, monkeypatch):
+    """The section is [providers.<name>]: another task adds `proxy` there — it must survive."""
+    _states(monkeypatch)
+    write(paths.global_config_path(), '[providers.codex]\nproxy = "http://127.0.0.1:8080"\n')
+    assert cli.main(["providers", "disable", "codex"]) == 0
+    capsys.readouterr()
+    text = paths.global_config_path().read_text(encoding="utf-8")
+    assert text.count("[providers.codex]") == 1
+    assert 'proxy = "http://127.0.0.1:8080"' in text and "enabled = false" in text
+    assert config.load_hub().provider_enabled("codex") is False
+
+
 def test_a_broken_switch_hides_nothing(capsys, monkeypatch):
     """A bad `enabled` value is a config error (doctor reports it); the registry must not hide every model."""
     _states(monkeypatch)

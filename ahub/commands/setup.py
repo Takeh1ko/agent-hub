@@ -4,8 +4,11 @@
 - registers the project in ~/.config/ahub/config.toml;
 - --claude: ahub skill for Claude Code (~/.claude/skills/ahub/SKILL.md) and a short block in the project CLAUDE.md.
 - TTY without --yes → interactive wizard (language, project, providers, models, service, Claude, Telegram, doctor).
-- Without a Go login the roles move to a free alias, but only after a live probe of the free candidates
-  (doctor.pick_free) — a free model that does not answer is never set as the default.
+- The providers step lists every provider ahub knows (found / logged in / a note / an install hint) and writes
+  [providers.<name>] enabled — the same switch `ahub providers enable|disable` changes.
+- The models step probes the models of the providers that are on (live, at once) and picks the role defaults:
+  a paid model that answered, else a free one that answered — a model that does not answer is never the default.
+  Without a Go login and with no probe (AHUB_PROBE=0), the roles move to a free alias (doctor.pick_free).
 """
 
 from __future__ import annotations
@@ -335,7 +338,7 @@ def _roles_needing_free(store) -> list[str]:
     return bad
 
 
-def _provider_step(ask: bool, log) -> dict[str, bool]:
+def _provider_step(states, ask: bool, log) -> dict[str, bool]:
     """Every provider ahub knows, then which to enable (default: found and logged in).
 
     Writes [providers.<name>] enabled for each — the single place the switch lives. Returns name → on.
@@ -343,7 +346,6 @@ def _provider_step(ask: bool, log) -> dict[str, bool]:
     from ahub import doctor
     from ahub.i18n import t
 
-    states = doctor.provider_states()
     names = [st.name for st in states]
     log(t("setup.wizard_providers_head"))
     for st in states:
@@ -449,25 +451,30 @@ def _free_default_step(store, ask: bool, log, alias: str | None = None) -> dict[
     return {}
 
 
-def _model_step(store, ask: bool, log) -> dict[str, str]:
+def _model_step(store, states, ask: bool, log) -> dict[str, str]:
     """Probe the models of the providers that are on, then set the default per role (executor, reviewer).
 
-    Other roles follow the executor unless their own default answers. Returns role → alias.
+    A provider that is not found or not logged in is never probed — its models are not offered. Other roles
+    follow the executor unless their own default answers. Returns role → alias.
     """
     from ahub import doctor, registry
     from ahub.i18n import t
     from ahub.model import Role
 
     off = registry.disabled_providers()
-    entries = [e for e in registry.models(store) if e.enabled and e.provider not in off]
+    live = {st.name for st in states if st.found and st.logged_in}
+    entries = [e for e in registry.models(store)
+               if e.enabled and e.provider not in off and e.provider in live]
     results = doctor.probe_models(entries, timeout_s=doctor.PROBE_WIZARD_S)
     if not results:  # probing off or nothing to probe — the free-alias path knows better
         return _free_default_step(store, ask, log)
     log(t("setup.wizard_models_head"))
+    kinds = {e.alias: t(f"setup.wizard_model_{registry.cost_kind(e)}") for e in entries}
+    width = max((len(kind) for kind in kinds.values()), default=0)
     for entry in entries:
         ok, detail = results.get(entry.alias, (False, ""))
-        note = t(f"setup.wizard_model_{registry.cost_kind(entry)}")
-        log(f"{'✓' if ok else '✗'} {note:<5} {detail}" + (f" — {entry.note}" if entry.note else ""))
+        log(f"{'✓' if ok else '✗'} {kinds[entry.alias]:<{width}} {detail}"
+            + (f" — {entry.note}" if entry.note else ""))
     recommended = doctor.recommend_model(entries, results)
     if not recommended:
         log("! " + doctor.probe_none_warning([e.alias for e in entries]))
@@ -542,10 +549,11 @@ def run_wizard(args) -> int:
     for p in config.check_project(cfg):
         print(f"! {p}")
     # 3) providers: all of them, then which to enable
-    _provider_step(ask=True, log=print)
+    states = doctor.provider_states()
+    _provider_step(states, ask=True, log=print)
     # 4) models: a live probe of every model of a provider that is on, then the role defaults
     store = Store()
-    _model_step(store, ask=True, log=print)
+    _model_step(store, states, ask=True, log=print)
     # 5) service
     want_service = bool(getattr(args, "service", False))
     if want_service:
@@ -664,8 +672,11 @@ def _cmd_noninteractive(args) -> int:
     chosen: dict[str, bool] = {}
     role_models: dict[str, str] = {}
     try:
-        chosen = _provider_step(ask=False, log=lines.append)
-        role_models = _model_step(Store(), ask=False, log=lines.append)
+        from ahub import doctor
+
+        states = doctor.provider_states()
+        chosen = _provider_step(states, ask=False, log=lines.append)
+        role_models = _model_step(Store(), states, ask=False, log=lines.append)
     except Exception as e:
         lines.append(t("setup.wizard_models_skip"))
         print(f"! {e}")

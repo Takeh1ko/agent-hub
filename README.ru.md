@@ -86,16 +86,19 @@ Opus 5.5 ($4 / $20 / $0.20 за миллион). Opus мог бы справит
 
 ## Установка
 
-Нужны Python 3.11+, git и хотя бы один поставщик: [opencode](https://opencode.ai) (бесплатные модели подходят) или
-Google Antigravity CLI (`agy`).
+Нужны Python 3.11+, git и хотя бы один поставщик: [opencode](https://opencode.ai) (бесплатные модели подходят),
+Google Antigravity CLI (`agy`) или Codex CLI (`@openai/codex`).
 
 ```
 pipx install ahub
 ahub setup                 # язык, проект, поставщики, модели, служба, навык Claude, Telegram (по желанию)
 ahub doctor                # что не так и как исправить
+ahub providers             # поставщики, которые знает ahub; providers enable|disable <имя>
 ```
 
-`ahub setup --yes` — все умолчания без вопросов. Telegram — по желанию: `pipx install 'ahub[telegram]'`.
+`ahub setup --yes` — все умолчания без вопросов. Мастер находит всех поставщиков (opencode, agy, codex), показывает,
+кто установлен и где есть вход, включает их и живой проверкой моделей подбирает модели для ролей.
+Telegram — по желанию: `pipx install 'ahub[telegram]'`.
 
 Платформы: Linux (systemd), macOS (launchd; проверяется в CI), Windows — только через WSL2.
 

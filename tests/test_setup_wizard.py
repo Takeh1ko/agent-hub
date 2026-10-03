@@ -222,6 +222,25 @@ def test_wizard_role_answer_must_have_answered(tmp_path, monkeypatch, capsys):
     assert _defaults()["reviewer"] == "spark"  # Enter takes the recommended one
 
 
+def test_a_provider_without_a_login_is_never_probed(tmp_path, monkeypatch, capsys):
+    """T50: agy is enabled by hand but nobody is logged in — its models are not probed and not offered."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch, agy=(True, False))
+    from ahub.tg import launcher
+
+    monkeypatch.setattr(launcher, "claude_bin", lambda: None)
+    tried = _probe_stub(monkeypatch, {"spark", "bunny"})
+    root = tmp_path / "nolog"
+    make_repo(root)
+    _answers(monkeypatch, ["", str(root), "opencode,agy", "", "", "n", "n", "n"])
+    assert cli.main(["setup"]) == 0
+    capsys.readouterr()
+    assert _enabled("agy") is True  # the user turned it on anyway
+    assert not [a for a in tried if a.startswith("gemini")]  # but no login — no probe
+    assert _defaults()["executor"] == "spark"
+
+
 def test_wizard_service_install_writes_units(tmp_path, monkeypatch, capsys):
     _tty(monkeypatch, True)
     _no_go(monkeypatch)
