@@ -1,8 +1,14 @@
-"""Tests for _age: minutes, hours, days, the 24 h boundary."""
+"""Tests for _age: minutes, hours, days, the 24 h boundary; the inbox/questions views: the head of a message
+in the list, the whole one by its number."""
 
 from __future__ import annotations
 
-from ahub.views import _age, report_essence
+from ahub import comms
+from ahub.store import Store
+from ahub.views import _age, inbox_text, message_text, question_text, report_essence
+
+LONG = ("Я тебе ставил конкретные цели на прошлой неделе, а ты сделал вид, что ничего не было, и я хочу "
+        "понять почему так вышло и что ты собираешься с этим делать дальше, потому что сроки уже в четверг.")
 
 
 def test_minuty():
@@ -37,3 +43,58 @@ def test_essence_ru():
 def test_essence_summary_en():
     rep = "## Summary\nleak in core/a.py:1\n\n## Details\nlots of text\n"
     assert "leak" in report_essence(rep) and "Details" not in report_essence(rep)
+
+
+def test_inbox_shows_two_lines_and_where_the_rest_is():
+    store = Store()
+    mid = comms.owner_message(store, LONG, project="P", chat_id=42)
+    comms.owner_message(store, "спасибо", project="P")
+    rows = comms.inbox(store, mark=False)
+
+    out = inbox_text(rows, w=100)
+    lines = out.splitlines()
+    assert lines[0].split() == ["#", "сообщение"]
+    block = [ln for ln in lines if ln.startswith("      ") or ln.startswith(f"  #{mid}")]
+    assert len(block) == 3  # two lines of the head + where the rest is
+    assert block[-1] == f"      … остальное: ahub inbox {mid}"
+    assert lines[-1].endswith("спасибо")  # a short message — the whole text, no hint
+    assert sum("ahub inbox" in ln for ln in lines) == 1
+
+
+def test_message_text_is_the_whole_message():
+    store = Store()
+    mid = comms.owner_message(store, LONG, project="P", chat_id=42, now=0)
+    out = message_text(comms.message(store, mid), w=100)
+    assert out.splitlines()[:2] == [f"#{mid}", "───"]
+    assert "Когда" in out and "Проект  P" in out and "Чат     42" in out
+    assert LONG in " ".join(out.split())  # every word of the message, nothing cut
+    assert "…" not in out and "ahub inbox" not in out  # no hint — nothing is cut
+
+
+def test_inbox_full_is_the_message_blocks():
+    store = Store()
+    comms.owner_message(store, LONG, project="P", now=0)
+    rows = comms.inbox(store, mark=False)
+    assert inbox_text(rows, full=True, w=100) == message_text(rows[0], w=100)
+    assert inbox_text([], full=True, w=100) == "новых сообщений нет"
+
+
+def test_question_text_options_and_answer():
+    store = Store()
+    qid = comms.ask(store, "сливать T12?", ["да", "нет"], task_id=7, project="P", now=0)
+    out = question_text(comms.question(store, qid), w=100)
+    assert out.splitlines()[:2] == [f"#{qid}", "───"]
+    assert "сливать T12?" in out and "Варианты" in out and "• да" in out and "• нет" in out
+    assert "Задача  T7" in out and "Ответ" not in out  # not answered yet
+
+    comms.answer(store, qid, "да")
+    out = question_text(comms.question(store, qid), w=100)
+    assert "Ответ  да" in out
+
+
+def test_a_hub_wide_row_has_no_project_line():
+    store = Store()
+    mid = comms.owner_message(store, "для всех", now=0)
+    out = message_text(comms.message(store, mid), w=100)
+    assert "Когда" in out and "Проект" not in out
+    assert comms.question(store, 99) is None and comms.message(store, 99) is None

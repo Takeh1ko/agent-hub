@@ -125,6 +125,66 @@ def test_say_ask_answer_alarms(env, capsys):
     assert ahub(capsys, "alarms")[1] == "тревог нет"
 
 
+LONG_OWNER = ("Я тебе ставил конкретные цели на прошлой неделе, а ты сделал вид, что ничего не было, и я хочу "
+              "понять почему так вышло и что ты собираешься с этим делать дальше, потому что сроки уже в четверг.")
+
+
+def test_inbox_reads_one_message_in_full(env, capsys):
+    """`ahub inbox` cuts the text to a cell and says where the rest is; `ahub inbox <id>` — the whole text."""
+    store, _ = env
+    mid = comms.owner_message(store, LONG_OWNER, project="P", chat_id=42)
+    comms.owner_message(store, "спасибо", project="P")
+
+    out = ahub(capsys, "inbox")[1]
+    assert out.splitlines()[0].split() == ["#", "сообщение"]
+    assert f"… остальное: ahub inbox {mid}" in out
+    assert "сроки уже в четверг." not in out  # the list cuts the message
+    assert comms.inbox(store, mark=False) == []  # and read it
+
+    unread = comms.owner_message(store, "ещё одно", project="P")
+    rc, out, err = ahub(capsys, "inbox", f"#{mid}")
+    assert rc == 0 and err == "", err
+    assert out.splitlines()[:2] == ["#1", "───"]
+    assert "Чат     42" in out and "сроки уже в четверг." in out  # the whole text, nothing cut
+    assert "ahub inbox" not in out  # nothing is cut — no hint
+    assert [r["id"] for r in comms.inbox(store, mark=False)] == [unread]  # reading one marks nothing
+
+    data = json.loads(ahub(capsys, "--json", "inbox", str(mid))[1])
+    assert data["message"]["text"] == LONG_OWNER and data["message"]["chat_id"] == 42
+
+
+def test_inbox_full_and_its_refusals(env, capsys):
+    store, _ = env
+    comms.owner_message(store, LONG_OWNER, project="P")
+    out = ahub(capsys, "inbox", "--full", "--peek")[1]
+    assert LONG_OWNER in " ".join(out.split()) and "ahub inbox" not in out
+    assert len(comms.inbox(store, mark=False)) == 1  # --peek
+
+    rc, out, err = ahub(capsys, "inbox", "99")
+    assert rc == 2 and out == "" and err.strip() == "ошибка: нет сообщения #99"
+    rc, out, err = ahub(capsys, "inbox", "xx")
+    assert rc == 2 and err.strip() == "ошибка: «xx» — не номер"
+    assert ahub(capsys, "--lang", "en", "inbox", "99")[2].strip() == "error: no message #99"
+
+
+def test_questions_reads_one_question_in_full(env, capsys):
+    store, _ = env
+    qid = comms.ask(store, "сливать T12?", ["да", "нет"], project="P")
+    rc, out, err = ahub(capsys, "questions", str(qid))
+    assert rc == 0 and err == "", err
+    assert out.splitlines()[:2] == [f"#{qid}", "───"]
+    assert "сливать T12?" in out and "Варианты" in out and "• нет" in out
+
+    comms.answer(store, qid, "да")
+    assert "Ответ  да" in ahub(capsys, "questions", str(qid))[1]  # an answered one is readable too
+    data = json.loads(ahub(capsys, "--json", "questions", str(qid))[1])
+    assert data["question"]["answer"] == "да" and data["question"]["options"] == ["да", "нет"]
+
+    rc, out, err = ahub(capsys, "questions", "99")
+    assert rc == 2 and out == "" and err.strip() == "ошибка: нет вопроса #99"
+    assert ahub(capsys, "questions", "xx")[2].strip() == "ошибка: «xx» — не номер"
+
+
 def test_l1_limit(env, capsys):
     store, _ = env
     for i in range(80):

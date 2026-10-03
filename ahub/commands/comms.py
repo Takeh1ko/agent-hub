@@ -3,6 +3,9 @@
 Every command here reads what an orchestrator reads, so every one of them is scoped by project
 (ahub/scope.py): the project of the current directory, --project X — X, --all — every project (the owner).
 `say`/`ask` write into the scope of the directory they were run from.
+
+`inbox <id>` and `questions <id>` read one row in full — the list views cut the text to a cell; the whole
+one is here (nothing is marked read by that: only `inbox` reads the inbox).
 """
 
 from __future__ import annotations
@@ -78,9 +81,39 @@ def cmd_ack(args) -> int:
     return 0
 
 
+def _row_num(ref: str) -> int:
+    """The number of a row: «36» or «#36»."""
+    from ahub.i18n import t
+
+    try:
+        return int(ref.lstrip("#"))
+    except ValueError as e:
+        raise CliError(t("err.bad_ref", ref=ref)) from e
+
+
+def _row(row: dict | None, sc: scope.Scope, kind: str, ref: str) -> dict:
+    """One row of the scope by its number, or a refusal: no such row — or one of another project,
+    with the way out (architecture §9 — the same rule as for a task)."""
+    from ahub.i18n import t
+
+    if row is None:
+        raise CliError(t(f"err.no_{kind}", ref=f"#{ref.lstrip('#')}"))
+    project = str(row.get("project") or "")
+    if scope.foreign(sc, project):
+        raise CliError(t("err.foreign_row", ref=f"#{row['id']}", project=project),
+                       t("err.foreign_task_hint", project=project))
+    return row
+
+
 def cmd_inbox(args) -> int:
-    rows = comms.inbox(Store(), mark=not args.peek, scope=scope.resolve(args))
-    emit(args, {"messages": rows}, views.inbox_text(rows))
+    store = Store()
+    sc = scope.resolve(args)
+    if args.id:
+        row = _row(comms.message(store, _row_num(args.id)), sc, "message", args.id)
+        emit(args, {"message": row}, views.message_text(row))
+        return 0
+    rows = comms.inbox(store, mark=not args.peek, scope=sc)
+    emit(args, {"messages": rows}, views.inbox_text(rows, full=args.full))
     return 0
 
 
@@ -108,7 +141,13 @@ def cmd_ask(args) -> int:
 
 
 def cmd_questions(args) -> int:
-    rows = comms.open_questions(Store(), scope=scope.resolve(args))
+    store = Store()
+    sc = scope.resolve(args)
+    if args.id:
+        row = _row(comms.question(store, _row_num(args.id)), sc, "question", args.id)
+        emit(args, {"question": row}, views.question_text(row))
+        return 0
+    rows = comms.open_questions(store, scope=sc)
     emit(args, {"questions": rows}, views.questions_text(rows))
     return 0
 
@@ -144,7 +183,9 @@ def register(subparsers) -> None:
     add_scope_args(a)
     a.set_defaults(func=cmd_ack)
     i = subparsers.add_parser("inbox", help=t("help.inbox"))
+    i.add_argument("id", nargs="?", help=t("help.row_id"))
     i.add_argument("--peek", action="store_true", help=t("help.inbox_peek"))
+    i.add_argument("--full", action="store_true", help=t("help.inbox_full"))
     add_scope_args(i)
     i.set_defaults(func=cmd_inbox)
     s = subparsers.add_parser("say", help=t("help.say"))
@@ -158,6 +199,7 @@ def register(subparsers) -> None:
     add_scope_args(q)
     q.set_defaults(func=cmd_ask)
     qs = subparsers.add_parser("questions", help=t("help.questions"))
+    qs.add_argument("id", nargs="?", help=t("help.row_id"))
     add_scope_args(qs)
     qs.set_defaults(func=cmd_questions)
     al = subparsers.add_parser("alarms", help=t("help.alarms"))

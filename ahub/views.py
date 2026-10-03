@@ -1,7 +1,7 @@
-"""What the orchestrator sees: L1 (status), L2 (task detail), history, questions, inbox — the levels and
-byte limits of contracts §5. Every block is scoped by project (ahub/scope.py): `scope` — the project of the
-orchestrator's repository, None — every project (the owner). The drawing primitives live in ahub/ui.py, the
-reason codes in ahub/reasons.py.
+"""What the orchestrator sees: L1 (status), L2 (task detail), history, questions, inbox (one message or
+question in full — `ahub inbox <id>`), the levels and byte limits of contracts §5. Every block is scoped by
+project (ahub/scope.py): `scope` — the project of the orchestrator's repository, None — every project (the
+owner). The drawing primitives live in ahub/ui.py, the reason codes in ahub/reasons.py.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from ahub.model import ACTIVE, WAITING_DECISION, State
 from ahub.scope import OWNER, Scope
 from ahub.scope import where as scope_where  # the SQL condition of a scope
 from ahub.store import Store, Task
-from ahub.time import now_ms
+from ahub.time import fmt_local, now_ms
 from ahub.ui import Value
 
 L1_LIMIT = 1500
@@ -29,6 +29,8 @@ QUESTION_BYTES = 240
 NOTES_BYTES = 400
 REPORT_BYTES = 700
 UNREAD_LINES = 3
+MSG_LINES = 2  # the lines of a message in the inbox list; the rest is under `ahub inbox <id>`
+MSG_INDENT = 2
 HISTORY_STATES = frozenset({State.ACCEPTED, State.REJECTED, State.DONE, State.NEEDS_DECISION, State.ERROR,
                             State.STOPPED})
 # a decision is pending — the detail view offers the commands
@@ -330,10 +332,70 @@ def questions_text(rows: list[dict], *, w: int | None = None) -> str:
     return ui.table(head, body, max_width=[4, None, 30], indent=2, w=w)
 
 
-def inbox_text(rows: list[dict], *, w: int | None = None) -> str:
-    """Unread owner messages: number and the text."""
+def question_text(row: dict, *, w: int | None = None) -> str:
+    """One owner question in full (L3): the header, the facts, the text, the options, the answer."""
+    title = f"#{row['id']}"
+    out = [title, ui.rule(min(ui.width(w), len(title)))]
+    out.extend(_facts([_row_facts(row)], w))
+    text = str(row.get("text") or "")
+    if text.strip():
+        out.append(ui.para(text, indent=MSG_INDENT, w=w))
+    options = [str(o) for o in (row.get("options") or [])]
+    if options:
+        out.append(_t("views.lbl_options"))
+        out.append(ui.bullets(options, indent=MSG_INDENT, w=w))
+    if str(row.get("answer") or ""):
+        out.append(ui.kv([(_t("views.lbl_answer"), str(row["answer"]))], indent=MSG_INDENT, w=w))
+    return "\n".join(out)
+
+
+def _row_facts(row: dict) -> list[tuple[str, Value]]:
+    """The facts of an owner message or question: when it came, whose it is, where it came from.
+    A row with no project is hub-wide, and one with no chat came from a command, not from Telegram."""
+    facts: list[tuple[str, Value]] = [(_t("views.lbl_when"), fmt_local(int(row.get("ts") or 0)))]
+    if row.get("project"):
+        facts.append((_t("views.lbl_project"), str(row["project"])))
+    if row.get("task_id"):  # a question may be about a task; a message has no task of its own
+        facts.append((_t("views.lbl_task"), f"T{row['task_id']}"))
+    if row.get("chat_id"):
+        facts.append((_t("views.lbl_chat"), str(row["chat_id"])))
+    return facts
+
+
+def message_text(row: dict, *, w: int | None = None) -> str:
+    """One owner message in full (L3): the header, the facts, the whole text (nothing of it cut)."""
+    title = f"#{row['id']}"
+    out = [title, ui.rule(min(ui.width(w), len(title)))]
+    out.extend(_facts([_row_facts(row)], w))
+    text = str(row.get("text") or "")
+    if text.strip():
+        out.append(ui.para(text, indent=MSG_INDENT, w=w))
+    return "\n".join(out)
+
+
+def _head(text: str, body: int, lines: int) -> tuple[list[str], bool]:
+    """The first `lines` lines of a text, wrapped, and whether something is left of it."""
+    wrapped = ui.para(text, indent=0, w=body).split("\n")
+    return wrapped[:lines], len(wrapped) > lines
+
+
+def inbox_text(rows: list[dict], *, full: bool = False, w: int | None = None) -> str:
+    """Unread owner messages: number and the head of the text; the whole one is `ahub inbox <id>`.
+
+    full — every message in full, one block per message (what the MCP tool reads).
+    """
     if not rows:
         return _t("comms.inbox_empty")
-    head = [_t("views.col_num"), _t("views.col_message")]
-    body = [[f"#{r['id']}", str(r.get("text") or "")] for r in rows]
-    return ui.table(head, body, max_width=[4, None], indent=2, w=w)
+    if full:
+        return "\n\n".join(message_text(r) for r in rows)
+    nw = max(len(f"#{r['id']}") for r in rows)
+    body = max(20, ui.width(w) - MSG_INDENT - nw - ui.GAP)
+    pad, cell = " " * MSG_INDENT, " " * MSG_INDENT + " " * (nw + ui.GAP)
+    out = [(pad + _t("views.col_num").ljust(nw) + " " * ui.GAP + _t("views.col_message")).rstrip()]
+    for r in rows:
+        lines, rest = _head(str(r.get("text") or ""), body, MSG_LINES)
+        out.append((pad + f"#{r['id']}".ljust(nw + ui.GAP) + lines[0]).rstrip())
+        out.extend((cell + ln).rstrip() for ln in lines[1:])
+        if rest:
+            out.append(cell + _t("views.more_msg", id=r["id"]))
+    return "\n".join(out)
