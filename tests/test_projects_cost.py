@@ -417,3 +417,24 @@ async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
         app.query_one("#tasks").move_cursor(row=3)  # the header row of B
         await pilot.pause(2.5)  # a refresh of the screen
         assert app.query_one("#tasks").cursor_row == 3
+
+
+async def test_top_cursor_survives_a_refresh_that_empties_the_table(hub, store):
+    """No rows left — the cursor goes back to the top row, never to row -1 (nothing is picked)."""
+    from ahub.tui.app import TopApp
+
+    tids = filled(store)
+    app = TopApp(store=store, projects=[])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        app.query_one("#tasks").move_cursor(row=3)  # the header row of B
+        ahead = {State.QUEUED: (State.PREPARING, State.WORKING, State.DONE, State.ACCEPTED),
+                 State.WORKING: (State.DONE, State.ACCEPTED), State.DONE: (State.ACCEPTED,)}
+        for tid in tids.values():  # every task leaves the current view (a stopped task still waits)
+            for st in ahead[store.get_task(tid).state]:
+                transitions.move(store, tid, st)
+        app.refresh_data()
+        await pilot.pause(0.4)
+        assert app._ids == [] and app.selected() is None
+        assert app.query_one("#tasks").cursor_row == 0
+        assert "нет задач" in str(app.query_one("#detail").render())

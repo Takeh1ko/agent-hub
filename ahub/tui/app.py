@@ -297,8 +297,8 @@ class TopApp(App):
         if cur:  # the same task stays picked when the rows move under it
             if cur in self._ids:
                 table.move_cursor(row=self._ids.index(cur))
-        elif row_at:  # the cursor is on a project header row — keep its place, not the first group
-            table.move_cursor(row=min(row_at, len(self._ids) - 1))
+        elif self._ids and row_at:  # the cursor is on a project header row — keep its place, not the
+            table.move_cursor(row=min(row_at, len(self._ids) - 1))  # first group (an empty table: the top)
         self.query_one("#feed", Static).update("\n".join(screen.feed[-7:]) or _t("tui.no_events"))
         self._show_detail()
         if self._pending:  # a request that arrived while this refresh was running — serve it now
