@@ -1,10 +1,8 @@
 """ahub entry point: subcommands are ahub/commands/*.py modules with register(subparsers).
 
 Shared `--json` flag — machine output; default compact text (orchestrator token savings).
-Config errors and expected refusals — `error: …`, plus `  hint: …` when the way out is known, exit 2.
-No arguments — the home screen (what is going on and what to run next), not argparse usage.
-
-`--help` groups the subcommands (Tasks, Watching, Setup, Models and providers, Integrations).
+        if hint:  # the way out — one more line
+            print(t("cli.hint", hint=hint), file=sys.stderr)
 
 Imports live inside functions: main() refuses on Windows before command imports
 (some modules pull fcntl, which is missing there).
@@ -104,6 +102,23 @@ def build_parser():
     return ap
 
 
+def command_names(ap=None) -> frozenset[str]:
+    """Every subcommand name, the nested ones too (`task new`, `models role`).
+
+    command_hint() reads a command while the words it sees are commands and stops at prose — it needs to
+    know the names; the set is built once from the parser itself, so a new command needs nothing here.
+    """
+    names: set[str] = set()
+    subs = getattr(ap or build_parser(), "_subparsers", None)
+    for group in getattr(subs, "_group_actions", []):
+        for name, parser in getattr(group, "choices", {}).items():
+            names.add(name)
+            nested = getattr(parser, "_subparsers", None)
+            for sub_group in getattr(nested, "_group_actions", []):
+                names |= set(getattr(sub_group, "choices", {}))
+    return frozenset(names)
+
+
 def main(argv: list[str] | None = None) -> int:
     if sys.platform == "win32":
         from ahub.i18n import t as _t
@@ -131,9 +146,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return int(func(args) or 0)
     except (ConfigError, CliError) as e:
-        hint = getattr(e, "hint", "") or command_hint(str(e))
+        hint = getattr(e, "hint", "") or command_hint(str(e), command_names())
         print(t("cli.error", msg=e), file=sys.stderr)
-        if hint:
+        if hint:  # the way out — one more line
             print(t("cli.hint", hint=hint), file=sys.stderr)
         return 2
     except KeyboardInterrupt:

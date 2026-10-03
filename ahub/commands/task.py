@@ -1,6 +1,7 @@
 """Task handles for the orchestrator: task new | status | result | log | stop | nudge | continue | accept | reject.
 
-Compact output (contracts §5, §7); reading a task implicitly acks its events.
+Compact output (contracts §5, §7); reading a task implicitly acks its events. A command that names one task belongs
+to that task's project (ahub/scope.py): a task of another project is refused, with the way out (--project/--all).
 """
 
 from __future__ import annotations
@@ -8,8 +9,8 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 
-from ahub import events, tasks, transitions, views
-from ahub.cliutil import CliError, add_project_arg, emit, resolve_project
+from ahub import events, scope, tasks, transitions, views
+from ahub.cliutil import CliError, add_project_arg, add_scope_args, check_task, emit, resolve_project
 from ahub.model import ACTIVE, WAITING_DECISION, Kind, State, parse_task_id
 from ahub.service import live_workers
 from ahub.store import Store, Task
@@ -19,7 +20,8 @@ def _csv(v: str | None) -> list[str]:
     return [x.strip() for x in (v or "").split(",") if x.strip()]
 
 
-def _task(store: Store, ref: str) -> Task:
+def _task(store: Store, ref: str, args) -> Task:
+    """The task by its reference, checked against the scope of the handle (ahub/scope.py)."""
     from ahub.i18n import t as _t
 
     try:
@@ -29,6 +31,7 @@ def _task(store: Store, ref: str) -> Task:
     t = store.get_task(tid)
     if t is None:
         raise CliError(_t("err.no_task", ref=ref), hint=_t("hint.status"))
+    check_task(args, t)
     return t
 
 
@@ -78,7 +81,7 @@ def cmd_status(args) -> int:
     store = Store()
     live = live_workers()
     if args.task:
-        t = _task(store, args.task)
+        t = _task(store, args.task, args)
         events.ack_task(store, t.id)
         from ahub import reasons
 
@@ -86,28 +89,26 @@ def cmd_status(args) -> int:
                     "state_reason_text": reasons.text(t.state_reason)},
              views.task_text(store, t, live=live))
         return 0
-    project = None
-    if args.project:
-        project = resolve_project(args).name
+    sc = scope.resolve(args)
     from ahub import config, pulse, reasons
 
     projects, _errs = config.load_projects()
     pulses = pulse.all_pulses(store, live=live, projects=projects)
-    text = views.status_text(store, project=project, live=live, pulses=pulses)
-    queued = store.list_tasks(states={State.QUEUED}, project=project)
-    data = {"active": [asdict(t) for t in store.list_tasks(states=ACTIVE, project=project)],
-            "waiting": [asdict(t) for t in store.list_tasks(states=WAITING_DECISION, project=project)],
+    text = views.status_text(store, scope=sc, live=live, pulses=pulses)
+    queued = store.list_tasks(states={State.QUEUED}, projects=sc.projects)
+    data = {"active": [asdict(t) for t in store.list_tasks(states=ACTIVE, projects=sc.projects)],
+            "waiting": [asdict(t) for t in store.list_tasks(states=WAITING_DECISION, projects=sc.projects)],
             "queued": [{"id": t.id, "label": t.label, "state": t.state.value,
                         "reason": t.state_reason,
                         "reason_text": reasons.text(t.state_reason)} for t in queued],
-            "live": live}
+            "project": sc.name, "live": live}
     emit(args, data, text)
     return 0
 
 
 def cmd_result(args) -> int:
     store = Store()
-    t = _task(store, args.task)
+    t = _task(store, args.task, args)
     events.ack_task(store, t.id)
     emit(args, {"task": asdict(t)}, views.result_text(store, t, full=args.full, max_bytes=args.max_bytes))
     return 0
@@ -115,7 +116,7 @@ def cmd_result(args) -> int:
 
 def cmd_log(args) -> int:
     store = Store()
-    t = _task(store, args.task)
+    t = _task(store, args.task, args)
     emit(args, {"sessions": [asdict(s) for s in store.list_sessions(t.id)]},
          views.log_text(store, t, max_bytes=args.max_bytes))
     return 0
@@ -137,7 +138,7 @@ def _decide(args, fn, next_key: str = "") -> int:
     from ahub.accept import DecisionError
 
     store = Store()
-    t = _task(store, args.task)
+    t = _task(store, args.task, args)
     try:
         msg = fn(store, t)
     except DecisionError as e:
@@ -206,7 +207,7 @@ def cmd_model(args) -> int:
 
 def cmd_stop(args) -> int:
     store = Store()
-    t = _task(store, args.task)
+    t = _task(store, args.task, args)
     from ahub import reasons
     from ahub.i18n import t as _t
 
@@ -223,7 +224,7 @@ def cmd_stop(args) -> int:
 def cmd_nudge(args) -> int:
     """`ahub nudge T12 "text"` — a message to a working agent in its own session."""
     store = Store()
-    t = _task(store, args.task)
+    t = _task(store, args.task, args)
     from ahub.i18n import t as _t
 
     try:
@@ -240,7 +241,7 @@ def cmd_diff(args) -> int:
     from ahub.i18n import t as _t
 
     store = Store()
-    t = _task(store, args.task)
+    t = _task(store, args.task, args)
     if not t.worktree or not Path(t.worktree).is_dir():
         raise CliError(_t("err.no_worktree", label=t.label))
     base = gates.effective_base(_project_of(store, t), t)
@@ -251,10 +252,11 @@ def cmd_diff(args) -> int:
 
 def cmd_history(args) -> int:
     store = Store()
-    project = resolve_project(args).name if args.project else None
-    done = [t for t in store.list_tasks(project=project, newest_first=True)
+    sc = scope.resolve(args)
+    done = [t for t in store.list_tasks(projects=sc.projects, newest_first=True)
             if t.state in views.HISTORY_STATES][: args.n]
-    emit(args, {"tasks": [asdict(t) for t in done]}, views.history_text(store, project=project, limit=args.n))
+    emit(args, {"tasks": [asdict(t) for t in done], "project": sc.name},
+         views.history_text(store, scope=sc, limit=args.n))
     return 0
 
 
@@ -293,21 +295,24 @@ def register(subparsers) -> None:
 
     s = subparsers.add_parser("status", help=t("help.status"))
     s.add_argument("task", nargs="?")
-    add_project_arg(s)
+    add_scope_args(s)
     s.set_defaults(func=cmd_status)
     r = subparsers.add_parser("result", help=t("help.result"))
     r.add_argument("task")
     r.add_argument("--full", action="store_true")
     r.add_argument("--max-bytes", type=int, default=views.L3_DEFAULT)
+    add_scope_args(r)
     r.set_defaults(func=cmd_result)
     lg = subparsers.add_parser("log", help=t("help.log"))
     lg.add_argument("task")
     lg.add_argument("--max-bytes", type=int, default=8000)
+    add_scope_args(lg)
     lg.set_defaults(func=cmd_log)
     nd = subparsers.add_parser("nudge", help=t("help.nudge"))
     nd.add_argument("task")
     nd.add_argument("text", help=t("help.nudge"))
     nd.add_argument("--by", default="orchestrator")
+    add_scope_args(nd)
     nd.set_defaults(func=cmd_nudge)
     for name, fn, key in (("stop", cmd_stop, "help.stop"), ("continue", cmd_continue, "help.continue"),
                           ("accept", cmd_accept, "help.accept"), ("reject", cmd_reject, "help.reject")):
@@ -317,11 +322,13 @@ def register(subparsers) -> None:
         x.add_argument("--by", default="orchestrator")
         if name == "reject":
             x.add_argument("--keep", action="store_true", help=t("help.reject_keep"))
+        add_scope_args(x)
         x.set_defaults(func=fn)
     rw = subparsers.add_parser("rework", help=t("help.rework"))
     rw.add_argument("task")
     rw.add_argument("--notes", required=True)
     rw.add_argument("--by", default="orchestrator")
+    add_scope_args(rw)
     rw.set_defaults(func=cmd_rework)
     ed = sub.add_parser("edit", help=t("help.task_edit"))
     ed.add_argument("task")
@@ -333,11 +340,13 @@ def register(subparsers) -> None:
     ed.add_argument("--rounds", type=int, help=t("help.task_edit_rounds"))
     ed.add_argument("--model", help=t("help.task_edit_model"))
     ed.add_argument("--by", default="orchestrator")
+    add_scope_args(ed)
     ed.set_defaults(func=cmd_edit)
     ex = subparsers.add_parser("extend", help=t("help.extend"))
     ex.add_argument("task")
     ex.add_argument("--paths", required=True)
     ex.add_argument("--by", default="orchestrator")
+    add_scope_args(ex)
     ex.set_defaults(func=cmd_extend)
     bu = subparsers.add_parser("budget", help=t("help.budget"))
     bu.add_argument("task")
@@ -346,17 +355,20 @@ def register(subparsers) -> None:
     gb.add_argument("--set", type=float, help=t("help.budget_set"))
     bu.add_argument("--add-usd", type=float, help=t("help.budget_add_usd"))
     bu.add_argument("--by", default="orchestrator")
+    add_scope_args(bu)
     bu.set_defaults(func=cmd_budget)
     mo = subparsers.add_parser("model", help=t("help.model"))
     mo.add_argument("task")
     mo.add_argument("alias")
     mo.add_argument("--by", default="orchestrator")
+    add_scope_args(mo)
     mo.set_defaults(func=cmd_model)
     df = subparsers.add_parser("diff", help=t("help.diff"))
     df.add_argument("task")
     df.add_argument("--max-bytes", type=int, default=views.L3_DEFAULT)
+    add_scope_args(df)
     df.set_defaults(func=cmd_diff)
     hi = subparsers.add_parser("history", help=t("help.history"))
     hi.add_argument("-n", type=int, default=20)
-    add_project_arg(hi)
+    add_scope_args(hi)
     hi.set_defaults(func=cmd_history)

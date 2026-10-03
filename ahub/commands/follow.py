@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from ahub import providers, transcript
-from ahub.cliutil import CliError
+from ahub.cliutil import CliError, add_scope_args
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Role
 from ahub.service import live_workers
@@ -51,7 +51,7 @@ def cmd_follow(args) -> int:
     from ahub.commands.task import _task
 
     store = Store()
-    t = _task(store, args.task)
+    t = _task(store, args.task, args)
     session = _pick(store.list_sessions(t.id), args.role, args.round)
     if session is None:
         raise CliError(_t("follow.no_sessions", label=t.label), hint=_t("hint.status_task", label=t.label))
@@ -103,4 +103,5 @@ def register(subparsers) -> None:
     p.add_argument("--round", type=int, help=t("help.follow_round"))
     p.add_argument("--full", action="store_true", help=t("help.follow_full"))
     p.add_argument("--no-follow", action="store_true", help=t("help.follow_no_follow"))
+    add_scope_args(p)
     p.set_defaults(func=cmd_follow)

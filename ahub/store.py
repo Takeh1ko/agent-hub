@@ -297,8 +297,10 @@ class Store:
             return _do(c)
 
     def list_tasks(self, *, states: set[State] | frozenset[State] | None = None,
-                   project: str | None = None, limit: int | None = None,
+                   project: str | None = None, projects: tuple[str, ...] | None = None,
+                   limit: int | None = None,
                    newest_first: bool = False) -> list[Task]:
+        """Tasks, optionally of one project (`project`) or of a scope (`projects`, ahub/scope.py)."""
         sql = "SELECT * FROM task"
         where, args = [], []
         if states is not None:
@@ -309,6 +311,9 @@ class Store:
         if project is not None:
             where.append("project=?")
             args.append(project)
+        if projects:
+            where.append(f"project IN ({','.join('?' * len(projects))})")
+            args.extend(projects)
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY id " + ("DESC" if newest_first else "ASC")

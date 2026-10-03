@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -52,6 +53,15 @@ def home(monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(base / "s"))
     yield base
     shutil.rmtree(base, ignore_errors=True)
+
+
+def in_project(project, tmp_path, monkeypatch) -> None:
+    """The project file and the current directory: a command run from the repository of a task sees it
+    (ahub/scope.py refuses a task of another project)."""
+    write(Path(project.root) / ".hub.toml", 'schema_version = 2\nname = "P"\n'
+          f'worktrees = "{tmp_path / "wt"}"\nallowed_paths = ["core/**", "tests/**"]\n')
+    write(paths.global_config_path(), f'projects = ["{project.root}"]\n')
+    monkeypatch.chdir(str(project.root))
 
 
 def run(capsys, *argv: str) -> tuple[int, str]:
@@ -368,14 +378,14 @@ def test_the_json_shape_did_not_change(capsys, monkeypatch):
     assert (rc, json.loads(out)) == (0, {"ok": True, "name": "opencode", "enabled": True})
 
 
-def test_review_findings_are_listed_in_the_task_detail(capsys, tmp_path):
+def test_review_findings_are_listed_in_the_task_detail(capsys, monkeypatch, tmp_path):
     """A task that ended with open findings says what they are — the verdicts are in the copy."""
-
     from tests.enginekit import install_fake, make_project
     from tests.test_engine_code import HIGH, code_task, verdict, work
     from tests.test_engine_code import run as run_engine
 
     project = make_project(tmp_path)
+    in_project(project, tmp_path, monkeypatch)
     store = Store()
     install_fake(store, [work(), verdict(v="changes", findings=HIGH)])
     t = code_task(store, project, review_models=["fake"], review_rounds=1)
@@ -409,19 +419,14 @@ def test_no_findings_block_without_the_copy(tmp_path):
 
 
 def test_task_edit_changes_the_review_panel_and_the_executor(capsys, monkeypatch, tmp_path):
-    from pathlib import Path
-
-    from ahub import cli, paths, tasks
+    from ahub import cli, tasks
     from ahub.model import Kind
     from tests.enginekit import install_fake, make_project
 
     project = make_project(tmp_path)
     store = Store()
     install_fake(store, [])
-    write(Path(project.root) / ".hub.toml", 'schema_version = 2\nname = "P"\n'
-          f'worktrees = "{tmp_path / "wt"}"\nallowed_paths = ["core/**", "tests/**"]\n')
-    write(paths.global_config_path(), f'projects = ["{project.root}"]\n')
-    monkeypatch.chdir(str(project.root))
+    in_project(project, tmp_path, monkeypatch)
     t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.CODE, title="fix", spec="do it",
                                            paths=["core/**"], accept=["tests/test_a.py"], model="spark"),
                      project, collect=False)
@@ -441,19 +446,14 @@ def test_task_edit_changes_the_review_panel_and_the_executor(capsys, monkeypatch
 
 
 def test_the_review_panel_is_locked_once_the_review_started(capsys, monkeypatch, tmp_path):
-    from pathlib import Path
-
-    from ahub import cli, paths, tasks, transitions
+    from ahub import cli, tasks, transitions
     from ahub.model import Kind, State
     from tests.enginekit import install_fake, make_project
 
     project = make_project(tmp_path)
     store = Store()
     install_fake(store, [])
-    write(Path(project.root) / ".hub.toml", 'schema_version = 2\nname = "P"\n'
-          f'worktrees = "{tmp_path / "wt"}"\nallowed_paths = ["core/**", "tests/**"]\n')
-    write(paths.global_config_path(), f'projects = ["{project.root}"]\n')
-    monkeypatch.chdir(str(project.root))
+    in_project(project, tmp_path, monkeypatch)
     t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.CODE, title="fix", spec="do it",
                                            paths=["core/**"], accept=["tests/test_a.py"], model="spark",
                                            review_models=["spark"], review_rounds=1),
