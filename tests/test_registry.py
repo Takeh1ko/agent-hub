@@ -96,9 +96,11 @@ def test_cli_models(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path / "p")
     assert cli.main(["models", "--role", "executor"]) == 0
     out = capsys.readouterr().out
-    assert "spark★" in out and "deepseek-flash(запрет проекта)" in out
+    # the menus are a table: role, default, the other models of the role
+    assert out.splitlines()[0].split() == ["роль", "по", "умолчанию", "остальные"]
+    assert "executor" in out and "spark" in out and "deepseek-flash(запрет проекта)" in out
     assert cli.main(["models", "role", "scout", "--add", "mimo-flash", "--default"]) == 0
-    assert "mimo-flash★" in capsys.readouterr().out
+    assert "mimo-flash" in capsys.readouterr().out
     assert cli.main(["--json", "models", "--role", "scout"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert {"alias": "mimo-flash", "default": True} in data["roles"]["scout"]
@@ -140,7 +142,12 @@ def test_cli_models_check_probes(capsys, monkeypatch):
     monkeypatch.setattr(doctor, "probe_model", _probe)
     assert cli.main(["models", "check", "bunny", "spark-free"]) == 0
     assert tried == ["bunny", "spark-free"]
-    assert capsys.readouterr().out.splitlines() == ["✓ bunny: ответил", "✓ spark-free: ответил"]
+    assert capsys.readouterr().out.splitlines() == [
+        "     модель      проба",
+        "  ✓  bunny       ответил",
+        "  ✓  spark-free  ответил",
+        "2 из 2 моделей отвечают",
+    ]
     assert cli.main(["--json", "models", "check", "spark"]) == 1
     data = json.loads(capsys.readouterr().out)
     assert data["checked"] == [{"alias": "spark", "ok": False, "detail": "spark: молчит"}]

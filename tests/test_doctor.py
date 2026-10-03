@@ -582,13 +582,13 @@ def test_cli_codes_and_json(capsys, monkeypatch):
         assert c["ok"] in (True, False, None)
     # forced all-ok -> exit 0, one fail -> exit 1 with marks and fix arrow
     monkeypatch.setattr(doctor, "run_all",
-                        lambda: [doctor.Check("python", True, "d", ""),
-                                 doctor.Check("git", None, "d", "")])
+                        lambda *a, **k: [doctor.Check("python", True, "d", ""),
+                                         doctor.Check("git", None, "d", "")])
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
     assert "\u2713" in out and "\u2013" in out
     monkeypatch.setattr(doctor, "run_all",
-                        lambda: [doctor.Check("python", False, "bad", "fix it")])
+                        lambda *a, **k: [doctor.Check("python", False, "bad", "fix it")])
     assert cli.main(["doctor"]) == 1
     out = capsys.readouterr().out
     assert "\u2717" in out and "\u2192" in out and "fix it" in out
