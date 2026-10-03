@@ -135,6 +135,57 @@ def test_should_stop_kills_group(fake, tmp_path):
     assert not any(procs.alive(k) for k in kids), "дети пережили остановку"
 
 
+def test_poll_failure_kills_the_group_and_lets_the_error_out(fake, tmp_path):
+    """should_stop() cannot poll: the provider group is killed, the run raises PollFailed (no busy loop)."""
+    import threading
+
+    from ahub import procs
+    from ahub.providers.runner import PollFailed
+
+    pids, holder, kids = [], {}, []
+
+    def broken_stop():
+        kids.extend(procs.children(pids[0]))  # the agent is running its own child
+        raise PollFailed("request: TypeError")
+
+    def go():
+        try:
+            holder["r"] = run(fake, spec(tmp_path, {"session": "s", "steps": [{"child": 30}]}, idle_s=0),
+                              on_start=pids.append, should_stop=broken_stop)
+        except PollFailed as e:  # the run gives the error to the caller (in the worker: to the process)
+            holder["error"] = e
+
+    th = threading.Thread(target=go)
+    th.start()
+    th.join(20)
+    assert isinstance(holder.get("error"), PollFailed)
+    assert kids, "ребёнок не появился"
+    time.sleep(0.3)
+    assert not procs.alive(pids[0]), "провайдер пережил отказ опроса"
+    assert not any(procs.alive(k) for k in kids), "дети пережили отказ опроса"
+
+
+def test_request_stop_ends_a_live_run(fake, tmp_path):
+    """A signal in this process (worker SIGTERM): every live run is stopped by group."""
+    import threading
+
+    from ahub import procs
+    from ahub.providers import runner
+
+    pids, holder = [], {}
+    th = threading.Thread(target=lambda: holder.setdefault("r", run(
+        fake, spec(tmp_path, {"session": "s", "steps": [{"sleep": 30}]}, idle_s=0),
+        on_start=pids.append)))
+    th.start()
+    time.sleep(1.0)
+    assert procs.alive(pids[0])
+    runner.request_stop()
+    th.join(20)
+    assert holder["r"].outcome is Outcome.KILLED
+    time.sleep(0.3)
+    assert not procs.alive(pids[0]), "процесс провайдера пережил request_stop"
+
+
 def test_transient_error(fake, tmp_path):
     r = run(fake, spec(tmp_path, {"session": "s", "steps": [
         {"event": {"type": "error", "message": "Unexpected server error"}}], "exit": 1}))

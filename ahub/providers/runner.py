@@ -16,6 +16,10 @@ Same for all providers — the provider module only builds the command and parse
 - After any turn end (including clean ones) leftover agent processes are reaped: the whole process group plus
   descendants seen during the turn that escaped the group (setsid). Otherwise abandoned background processes
   live forever (09-30 case: 12 × `yes` from the T28 task agent loaded all cores for a day).
+- request_stop() — a signal in this process (a task process got SIGTERM) stops every live run by group
+  and every other child process it started.
+- PollFailed — should_stop() cannot poll at all (the core is on a schema it cannot read). The provider group
+  is killed and the error is let out: the caller stops the session and exits, the service re-picks the task.
 """
 
 from __future__ import annotations
@@ -39,6 +43,47 @@ TAIL_POLL_S = 0.05
 MAX_LINE = 1_000_000  # bytes per output line; longer lines are cut
 KILL_GRACE_S = 5.0
 _log = hublog.get("runner")
+
+
+class PollFailed(RuntimeError):
+    """The stop predicate of the core keeps failing — the turn cannot be governed any more."""
+
+
+_stop = threading.Event()  # a signal asked every run in this process to stop
+_live: dict[int, subprocess.Popen] = {}  # pid → run (stop by group from a signal handler)
+_live_lock = threading.Lock()
+
+
+def request_stop() -> None:
+    """Stop every provider run in this process by group and every other child process.
+
+    A signal handler in a task process: nothing started by this process may outlive it (the provider
+    session runs in its own group, a test run under the acceptance lock does not).
+    """
+    _stop.set()
+    with _live_lock:
+        running = list(_live.values())
+    for p in running:
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    me = os.getpid()
+    tracked = {pid: procs.start_time(pid) for pid in procs.children(me)}
+    if not tracked:
+        return
+    try:
+        killed = reap(None, tracked)  # our own group would be us — the children only
+    except Exception:
+        _log.exception("stopping the child processes failed")
+    else:
+        if killed:
+            _log.warning("stopped %d child processes on request", len(killed))
+
+
+def reset_stop() -> None:
+    """Forget the stop request (a test process runs many scenarios)."""
+    _stop.clear()
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
@@ -230,10 +275,14 @@ def run(provider: Provider, spec: RunSpec, *,
     deadline = time.monotonic() + max(1, int(spec.timeout_s))
     tracked: dict[int, int | None] = {}  # agent descendants (pid → start time) — reap after the turn
     last_track = 0.0
+    with _live_lock:
+        _live[proc.pid] = proc
     try:
         while True:
             try:
                 proc.wait(timeout=POLL_S)
+                if _stop.is_set():
+                    forced = Outcome.KILLED  # request_stop() has already killed the group
                 break
             except subprocess.TimeoutExpired:
                 pass
@@ -243,9 +292,16 @@ def run(provider: Provider, spec: RunSpec, *,
                 for d in procs.descendants(proc.pid):
                     if d not in tracked:
                         tracked[d] = procs.start_time(d)
+            if _stop.is_set():  # a signal in this process (worker SIGTERM)
+                forced = Outcome.KILLED
+                _kill_group(proc)
+                break
             if should_stop is not None:
                 try:
                     stop = bool(should_stop())
+                except PollFailed:  # the core cannot poll — kill the provider and let the error out
+                    _kill_group(proc)
+                    raise
                 except Exception:
                     _log.exception("should_stop failed", extra=ctx)
                     stop = False
@@ -265,6 +321,8 @@ def run(provider: Provider, spec: RunSpec, *,
                 _kill_group(proc)
                 break
     finally:
+        with _live_lock:
+            _live.pop(proc.pid, None)
         exited.set()
         t_out.join(timeout=30)
         try:

@@ -1,18 +1,24 @@
 """Task process: python -m ahub.worker T12
 
 Started by the service (V09b) in its own process group; drives one task with the engine and exits.
-Exit code: 0 — task reached a decision (any), 2 — no task/project, 3 — held by another owner.
+Exit code: 0 — task reached a decision (any), 2 — no task/project, 3 — held by another owner,
+4 — the owner poll keeps failing (the code cannot read the schema; the service re-picks the task).
+
+SIGTERM/SIGINT: the provider process group is stopped (runner stops a run by group), then the process
+exits — the task stays active and the service picks it up as an orphan, on the current code.
 """
 
 from __future__ import annotations
 
+import signal
 import sys
 
 from ahub import config
 from ahub import log as hublog
-from ahub.engine import Engine
+from ahub.engine import Engine, PollFailed
 from ahub.i18n import t as _t
 from ahub.model import parse_task_id
+from ahub.providers import runner
 from ahub.store import Store
 
 CMD_MARK = "ahub.worker"  # the service finds task processes in /proc by it
@@ -26,6 +32,20 @@ def find_project(name: str) -> config.ProjectConfig | None:
     for e in errors:
         hublog.get("worker").warning("project config: %s", e)
     return None
+
+
+def stop_provider(signum, frame) -> None:
+    """Signal handler: no provider process may outlive this process."""
+    runner.request_stop()
+    raise SystemExit(0)
+
+
+def install_signal_handlers() -> None:
+    for s in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(s, stop_provider)
+        except ValueError:  # not the main thread (tests, an embedding process)
+            pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -47,7 +67,11 @@ def main(argv: list[str] | None = None) -> int:
         lg.error("project %s not found in hub config", task.project)
         return 2
     lg.info("task process starting")
-    res = Engine(store, project, tid).run()
+    install_signal_handlers()
+    try:
+        res = Engine(store, project, tid).run()
+    except PollFailed:
+        return 4  # the engine has logged it once; the task stays for the service to re-pick
     lg.info("task process done: %s %s", res.state.value, res.reason[:200])
     return 3 if res.reason == _t("engine.busy") else 0
 
