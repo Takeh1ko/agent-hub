@@ -5,6 +5,7 @@ import pytest
 from ahub import events, reasons, transitions
 from ahub.i18n import _reset
 from ahub.model import Ev, State
+from ahub.scope import OWNER, Scope
 from ahub.store import Store
 
 
@@ -63,8 +64,9 @@ def test_project_filter(store):
     done_task(store, project="A")
     done_task(store, project="B")
     store.add_event(Ev.ALARM, critical=True, payload={"text": "общая"})  # no project — for everyone
-    got = events.ready_batch(store, project="A", now=10**13)
+    got = events.ready_batch(store, scope=Scope(("A",)), now=10**13)
     assert sorted(e.project for e in got) == ["", "A"]
+    assert len(events.ready_batch(store, scope=OWNER, now=10**13)) == 3  # the owner sees every project
 
 
 def test_lines_format(store):

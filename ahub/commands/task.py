@@ -8,8 +8,8 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 
-from ahub import events, tasks, transitions, views
-from ahub.cliutil import CliError, add_project_arg, emit, resolve_project
+from ahub import events, scope, tasks, transitions, views
+from ahub.cliutil import CliError, add_project_arg, add_scope_args, emit, resolve_project
 from ahub.model import ACTIVE, WAITING_DECISION, Kind, State, parse_task_id
 from ahub.service import live_workers
 from ahub.store import Store, Task
@@ -85,21 +85,19 @@ def cmd_status(args) -> int:
                     "state_reason_text": reasons.text(t.state_reason)},
              views.task_text(store, t, live=live))
         return 0
-    project = None
-    if args.project:
-        project = resolve_project(args).name
+    sc = scope.resolve(args)
     from ahub import config, pulse, reasons
 
     projects, _errs = config.load_projects()
     pulses = pulse.all_pulses(store, live=live, projects=projects)
-    text = views.status_text(store, project=project, live=live, pulses=pulses)
-    queued = store.list_tasks(states={State.QUEUED}, project=project)
-    data = {"active": [asdict(t) for t in store.list_tasks(states=ACTIVE, project=project)],
-            "waiting": [asdict(t) for t in store.list_tasks(states=WAITING_DECISION, project=project)],
+    text = views.status_text(store, scope=sc, live=live, pulses=pulses)
+    queued = store.list_tasks(states={State.QUEUED}, projects=sc.projects)
+    data = {"active": [asdict(t) for t in store.list_tasks(states=ACTIVE, projects=sc.projects)],
+            "waiting": [asdict(t) for t in store.list_tasks(states=WAITING_DECISION, projects=sc.projects)],
             "queued": [{"id": t.id, "label": t.label, "state": t.state.value,
                         "reason": t.state_reason,
                         "reason_text": reasons.text(t.state_reason)} for t in queued],
-            "live": live}
+            "project": sc.name, "live": live}
     emit(args, data, text)
     return 0
 
@@ -238,10 +236,11 @@ def cmd_diff(args) -> int:
 
 def cmd_history(args) -> int:
     store = Store()
-    project = resolve_project(args).name if args.project else None
-    done = [t for t in store.list_tasks(project=project, newest_first=True)
+    sc = scope.resolve(args)
+    done = [t for t in store.list_tasks(projects=sc.projects, newest_first=True)
             if t.state in views.HISTORY_STATES][: args.n]
-    emit(args, {"tasks": [asdict(t) for t in done]}, views.history_text(store, project=project, limit=args.n))
+    emit(args, {"tasks": [asdict(t) for t in done], "project": sc.name},
+         views.history_text(store, scope=sc, limit=args.n))
     return 0
 
 
@@ -280,7 +279,7 @@ def register(subparsers) -> None:
 
     s = subparsers.add_parser("status", help=t("help.status"))
     s.add_argument("task", nargs="?")
-    add_project_arg(s)
+    add_scope_args(s)
     s.set_defaults(func=cmd_status)
     r = subparsers.add_parser("result", help=t("help.result"))
     r.add_argument("task")
@@ -342,5 +341,5 @@ def register(subparsers) -> None:
     df.set_defaults(func=cmd_diff)
     hi = subparsers.add_parser("history", help=t("help.history"))
     hi.add_argument("-n", type=int, default=20)
-    add_project_arg(hi)
+    add_scope_args(hi)
     hi.set_defaults(func=cmd_history)

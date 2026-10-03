@@ -134,6 +134,7 @@ def test_views_events_en(monkeypatch, tmp_path):
     """Step 3: L1/L2 and the DONE line in English (AHUB_LANG=en)."""
     from ahub import events, transitions, views
     from ahub.model import State
+    from ahub.scope import Scope
     from ahub.store import Store
 
     monkeypatch.setenv("AHUB_LANG", "en")
@@ -174,7 +175,7 @@ def test_views_events_en(monkeypatch, tmp_path):
     assert "Report" in l2 and "KB" in l2
     assert "Next" in l2 and "ahub accept T2" in l2
 
-    assert views.status_text(store, project="NOPE", now=now).startswith("quiet:")
+    assert views.status_text(store, scope=Scope(("NOPE",)), now=now).startswith("quiet:")
     import re as _re
 
     assert not _re.search(r"[а-яА-ЯёЁ]", l1) and not _re.search(r"[а-яА-ЯёЁ]", l2 + line)

@@ -2,6 +2,9 @@
 
 - Only needs_reaction events wake anyone. At once — owner_message, answer, and critical ones; the rest — batched
   over the grouping window (from the oldest undelivered).
+- Everything an orchestrator reads is scoped by project (ahub/scope.py): `scope` is the project of its
+  repository, `None` — every project (the owner). Acknowledgement is scoped the same way: `ack` in one project
+  never marks the events of another read.
 - "Delivered" is set by wait/watch handoff; "acked" — ack (explicit, or implicit on reading the task/inbox).
 - Delivered but unacked is re-offered once after REDELIVER_MS — so nothing is lost
   if the orchestrator never picked it up, without waking it with the same thing in a loop.
@@ -16,6 +19,7 @@ from collections.abc import Callable
 from ahub import reasons, ui
 from ahub.i18n import t
 from ahub.model import Ev
+from ahub.scope import Scope, where
 from ahub.store import Event, Store, Task
 from ahub.time import now_ms
 
@@ -30,13 +34,14 @@ TASK_REACTIONS = (Ev.DONE.value, Ev.NEEDS_DECISION.value, Ev.ERROR.value)
 DEFAULT_WHO = "claude"
 
 
-def _deliverable(store: Store, now: int, project: str | None) -> list[Event]:
+def _deliverable(store: Store, now: int, scope: Scope | None) -> list[Event]:
     sql = ("SELECT * FROM event WHERE needs_reaction=1 AND acked_at IS NULL"
            " AND (delivered_at IS NULL OR (delivered_at<? AND deliveries<?))")
     args: list = [now - REDELIVER_MS, MAX_DELIVERIES]
-    if project is not None:
-        sql += " AND (project=? OR project='')"
-        args.append(project)
+    cond, extra = where(scope)
+    if cond:
+        sql += " AND " + cond
+        args += extra
     sql += " ORDER BY id"
     with store.read() as c:
         return [Event.from_row(r) for r in c.execute(sql, args)]
@@ -46,11 +51,11 @@ def is_immediate(ev: Event) -> bool:
     return ev.critical or ev.kind in IMMEDIATE
 
 
-def ready_batch(store: Store, *, now: int | None = None, project: str | None = None,
+def ready_batch(store: Store, *, now: int | None = None, scope: Scope | None = None,
                 window_ms: int = GROUP_WINDOW_MS) -> list[Event]:
     """What to hand out now: everything available if urgent or the oldest window expired; else empty."""
     ts = now if now is not None else now_ms()
-    evs = _deliverable(store, ts, project)
+    evs = _deliverable(store, ts, scope)
     if not evs:
         return []
     if any(is_immediate(e) for e in evs) or ts - min(e.ts for e in evs) >= window_ms:
@@ -67,8 +72,8 @@ def mark_delivered(store: Store, ids: list[int], *, now: int | None = None) -> N
 
 
 def ack(store: Store, ids: list[int] | None = None, *, kinds: tuple[str, ...] | None = None,
-        task_id: int | None = None, project: str | None = None, now: int | None = None) -> int:
-    """Ack: by id, by kind and/or task. No filters — everything unacked. Returns the count."""
+        task_id: int | None = None, scope: Scope | None = None, now: int | None = None) -> int:
+    """Ack: by id, by kind and/or task, inside the scope. No filters — everything unacked. Returns the count."""
     sql = ("UPDATE event SET acked_at=?, delivered_at=COALESCE(delivered_at, ?)"
            " WHERE needs_reaction=1 AND acked_at IS NULL")
     ts = now if now is not None else now_ms()
@@ -84,9 +89,10 @@ def ack(store: Store, ids: list[int] | None = None, *, kinds: tuple[str, ...] | 
     if task_id is not None:
         sql += " AND task_id=?"
         args.append(int(task_id))
-    if project is not None:
-        sql += " AND (project=? OR project='')"
-        args.append(project)
+    cond, extra = where(scope)
+    if cond:
+        sql += " AND " + cond
+        args += extra
     with store.tx() as c:
         return c.execute(sql, args).rowcount
 
@@ -96,38 +102,41 @@ def ack_task(store: Store, task_id: int) -> int:
     return ack(store, kinds=TASK_REACTIONS, task_id=task_id)
 
 
-def unacked(store: Store, project: str | None = None) -> list[Event]:
+def unacked(store: Store, scope: Scope | None = None) -> list[Event]:
     sql = "SELECT * FROM event WHERE needs_reaction=1 AND acked_at IS NULL"
     args: list = []
-    if project is not None:
-        sql += " AND (project=? OR project='')"
-        args.append(project)
+    cond, extra = where(scope)
+    if cond:
+        sql += " AND " + cond
+        args += extra
     with store.read() as c:
         return [Event.from_row(r) for r in c.execute(sql + " ORDER BY id", args)]
 
 
-def _watch_mark_key(who: str, project: str | None) -> str:
-    return f"watch_summary:{who}:{project or ''}"
+def _watch_mark_key(who: str, scope: Scope | None) -> str:
+    """Where the watch summary stands — per consumer and per scope (a project does not re-announce another's)."""
+    name = (scope or Scope()).name
+    return f"watch_summary:{who}:{name}"
 
 
 def watch_start_summary(store: Store, *, who: str = DEFAULT_WHO,
-                        project: str | None = None) -> list[Event]:
-    """Start summary for watch: delivered-but-unacked events not summarised before.
+                        scope: Scope | None = None) -> list[Event]:
+    """Start summary for watch: delivered-but-unacked events of the scope not summarised before.
 
-    Remembers the highest summarised id per consumer (who + project) in store meta,
+    Remembers the highest summarised id per consumer (who + scope) in store meta,
     so a restart does not re-announce the same old unread lines. Old events stay
     unread (inbox/status still list them), they are just not announced again.
     Returns the new events to summarise (empty means stay silent).
     """
-    raw = store.meta_get(_watch_mark_key(who, project))
+    raw = store.meta_get(_watch_mark_key(who, scope))
     try:
         mark = int(raw) if raw is not None else 0
     except (TypeError, ValueError):
         mark = 0
-    fresh = [e for e in unacked(store, project) if e.delivered_at is not None and e.id > mark]
+    fresh = [e for e in unacked(store, scope) if e.delivered_at is not None and e.id > mark]
     if not fresh:
         return []
-    store.meta_set(_watch_mark_key(who, project), str(max(e.id for e in fresh)))
+    store.meta_set(_watch_mark_key(who, scope), str(max(e.id for e in fresh)))
     return fresh
 
 
@@ -231,18 +240,18 @@ def present(store: Store, who: str = DEFAULT_WHO, *, now: int | None = None, fre
 
 # --- waiting ---
 
-def wait(store: Store, *, timeout_s: float, project: str | None = None, who: str = DEFAULT_WHO,
+def wait(store: Store, *, timeout_s: float, scope: Scope | None = None, who: str = DEFAULT_WHO,
          poll_s: float = 1.0, sleep: Callable[[float], None] = time.sleep,
          clock: Callable[[], float] = time.monotonic) -> list[str]:
-    """Block until an event batch or timeout. Handed-out events are marked delivered."""
+    """Block until an event batch of the scope or timeout. Handed-out events are marked delivered."""
     deadline = clock() + timeout_s
     last_touch = -1e9
     while True:
         now_c = clock()
         if now_c - last_touch >= PRESENCE_TOUCH_S:
-            touch(store, who, project=project or "", via="wait")
+            touch(store, who, project=(scope or Scope()).name, via="wait")
             last_touch = now_c
-        batch = ready_batch(store, project=project)
+        batch = ready_batch(store, scope=scope)
         if batch:
             mark_delivered(store, [e.id for e in batch])
             return lines(store, batch)

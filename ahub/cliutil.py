@@ -29,6 +29,15 @@ def add_project_arg(parser) -> None:
     parser.add_argument("--project", "-P", default=None, help=t("cli.help_project"))
 
 
+def add_scope_args(parser) -> None:
+    """--project/--all — the scope of a handle (ahub/scope.py): the project of the current directory by
+    default, --all — every project (the owner)."""
+    from ahub.i18n import t
+
+    parser.add_argument("--project", "-P", default=None, help=t("cli.help_project"))
+    parser.add_argument("--all", action="store_true", help=t("cli.help_all"))
+
+
 def resolve_project(args, cwd: str | Path | None = None) -> config.ProjectConfig:
     """Project by --project (hub config name or path) or by current dir."""
     want = getattr(args, "project", None)
