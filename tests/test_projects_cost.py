@@ -17,7 +17,7 @@ from ahub.i18n import t
 from ahub.model import State
 from ahub.scope import OWNER, Scope
 from ahub.store import Store
-from ahub.time import now_ms
+from ahub.time import fmt_local, now_ms
 from ahub.tui import data
 from tests.conftest import write
 
@@ -118,13 +118,51 @@ def test_projects_json_and_open_questions(hub, store, capsys):
     assert data_["month"].count("-") == 2  # the first day of this month
 
 
+def moved(store: Store, tid: int, *steps: tuple[State, int]) -> int:
+    """Walk a task through the given states, each with its own timestamp."""
+    for state, ts in steps:
+        transitions.move(store, tid, state, now=ts)
+    return tid
+
+
+def test_projects_last_is_the_newest_touch_not_the_last_row_of_the_group_by(hub, store, capsys):
+    """`last` — the newest touch of the project, whatever the group-by loop hands out.
+
+    Two traps, both planted here: the newest touch of A is in the group SQLite sorts *first*
+    ('done' before 'queued' and 'working'), so "the last group wins" is wrong; and the two working
+    tasks of B are touched oldest-first, so a bare column instead of MAX inside the group is wrong too.
+    """
+    def work(project: str, ts: int) -> int:
+        return moved(store, store.create_task(project=project, kind="code", title="work"),
+                     (State.PREPARING, ts - 1), (State.WORKING, ts))
+
+    store.create_task(project="A", kind="scout", title="later", now=1000)  # queued, the oldest touch of A
+    work("A", 2000)
+    moved(store, store.create_task(project="A", kind="scout", title="ready"),
+          (State.PREPARING, 2999), (State.WORKING, 2999), (State.DONE, 3000))  # the newest touch of A
+    work("B", 4000)
+    work("B", 5000)  # the newest touch of B sits on the later id of its group
+    moved(store, store.create_task(project="B", kind="scout", title="ready"),
+          (State.PREPARING, 100), (State.WORKING, 100), (State.DONE, 100))
+
+    by_name = {p["name"]: p for p in json.loads(ahub(capsys, "--json", "projects")[1])["projects"]}
+    assert by_name["A"]["last"] == 3000 and by_name["B"]["last"] == 5000
+    lines = {ln.split()[0]: ln for ln in ahub(capsys, "projects")[1].splitlines()[1:]}  # the same moment
+    assert lines["A"].rstrip().endswith(fmt_local(3000))
+    assert lines["B"].rstrip().endswith(fmt_local(5000))
+
+
 def test_projects_marks_a_project_with_tasks_but_no_config(hub, store, capsys):
     """A task of a project that is not connected to the hub: the owner must see it, marked as a problem."""
     store.create_task(project="Ghost", kind="scout", title="orphan")
     rc, out, _ = ahub(capsys, "--lang", "en", "projects")
     assert rc == 1
     assert "! Ghost" in out and "not connected to the hub" in out
-    assert json.loads(ahub(capsys, "--json", "projects")[1])["unconnected"] == ["Ghost"]
+    data_ = json.loads(ahub(capsys, "--json", "projects")[1])
+    assert data_["unconnected"] == ["Ghost"]
+    # the JSON has no root for it — never the "—" that stands in for it in the table
+    ghost = next(p for p in data_["projects"] if p["name"] == "Ghost")
+    assert ghost["root"] is None and "—" not in json.dumps(ghost, ensure_ascii=False)
 
 
 def test_projects_marks_a_project_with_a_problem_on_disk(hub, store, capsys):
@@ -248,6 +286,21 @@ def test_projects_table_keeps_the_name_whole_in_a_narrow_terminal(hub, store, ca
     assert t("projects.col_path") in ahub(capsys, "projects")[1].splitlines()[0]
 
 
+def test_projects_never_cuts_the_name_however_wide_it_is(hub, store, capsys, monkeypatch):
+    """The name cell is the widest one and it still comes out whole — the other columns give way."""
+    long = "a-very-long-project-name"
+    store.create_task(project=long, kind="scout", title="orphan")
+    monkeypatch.setenv("COLUMNS", "40")
+    out = ahub(capsys, "--lang", "en", "projects")[1]
+    lines = out.splitlines()
+    row = next(ln for ln in lines if ln.lstrip().startswith("!"))  # the row of the unconnected project
+    assert row.lstrip().startswith(f"! {long}")
+    assert "…" not in row  # no cell of it was cut, not even the widest one
+    assert t("projects.col_go") in lines[0]  # the money outlasted the counts
+    for dropped in ("active", "queued", "decision", "questions", "last", "path"):
+        assert t(f"projects.col_{dropped}") not in lines[0]
+
+
 # --- ahub top data layer ---
 
 
@@ -326,6 +379,23 @@ def test_top_filters_to_one_project(hub, store):
     assert data.snapshot(store, projects=[])[0].projects == ["A", "B"]
 
 
+def test_top_header_counts_follow_the_project_filter(hub, store):
+    """One scope per screen: the counts of the header describe the rows shown under it."""
+    filled(store)
+    comms.raise_alarm(store, "B is on fire", critical=True, project="B")
+    comms.raise_alarm(store, "the hub is on fire", critical=True)  # hub-wide — in every scope
+    whole = data.snapshot(store, projects=[])[0]
+    a = data.snapshot(store, projects=[], only="A")[0]
+    b = data.snapshot(store, projects=[], only="B")[0]
+    assert "работают 2" in whole.header and "ждут решения 1" in whole.header
+    assert "в очереди 1" in whole.header and "тревог 2" in whole.header
+    assert "работают 1" in a.header and "работают 1" in b.header  # one working task in each
+    assert "ждут решения 1" in a.header and "ждут решения 0" in b.header
+    assert "в очереди 0" in a.header and "в очереди 1" in b.header
+    assert "тревог 1" in a.header and "тревог 2" in b.header  # the hub-wide alarm is in both
+    assert {r.project for r in a.rows} == {"A"} and {r.project for r in b.rows} == {"B"}
+
+
 async def test_top_key_narrows_the_table_to_one_project(hub, store):
     from ahub.tui.app import TopApp
 
@@ -368,20 +438,35 @@ async def test_top_header_row_opens_nothing(hub, store):
         assert not any("T0" in n.message for n in app._notifications._notifications)
 
 
-async def test_top_project_filter_waits_for_the_refresh_in_flight(hub, store):
-    """`o` must not be swallowed by the periodic refresh that is already running: it is remembered."""
+async def test_top_project_filter_waits_for_the_refresh_in_flight(hub, store, monkeypatch):
+    """`o` must not be swallowed by the refresh that is already running: the request is kept.
+
+    The refresh in flight is a real one — a thread stuck inside the snapshot until the test opens the
+    gate — and nothing but the kept request may serve the table: the 2 s tick is off, so this test
+    stands or falls on the pending block of `_apply`.
+    """
+    import threading
+
+    from ahub.tui import data as tdata
     from ahub.tui.app import TopApp
 
     tids = filled(store)
+    monkeypatch.setattr(TopApp, "set_interval", lambda self, *a, **kw: None)  # no periodic rescue
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
-        app._busy = True  # a refresh is in flight (the 2 s tick landed on it)
-        await pilot.press("o")
-        await pilot.pause(0.3)
+        assert len(app._ids) == 6
+        gate, real = threading.Event(), tdata.snapshot
+        monkeypatch.setattr(tdata, "snapshot",
+                            lambda *a, **kw: (gate.wait(10), real(*a, **kw))[1])
+        app.refresh_data()  # the refresh that is in flight
+        await pilot.pause(0.2)
+        assert app._busy
+        await pilot.press("o")  # the request arrives while it runs
+        await pilot.pause(0.2)
         assert app.project == "A" and app._pending is True and len(app._ids) == 6
-        app._busy = False
-        app.refresh_data()  # the in-flight one ends...
+        monkeypatch.setattr(tdata, "snapshot", real)  # the kept request must not wait at the gate
+        gate.set()  # the refresh in flight ends...
         await pilot.pause(0.5)  # ...and the kept request is served right after it
         assert app._pending is False
         assert app._ids == [tids["a_working"], tids["a_done"]]
@@ -398,3 +483,24 @@ async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
         app.query_one("#tasks").move_cursor(row=3)  # the header row of B
         await pilot.pause(2.5)  # a refresh of the screen
         assert app.query_one("#tasks").cursor_row == 3
+
+
+async def test_top_cursor_survives_a_refresh_that_empties_the_table(hub, store):
+    """No rows left — the cursor goes back to the top row, never to row -1 (nothing is picked)."""
+    from ahub.tui.app import TopApp
+
+    tids = filled(store)
+    app = TopApp(store=store, projects=[])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        app.query_one("#tasks").move_cursor(row=3)  # the header row of B
+        ahead = {State.QUEUED: (State.PREPARING, State.WORKING, State.DONE, State.ACCEPTED),
+                 State.WORKING: (State.DONE, State.ACCEPTED), State.DONE: (State.ACCEPTED,)}
+        for tid in tids.values():  # every task leaves the current view (a stopped task still waits)
+            for st in ahead[store.get_task(tid).state]:
+                transitions.move(store, tid, st)
+        app.refresh_data()
+        await pilot.pause(0.4)
+        assert app._ids == [] and app.selected() is None
+        assert app.query_one("#tasks").cursor_row == 0
+        assert "нет задач" in str(app.query_one("#detail").render())

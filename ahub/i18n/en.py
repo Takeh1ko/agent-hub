@@ -479,7 +479,6 @@ MESSAGES: dict[str, str] = {
     "tui.ev_budget_extended": "budget extended",
     "tui.working_now": "working",
     "tui.group_tasks": "{n} tasks",
-    "tui.filter_all": "all projects",
     "tui.filter_project": "project: {name} (o — all)",
     "tui.help": "Icons: 🟢 working · 🟡 waiting for a reason (tests, lock, tool) · 🔴 silent too long · ⚫ process lost ·\n⚪ no data · ⏳ queued · ✅ done (waits for Claude's decision) · ❓ decision needed · ❌ error · ⏹ stopped · ✔ accepted\n\nTable: the current work — active, waiting for a decision, queued. h — history: the finished ones too.\nProjects: with several ones a project opens each group of rows (and its money). o — only one project,\nagain through the rest and back to all.\nModes: “View” — watch only. “Control” (c key) — you can act:\n  n — new task in your words (the model drafts it, you preview and start it)\n  s — stop · a — accept (merge code) · x — reject · r — rework (notes)\n  m — message the worker in its session (a stuck worker) · M — change model · b — extend budget · p —\n  pause/resume queue\nEnter (or t) — the live transcript of the task: it follows the log, r — the other role of the round,\n[ / ] — the round, p — the full prompt, f — the tail back to the end, m — message the worker, Esc — back.\nAlways: ↑/↓ — pick a task, ? — this help, q — quit.\nUsually you do nothing: Claude runs the tasks. Step in if you see 🔴/⚫ or an alarm.",
     "tui.loading": "loading…",
