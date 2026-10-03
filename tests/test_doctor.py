@@ -517,7 +517,22 @@ def test_claude_and_skill(monkeypatch, tmp_path):
     p = doctor.skill_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("# skill\n", encoding="utf-8")
-    assert doctor.check_claude_skill().ok is True
+    # T51: the skill alone is not enough — without Bash(ahub:*) Claude Code asks on every command
+    root = tmp_path / "proj"
+    c = doctor.check_claude_skill(root)
+    assert c.ok is False and "Bash(ahub:*)" in c.detail and c.fix == "ahub setup --claude"
+    write(root / ".claude" / "settings.json", '{"permissions": {"allow": ["Bash(git:*)"]}}\n')
+    assert doctor.bash_allowed(root) is False
+    c = doctor.check_claude_skill(root)
+    assert c.ok is False and "Bash(ahub:*)" in c.detail
+    write(root / ".claude" / "settings.json", '{"permissions": {"allow": ["Bash(ahub:*)"]}}\n')
+    assert doctor.bash_allowed(root) is True
+    c = doctor.check_claude_skill(root)
+    assert c.ok is True and "Bash(ahub:*)" in c.detail and not c.fix
+    # a settings.json that is not JSON is not a permission
+    write(root / ".claude" / "settings.json", "{ nope\n")
+    assert doctor.bash_allowed(root) is False
+    assert doctor.check_claude_skill(root).ok is False
 
 
 def test_claude_config_override_needs_file_and_exec(tmp_path):
