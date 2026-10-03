@@ -10,7 +10,7 @@ python -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest -q
 ```
 
-The suite takes about three minutes, needs no network and fakes `HOME`, so it never touches your real hub.
+The suite takes about six minutes, needs no network and fakes `HOME`, so it never touches your real hub.
 Tests against real providers cost money and run only on request: `AHUB_LIVE=1 .venv/bin/python -m pytest -m live`.
 
 ## Lint and smoke test
@@ -22,6 +22,15 @@ wheel, installs it into a fresh venv in a temp dir and runs `ahub version`, `ahu
 `AHUB_FAKE_QUEUE`). Only pip needs the network. Run it before a release and whenever packaging or the setup
 wizard changes — it catches a wheel without its data files, a wizard that crashes in a clean `HOME` and a task
 that never reaches `done`, which unit tests cannot see.
+
+## Documentation
+
+User-facing docs come in pairs with the same structure: `README.md` / `README.ru.md` and `docs/guide.md` /
+`docs/guide.ru.md`. A change to one is a change to the other, in the same commit — same sections in the same order,
+the Russian version written as Russian rather than translated word for word. No Cyrillic in the English files.
+
+Developer docs — `docs/ARCHITECTURE.md`, `docs/architecture.md`, `docs/contracts.md` and this file — are English
+only. A command, a flag or a state name mentioned in a doc must exist in `ahub --help` on the branch you are on.
 
 ## Where things are
 
