@@ -276,6 +276,7 @@ MESSAGES: dict[str, str] = {
     "reason.busy": "busy",
     "reason.continue_task": "back in the queue",
     "reason.dep_error": "dependency {task} is in error",
+    "reason.dep_missing": "dependency {task} does not exist — drop it with ahub task edit, or recreate the task",
     "reason.dep_rejected": "dependency {task} is rejected",
     "reason.gate_accept_red": "acceptance is red",
     "reason.gate_dirty": "uncommitted changes: {files}",

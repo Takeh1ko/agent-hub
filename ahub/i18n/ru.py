@@ -276,6 +276,7 @@ MESSAGES: dict[str, str] = {
     "reason.busy": "занята",
     "reason.continue_task": "снова в очереди",
     "reason.dep_error": "зависимость {task} в ошибке",
+    "reason.dep_missing": "зависимости {task} не существует — уберите её через ahub task edit или создайте задачу заново",
     "reason.dep_rejected": "зависимость {task} отклонена",
     "reason.gate_accept_red": "приёмка красная",
     "reason.gate_dirty": "незакоммиченные изменения: {files}",

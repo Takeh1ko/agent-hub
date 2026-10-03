@@ -155,7 +155,7 @@ class Service:
         for a in t.after:
             dep = self.store.get_task(a)
             if dep is None:
-                return reasons.dump("wait_accept", task=f"T{a}", state="error")
+                return reasons.dump("dep_missing", task=f"T{a}")
             if dep.state is not State.ACCEPTED:
                 return reasons.dump("wait_accept", task=dep.label, state=dep.state.value)
         return ""

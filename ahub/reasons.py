@@ -14,22 +14,36 @@ from typing import Any
 
 from ahub.i18n import template
 
+PARAM_LIMIT = 400  # a param longer than this is detail, not a reason: the blob stays readable
+
 
 def dump(code: str, **params: Any) -> str:
     """The stored form of a reason: a code + params (JSON). Empty code — no reason.
 
     An empty param is kept (only None is dropped): the template of the code always gets what it asks for.
+    A param a worker filled in (an error tail, a summary) is capped, so one task cannot bloat the column.
     """
     if not code:
         return ""
     body: dict[str, Any] = {"code": code}
-    body.update({k: v for k, v in params.items() if v is not None})
+    body.update({k: _cap(v) for k, v in params.items() if v is not None})
     return json.dumps(body, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def part(code: str, **params: Any) -> dict:
     """A sub-reason (one gate problem inside another reason) — rendered by text()."""
     return {k: v for k, v in (("code", code), *params.items()) if v is not None}
+
+
+def _cap(value: Any) -> Any:
+    """A param as it is stored: strings clipped, a sub-reason or a list of them capped the same way."""
+    if isinstance(value, str):
+        return value[:PARAM_LIMIT]
+    if isinstance(value, dict):
+        return {k: _cap(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_cap(v) for v in value]
+    return value
 
 
 def load(stored: str) -> dict:
