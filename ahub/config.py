@@ -21,6 +21,13 @@ Example ~/.config/ahub/config.toml:
     claude = "~/.claude/local/claude"
     opencode_db = "$HOME/.local/share/opencode/opencode.db"
 
+    [providers.opencode]                # provider on/off (ahub providers, the setup wizard); no key — on
+    enabled = true
+    [providers.agy]
+    enabled = false
+    [providers.codex]
+    enabled = true
+
 Example .hub.toml v2:
 
     schema_version = 2
@@ -159,11 +166,16 @@ class HubConfig:
     opencode: str = ""  # [paths] opencode; empty — which/known location
     claude: str = ""  # [paths] claude; empty — which/known location
     opencode_db: str = ""  # [paths] opencode_db; empty — XDG/known location
+    providers_off: tuple[str, ...] = ()  # [providers.<name>] enabled = false; the rest are on
 
     @property
     def telegram_enabled(self) -> bool:
         """Bot enabled: token present."""
         return bool(self.tg_token)
+
+    def provider_enabled(self, name: str) -> bool:
+        """Provider switch ([providers.<name>] enabled): no key — the provider is on."""
+        return name.strip().lower() not in self.providers_off
 
 
 class _Reader:
@@ -219,6 +231,13 @@ class _Reader:
         if not isinstance(v, dict):
             self.errors.append(_t("config.expect_table", field=key))
             return {}
+        return v
+
+    def bool_(self, data: dict, key: str, default: bool, where: str = "") -> bool:
+        v = data.get(key, default)
+        if not isinstance(v, bool):
+            self.errors.append(_t("config.expect_bool", where=where, field=key, got=type(v).__name__))
+            return default
         return v
 
 
@@ -409,6 +428,13 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
     opencode = expand(r.str_(pth, "opencode", "", "paths.").strip())
     claude = expand(r.str_(pth, "claude", "", "paths.").strip())
     opencode_db = expand(r.str_(pth, "opencode_db", "", "paths.").strip())
+    providers_off: list[str] = []
+    for pname, spec in r.table(data, "providers").items():
+        if not isinstance(spec, dict):
+            r.errors.append(_t("config.expect_table", field=f"providers.{pname}"))
+            continue
+        if "enabled" in spec and not r.bool_(spec, "enabled", True, f"providers.{pname}."):
+            providers_off.append(pname.strip().lower())
     raw = data.get("lang", "")
     norm = raw.strip().lower() if isinstance(raw, str) else ""
     if isinstance(raw, str) and norm not in ("", "en", "ru"):
@@ -431,6 +457,7 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
         opencode=opencode,
         claude=claude,
         opencode_db=opencode_db,
+        providers_off=tuple(sorted(set(providers_off))),
     )
 
 
