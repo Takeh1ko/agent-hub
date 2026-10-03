@@ -256,8 +256,13 @@ sessions; per-project budget caps and model menus are deliberately not part of t
 - The **wakeup stream** yields only new unacknowledged events: critical ones at once, the rest batched over a window;
   it remembers where it stopped; on the first start it does not dump everything old but gives one summary.
 - **"Wake me"** — blocking wait until new events or a timeout; returns only the delta.
-- **Claude presence** — a fresh mark of its wait/stream. No mark longer than the threshold = Claude is not there. Both
-  the observer's escalation (§8) and launching Claude from Telegram (§11) are built on this.
+- **Claude presence** — a fresh mark of its wait/stream, **per project**: `presence_project`, one row per
+  (who, project), so a session in one repository does not look like a session in another. The owner's stream (every
+  project) stamps a row for each of them. No mark longer than the threshold for a project = no Claude there. The launch
+  from Telegram (§11) asks the question per project — one launch for A must not wait for the Claude of B; the
+  observer's escalation (§8) asks it for the whole hub, since it watches the hub. The pre-migration table
+  `presence` (one row per `who`) is still written and read as a fallback, so a process on the previous code (a live
+  reload) neither breaks nor looks absent.
 
 ### How tokens are saved
 - **Detail levels with a hard size limit:** L0 — one line ("is there anything for me"), L1 — a summary
@@ -295,17 +300,30 @@ sessions; per-project budget caps and model menus are deliberately not part of t
 Telegram is **not a remote control for the hub**: tasks are not created or changed from there directly. It is a link to
 Claude, like a senior in the office while the owner is on holiday, plus a convenient view.
 
+**Which project a message belongs to:** the prefix in the text (`по agent-hub: …` / `agent-hub: …`), else the project
+the chat picked last (`/project`, or the prefix of an earlier message; a pick that is no longer in the hub is dropped
+with a notice, so the message is not stranded), else the whole hub. A hub-wide message is in every project's inbox,
+and the launcher serves it to the owner alone — it is never mixed into a project's prompt.
+
 **Link to Claude:**
-- A human's message → an event for the orchestrator:
-  - a live Claude session exists → the message goes into it (§9);
-  - no live session (no presence mark) → **the hub launches Claude Code** (`--dangerously-skip-permissions`, as the
-    owner normally runs it) in the project where Claude worked last; if the message names another project — in that
-    one. It passes on: the skill for working with the hub, an L1 summary, the message. That Claude controls the hub
-    through the handles and answers.
-- **One Claude at a time:** a second one starts only after the first has died. Messages that arrive while a launched
-  Claude is working accumulate and are passed to it on its next turn (no new launches). A launched Claude is a
-  supervised process (timeout, pulse), and its session is kept: one continuable "Telegram session" remembers the
-  conversation; a new one when the old has grown too large or a day has passed. Launches go into the log.
+- A human's message → an event for the orchestrator of that project:
+  - a live session exists **in that project** (presence §9) → the message goes into it; that session reads its own
+    inbox (`ahub inbox`) and no second one is started;
+  - no live session → **the hub launches Claude Code** (`--dangerously-skip-permissions`, as the owner normally runs
+    it) **in that project's own directory, with that project's messages only** and an L1 summary of that project; the
+    prompt tells it which scope it has (`--all` for a hub-wide launch). It passes on: the skill for working with the
+    hub, the summary, the messages. That Claude controls the hub through the handles and answers.
+- **One launched Claude per project.** The pending messages are grouped by project, and each group without a live
+  session (and without a Claude the hub has already started for it) gets its own — a live session in A never holds back
+  a launch for B, and the owner (a hub-wide message) gets one of his own. While a launched Claude works, the new
+  messages of that project queue: it picks them up before finishing, the rest goes to the next launch.
+- A launched Claude is a supervised process (timeout, pulse, the launch journal) and its session is kept: **one
+  continuable "Telegram session" per project** remembers the conversation — a new one when the old has grown too large
+  or a day has passed. Launches are limited per hour (a limit of the whole hub; one launch spends it) and go into the
+  log.
+- **A group with no directory cannot be started** — a project that is not in the hub config (and the hub-wide group
+  when the hub has no projects at all). That is reported **once**, not on every tick: the bot tells the owner, the log
+  keeps a warning, and the report is due again only after a pause.
 - Claude → human: answers, questions with buttons (for example, approving a merge), reports on request.
   **A button is an answer addressed to Claude** — he acts on it through the handles; the hub itself does nothing on a
   button.
@@ -385,8 +403,9 @@ From the field issues of 2026-09-30:
 
 1. The hub service is one background process; the CLI, the terminal app and Telegram are clients.
 2. Handles: CLI → Claude Code package → MCP (later).
-3. Claude Code is launched by the hub only if the live session has died; one Claude at a time;
-   `--dangerously-skip-permissions`; the Telegram session is continuable.
+3. Claude Code is launched by the hub only if the live session of that project has died; one launched Claude per
+   project (a hub-wide message — one of the owner's own); `--dangerously-skip-permissions`; the Telegram session is
+   continuable per project.
 4. Observer: 5 min code, 30 min model (Spark medium/high); escalation: ordinary — after 15 min without a reaction,
    critical — to both at once.
 5. Model menus without automatic substitution; a model is changed by hand (a human or Claude).
@@ -395,4 +414,5 @@ From the field issues of 2026-09-30:
 8. Task events go to Claude; Claude writes to the human. "Document" ⊂ "Routine". One hub per machine. The archive is
    write-only.
 9. A project-level model ban (e.g. DeepSeek banned in one project); only a human lifts it.
-10. Claude from Telegram starts in the project where it worked last (or the one named in the message).
+10. A message from Telegram belongs to the project it names (prefix, or the last `/project` of that chat); an unnamed
+    one is the hub's — such a Claude starts where it worked last, else in the first project.
