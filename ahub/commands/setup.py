@@ -329,28 +329,14 @@ def _service_enable_lines(os_kind: str, names: list[str], written: list[str], hi
     """Enable an installed service and check it by heartbeat; never raises."""
     import os
 
+    from ahub.commands import service as svc
     from ahub.i18n import t
 
-    lines: list[str] = []
-    try:
-        from ahub.commands import service as svc
-
-        failures = svc.enable_service(os_kind, names, written)
-    except Exception as e:
-        failures = [(["enable"], f"{e.__class__.__name__}: {e}"[:500])]
-    for cmd, err in failures:
-        cmd_s = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
-        lines.append(t("setup.wizard_service_enable_fail", cmd=cmd_s, err=err))
-    try:
-        from ahub.commands import service as svc
-
-        age = svc.wait_for_heartbeat()
-    except Exception:
-        age = None
-    if age is not None:
-        lines.append(t("setup.wizard_service_alive", age=age))
-    else:
-        lines.append(t("setup.wizard_service_dead", hint=hint))
+    lines = [t("setup.wizard_service_enable_fail", cmd=" ".join(cmd), err=err)
+             for cmd, err in svc.enable_service(os_kind, names, written)]
+    age = svc.wait_for_heartbeat()
+    lines.append(t("setup.wizard_service_alive", age=age) if age is not None
+                 else t("setup.wizard_service_dead", hint=hint))
     if os_kind == "linux":
         user = os.environ.get("USER") or os.environ.get("LOGNAME") or "$USER"
         lines.append(t("setup.wizard_service_linger", user=user))
