@@ -21,6 +21,7 @@ from ahub.time import parse_duration as _parse_duration
 MAX_POLL_FAILURES = 20  # consecutive failures of a poll before the stream gives up
 RETRY_S = 1.0  # sleep between retries of a failed poll
 FAILED_RC = 4  # the poll never worked — not a timeout (3), not a refusal (2)
+clock = time.monotonic  # the clock of the wait's deadline (a test moves it)
 
 
 def parse_duration(text: str) -> float:
@@ -63,21 +64,29 @@ class _Failures:
 
 
 def cmd_wait(args) -> int:
-    """Block until an event or the timeout; a broken poll is retried until the cap (KeyboardInterrupt is not)."""
+    """Block until an event or the deadline.
+
+    A broken poll is retried (KeyboardInterrupt is not) — until the cap says it is hopeless. The timeout is
+    the deadline: once it is past, not one more poll is started, not even one of length 0.
+    """
     store = Store()
     sc = scope.resolve(args)
     fails = _Failures("wait")
-    deadline = time.monotonic() + parse_duration(args.timeout)
+    deadline = clock() + parse_duration(args.timeout)
+    got: list[str] = []
     while True:
+        left = deadline - clock()
+        if left <= 0:
+            break  # the timeout is what it was asked for — no poll past it
         try:
-            got = events.wait(store, timeout_s=max(0.0, deadline - time.monotonic()), scope=sc, who=args.who)
+            got = events.wait(store, timeout_s=left, scope=sc, who=args.who)
             break
         except Exception as e:  # a broken poll must not kill the wait — until the cap says it is hopeless
             line = fails.note(e)
             if line:
                 print(line, file=sys.stderr, flush=True)
                 return FAILED_RC
-            time.sleep(RETRY_S)
+            time.sleep(min(RETRY_S, max(0.0, deadline - clock())))  # a retry must not outlive the deadline
     if not got:
         emit(args, {"events": []}, "")
         return 3

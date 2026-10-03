@@ -427,6 +427,28 @@ async def test_background_tells_the_owner_about_a_project_without_a_directory(st
     assert [text for _, text, _ in bot.sent] == [t("tg.launch_no_dir", name="B")]
 
 
+async def test_background_tells_the_owner_when_the_hub_has_no_projects(store, monkeypatch):
+    """`nodir:` with an empty name — the hub-wide group with nothing configured: its own line, not one
+    with a blank project name."""
+    import asyncio
+
+    from ahub.i18n import t
+    from ahub.tg import run as tgrun
+
+    core.remember_chat(store, 7)
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda s: "nodir:")
+
+    async def stop(_):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", stop)
+    bot = FakeBot()
+    with pytest.raises(asyncio.CancelledError):
+        await tgrun.background(bot, store)
+    text = bot.sent[0][1]
+    assert text == t("tg.launch_no_dir_hub") and text != t("tg.launch_no_dir", name="")
+
+
 def test_dispatcher_builds(store):
     from ahub.tg import run as tgrun
     assert tgrun.build_dispatcher(store) is not None
