@@ -21,6 +21,9 @@ step() { echo "smoke: $*"; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/ahub-smoke.XXXXXX")"
 cleanup() {
   rc=$?
+  if [ -n "${AHUB:-}" ] && [ -n "${REPO:-}" ]; then  # never leave the service running
+    ( cd "$REPO" && "$AHUB" service stop ) >/dev/null 2>&1 || true
+  fi
   if [ "$rc" -ne 0 ] || [ "$KEEP" = "1" ]; then
     echo "smoke: temp dir kept: $TMP" >&2
   else
@@ -32,7 +35,12 @@ trap cleanup EXIT
 # --- 1. the wheel -----------------------------------------------------------------------------------
 step "build the wheel"
 "$PY" -m build --version >/dev/null 2>&1 || die "python -m build is missing — $PY -m pip install build"
-"$PY" -m build --wheel --outdir "$TMP/dist" "$ROOT" > "$TMP/build.log" 2>&1 || {
+# From a copy in the temp dir: a build in the checkout would leave a build/ directory behind.
+SRC="$TMP/src"
+mkdir -p "$SRC"
+tar --exclude=./.git --exclude=./build --exclude=./dist --exclude=./.venv --exclude=./.pytest_cache \
+    --exclude='*.egg-info' --exclude='__pycache__' -cf - -C "$ROOT" . | tar -xf - -C "$SRC"
+"$PY" -m build --wheel --outdir "$TMP/dist" "$SRC" > "$TMP/build.log" 2>&1 || {
   tail -30 "$TMP/build.log" >&2
   die "python -m build failed"
 }
@@ -109,8 +117,9 @@ step "setup done: .hub.toml created"
 
 # --- 4. one task end to end ------------------------------------------------------------------------
 step "write the fake provider scenario"
-"$PY" - "$AHUB_FAKE_QUEUE/001.json" <<'EOF'
+"$PY" - "$AHUB_FAKE_QUEUE" <<'EOF'
 import json, sys
+from pathlib import Path
 
 # What a scout worker must produce: report.md + result.json with status done.
 scenario = {"session": "ses_smoke", "steps": [
@@ -121,8 +130,11 @@ scenario = {"session": "ses_smoke", "steps": [
                "text": json.dumps({"summary": "smoke ok", "status": "done"})}},
     {"event": {"type": "text", "text": "done"}},
 ]}
-with open(sys.argv[1], "w", encoding="utf-8") as f:
-    json.dump(scenario, f)
+# The queue is shared and taken in order: the service's observer also probes a model on start,
+# so more scenarios than turns of the task.
+queue = Path(sys.argv[1])
+for i in range(1, 4):
+    (queue / f"{i:03d}.json").write_text(json.dumps(scenario), encoding="utf-8")
 EOF
 
 step "ahub task new --kind scout"
@@ -142,13 +154,13 @@ while :; do
   STATE="$("$AHUB" --json status T1 2>/dev/null | "$PY" -c 'import json, sys; print(json.load(sys.stdin)["task"]["state"])' 2>/dev/null || true)"
   case "$STATE" in
     done) break ;;
-    ""|queued|preparing|working|checking|reviewing|fixing)
-      [ "$SECONDS" -lt "$DEADLINE" ] || break
-      sleep 1
-      ;;
-    *)
+    error|needs_decision|stopped|rejected)
       "$AHUB" result T1 || true
       die "T1 stopped at state=$STATE"
+      ;;
+    *)  # queued or in a working state — wait
+      [ "$SECONDS" -lt "$DEADLINE" ] || break
+      sleep 1
       ;;
   esac
 done
@@ -158,7 +170,6 @@ done
   die "T1 did not reach done in ${TIMEOUT_S}s (last state: ${STATE:-unknown})"
 }
 ( cd "$REPO" && "$AHUB" result T1 ) || true
-
 ( cd "$REPO" && "$AHUB" service stop ) >/dev/null 2>&1 || true
 
 echo "SMOKE OK: wheel installed, doctor + setup in a clean HOME, scout T1 done (temp: $TMP)"
