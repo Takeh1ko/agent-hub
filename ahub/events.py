@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+from ahub import reasons, ui
 from ahub.i18n import t
 from ahub.model import Ev
 from ahub.store import Event, Store, Task
@@ -141,9 +142,9 @@ EVENT_CODES: dict[Ev, str] = {
     Ev.ALARM: "ALARM",
 }
 
-def _clip(text: str, n: int) -> str:
-    s = " ".join(str(text or "").split())
-    return s if len(s) <= n else s[: n - 1] + "…"
+def _reason(payload: dict) -> str:
+    """The reason of a decision/error event in the reader's language — the stored blob is never shown."""
+    return reasons.text(str(payload.get("reason") or ""))
 
 
 def _money(p: dict) -> str:
@@ -160,7 +161,7 @@ def format_line(ev: Event, task: Task | None) -> str:
     p = ev.payload or {}
     k = Ev(ev.kind)
     if task is not None:
-        head = f"{task.label} {task.kind.value} «{_clip(task.title, 50)}»"
+        head = f"{task.label} {task.kind.value} «{ui.clip(task.title, 50)}»"
     else:
         head = f"T{ev.task_id}" if ev.task_id else ""
     if k is Ev.DONE:
@@ -168,21 +169,21 @@ def format_line(ev: Event, task: Task | None) -> str:
         if p.get("report_bytes"):
             extra.append(t("events.report", kb=f"{p['report_bytes'] / 1024:.1f}"))
         if p.get("summary"):
-            extra.append(_clip(p["summary"], 70))
+            extra.append(ui.clip(p["summary"], 70))
         m = _money(p)
         if m:
             extra.append(m)
         line = f"{EVENT_CODES[k]} {head}" + (" — " + "; ".join(extra) if extra else "")
     elif k is Ev.NEEDS_DECISION:
-        line = f"{EVENT_CODES[k]} {head} — {_clip(p.get('reason', ''), 100)}"
+        line = f"{EVENT_CODES[k]} {head} — {ui.clip(_reason(p), 100)}"
     elif k is Ev.ERROR:
-        line = f"{EVENT_CODES[k]} {head} — {_clip(p.get('reason', ''), 100)}"
+        line = f"{EVENT_CODES[k]} {head} — {ui.clip(_reason(p), 100)}"
     elif k is Ev.OWNER_MESSAGE:
-        line = f"{EVENT_CODES[k]} «{_clip(p.get('text', ''), 160)}»"
+        line = f"{EVENT_CODES[k]} «{ui.clip(p.get('text', ''), 160)}»"
     elif k is Ev.ANSWER:
-        line = f"{EVENT_CODES[k]} #{p.get('question_id', '?')} «{_clip(p.get('question', ''), 60)}» → {_clip(p.get('answer', ''), 60)}"
+        line = f"{EVENT_CODES[k]} #{p.get('question_id', '?')} «{ui.clip(p.get('question', ''), 60)}» → {ui.clip(p.get('answer', ''), 60)}"
     elif k is Ev.ALARM:
-        line = (f"{EVENT_CODES[k]}! " if ev.critical else f"{EVENT_CODES[k]} ") + _clip(p.get("text", ""), 150)
+        line = (f"{EVENT_CODES[k]}! " if ev.critical else f"{EVENT_CODES[k]} ") + ui.clip(p.get("text", ""), 150)
     else:
         line = f"{k.value.upper()} {head}"
     return line[:LINE_LIMIT]

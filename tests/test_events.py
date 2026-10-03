@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from ahub import events, transitions
+from ahub import events, reasons, transitions
+from ahub.i18n import _reset
 from ahub.model import Ev, State
 from ahub.store import Store
 
@@ -156,3 +157,33 @@ def test_watch_summary_per_who(store):
     assert events.watch_start_summary(store, who="claude") == []
     assert len(events.watch_start_summary(store, who="other")) == 1  # another consumer hears it once
     assert events.watch_start_summary(store, who="other") == []
+
+
+def test_a_stored_reason_blob_is_rendered_in_the_line(store, monkeypatch):
+    """A NEEDS_DECISION/ERROR line must never show the stored JSON — the reader gets a sentence."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    decided = store.create_task(project="P", kind="code", title="pay button", now=0)
+    for st in (State.PREPARING, State.WORKING):
+        transitions.move(store, decided, st, now=0)
+    transitions.move(store, decided, State.NEEDS_DECISION,
+                     reason=reasons.dump("review_exhausted", n=2, highs=1), now=0)
+    failed = store.create_task(project="P", kind="code", title="pay button", now=0)
+    transitions.move(store, failed, State.PREPARING, now=0)
+    transitions.move(store, failed, State.ERROR, reason=reasons.dump("quota", err="window is over"), now=0)
+    lines = events.lines(store, [e for e in store.events(needs_reaction=True)
+                                 if e.kind in ("needs_decision", "error")])
+    assert lines == ["DECISION T1 code «pay button» — review rounds exhausted (2 findings, high: 1)",
+                     "ERROR T2 code «pay button» — provider quota: window is over"]
+    assert not any('{"code"' in ln for ln in lines)
+
+
+def test_a_long_reason_is_clipped_at_a_word(store, monkeypatch):
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    tid = store.create_task(project="P", kind="scout", title="x", now=0)
+    store.add_event(Ev.NEEDS_DECISION, task_id=tid, project="P", now=1,
+                    payload={"reason": reasons.dump("blocked", summary="the worker needs a database login "
+                                                                     "that nobody has " * 3)})
+    line = events.lines(store, store.events(task_id=tid, needs_reaction=True))[0]
+    assert "…" in line and "nobodyha" not in line and len(line) <= events.LINE_LIMIT
