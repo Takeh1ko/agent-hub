@@ -233,6 +233,21 @@ A system role that watches **the hub, not the projects**.
 
 ## 9. Orchestrator handles
 
+### Projects and scope
+One hub, one database, several repositories. A Claude session works in one repository and must see and touch only
+that project; the owner — the human, the terminal app, Telegram — sees everything. The scope of a handle comes
+from one place: `--all` — every project (the owner's mode), `--project X` — X, otherwise the project of the
+current directory (`.hub.toml` is searched upward); outside every project — every project. The MCP server
+resolves its scope once, from its own working directory, when it starts; a tool call may name another project.
+
+Everything an orchestrator reads carries its project: tasks, events, questions (the answer too), the human's
+messages. A row with an empty project — the observer's alarms, the service's own events — is hub-wide and belongs
+to every scope. Acknowledgement follows the scope: reading the inbox or acknowledging events in one repository
+never marks another repository's events or messages read. Commands that name one task belong to that task's
+project: a task of another project is refused, with the way out — run from that repository or add
+`--project X` — unless `--all` or a matching `--project` was given. Per-project money counts the hub's own
+sessions; per-project budget caps and model menus are deliberately not part of this.
+
 ### Event delivery (without losses)
 - Every event that needs a reaction (Done, Needs decision, Error, a message/an answer from the human, an alarm) is
   stored with "delivered" and "acknowledged" marks. The orchestrator **explicitly acknowledges** that it took the
