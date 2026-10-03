@@ -9,6 +9,7 @@ from ahub.views import _age, inbox_text, message_text, question_text, report_ess
 
 LONG = ("Я тебе ставил конкретные цели на прошлой неделе, а ты сделал вид, что ничего не было, и я хочу "
         "понять почему так вышло и что ты собираешься с этим делать дальше, потому что сроки уже в четверг.")
+URL = "https://example.com/a/really/long/link/that/never/breaks/at/any/word/boundary/at/all/report-2026.pdf"
 
 
 def test_minuty():
@@ -77,6 +78,32 @@ def test_inbox_full_is_the_message_blocks():
     rows = comms.inbox(store, mark=False)
     assert inbox_text(rows, full=True, w=100) == message_text(rows[0], w=100)
     assert inbox_text([], full=True, w=100) == "новых сообщений нет"
+
+
+def test_inbox_full_keeps_the_width_of_the_caller(monkeypatch):
+    """--full draws at the width it was given, not at COLUMNS (the MCP tool reads through it)."""
+    monkeypatch.setenv("COLUMNS", "60")
+    store = Store()
+    comms.owner_message(store, LONG, project="P", now=0)
+    rows = comms.inbox(store, mark=False)
+    assert inbox_text(rows, full=True, w=100) == message_text(rows[0], w=100)
+    assert inbox_text(rows, full=True) != inbox_text(rows, full=True, w=100)  # COLUMNS=60 is narrower
+
+
+def test_a_head_never_passes_the_width_of_the_column():
+    """para does not break a long word — a URL in a message would be one line past the width; it is clipped,
+    and a clipped head is a cut, so the hint points at the rest."""
+    store = Store()
+    mid = comms.owner_message(store, f"смотри {URL}", project="P")
+    rows = comms.inbox(store, mark=False)
+    lines = inbox_text(rows, w=80).splitlines()
+
+    assert len(lines) == 4  # the column head, the two lines of the message, the hint
+    assert lines[1].strip() == f"#{mid}  смотри"
+    assert lines[2].strip().startswith("https://example.com") and lines[2].endswith("…")
+    assert len(lines[2]) == 80 and len(URL) > 80 - 7  # the URL alone is longer than the column
+    assert lines[3] == f"      … остальное: ahub inbox {mid}"
+    assert all(len(ln) <= 80 for ln in lines)
 
 
 def test_question_text_options_and_answer():

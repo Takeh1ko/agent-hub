@@ -374,9 +374,15 @@ def message_text(row: dict, *, w: int | None = None) -> str:
 
 
 def _head(text: str, body: int, lines: int) -> tuple[list[str], bool]:
-    """The first `lines` lines of a text, wrapped, and whether something is left of it."""
+    """The first `lines` lines of a text, wrapped, and whether something is left of it.
+
+    para does not break a long word (a URL in a Telegram message) — a line is clipped to the column, and a
+    clipped line is a cut too, so the hint says where the rest is.
+    """
     wrapped = ui.para(text, indent=0, w=body).split("\n")
-    return wrapped[:lines], len(wrapped) > lines
+    head = wrapped[:lines]
+    return ([ui.clip(ln, body) for ln in head],
+            len(wrapped) > lines or any(len(ln) > body for ln in head))
 
 
 def inbox_text(rows: list[dict], *, full: bool = False, w: int | None = None) -> str:
@@ -387,7 +393,7 @@ def inbox_text(rows: list[dict], *, full: bool = False, w: int | None = None) ->
     if not rows:
         return _t("comms.inbox_empty")
     if full:
-        return "\n\n".join(message_text(r) for r in rows)
+        return "\n\n".join(message_text(r, w=w) for r in rows)
     nw = max(len(f"#{r['id']}") for r in rows)
     body = max(20, ui.width(w) - MSG_INDENT - nw - ui.GAP)
     pad, cell = " " * MSG_INDENT, " " * MSG_INDENT + " " * (nw + ui.GAP)

@@ -129,8 +129,9 @@ LONG_OWNER = ("Я тебе ставил конкретные цели на пр�
               "понять почему так вышло и что ты собираешься с этим делать дальше, потому что сроки уже в четверг.")
 
 
-def test_inbox_reads_one_message_in_full(env, capsys):
+def test_inbox_reads_one_message_in_full(env, capsys, monkeypatch):
     """`ahub inbox` cuts the text to a cell and says where the rest is; `ahub inbox <id>` — the whole text."""
+    monkeypatch.setenv("COLUMNS", "100")  # the list is drawn at the width of the terminal
     store, _ = env
     mid = comms.owner_message(store, LONG_OWNER, project="P", chat_id=42)
     comms.owner_message(store, "спасибо", project="P")
@@ -153,7 +154,8 @@ def test_inbox_reads_one_message_in_full(env, capsys):
     assert data["message"]["text"] == LONG_OWNER and data["message"]["chat_id"] == 42
 
 
-def test_inbox_full_and_its_refusals(env, capsys):
+def test_inbox_full_and_its_refusals(env, capsys, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "100")
     store, _ = env
     comms.owner_message(store, LONG_OWNER, project="P")
     out = ahub(capsys, "inbox", "--full", "--peek")[1]
