@@ -428,6 +428,10 @@ MESSAGES: dict[str, str] = {
     "config.bad_worktrees": "worktrees: нет ни каталога, ни родителя {path}",
     "config.bad_chat_id": "telegram.chat_id: ожидается целое, получено {got!r}",
     "config.bad_proxy": "telegram.proxy: нужен http:// или https://, получено {got!r}",
+    "config.bad_provider_proxy": "providers.{name}.proxy: нужен http://, https://, socks5:// или socks5h:// "
+                                 "(либо \"\" — без прокси), получено {got!r}",
+    "config.bad_sandbox": "providers.{name}.sandbox: нужно read-only, workspace-write или danger-full-access, "
+                          "получено {got!r}",
     "config.bad_go_type": "usage.go_month_limit: ожидается число, получено {got!r}",
     "config.bad_go_value": "usage.go_month_limit: должен быть больше 0 ({got})",
     "config.bad_env_chat": "AHUB_TG_CHAT: ожидается целое, получено {got!r}",
@@ -693,6 +697,13 @@ MESSAGES: dict[str, str] = {
     "doctor.codex_missing": "нет в PATH",
     "doctor.codex_fix": "установите codex (npm i -g @openai/codex)",
     "doctor.codex_fix_login": "запустите codex login в терминале",
+    "doctor.codex_fix_userns": "AppArmor запрещает непривилегированные user namespace — разрешите их "
+                               "(решение администратора): sudo sysctl -w "
+                               "kernel.apparmor_restrict_unprivileged_userns=0 "
+                               "(навсегда: /etc/sysctl.d/99-userns.conf)",
+    "doctor.codex_fix_no_sandbox": "или вообще без OS-песочницы: [providers.codex] sandbox = "
+                                   "\"danger-full-access\" в конфиге хаба — тогда codex держат копия задачи и "
+                                   "ворота, как opencode и agy",
     "doctor.prov_missing": "не найден",
     "doctor.prov_logged_in": "вход есть",
     "doctor.prov_no_login": "найден, но без входа",
@@ -705,6 +716,7 @@ MESSAGES: dict[str, str] = {
     "doctor.prov_hint_opencode": "поставить opencode: npm i -g opencode-ai, затем opencode auth login",
     "doctor.prov_hint_agy": "поставить Google Antigravity CLI (agy), затем войти в терминале",
     "doctor.prov_hint_codex": "поставить codex: npm i -g @openai/codex, затем codex login",
+
     "doctor.models_ok": "умолчания ролей подходят под вход",
     "doctor.models_bad": "ролям нужна бесплатная модель: {roles}",
     "doctor.models_fix": "{cmds}",
@@ -718,6 +730,9 @@ MESSAGES: dict[str, str] = {
     "doctor.network_no_proxy": "системного прокси нет",
     "doctor.network_bad": "{problem}",
     "doctor.network_fix": "проверьте системный прокси (HTTPS_PROXY)",
+    "doctor.provider_proxy_ok": " (свой прокси {host}:{port} отвечает)",
+    "doctor.provider_proxy_down": " (свой прокси {host}:{port} не отвечает)",
+    "doctor.provider_proxy_none": " (свой прокси: нет)",
     "doctor.claude_found": "найден {binary}",
     "doctor.claude_missing": "не найден",
     "doctor.claude_fix": "установите Claude Code",

@@ -428,6 +428,10 @@ MESSAGES: dict[str, str] = {
     "config.bad_worktrees": "worktrees: neither the directory nor its parent exists {path}",
     "config.bad_chat_id": "telegram.chat_id: expected an integer, got {got!r}",
     "config.bad_proxy": "telegram.proxy: need http:// or https://, got {got!r}",
+    "config.bad_provider_proxy": "providers.{name}.proxy: need http://, https://, socks5:// or socks5h:// "
+                                 "(or \"\" for no proxy), got {got!r}",
+    "config.bad_sandbox": "providers.{name}.sandbox: need read-only, workspace-write or danger-full-access, "
+                          "got {got!r}",
     "config.bad_go_type": "usage.go_month_limit: expected a number, got {got!r}",
     "config.bad_go_value": "usage.go_month_limit: must be greater than 0 ({got})",
     "config.bad_env_chat": "AHUB_TG_CHAT: expected an integer, got {got!r}",
@@ -693,6 +697,12 @@ MESSAGES: dict[str, str] = {
     "doctor.codex_missing": "not found in PATH",
     "doctor.codex_fix": "install codex (npm i -g @openai/codex)",
     "doctor.codex_fix_login": "run codex login in a terminal",
+    "doctor.codex_fix_userns": "AppArmor forbids unprivileged user namespaces here — allow them (the admin's "
+                               "decision): sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 "
+                               "(to keep it: /etc/sysctl.d/99-userns.conf)",
+    "doctor.codex_fix_no_sandbox": "or no OS sandbox at all: [providers.codex] sandbox = \"danger-full-access\" "
+                                   "in the hub config — then the task copy and the gates hold codex, as they "
+                                   "hold opencode and agy",
     "doctor.prov_missing": "not found",
     "doctor.prov_logged_in": "logged in",
     "doctor.prov_no_login": "found, not logged in",
@@ -705,6 +715,7 @@ MESSAGES: dict[str, str] = {
     "doctor.prov_hint_opencode": "install opencode: npm i -g opencode-ai, then opencode auth login",
     "doctor.prov_hint_agy": "install the Google Antigravity CLI (agy), then sign in in a terminal",
     "doctor.prov_hint_codex": "install codex: npm i -g @openai/codex, then codex login",
+
     "doctor.models_ok": "role defaults fit the login",
     "doctor.models_bad": "roles need a free model: {roles}",
     "doctor.models_fix": "{cmds}",
@@ -718,6 +729,9 @@ MESSAGES: dict[str, str] = {
     "doctor.network_no_proxy": "no system proxy",
     "doctor.network_bad": "{problem}",
     "doctor.network_fix": "check the system proxy (HTTPS_PROXY)",
+    "doctor.provider_proxy_ok": " (own proxy {host}:{port} answers)",
+    "doctor.provider_proxy_down": " (own proxy {host}:{port} does not answer)",
+    "doctor.provider_proxy_none": " (own proxy: none)",
     "doctor.claude_found": "found {binary}",
     "doctor.claude_missing": "not found",
     "doctor.claude_fix": "install Claude Code",

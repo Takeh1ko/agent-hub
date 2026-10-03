@@ -29,6 +29,23 @@ def store() -> Store:
     return s
 
 
+@pytest.fixture(autouse=True)
+def _no_real_providers(monkeypatch):
+    """Tests never touch real providers: quick_check calls health() on the machine, and a real
+    WARNING (agy models exiting 1) then lands in the faked log and shows up in the next cycle."""
+    from ahub import providers
+    from ahub.providers.base import Health
+
+    class _Healthy:
+        name = "opencode"
+
+        def health(self) -> Health:
+            return Health(True, ())
+
+    monkeypatch.setattr(providers, "names", lambda: ["opencode"])
+    monkeypatch.setitem(providers._cache, "opencode", _Healthy())
+
+
 def qc(store, **kw):
     return observer.quick_check(store, projects=[], health=False, **kw)
 
@@ -55,6 +72,24 @@ def test_heartbeat_stale_is_critical(store):
     assert sus and sus[0].critical and "сервис не тикает" in sus[0].text
 
 
+def test_broken_provider_is_critical(store, monkeypatch):
+    """quick_check calls health() of every provider — here a stub, never the machine."""
+    from ahub import providers
+    from ahub.providers.base import Health
+
+    class _Broken:
+        name = "opencode"
+
+        def health(self) -> Health:
+            return Health(False, ("no login",))
+
+    monkeypatch.setitem(providers._cache, "opencode", _Broken())
+    sus = observer.quick_check(store, projects=[], health=True)
+    assert [s.sig for s in sus] == ["health:opencode"] and sus[0].critical
+    assert sus[0].text.endswith("no login")
+    assert qc(store) == []  # the same check without the health part — clean
+
+
 def test_queue_stuck_and_unacked(store):
     tid = store.create_task(project="P", kind="scout", title="x", now=now_ms() - 30 * 60_000)
     store.add_event("done", task_id=tid, now=now_ms() - 30 * 60_000)
@@ -75,6 +110,11 @@ def test_cycle_without_model_raises_once(store):
     assert observer.reports(store, 1)[0]["kind"] == "quick"
 
 
+def _stale_heartbeat(store) -> None:
+    """A code suspicion of its own: the hub looks alive to nobody (the service tick is old)."""
+    store.meta_set("service_heartbeat", str(now_ms() - 10 * 60_000))
+
+
 def _observer_fake(store, answer: str):
     fake = install_fake(store, [{"session": "ses_obs", "steps": [
         {"event": {"type": "usage", "in": 50, "out": 20, "go": 0.002}},
@@ -88,6 +128,7 @@ def test_triage_false_alarm_no_alarm(store):
     tid = store.create_task(project="P", kind="scout", title="x")
     transitions.move(store, tid, State.PREPARING)
     store.meta_set(observer.LAST_DEEP, str(now_ms()))
+    _stale_heartbeat(store)  # a suspicion of its own — otherwise the cycle never reaches the model
     assert observer.cycle(store, projects=[]) == "false_alarm"
     assert comms.alarms(store) == []
     assert "Code suspicions" in fake.calls[0]["prompt"] and f"T{tid}" in fake.calls[0]["prompt"]
@@ -99,6 +140,7 @@ def test_triage_alarm(store):
     tid = store.create_task(project="P", kind="scout", title="x")
     transitions.move(store, tid, State.PREPARING)
     store.meta_set(observer.LAST_DEEP, str(now_ms()))
+    _stale_heartbeat(store)
     assert observer.cycle(store, projects=[]) == "alarm"
     assert events.lines(store, comms.alarms(store)) == ["ALARM T1 висит → перезапустить"]
 

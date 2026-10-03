@@ -195,6 +195,77 @@ def test_codex_health_and_missing(monkeypatch, tmp_path):
     assert doctor.check_codex().ok is None
 
 
+def _only_codex(monkeypatch, path):
+    monkeypatch.setattr(shutil, "which", lambda name: str(path) if name == "codex" else None)
+
+
+def _no_sandbox_codex(monkeypatch, tmp_path, name="c"):
+    """A logged-in codex whose OS sandbox does not start (Ubuntu 24.04 with AppArmor)."""
+    from ahub import providers
+    from ahub.providers.codex import CodexProvider
+    from tests.provider_contract import CODEX_DATA, fake_codex
+
+    class _NoSandbox(CodexProvider):
+        def sandbox_ok(self):
+            return False, "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+
+    prov = _NoSandbox(binary=str(fake_codex(tmp_path / name)), env={"AHUB_CODEX_FAKE_DATA": str(CODEX_DATA)})
+    _only_codex(monkeypatch, prov.binary)
+    monkeypatch.setitem(providers._cache, "codex", prov)
+    return prov
+
+
+def test_codex_sandbox_hint_appArmor(tmp_path, monkeypatch):
+    """AppArmor blocks unprivileged user namespaces — both fixes in one hint, the sysctl is the admin's."""
+    flag = tmp_path / "apparmor_restrict_unprivileged_userns"
+    monkeypatch.setattr(doctor, "APPARMOR_USERNS_FLAG", flag)
+    assert doctor.apparmor_blocks_userns() is False  # no such file — AppArmor is not in the kernel
+    flag.write_text("1\n")
+    assert doctor.apparmor_blocks_userns() is True
+    fix = doctor.codex_sandbox_fix()
+    assert "sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in fix
+    assert "/etc/sysctl.d/" in fix  # and how to keep it
+    assert 'sandbox = "danger-full-access"' in fix  # the config way
+
+    _no_sandbox_codex(monkeypatch, tmp_path)
+    c = doctor.check_codex()
+    assert c.ok is False and "bwrap" in c.detail
+    assert "sysctl -w" in c.fix and 'danger-full-access' in c.fix
+    assert "codex login" not in c.fix  # the login is fine — the sandbox is the problem
+
+
+def test_codex_sandbox_hint_without_appArmor(tmp_path, monkeypatch):
+    """No AppArmor flag (a container without user namespaces): the sysctl would not help — one fix."""
+    monkeypatch.setattr(doctor, "APPARMOR_USERNS_FLAG", tmp_path / "no_such_flag")
+    fix = doctor.codex_sandbox_fix()
+    assert "sysctl" not in fix and 'sandbox = "danger-full-access"' in fix
+
+    flag = tmp_path / "apparmor_restrict_unprivileged_userns"
+    flag.write_text("0\n")
+    assert doctor.apparmor_blocks_userns() is False  # not restricting — nothing to allow
+
+    _no_sandbox_codex(monkeypatch, tmp_path)
+    c = doctor.check_codex()
+    assert c.ok is False and "sysctl" not in c.fix and 'danger-full-access' in c.fix
+
+
+def test_codex_no_sandbox_hint_without_a_broken_sandbox(monkeypatch, tmp_path):
+    """A broken codex for another reason gets the login fix only, not the sandbox advice."""
+    from ahub import providers
+    from ahub.providers.codex import CodexProvider
+    from tests.provider_contract import CODEX_DATA, fake_codex
+
+    class _NoLogin(CodexProvider):
+        def login(self):
+            return False, "Not logged in"
+
+    prov = _NoLogin(binary=str(fake_codex(tmp_path)), env={"AHUB_CODEX_FAKE_DATA": str(CODEX_DATA)})
+    _only_codex(monkeypatch, prov.binary)
+    monkeypatch.setitem(providers._cache, "codex", prov)
+    c = doctor.check_codex()
+    assert c.ok is False and "codex login" in c.fix and "danger-full-access" not in c.fix
+
+
 def test_models_go_and_free_fix():
     assert doctor.check_models(["opencode", "opencode-go"]).ok is True
     c = doctor.check_models(["opencode"])
@@ -384,6 +455,49 @@ def test_network_proxy_ok(monkeypatch):
         assert c.ok is True and str(port) in c.detail
     finally:
         srv.close()
+
+
+def _opencode_line(monkeypatch, tmp_path, section: str) -> str:
+    """The opencode doctor line with [providers.opencode] in the config (the binary is a fake file)."""
+    fake = tmp_path / "opencode"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda name: str(fake) if name == "opencode" else None)
+    write(paths.global_config_path(), section)
+    return doctor.check_opencode().detail
+
+
+def test_provider_own_proxy_on_the_line(monkeypatch, tmp_path):
+    """A provider with [providers.<name>] — its line shows the proxy and whether it answers."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    assert doctor.provider_proxy_detail("opencode") == ""  # no section — nothing to say
+    assert _opencode_line(monkeypatch, tmp_path, "[usage]\ngo_month_limit = 5.0\n") == f"found {tmp_path / 'opencode'}"
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    port = srv.getsockname()[1]
+    srv.close()  # nothing listens there — the proxy does not answer
+    detail = _opencode_line(monkeypatch, tmp_path,
+                            f'[providers.opencode]\nproxy = "http://user:secret@127.0.0.1:{port}"\n')
+    assert f"127.0.0.1:{port}" in detail and "does not answer" in detail
+    assert "secret" not in detail  # only host:port — the URL may carry a password
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    live = srv.getsockname()[1]
+    try:
+        detail = _opencode_line(monkeypatch, tmp_path,
+                                f'[providers.opencode]\nproxy = "http://127.0.0.1:{live}"\n')
+        assert f"127.0.0.1:{live}" in detail and "answers" in detail
+    finally:
+        srv.close()
+
+    assert "none" in _opencode_line(monkeypatch, tmp_path, '[providers.opencode]\nproxy = ""\n')
 
 
 def test_claude_and_skill(monkeypatch, tmp_path):

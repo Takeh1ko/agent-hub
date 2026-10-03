@@ -21,12 +21,21 @@ Example ~/.config/ahub/config.toml:
     claude = "~/.claude/local/claude"
     opencode_db = "$HOME/.local/share/opencode/opencode.db"
 
-    [providers.opencode]                # provider on/off (ahub providers, the setup wizard); no key — on
-    enabled = true
+    [providers.opencode]                # the provider's own settings: on/off + the advanced keys
+    enabled = true                      # off — its models leave the role menus (ahub providers, the wizard)
+    proxy = "http://127.0.0.1:8080"     # for this provider's process
+    no_proxy = "localhost,127.0.0.1"
+
     [providers.agy]
-    enabled = false
+    proxy = ""                          # explicitly no proxy (the inherited variables are dropped)
+
+    # per proxy key: absent — inherited as is, "" — explicitly none, a value — set
+
     [providers.codex]
     enabled = true
+    sandbox = "workspace-write"         # codex OS sandbox: read-only | workspace-write | danger-full-access
+                                       # (absent — workspace-write; danger-full-access — no OS sandbox,
+                                       # only the task copy and the gates hold codex)
 
 Example .hub.toml v2:
 
@@ -78,6 +87,8 @@ from ahub.i18n import t as _t
 PROJECT_FILE = ".hub.toml"
 SCHEMA_VERSION = 2
 DEFAULT_SECRET_EXCLUDES = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*")
+PROXY_SCHEMES = ("http://", "https://", "socks5://", "socks5h://")  # the providers are separate programs
+SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")  # `codex exec -s …`
 
 
 class ConfigError(ValueError):
@@ -155,6 +166,22 @@ class ProjectConfig:
 
 
 @dataclass(frozen=True)
+class ProviderSettings:
+    """A provider's own settings — [providers.<name>] in the hub config.
+
+    Proxy, per key: None — the key is absent, the provider process inherits the hub environment; "" —
+    explicitly none (the inherited variables are dropped); a value — for this provider's process.
+    Sandbox: "" — the key is absent, the provider uses its own default.
+    Enabled: False — the provider is off (ahub providers, the setup wizard); True/absent — on.
+    """
+
+    proxy: str | None = None
+    no_proxy: str | None = None
+    sandbox: str = ""
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class HubConfig:
     projects: tuple[str, ...] = ()  # paths to project roots (or to their .hub.toml)
     source: str = ""
@@ -166,16 +193,27 @@ class HubConfig:
     opencode: str = ""  # [paths] opencode; empty — which/known location
     claude: str = ""  # [paths] claude; empty — which/known location
     opencode_db: str = ""  # [paths] opencode_db; empty — XDG/known location
-    providers_off: tuple[str, ...] = ()  # [providers.<name>] enabled = false; the rest are on
+    provider_settings: dict[str, ProviderSettings] = field(default_factory=dict)  # [providers.<name>]
 
     @property
     def telegram_enabled(self) -> bool:
         """Bot enabled: token present."""
         return bool(self.tg_token)
 
+    def provider(self, name: str) -> ProviderSettings:
+        """A provider's own settings; no section — the proxy keys stay inherited, the sandbox default."""
+        return self.provider_settings.get(name) or ProviderSettings()
+
     def provider_enabled(self, name: str) -> bool:
-        """Provider switch ([providers.<name>] enabled): no key — the provider is on."""
-        return name.strip().lower() not in self.providers_off
+        """Provider switch ([providers.<name>] enabled): no section or no key — the provider is on."""
+        spec = self.provider_settings.get(name.strip().lower())
+        return spec is None or spec.enabled
+
+    @property
+    def providers_off(self) -> tuple[str, ...]:
+        """Providers with enabled = false (lowercase) — the registry hides their models."""
+        return tuple(sorted({name.strip().lower() for name, spec in self.provider_settings.items()
+                             if not spec.enabled}))
 
 
 class _Reader:
@@ -255,6 +293,37 @@ def _resources(r: _Reader, raw: dict) -> dict[str, Resource]:
             capacity=r.int_(spec, "capacity", 1, where, minimum=1),
             lock=expand(r.str_(spec, "lock", "", where)),
         )
+    return out
+
+
+def _provider_settings(r: _Reader, raw: dict) -> dict[str, ProviderSettings]:
+    """[providers.<name>] → the provider's own settings (the switch `enabled` and the advanced keys).
+
+    An absent proxy key stays inherited; "" means explicitly none; an unknown sandbox mode is an error
+    (a typo would silently drop the sandbox); `enabled` must be a boolean — a non-boolean is an error too
+    (otherwise a typo would quietly keep the provider on).
+    """
+    out: dict[str, ProviderSettings] = {}
+    for name, spec in raw.items():
+        if not isinstance(spec, dict):
+            r.errors.append(_t("config.expect_table", field=f"providers.{name}"))
+            continue
+        where = f"providers.{name}."
+        proxy: str | None = None
+        if "proxy" in spec:
+            proxy = r.str_(spec, "proxy", "", where).strip()
+            if proxy and not proxy.lower().startswith(PROXY_SCHEMES):
+                r.errors.append(_t("config.bad_provider_proxy", name=name, got=proxy))
+        no_proxy: str | None = None
+        if "no_proxy" in spec:
+            no_proxy = r.str_(spec, "no_proxy", "", where).strip()
+        sandbox = r.str_(spec, "sandbox", "", where).strip()
+        if sandbox and sandbox not in SANDBOX_MODES:
+            r.errors.append(_t("config.bad_sandbox", name=name, got=sandbox))
+            sandbox = ""
+        enabled = r.bool_(spec, "enabled", True, where)
+        if proxy is not None or no_proxy is not None or sandbox or not enabled:
+            out[name] = ProviderSettings(proxy=proxy, no_proxy=no_proxy, sandbox=sandbox, enabled=enabled)
     return out
 
 
@@ -428,13 +497,7 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
     opencode = expand(r.str_(pth, "opencode", "", "paths.").strip())
     claude = expand(r.str_(pth, "claude", "", "paths.").strip())
     opencode_db = expand(r.str_(pth, "opencode_db", "", "paths.").strip())
-    providers_off: list[str] = []
-    for pname, spec in r.table(data, "providers").items():
-        if not isinstance(spec, dict):
-            r.errors.append(_t("config.expect_table", field=f"providers.{pname}"))
-            continue
-        if "enabled" in spec and not r.bool_(spec, "enabled", True, f"providers.{pname}."):
-            providers_off.append(pname.strip().lower())
+    provider_settings = _provider_settings(r, r.table(data, "providers"))
     raw = data.get("lang", "")
     norm = raw.strip().lower() if isinstance(raw, str) else ""
     if isinstance(raw, str) and norm not in ("", "en", "ru"):
@@ -457,7 +520,7 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
         opencode=opencode,
         claude=claude,
         opencode_db=opencode_db,
-        providers_off=tuple(sorted(set(providers_off))),
+        provider_settings=provider_settings,
     )
 
 

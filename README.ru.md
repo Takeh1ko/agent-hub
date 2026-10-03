@@ -119,6 +119,41 @@ Claude держит Monitor на `ahub watch`; пришла строка `DONE T
 
 Всё остальное — `ahub --help`.
 
+## Продвинуто: прокси на провайдера
+
+По умолчанию процесс каждого провайдера наследует окружение хаба, поэтому один системный прокси (`HTTPS_PROXY` и
+подобные) действует на всех. В `~/.config/ahub/config.toml` у провайдера может быть свой — один через прокси, другой
+напрямую:
+
+```toml
+[providers.opencode]
+proxy = "http://127.0.0.1:8080"      # https_proxy/http_proxy/all_proxy для процесса этого провайдера
+no_proxy = "localhost,127.0.0.1"
+
+[providers.agy]
+proxy = ""                            # пустая строка = явно без прокси (унаследованные переменные убираются)
+```
+
+Правило для каждого ключа: нет ключа — переменная наследуется как есть, `""` — явно нет (переменная убирается),
+значение — переменная ставится; `proxy` задаёт `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` и их строчные варианты,
+`no_proxy` — `NO_PROXY`/`no_proxy`, ключи друг на друга не влияют. Принимаются только http/https/socks5/socks5h.
+Собственные процессы хаба и Telegram-бот работают как раньше (`[telegram] proxy` — отдельно). `ahub doctor`
+показывает свой прокси каждого провайдера и отвечает ли он.
+
+В этой же секции ключ `sandbox` для Codex — OS-песочница, в которой работает воркер:
+
+```toml
+[providers.codex]
+sandbox = "workspace-write"     # read-only | workspace-write (по умолчанию) | danger-full-access
+```
+
+В `workspace-write` инструменты читают всё, но пишут только в копию задачи (это обеспечивает ядро). На Ubuntu 24.04
+AppArmor запрещает непривилегированные user namespace, нужные bubblewrap, и тогда codex молча не выполняет ни одной
+команды, а ход выходит пустым — `ahub doctor` распознаёт этот случай и даёт обе починки в одной подсказке: разрешить
+namespace (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` и файл в `/etc/sysctl.d/`, чтобы
+навсегда — решение администратора) или поставить `sandbox = "danger-full-access"`, где codex держат копия задачи и
+ворота приёмки, как opencode и agy. Системные настройки хаб сам не меняет.
+
 ## Документация (на английском)
 
 - [docs/ARCHITECTURE.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/ARCHITECTURE.md) — карта кода, начинать с неё
