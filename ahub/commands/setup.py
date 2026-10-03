@@ -325,6 +325,38 @@ def _roles_needing_free(store) -> list[str]:
     return bad
 
 
+def _service_enable_lines(os_kind: str, names: list[str], written: list[str], hint: str) -> list[str]:
+    """Enable an installed service and check it by heartbeat; never raises."""
+    import os
+
+    from ahub.i18n import t
+
+    lines: list[str] = []
+    try:
+        from ahub.commands import service as svc
+
+        failures = svc.enable_service(os_kind, names, written)
+    except Exception as e:
+        failures = [(["enable"], f"{e.__class__.__name__}: {e}"[:500])]
+    for cmd, err in failures:
+        cmd_s = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        lines.append(t("setup.wizard_service_enable_fail", cmd=cmd_s, err=err))
+    try:
+        from ahub.commands import service as svc
+
+        age = svc.wait_for_heartbeat()
+    except Exception:
+        age = None
+    if age is not None:
+        lines.append(t("setup.wizard_service_alive", age=age))
+    else:
+        lines.append(t("setup.wizard_service_dead", hint=hint))
+    if os_kind == "linux":
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or "$USER"
+        lines.append(t("setup.wizard_service_linger", user=user))
+    return lines
+
+
 def run_wizard(args) -> int:
     import os
     import types
@@ -389,7 +421,22 @@ def run_wizard(args) -> int:
         else:
             print(t("setup.wizard_models_skip"))
     # 5) service
-    if sys.platform.startswith("linux") or sys.platform == "darwin":
+    want_service = bool(getattr(args, "service", False))
+    if want_service:
+        # --service: install and enable without questions; failures never stop setup.
+        try:
+            from ahub.commands import service as svc
+
+            _kind, _names, written, hint = svc.install_service_files()
+            print(t("setup.wizard_service_done", names=", ".join(written)))
+            print(hint)
+            for line in _service_enable_lines(_kind, _names, written, hint):
+                print(line)
+        except CliError as e:
+            print(e)
+        except Exception as e:
+            print(t("setup.wizard_service_enable_fail", cmd="install", err=str(e)[:300]))
+    elif sys.platform.startswith("linux") or sys.platform == "darwin":
         if _ask_yes_no(t("setup.wizard_service_ask_install"), True):
             try:
                 from ahub.commands import service as svc
@@ -397,8 +444,12 @@ def run_wizard(args) -> int:
                 _kind, _names, written, hint = svc.install_service_files()
                 print(t("setup.wizard_service_done", names=", ".join(written)))
                 print(hint)
+                for line in _service_enable_lines(_kind, _names, written, hint):
+                    print(line)
             except CliError as e:
                 print(e)
+            except Exception as e:
+                print(t("setup.wizard_service_enable_fail", cmd="install", err=str(e)[:300]))
         elif _ask_yes_no(t("setup.wizard_service_ask_start"), False):
             try:
                 from ahub.commands import service as svc
@@ -488,6 +539,21 @@ def _cmd_noninteractive(args) -> int:
         ensure_free_default(warn=lines.append)
     except Exception:
         pass
+    want_service = bool(getattr(args, "service", False))
+    want_install = bool(getattr(args, "yes", False)) or want_service
+    if want_install and (sys.platform.startswith("linux") or sys.platform == "darwin" or want_service):
+        try:
+            from ahub.commands import service as svc
+
+            _kind, _names, written, hint = svc.install_service_files()
+            lines.append(t("setup.wizard_service_done", names=", ".join(written)))
+            lines.append(hint)
+            if want_service:
+                lines.extend(_service_enable_lines(_kind, _names, written, hint))
+        except CliError as e:
+            lines.append(str(e))
+        except Exception as e:
+            lines.append(t("setup.wizard_service_enable_fail", cmd="install", err=str(e)[:300]))
     problems = config.check_project(cfg)
     lines += [f"! {p}" for p in problems]
     emit(args, {"project": cfg.name, "file": str(f), "problems": problems}, "\n".join(lines))
@@ -517,5 +583,6 @@ def register(subparsers) -> None:
     p.add_argument("--deny", help=t("help.setup_deny"))
     p.add_argument("--claude", action="store_true", help=t("help.setup_claude"))
     p.add_argument("--yes", action="store_true", help=t("help.setup_yes"))
+    p.add_argument("--service", action="store_true", help=t("help.setup_service"))
     p.add_argument("--lang", dest="setup_lang", choices=("en", "ru"), default=None, help=t("help.setup_lang"))
     p.set_defaults(func=cmd_setup)

@@ -177,6 +177,60 @@ def install_service_files() -> tuple[str, list[str], list[str], str]:
     return os_kind, names, written, hint
 
 
+HEARTBEAT_WAIT_S = 15.0  # setup waits this long for a tick after enabling
+HEARTBEAT_POLL_S = 0.5  # heartbeat poll step while waiting
+ENABLE_TIMEOUT_S = 30  # one enable command timeout
+
+
+def enable_commands(os_kind: str, names: list[str], written: list[str]) -> list[list[str]]:
+    """Ordered OS commands that enable an installed service."""
+    if os_kind == "darwin":
+        try:
+            uid = os.getuid()
+        except AttributeError:
+            uid = 0
+        return [["launchctl", "bootstrap", f"gui/{uid}", p] for p in written]
+    return [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "--now", *names],
+    ]
+
+
+def enable_service(os_kind: str, names: list[str], written: list[str]) -> list[tuple[list[str], str]]:
+    """Run enable commands in order; tolerate "already loaded" on macOS.
+
+    Returns [(cmd, error)] for failed commands, [] on success. Never raises —
+    setup prints failures and continues.
+    """
+    failures: list[tuple[list[str], str]] = []
+    for cmd in enable_commands(os_kind, names, written):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=ENABLE_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError) as e:
+            failures.append((cmd, str(e)[:500]))
+            continue
+        if r.returncode == 0:
+            continue
+        out = ((r.stdout or "") + "\n" + (r.stderr or "")).lower()
+        if os_kind == "darwin" and "already loaded" in out:
+            continue
+        err = (r.stderr or r.stdout or f"exit {r.returncode}").strip()[:500]
+        failures.append((cmd, err))
+    return failures
+
+
+def wait_for_heartbeat(timeout_s: float = HEARTBEAT_WAIT_S) -> int | None:
+    """Poll the service heartbeat until a fresh tick (<30s); age or None on timeout."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        age = _heartbeat_age_s()
+        if age is not None and age < 30:
+            return age
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(HEARTBEAT_POLL_S)
+
+
 def cmd_install(args) -> int:
     """OS service: systemd --user on Linux, launchd plist on macOS (autostart, KeepAlive/Restart).
 
