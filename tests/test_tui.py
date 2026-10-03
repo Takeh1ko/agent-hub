@@ -129,6 +129,31 @@ async def test_app_stop_with_confirm(store):
         assert store.get_task(a).state is State.STOPPED
 
 
+async def test_app_nudge_message(store):
+    """`m` in control mode asks for the text and stores the request; in view mode nothing happens."""
+    a, b = fill(store)
+    transitions.move(store, a, State.PREPARING)
+    transitions.move(store, a, State.WORKING)
+    transitions.acquire(store, a, "own", pid=5)
+    store.add_session(task_id=a, provider="fake", role="executor", model="fake", external_id="ses_x")
+    app = TopApp(store=store, projects=[])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        app.query_one("#tasks").move_cursor(row=app._ids.index(a))
+        await pilot.press("m")  # view mode: nothing happens
+        await pilot.pause(0.2)
+        assert app.screen.__class__.__name__ != "Ask" and store.get_task(a).request == ""
+        await pilot.press("c")  # control mode on
+        await pilot.press("m")
+        await pilot.pause(0.2)
+        await pilot.press(*"продолжай, почини")
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+    t = store.get_task(a)
+    assert t.request == "nudge" and t.request_text == "продолжай, почини"
+    assert [e.payload["by"] for e in store.events(task_id=a) if e.kind == "nudge"] == ["human"]
+
+
 async def test_app_help(store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
@@ -265,6 +290,28 @@ async def test_app_transcript_screen(tmp_path, store):
         await pilot.pause(0.2)
         app.screen.query_one("#tasks")
         assert app.is_running  # q on the transcript screen is "back", not "quit"
+
+
+async def test_transcript_screen_nudges_the_worker(tmp_path, store):
+    """`m` inside the transcript screen: the same ask, with the task of the screen."""
+    tid = store.create_task(project="P", kind="code", title="починить")
+    transitions.move(store, tid, State.PREPARING)
+    transitions.move(store, tid, State.WORKING)
+    transitions.acquire(store, tid, "own", pid=5)
+    _session(store, tid, _fake_log(tmp_path / "executor.log", ["Смотрю код."]), status="running")
+    app = TopApp(store=store, projects=[], control=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
+        await pilot.press("t")
+        await pilot.pause(0.3)
+        await pilot.press("m")
+        await pilot.pause(0.2)
+        assert app.screen.__class__.__name__ == "Ask"
+        await pilot.press(*"хватит, почини", "enter")
+        await pilot.pause(0.3)
+        assert app.screen.__class__.__name__ == "Transcript"  # the screen is still under the dialog
+    assert store.get_task(tid).request_text == "хватит, почини"
 
 
 async def test_transcript_tail_holds_when_scrolled_up(tmp_path, store):

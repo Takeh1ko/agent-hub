@@ -101,6 +101,7 @@ class Transcript(Screen[None]):
                 Binding("r", "role", _t("tui.bind_role")),
                 Binding("bracketleft", "round_prev", _t("tui.bind_round_prev"), key_display="["),
                 Binding("bracketright", "round_next", _t("tui.bind_round_next"), key_display="]"),
+                Binding("m", "nudge", _t("tui.bind_nudge")),
                 Binding("p", "prompt", _t("tui.bind_prompt")), Binding("f", "follow", _t("tui.bind_follow"))]
     POLL_S = 1.5
 
@@ -172,6 +173,11 @@ class Transcript(Screen[None]):
     def action_prompt(self) -> None:
         self.app.push_screen(Prompt(self.view.prompt()))
 
+    def action_nudge(self) -> None:
+        app = self.app
+        if isinstance(app, TopApp):
+            app.ask_nudge(self.view.task_id)
+
     def action_follow(self) -> None:
         self._resume = True
         self._paint(True)
@@ -199,7 +205,9 @@ class TopApp(App):
                 ("c", "toggle", _t("tui.bind_toggle")), ("n", "new", _t("tui.bind_new")),
                 ("s", "stop", _t("tui.bind_stop")), ("a", "accept", _t("tui.bind_accept")),
                 ("x", "reject", _t("tui.bind_reject")), ("r", "rework", _t("tui.bind_rework")),
-                ("m", "model", _t("tui.bind_model")), ("b", "budget", _t("tui.bind_budget")),
+                ("m", "nudge", _t("tui.bind_nudge")),
+                Binding("M", "model", _t("tui.bind_model")),
+                ("b", "budget", _t("tui.bind_budget")),
                 ("p", "pause", _t("tui.bind_pause")), ("h", "history", _t("tui.bind_history")),
                 ("t", "transcript", _t("tui.bind_transcript"))]
 
@@ -380,6 +388,23 @@ class TopApp(App):
             self._ask_then(_t("tui.ask_model", tid=tid),
                            lambda v: accept.change_model(self.store, p, tid, v, by="human"),
                            "spark / mimo-flash / deepseek-flash")
+
+    def ask_nudge(self, tid: int) -> None:
+        """A message to a working task (`m` — from the table and from the transcript screen)."""
+        if not self.control:
+            self.notify(_t("tui.view_only"), severity="warning")
+            return
+
+        def send(text: str) -> str:
+            transitions.request_nudge(self.store, tid, text=text, by="human")
+            return _t("task.nudge_requested", label=f"T{tid}")
+
+        self._ask_then(_t("tui.ask_nudge", tid=tid), send)
+
+    def action_nudge(self) -> None:
+        tid = self.selected()
+        if tid is not None:
+            self.ask_nudge(tid)
 
     def action_budget(self) -> None:
         tid = self.selected()
