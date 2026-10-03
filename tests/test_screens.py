@@ -76,10 +76,43 @@ def test_home_screen_without_a_hub(capsys, monkeypatch, tmp_path):
     assert rc == 0
     assert snap(out, tmp_path) == (
         "ahub 3.0.0 · no project in this directory · service not running\n"
-        "  the hub is not configured yet — Run `ahub setup` to get started\n"
+        "  the hub is not configured yet — run `ahub setup` to get started\n"
         "  • ahub setup\n"
         "  • ahub doctor\n"
         "  • ahub models\n")
+
+
+def test_home_screen_builds_only_emitted_representation(capsys, monkeypatch, tmp_path):
+    """Running ahub builds only text; ahub --json builds only data (no double evaluation)."""
+    import ahub.home
+
+    monkeypatch.chdir(tmp_path)
+    data_calls = 0
+    text_calls = 0
+
+    orig_data = ahub.home.data
+    orig_text = ahub.home.text
+
+    def mock_data(*a, **kw):
+        nonlocal data_calls
+        data_calls += 1
+        return orig_data(*a, **kw)
+
+    def mock_text(*a, **kw):
+        nonlocal text_calls
+        text_calls += 1
+        return orig_text(*a, **kw)
+
+    monkeypatch.setattr(ahub.home, "data", mock_data)
+    monkeypatch.setattr(ahub.home, "text", mock_text)
+
+    run(capsys)
+    assert text_calls == 1
+    assert data_calls == 0
+
+    run(capsys, "--json")
+    assert text_calls == 1
+    assert data_calls == 1
 
 
 def test_home_screen_with_work_and_a_decision(capsys, monkeypatch, tmp_path):

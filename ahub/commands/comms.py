@@ -240,7 +240,7 @@ def cmd_alarms(args) -> int:
         return 0
     now = now_ms()
     head = [t("alarms.col_id"), t("alarms.col_age"), t("alarms.col_what")]
-    body = [[f"#{e.id}", views._age(e.ts, now), line] for e, line in zip(al, events.lines(store, al), strict=True)]
+    body = [[f"#{e.id}", views.age(e.ts, now), line] for e, line in zip(al, events.lines(store, al), strict=True)]
     out = [ui.table(head, body, max_width=[6, 8, None], indent=2)]
     if args.ack:  # the result of the command, not a suggestion for the next one
         events.ack(store, [e.id for e in al], scope=sc)

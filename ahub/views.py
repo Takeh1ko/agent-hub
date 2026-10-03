@@ -51,13 +51,16 @@ def clip_bytes(text: str, limit: int) -> str:
     return cut.rsplit("\n", 1)[0] + "\n…" if "\n" in cut else cut + "…"
 
 
-def _age(ms: int, now: int) -> str:
+def age(ms: int, now: int) -> str:
     m = max(0, (now - ms) // 60000)
     if m < 60:
         return _t("views.age_min", m=m)
     if m < 24 * 60:
         return _t("views.age_hm", h=m // 60, m=m % 60)
     return _t("views.age_dh", d=m // 1440, h=(m % 1440) // 60)
+
+
+_age = age
 
 
 def _short(s: str, n: int) -> str:
@@ -101,11 +104,14 @@ def _bytes(lines: list[str]) -> int:
     return sum(len(ln.encode("utf-8")) + 1 for ln in lines)
 
 
-def _state_cell(t: Task) -> str:
+def state_cell(t: Task) -> str:
     """The state column: the phase of an active task (what it is doing), else the state."""
     if t.state in ACTIVE and t.phase:
         return PHASE_WORDS.get(t.phase, t.phase)
     return state_word(t.state)
+
+
+_state_cell = state_cell
 
 
 def _pulse_detail(pl) -> str:

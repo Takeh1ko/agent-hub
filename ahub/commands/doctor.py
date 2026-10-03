@@ -56,8 +56,11 @@ def _lines(checks: list[doctor.Check], w: int | None) -> list[str]:
     return out
 
 
-def _text(checks: list[doctor.Check], w: int | None = None) -> str:
+def text(checks: list[doctor.Check], w: int | None = None) -> str:
     return "\n".join(_lines(checks, w))
+
+
+_text = text
 
 
 def cmd_doctor(args) -> int:

@@ -161,15 +161,19 @@ def main(argv: list[str] | None = None) -> int:
             if getattr(args, "cmd", None):
                 ap.print_help()
                 return 2
-            from ahub.home import data, text
-
             sc = scope.resolve(args)
-            emit(args, data(all_projects=sc.all, project=sc.name or None),
-                 text(all_projects=sc.all, project=sc.name or None))
+            if getattr(args, "json", False):
+                from ahub.home import data
+
+                emit(args, data(all_projects=sc.all, project=sc.name or None), "")
+            else:
+                from ahub.home import text
+
+                emit(args, None, text(all_projects=sc.all, project=sc.name or None))
             return 0
         return int(func(args) or 0)
     except (ConfigError, CliError) as e:
-        hint = getattr(e, "hint", "") or command_hint(str(e), command_names())
+        hint = getattr(e, "hint", "") or command_hint(str(e), command_names(ap))
         if ui.colour_on():  # a terminal: ✗ <what>, the way out under it; a pipe keeps "error: …"
             print(ui.failed(str(e), t("cli.hint_tty", hint=hint)) if hint else ui.failed(str(e)),
                   file=sys.stderr)
