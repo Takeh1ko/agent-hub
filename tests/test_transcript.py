@@ -223,6 +223,22 @@ def test_engine_saves_the_prompt_of_every_turn(tmp_path):
     assert "готово" in text and "👁 read" in text and "расход: в 100" in text
 
 
+def test_engine_retry_does_not_add_a_turn(tmp_path):
+    """A network retry repeats the run of the same prompt — one line in the sidecar, one Turn."""
+    store = Store()
+    project = make_project(tmp_path)
+    install_fake(store, [{"session": "ses_t", "steps": [{"event": {"type": "error", "message": "status 503"}}],
+                          "exit": 1},
+                         scout_ok("ses_t")])
+    t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.SCOUT, title="где утечка", model="fake"),
+                     project, collect=False)
+    assert Engine(store, project, t.id, sleep=lambda s: None).run().state is State.DONE
+    side = transcript.prompts_path(Path(store.get_task(t.id).worktree) / ".ahub" / "logs" / "scout.log")
+    assert [(p.turn, p.kind) for p in transcript.read_prompts(side)] == [(1, "start")]
+    text = render(providers.get("fake"), side.parent / "scout.log")
+    assert text.count("── Turn ") == 1 and "✖ status 503" in text and "готово" in text
+
+
 def test_engine_prompt_kinds_of_a_code_task(tmp_path):
     """One sidecar per session log, one line per turn: start, rework on the findings, review."""
     store = Store()

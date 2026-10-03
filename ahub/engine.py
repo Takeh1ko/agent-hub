@@ -289,18 +289,20 @@ class Engine:
         """One worker step with retries on network failure (architecture §6.3).
 
         `prompt_kind` says what the prompt is (start | continue | repair | rework | stop | review) and goes
-        into the prompts sidecar, which is what `ahub follow` shows as the turn header.
+        into the prompts sidecar, which is what `ahub follow` shows as the turn header. One call is one
+        turn: a network retry repeats the run of the same prompt, not the turn.
         """
         entry = registry.get(self.store, alias)
         prov = providers.get(entry.provider)
         t = self.task()
         cwd = cwd or t.worktree
         tmo = self.project.timeouts
+        self._check_lease()
+        log_path = str(Path(cwd) / workspace.AHUB_DIR / "logs" / f"{log_name or role.value}.log")
+        self._note_prompt(log_path, prompt_kind, prompt)
         attempt = 0
         while True:
             self._check_lease()
-            log_path = str(Path(cwd) / workspace.AHUB_DIR / "logs" / f"{log_name or role.value}.log")
-            self._note_prompt(log_path, prompt_kind, prompt)
             row = self._session_row(prov.name, role, alias, t.round, session_id, log_path)
 
             def on_session(sid: str, _row=row) -> None:
