@@ -4,8 +4,11 @@
 - registers the project in ~/.config/ahub/config.toml;
 - --claude: ahub skill for Claude Code (~/.claude/skills/ahub/SKILL.md) and a short block in the project CLAUDE.md.
 - TTY without --yes → interactive wizard (language, project, providers, models, service, Claude, Telegram, doctor).
-- Without a Go login the roles move to a free alias, but only after a live probe of the free candidates
-  (doctor.pick_free) — a free model that does not answer is never set as the default.
+- The providers step lists every provider ahub knows (found / logged in / a note / an install hint) and writes
+  [providers.<name>] enabled — the same switch `ahub providers enable|disable` changes.
+- The models step probes the models of the providers that are on (live, at once) and picks the role defaults:
+  a paid model that answered, else a free one that answered — a model that does not answer is never the default.
+  Without a Go login and with no probe (AHUB_PROBE=0), the roles move to a free alias (doctor.pick_free).
 """
 
 from __future__ import annotations
@@ -140,7 +143,14 @@ def _replace_top_key(text: str, key: str, value) -> str:
     return new
 
 
-def _replace_section_key(text: str, section: str, key: str, value) -> str:
+def _provider_lookup(parsed: dict, name: str):
+    """`enabled` from [providers.<name>] — the nested table key, not a dotted path."""
+    table = parsed.get("providers")
+    spec = table.get(name) if isinstance(table, dict) else None
+    return spec.get("enabled") if isinstance(spec, dict) else None
+
+
+def _replace_section_key(text: str, section: str, key: str, value, lookup=None) -> str:
     """Key inside [section]; section missing — append; rest (comments, other sections) stays."""
     from ahub.i18n import t
 
@@ -171,7 +181,7 @@ def _replace_section_key(text: str, section: str, key: str, value) -> str:
     except tomllib.TOMLDecodeError:
         raise CliError(t("err.setup_global", path=gp)) from None
     try:
-        got = parsed.get(section, {}).get(key)
+        got = lookup(parsed) if lookup else parsed.get(section, {}).get(key)
     except AttributeError:
         got = None
     if got != value:
@@ -179,14 +189,21 @@ def _replace_section_key(text: str, section: str, key: str, value) -> str:
     return new
 
 
-def set_global(key: str, value, *, section: str | None = None) -> Path:
+def set_global(key: str, value, *, section: str | None = None, lookup=None) -> Path:
     """Single global-config writer: top-level key or [section] key, rest of file stays."""
     gp = paths.global_config_path()
     gp.parent.mkdir(parents=True, exist_ok=True)
     text = gp.read_text(encoding="utf-8") if gp.exists() else ""
-    new = _replace_section_key(text, section, key, value) if section else _replace_top_key(text, key, value)
+    new = (_replace_section_key(text, section, key, value, lookup) if section
+           else _replace_top_key(text, key, value))
     gp.write_text(new, encoding="utf-8")
     return gp
+
+
+def set_provider_enabled(name: str, enabled: bool) -> Path:
+    """The one writer of the provider switch: [providers.<name>] enabled (the rest of the table stays)."""
+    return set_global("enabled", enabled, section=f"providers.{name}",
+                      lookup=lambda parsed: _provider_lookup(parsed, name))
 
 
 def _replace_projects_line(text: str, items: list[str]) -> str:
@@ -315,14 +332,170 @@ def _roles_needing_free(store) -> list[str]:
         return []
     bad: list[str] = []
     for role in Role:
-        try:
-            menu = registry.menu(store, role)
-        except Exception:
-            continue
-        default = next((e for e, d in menu if d), None)
+        default = registry.role_default(store, role)
         if default is not None and default.model_id.startswith("opencode-go/"):
             bad.append(role.value)
     return bad
+
+
+def _provider_step(states, ask: bool, log) -> dict[str, bool]:
+    """Every provider ahub knows, then which to enable (default: found and logged in).
+
+    Writes [providers.<name>] enabled for each — the single place the switch lives. Returns name → on.
+    """
+    from ahub import doctor
+    from ahub.i18n import t
+
+    names = [st.name for st in states]
+    log(t("setup.wizard_providers_head"))
+    for st in states:
+        log(doctor.provider_line(st))
+    found = {st.name for st in states if st.found}
+    recommended = [st.name for st in states if st.found and st.logged_in]
+    picked = recommended
+    if ask:
+        while True:
+            raw = _prompt(t("setup.wizard_providers_ask", default=", ".join(recommended) or "—")).strip().lower()
+            picked = recommended if not raw else [w for w in re.split(r"[,\s]+", raw) if w]
+            unknown = [w for w in picked if w not in names]
+            if not unknown:
+                break
+            print(t("setup.wizard_providers_bad", name=", ".join(unknown), known=", ".join(names)))
+    for name in picked:
+        if name not in found:
+            log(t("setup.wizard_providers_skipped", name=name))
+    enabled = {st.name: st.name in picked and st.found for st in states}
+    for name, on in enabled.items():
+        try:
+            set_provider_enabled(name, on)
+        except CliError as e:
+            log(str(e))
+    log(t("setup.wizard_providers_on", names=", ".join(n for n, on in enabled.items() if on) or "—"))
+    off = [n for n, on in enabled.items() if not on]
+    if off:
+        log(t("setup.wizard_providers_off", names=", ".join(off)))
+    if not any(enabled.values()):
+        log(t("setup.wizard_providers_none"))
+    return enabled
+
+
+def _set_role_default(store, role, alias: str) -> None:
+    """Make the alias the role default via the registry (into the menu first); never raises."""
+    from ahub import registry
+
+    try:
+        if alias not in [e.alias for e, _ in registry.menu(store, role)]:
+            registry.add_to_role(store, role, alias)
+        registry.set_default(store, role, alias)
+    except Exception:
+        pass
+
+
+def _ask_role_model(role, good, recommended: str) -> str:
+    """The role default: Enter takes the recommended one, an alias or a number another."""
+    from ahub.i18n import t
+
+    options = ", ".join(e.alias for e in good)
+    while True:
+        raw = _prompt(t("setup.wizard_role_ask", role=role.value, options=options), recommended)
+        pick = raw.strip().lower()
+        if not pick:
+            return recommended
+        if pick.isdigit() and 1 <= int(pick) <= len(good):
+            return good[int(pick) - 1].alias
+        if any(e.alias == pick for e in good):
+            return pick
+        print(t("setup.wizard_role_bad", alias=raw, options=options))
+
+
+def _default_answers(store, role, results: dict) -> bool:
+    """The role already has a working default: it is set and it answered the probe.
+
+    An alias that was not probed (disabled, or its provider is off or not logged in — the models are not
+    offered then) is not working: such a role follows the executor, otherwise its default stays unusable.
+    """
+    from ahub import registry
+
+    default = registry.role_default(store, role)
+    return default is not None and bool(results.get(default.alias, (False, ""))[0])
+
+
+def _first_free(store) -> str:
+    """The free alias to fall back on (the first candidate; the registry knows the order)."""
+    from ahub import doctor
+
+    cands = doctor.free_candidates(store)
+    return cands[0].alias if cands else doctor.FALLBACK_FREE
+
+
+def _free_default_step(store, ask: bool, log, alias: str | None = None) -> dict[str, str]:
+    """No live probe (AHUB_PROBE=0), or nothing answered it: the free alias where the default is opencode-go/*.
+
+    alias=... — it is already known (the probe step found no answerer), so no second probe.
+    """
+    from ahub import doctor
+    from ahub.i18n import t
+
+    bad = _roles_needing_free(store)
+    if not bad:
+        log(t("setup.wizard_models_ok"))
+        return {}
+    if alias is None:
+        alias, warning = doctor.pick_free(store)  # free probe: a dead free model is not offered
+        if warning:
+            log(f"! {warning}")
+    if ask and not _ask_yes_no(t("setup.wizard_models_ask", alias=alias, roles=", ".join(bad)), True):
+        log(t("setup.wizard_models_skip"))
+        return {}
+    alias, changed = ensure_free_default(store, alias=alias, warn=lambda w: log(f"! {w}"))
+    if changed:
+        log(t("setup.wizard_models_done", roles=", ".join(changed), alias=alias))
+    else:
+        log(t("setup.wizard_models_skip"))
+    return {}
+
+
+def _model_step(store, states, ask: bool, log) -> dict[str, str]:
+    """Probe the models of the providers that are on, then set the default per role (executor, reviewer).
+
+    A provider that is not found or not logged in is never probed — its models are not offered. Other roles
+    follow the executor unless their own default answers. Returns role → alias.
+    """
+    from ahub import doctor, registry
+    from ahub.i18n import t
+    from ahub.model import Role
+
+    off = registry.disabled_providers()
+    live = {st.name for st in states if st.found and st.logged_in}
+    entries = [e for e in registry.models(store)
+               if e.enabled and e.provider not in off and e.provider in live]
+    results = doctor.probe_models(entries, timeout_s=doctor.PROBE_WIZARD_S)
+    if not results:  # probing off or nothing to probe — the free-alias path knows better
+        return _free_default_step(store, ask, log)
+    log(t("setup.wizard_models_head"))
+    kinds = {e.alias: t(f"setup.wizard_model_{registry.cost_kind(e)}") for e in entries}
+    width = max((len(kind) for kind in kinds.values()), default=0)
+    for entry in entries:
+        ok, detail = results.get(entry.alias, (False, ""))
+        log(f"{'✓' if ok else '✗'} {kinds[entry.alias]:<{width}} {detail}"
+            + (f" — {entry.note}" if entry.note else ""))
+    recommended = doctor.recommend_model(entries, results)
+    if not recommended:
+        log("! " + doctor.probe_none_warning([e.alias for e in entries]))
+        return _free_default_step(store, ask, log, alias=_first_free(store))
+    good = [e for e in entries if results[e.alias][0]]
+    chosen: dict[Role, str] = {}
+    for role in (Role.EXECUTOR, Role.REVIEWER):
+        alias = _ask_role_model(role, good, recommended) if ask else recommended
+        _set_role_default(store, role, alias)
+        chosen[role] = alias
+    for role in (Role.SCOUT, Role.ROUTINE, Role.OBSERVER, Role.DRAFTER):
+        if _default_answers(store, role, results):
+            continue
+        _set_role_default(store, role, chosen[Role.EXECUTOR])
+        chosen[role] = chosen[Role.EXECUTOR]
+    log(t("setup.wizard_roles_done", roles=", ".join(f"{r.value}={a}" for r, a in chosen.items())))
+    return {r.value: a for r, a in chosen.items()}
 
 
 def _service_enable_lines(os_kind: str, names: list[str], written: list[str], hint: str) -> list[str]:
@@ -379,33 +552,12 @@ def run_wizard(args) -> int:
         print(t("setup.registered", path=paths.global_config_path()))
     for p in config.check_project(cfg):
         print(f"! {p}")
-    # 3) providers
-    op_check = doctor.check_opencode()
-    provs = doctor.auth_providers()
-    if not op_check.ok:
-        print(t("setup.wizard_opencode_missing", detail=op_check.detail))
-    elif provs:
-        print(t("setup.wizard_providers_ok", providers=", ".join(provs)))
-    else:
-        auth_c = doctor.check_opencode_auth()
-        print(f"✗ {t(f'doctor.name_{auth_c.name}')} — {auth_c.detail}" + (f"\n  → {auth_c.fix}" if auth_c.fix else ""))
-    # 4) models
+    # 3) providers: all of them, then which to enable
+    states = doctor.provider_states()
+    _provider_step(states, ask=True, log=print)
+    # 4) models: a live probe of every model of a provider that is on, then the role defaults
     store = Store()
-    bad = _roles_needing_free(store)
-    if not bad:
-        print(t("setup.wizard_models_ok"))
-    else:
-        alias, warning = doctor.pick_free(store)  # free probe: a dead free model is not offered
-        if warning:
-            print(f"! {warning}")
-        if _ask_yes_no(t("setup.wizard_models_ask", alias=alias, roles=", ".join(bad)), True):
-            _alias, changed = ensure_free_default(store, alias=alias)
-            if changed:
-                print(t("setup.wizard_models_done", roles=", ".join(changed), alias=alias))
-            else:
-                print(t("setup.wizard_models_skip"))
-        else:
-            print(t("setup.wizard_models_skip"))
+    _model_step(store, states, ask=True, log=print)
     # 5) service
     want_service = bool(getattr(args, "service", False))
     if want_service:
@@ -518,13 +670,23 @@ def _cmd_noninteractive(args) -> int:
     lines = [t("setup.done", name=cfg.name, what=what)]
     if register_project(root):
         lines.append(t("setup.registered", path=paths.global_config_path()))
+    from ahub.store import Store
+
+    # providers and models: the same choices the wizard makes, by the recommendation rule, as a summary
+    chosen: dict[str, bool] = {}
+    role_models: dict[str, str] = {}
+    try:
+        from ahub import doctor
+
+        states = doctor.provider_states()
+        chosen = _provider_step(states, ask=False, log=lines.append)
+        role_models = _model_step(Store(), states, ask=False, log=lines.append)
+    except Exception as e:
+        lines.append(t("setup.wizard_models_skip"))
+        print(f"! {e}")
     if args.claude:
         lines.append(t("setup.skill", path=install_skill()))
         lines.append(claude_md(root))
-    try:
-        ensure_free_default(warn=lines.append)
-    except Exception:
-        pass
     want_service = bool(getattr(args, "service", False))
     want_install = bool(getattr(args, "yes", False)) or want_service
     if want_install and (sys.platform.startswith("linux") or sys.platform == "darwin" or want_service):
@@ -542,7 +704,8 @@ def _cmd_noninteractive(args) -> int:
             lines.append(t("setup.wizard_service_enable_fail", cmd="install", err=str(e)[:300]))
     problems = config.check_project(cfg)
     lines += [f"! {p}" for p in problems]
-    emit(args, {"project": cfg.name, "file": str(f), "problems": problems}, "\n".join(lines))
+    emit(args, {"project": cfg.name, "file": str(f), "problems": problems, "providers": chosen,
+                "models": role_models}, "\n".join(lines))
     return 0
 
 

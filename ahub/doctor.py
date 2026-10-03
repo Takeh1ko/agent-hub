@@ -6,6 +6,8 @@ never logs secret values (auth.json values are never read into output, a proxy U
 
 Also the live model probe (probe_model): one tiny request through the provider module, so setup never
 makes a model that does not answer the default (the free Spark was silent for hours on 2026-10-02).
+And what every provider looks like right now (provider_states): the same checks, one state per provider,
+which `ahub setup` and `ahub providers` show and probe_models probes all at once.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,8 +27,10 @@ from ahub.i18n import t as _t
 
 TIMEOUT_S = 10  # short timeout for external calls (spec: <= 15 s)
 PROBE_TIMEOUT_S = 60  # one tiny live turn of a model: enough for a slow one, short enough not to hang setup
+PROBE_WIZARD_S = 45  # the wizard probes several models at once — a shorter turn, so the step is quick
 PROBE_PROMPT = "Reply with exactly: OK"  # to the model (not the user) — not translated
 FALLBACK_FREE = "spark-free"  # when the registry knows no free alias at all
+PROBE_WORKERS = 4  # how many models the wizard probes at the same time
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -300,6 +305,91 @@ def probing_enabled() -> bool:
     return os.environ.get("AHUB_PROBE", "1").strip().lower() not in ("0", "no", "off", "false")
 
 
+@dataclass(frozen=True)
+class ProviderState:
+    """What one provider looks like right now: found, logged in, a note, an install/login hint."""
+
+    name: str
+    found: bool
+    logged_in: bool
+    detail: str = ""  # the check detail: the binary, the version, the problems
+    note: str = ""  # free / paid / plan — one line for the wizard and the table
+    hint: str = ""  # install or login hint; empty — nothing to do
+
+
+_PROV_HINTS: dict[str, str] = {
+    "opencode": "doctor.prov_hint_opencode",
+    "agy": "doctor.prov_hint_agy",
+    "codex": "doctor.prov_hint_codex",
+}
+
+_PROV_NOTES: dict[str, str] = {"agy": "doctor.prov_note_agy", "codex": "doctor.prov_note_codex"}
+
+
+def install_hint(name: str) -> str:
+    """One-line install hint for a provider that is not found."""
+    key = _PROV_HINTS.get(name)
+    return _t(key) if key else ""
+
+
+def provider_state(name: str, auth: list[str] | None = None) -> ProviderState:
+    """One provider state, from the same checks `ahub doctor` runs."""
+    provs = auth if auth is not None else auth_providers()
+    if name == "opencode":
+        check = check_opencode()
+        found, logged, detail = bool(check.ok), bool(provs), check.detail
+        fix = "" if logged else (check.fix or _t("doctor.auth_fix"))
+    elif name == "agy":
+        check = check_agy()
+        found, logged = check.ok is not None, bool(check.ok)
+        detail = check.detail
+        fix = "" if logged else check.fix
+    elif name == "codex":
+        check = check_codex()
+        found, logged = check.ok is not None, bool(check.ok)
+        detail = check.detail
+        fix = "" if logged else check.fix
+    else:
+        return ProviderState(name, False, False, _t("doctor.prov_unknown", name=name))
+    note = _t(_PROV_NOTES[name]) if name in _PROV_NOTES else (
+        _t("doctor.prov_note_opencode_go") if has_go_login(provs)
+        else _t("doctor.prov_note_opencode_free"))
+    hint = _t("doctor.prov_login_hint", name=name, cmd=fix) if (found and not logged and fix) \
+        else ("" if found else install_hint(name))
+    return ProviderState(name, found, logged, detail=detail, note=note, hint=hint)
+
+
+def provider_states(auth: list[str] | None = None) -> list[ProviderState]:
+    """State of every provider ahub knows, in registration order (opencode, agy, codex)."""
+    from ahub import providers as provider_mod
+
+    provs = auth if auth is not None else auth_providers()
+    out = []
+    for name in provider_mod.names():
+        try:
+            out.append(provider_state(name, provs))
+        except Exception as e:  # one provider must not take the whole list down
+            out.append(ProviderState(name, False, False,
+                                    detail=_t("doctor.check_error", err=f"{e.__class__.__name__}: {e}"[:200])))
+    return out
+
+
+def provider_line(state: ProviderState) -> str:
+    """One provider for the wizard: the mark, the state, the note, and the hint on its own line."""
+    if not state.found:
+        mark, word = "✗", _t("doctor.prov_missing")
+    elif state.logged_in:
+        mark, word = "✓", _t("doctor.prov_logged_in")
+    else:
+        mark, word = "!", _t("doctor.prov_no_login")
+    line = f"{mark} {state.name} — {word}"
+    if state.note:
+        line += f" · {state.note}"
+    if state.hint:
+        line += f"\n  → {state.hint}"
+    return line
+
+
 def probe_model(entry, timeout_s: int = PROBE_TIMEOUT_S) -> tuple[bool, str]:
     """One tiny live request through the provider: does the model answer at all.
 
@@ -340,6 +430,49 @@ def free_candidates(store) -> list:
         return []
 
 
+def _probe_one(entry, timeout_s: int) -> tuple[bool, str]:
+    try:
+        return probe_model(entry, timeout_s)
+    except Exception as e:
+        return False, _t("doctor.probe_error", alias=entry.alias, err=f"{e.__class__.__name__}: {e}"[:200])
+
+
+def probe_models(entries, timeout_s: int = PROBE_WIZARD_S,
+                 workers: int = PROBE_WORKERS) -> dict[str, tuple[bool, str]]:
+    """Live probe of several models at once: alias → (answers, detail).
+
+    Empty with probing off (AHUB_PROBE=0) or nothing to probe — the caller then keeps its own fallback.
+    """
+    items = list(entries)
+    if not items or not probing_enabled():
+        return {}
+    out: dict[str, tuple[bool, str]] = {}
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(items)))) as pool:
+        futures = [pool.submit(_probe_one, e, timeout_s) for e in items]
+        for entry, fut in zip(items, futures):
+            out[entry.alias] = fut.result()
+    return out
+
+
+def recommend_model(entries, results: dict[str, tuple[bool, str]]) -> str:
+    """(alias) the recommended default: a paid model that answered, else the first free one that did.
+
+    The candidate order decides which paid model wins (the registry order, by alias). "" — none answered.
+    """
+    from ahub import registry
+
+    answered = [e for e in entries if results.get(e.alias, (False, ""))[0]]
+    if not answered:
+        return ""
+    pick = [e for e in answered if not registry.is_free(e)] or answered
+    return pick[0].alias
+
+
+def probe_none_warning(aliases) -> str:
+    """The warning when nothing answered a probe (aliases of what was tried)."""
+    return _t("doctor.probe_none", tried=", ".join(aliases), fix=_t("doctor.probe_fix"))
+
+
 def _free_alias(store) -> str:
     """The free alias to offer (the first candidate) — no live request: hints and questions."""
     cands = free_candidates(store)
@@ -364,8 +497,7 @@ def pick_free(store, *, timeout_s: int = PROBE_TIMEOUT_S) -> tuple[str, str]:
             ok = False
         if ok:
             return entry.alias, ""
-    return cands[0].alias, _t("doctor.probe_none", tried=", ".join(e.alias for e in cands),
-                              fix=_t("doctor.probe_fix"))
+    return cands[0].alias, probe_none_warning([e.alias for e in cands])
 
 
 def check_models(auth: list[str] | None = None) -> Check:
@@ -520,8 +652,10 @@ def run_all() -> list[Check]:
     return checks
 
 
-__all__ = ["Check", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_PROMPT", "auth_providers", "auth_file_path",
-           "has_go_login", "run_all", "probe_model", "probing_enabled", "pick_free", "free_candidates",
+__all__ = ["Check", "ProviderState", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_WIZARD_S", "PROBE_PROMPT",
+           "auth_providers", "auth_file_path", "has_go_login", "run_all", "probe_model", "probing_enabled",
+           "pick_free", "free_candidates", "probe_models", "recommend_model", "probe_none_warning",
+           "provider_states", "provider_state", "provider_line", "install_hint",
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
            "check_opencode_health", "check_opencode_auth", "check_agy", "check_codex", "check_models",
            "check_network", "check_claude", "check_claude_skill", "check_telegram", "provider_proxy_detail",

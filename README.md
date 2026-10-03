@@ -88,16 +88,19 @@ Claude Code to stop burning its context on work a cheaper model can do — and t
 
 ## Install
 
-Requires Python 3.11+, git, and at least one provider: [opencode](https://opencode.ai) (free models work) or
-Google Antigravity CLI (`agy`).
+Requires Python 3.11+, git, and at least one provider: [opencode](https://opencode.ai) (free models work),
+Google Antigravity CLI (`agy`) or Codex CLI (`@openai/codex`).
 
 ```
 pipx install ahub
 ahub setup                 # language, project, providers, models, service, Claude skill, Telegram (optional)
 ahub doctor                # what is wrong and how to fix it
+ahub providers             # the providers ahub knows; providers enable|disable <name>
 ```
 
-`ahub setup --yes` takes all defaults without questions. Telegram is optional: `pipx install 'ahub[telegram]'`.
+`ahub setup --yes` takes all defaults without questions. The wizard finds every provider (opencode, agy, codex),
+shows which are installed and logged in, switches them on or off, and probes the models live to pick the role
+defaults. Telegram is optional: `pipx install 'ahub[telegram]'`.
 
 Platforms: Linux (systemd), macOS (launchd; tested in CI), Windows via WSL2 only.
 

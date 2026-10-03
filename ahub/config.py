@@ -21,7 +21,8 @@ Example ~/.config/ahub/config.toml:
     claude = "~/.claude/local/claude"
     opencode_db = "$HOME/.local/share/opencode/opencode.db"
 
-    [providers.opencode]                # optional; the provider's own settings (advanced)
+    [providers.opencode]                # the provider's own settings: on/off + the advanced keys
+    enabled = true                      # off — its models leave the role menus (ahub providers, the wizard)
     proxy = "http://127.0.0.1:8080"     # for this provider's process
     no_proxy = "localhost,127.0.0.1"
 
@@ -31,6 +32,7 @@ Example ~/.config/ahub/config.toml:
     # per proxy key: absent — inherited as is, "" — explicitly none, a value — set
 
     [providers.codex]
+    enabled = true
     sandbox = "workspace-write"         # codex OS sandbox: read-only | workspace-write | danger-full-access
                                        # (absent — workspace-write; danger-full-access — no OS sandbox,
                                        # only the task copy and the gates hold codex)
@@ -170,11 +172,13 @@ class ProviderSettings:
     Proxy, per key: None — the key is absent, the provider process inherits the hub environment; "" —
     explicitly none (the inherited variables are dropped); a value — for this provider's process.
     Sandbox: "" — the key is absent, the provider uses its own default.
+    Enabled: False — the provider is off (ahub providers, the setup wizard); True/absent — on.
     """
 
     proxy: str | None = None
     no_proxy: str | None = None
     sandbox: str = ""
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -199,6 +203,17 @@ class HubConfig:
     def provider(self, name: str) -> ProviderSettings:
         """A provider's own settings; no section — the proxy keys stay inherited, the sandbox default."""
         return self.provider_settings.get(name) or ProviderSettings()
+
+    def provider_enabled(self, name: str) -> bool:
+        """Provider switch ([providers.<name>] enabled): no section or no key — the provider is on."""
+        spec = self.provider_settings.get(name.strip().lower())
+        return spec is None or spec.enabled
+
+    @property
+    def providers_off(self) -> tuple[str, ...]:
+        """Providers with enabled = false (lowercase) — the registry hides their models."""
+        return tuple(sorted({name.strip().lower() for name, spec in self.provider_settings.items()
+                             if not spec.enabled}))
 
 
 class _Reader:
@@ -256,6 +271,13 @@ class _Reader:
             return {}
         return v
 
+    def bool_(self, data: dict, key: str, default: bool, where: str = "") -> bool:
+        v = data.get(key, default)
+        if not isinstance(v, bool):
+            self.errors.append(_t("config.expect_bool", where=where, field=key, got=type(v).__name__))
+            return default
+        return v
+
 
 def _resources(r: _Reader, raw: dict) -> dict[str, Resource]:
     out: dict[str, Resource] = {}
@@ -275,8 +297,12 @@ def _resources(r: _Reader, raw: dict) -> dict[str, Resource]:
 
 
 def _provider_settings(r: _Reader, raw: dict) -> dict[str, ProviderSettings]:
-    """[providers.<name>] → the provider's own settings. An absent proxy key stays inherited;
-    "" means explicitly none; an unknown sandbox mode is an error (a typo would silently drop the sandbox)."""
+    """[providers.<name>] → the provider's own settings (the switch `enabled` and the advanced keys).
+
+    An absent proxy key stays inherited; "" means explicitly none; an unknown sandbox mode is an error
+    (a typo would silently drop the sandbox); `enabled` must be a boolean — a non-boolean is an error too
+    (otherwise a typo would quietly keep the provider on).
+    """
     out: dict[str, ProviderSettings] = {}
     for name, spec in raw.items():
         if not isinstance(spec, dict):
@@ -295,8 +321,9 @@ def _provider_settings(r: _Reader, raw: dict) -> dict[str, ProviderSettings]:
         if sandbox and sandbox not in SANDBOX_MODES:
             r.errors.append(_t("config.bad_sandbox", name=name, got=sandbox))
             sandbox = ""
-        if proxy is not None or no_proxy is not None or sandbox:
-            out[name] = ProviderSettings(proxy=proxy, no_proxy=no_proxy, sandbox=sandbox)
+        enabled = r.bool_(spec, "enabled", True, where)
+        if proxy is not None or no_proxy is not None or sandbox or not enabled:
+            out[name] = ProviderSettings(proxy=proxy, no_proxy=no_proxy, sandbox=sandbox, enabled=enabled)
     return out
 
 

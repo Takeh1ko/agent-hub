@@ -351,6 +351,76 @@ def test_pick_free_probes_candidates_then_warns(monkeypatch):
     assert doctor._free_alias(store) == "spark-free"
 
 
+def test_provider_states_from_the_checks(monkeypatch, tmp_path):
+    """T50: every provider gets found / logged in / a note / an install hint from the same checks."""
+    from ahub import providers
+    from ahub.providers.agy import AgyProvider
+    from ahub.providers.codex import CodexProvider
+    from tests.provider_contract import AGY_DATA, CODEX_DATA, fake_agy, fake_codex
+
+    opencode = tmp_path / "bin" / "opencode"
+    opencode.parent.mkdir(parents=True)
+    opencode.write_text("#!/bin/sh\n")
+    opencode.chmod(0o755)
+    # opencode is there and logged in (auth.json keys only), agy is missing, codex is there without a login
+    monkeypatch.setattr(shutil, "which", lambda name: str(opencode) if name == "opencode" else None)
+    _write_auth({"opencode-go": {"apiKey": "S3CRET"}, "opencode": {"k": "v"}})
+    env = {"AHUB_CODEX_FAKE_DATA": str(CODEX_DATA)}
+
+    class _NoLogin(CodexProvider):
+        def login(self):
+            return False, "Not logged in"
+
+    codex_fake = fake_codex(tmp_path / "b")
+    monkeypatch.setitem(providers._cache, "codex", _NoLogin(binary=str(codex_fake), env=env))
+    monkeypatch.setitem(providers._cache, "agy", AgyProvider(binary=str(tmp_path / "void" / "agy")))
+    monkeypatch.setattr(shutil, "which",
+                        lambda name: {"opencode": str(opencode), "codex": str(codex_fake)}.get(name))
+
+    states = {s.name: s for s in doctor.provider_states()}
+    assert list(states) == ["opencode", "agy", "codex"]  # every provider ahub knows
+    assert states["opencode"].found and states["opencode"].logged_in
+    assert "opencode-go" in states["opencode"].note  # the paid Spark is available
+    assert states["opencode"].hint == ""  # nothing to fix
+    assert states["agy"].found is False and "Antigravity" in states["agy"].hint
+    assert states["codex"].found and not states["codex"].logged_in
+    assert "codex login" in states["codex"].hint
+    assert "ChatGPT" in states["codex"].note
+    assert "S3CRET" not in json.dumps([vars(s) for s in states.values()], ensure_ascii=False)
+    # the wizard line: the mark, the state, the note, the hint
+    line = doctor.provider_line(states["codex"])
+    assert line.startswith("! codex") and "\u00b7 " + states["codex"].note in line
+    assert line.splitlines()[-1].strip().startswith("\u2192")
+    assert doctor.provider_line(states["agy"]).startswith("\u2717 agy")
+    assert doctor.install_hint("no-such") == ""
+    assert doctor.provider_state("no-such").found is False
+
+
+def test_probe_models_runs_at_once_and_recommends(monkeypatch):
+    """T50: several models are probed together; the recommendation prefers a paid answerer."""
+    from ahub import registry
+
+    store = Store()
+    tried: list[str] = []
+
+    def _probe(entry, timeout_s=doctor.PROBE_TIMEOUT_S):
+        tried.append(entry.alias)
+        return entry.alias in {"bunny", "spark"}, f"{entry.alias}: ok"
+
+    monkeypatch.setattr(doctor, "probing_enabled", lambda: True)
+    monkeypatch.setattr(doctor, "probe_model", _probe)
+    entries = [registry.get(store, a) for a in ("bunny", "spark", "spark-free")]
+    results = doctor.probe_models(entries)
+    assert set(tried) == {"bunny", "spark", "spark-free"}  # all three at once
+    assert results["bunny"][0] and results["spark"][0] and not results["spark-free"][0]
+    assert doctor.recommend_model(entries, results) == "spark"  # paid before free
+    assert doctor.recommend_model(entries, {a: (False, "") for a in tried}) == ""
+    assert "ahub doctor" in doctor.probe_none_warning(["spark-free", "bunny"])
+    # probing off — no request at all, the caller keeps its own fallback
+    monkeypatch.setattr(doctor, "probing_enabled", lambda: False)
+    assert doctor.probe_models(entries) == {}
+
+
 def test_probing_can_be_switched_off(monkeypatch):
     monkeypatch.setenv("AHUB_PROBE", "0")
     assert doctor.probing_enabled() is False

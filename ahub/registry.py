@@ -5,13 +5,15 @@
 - Task model pick: explicit or role default; explicit — any enabled model.
 - Project deny (`[models] deny` in .hub.toml) always applies: an entry is an alias or part of the model id.
   Only a human editing the project file lifts it — the registry has no such knob by design.
+- A provider switched off in the hub config (`[providers.<name>] enabled = false`, `ahub providers disable`)
+  hides all of its models: they leave the role menus, and naming one in a task is a refusal with a clear reason.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ahub.config import ProjectConfig
+from ahub.config import ConfigError, HubConfig, ProjectConfig, load_hub
 from ahub.i18n import t as _t
 from ahub.model import Role
 from ahub.store import Store
@@ -49,6 +51,9 @@ DEFAULT_MENUS: dict[Role, list[tuple[str, bool]]] = {
 # Free aliases in the order the probe tries them: the first that answers becomes the default
 # (doctor.pick_free). A free model needs no opencode-go login.
 FREE_ALIASES: tuple[str, ...] = ("spark-free", "bunny")
+
+# Providers that are paid for by a subscription or a window quota, not per token — the note in the wizard.
+PLAN_PROVIDERS: tuple[str, ...] = ("agy", "codex")
 
 
 class RegistryError(ValueError):
@@ -106,13 +111,46 @@ def get(store: Store, alias: str) -> ModelEntry:
     return _entry(row)
 
 
-def menu(store: Store, role: Role | str) -> list[tuple[ModelEntry, bool]]:
-    """Role menu: [(model, default)] in display order."""
+def disabled_providers(hub: HubConfig | None = None) -> frozenset[str]:
+    """Providers switched off in the hub config ([providers.<name>] enabled = false).
+
+    A broken global config must not hide every model: doctor/check_config reports it, here everything stays on.
+    """
+    if hub is None:
+        try:
+            hub = load_hub()
+        except ConfigError:
+            return frozenset()
+    return frozenset(name.strip().lower() for name in hub.providers_off)
+
+
+def provider_enabled(name: str, hub: HubConfig | None = None) -> bool:
+    """Is the provider on (the single place the switch lives: the hub config)."""
+    return name.strip().lower() not in disabled_providers(hub)
+
+
+def _raw_menu(store: Store, role: Role | str) -> list[tuple[ModelEntry, bool]]:
+    """Role menu rows as stored, a switched-off provider included (for the reasons in a refusal)."""
     seed(store)
     with store.read() as c:
         rows = c.execute("SELECT m.*, rm.is_default FROM role_model rm JOIN model m ON m.alias=rm.alias"
                          " WHERE rm.role=? ORDER BY rm.position, m.alias", (Role(role).value,)).fetchall()
     return [(_entry(r), bool(r["is_default"])) for r in rows]
+
+
+def menu(store: Store, role: Role | str) -> list[tuple[ModelEntry, bool]]:
+    """Role menu: [(model, default)] in display order; models of a switched-off provider are hidden."""
+    off = disabled_providers()
+    return [(e, d) for e, d in _raw_menu(store, role) if e.provider not in off]
+
+
+def role_default(store: Store, role: Role | str) -> ModelEntry | None:
+    """The default model of a role menu as stored, None — no default (a switched-off provider included)."""
+    try:
+        items = _raw_menu(store, role)
+    except Exception:
+        return None
+    return next((e for e, d in items if d), None)
 
 
 def is_free(entry: ModelEntry) -> bool:
@@ -122,12 +160,21 @@ def is_free(entry: ModelEntry) -> bool:
     return "free" in entry.model_id.lower().rsplit("/", 1)[-1] or "free" in entry.alias.lower()
 
 
+def cost_kind(entry: ModelEntry) -> str:
+    """free | paid | plan — what the user pays for the model (a note in the setup wizard)."""
+    if is_free(entry):
+        return "free"
+    return "plan" if entry.provider in PLAN_PROVIDERS else "paid"
+
+
 def free_candidates(store: Store) -> list[ModelEntry]:
     """Enabled free aliases to try, in order: FREE_ALIASES first, then any other free model."""
     entries = models(store)  # ordered by alias
-    known = {e.alias: e for e in entries if e.enabled and e.alias in FREE_ALIASES}
+    off = disabled_providers()
+    known = {e.alias: e for e in entries if e.enabled and e.alias in FREE_ALIASES and e.provider not in off}
     out = [known[a] for a in FREE_ALIASES if a in known]
-    return out + [e for e in entries if e.enabled and is_free(e) and e.alias not in known]
+    return out + [e for e in entries if e.enabled and e.provider not in off
+                  and is_free(e) and e.alias not in known]
 
 
 def denied_by(entry: ModelEntry, project: ProjectConfig | None) -> str | None:
@@ -142,10 +189,12 @@ def denied_by(entry: ModelEntry, project: ProjectConfig | None) -> str | None:
 
 
 def check(store: Store, alias: str, project: ProjectConfig | None) -> ModelEntry:
-    """Model fit for a project task: exists, enabled, not denied by the project."""
+    """Model fit for a project task: exists, enabled, provider on, not denied by the project."""
     entry = get(store, alias)
     if not entry.enabled:
         raise RegistryError(_t("registry.disabled", alias=alias))
+    if not provider_enabled(entry.provider):
+        raise RegistryError(_t("registry.provider_off", alias=alias, provider=entry.provider))
     rule = denied_by(entry, project)
     if rule is not None:
         raise RegistryError(_t("registry.denied", alias=alias, project=project.name, rule=rule))
@@ -156,12 +205,16 @@ def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit
     """Model for a role: explicit (checked) or default; if the default is denied — first allowed menu entry."""
     if explicit:
         return check(store, explicit, project)
-    items = menu(store, role)
+    off = disabled_providers()
+    items = _raw_menu(store, role)
     ordered = [e for e, d in items if d] + [e for e, d in items if not d]
     reasons = []
     for e in ordered:
         if not e.enabled:
             reasons.append(_t("registry.reason_disabled", alias=e.alias))
+            continue
+        if e.provider in off:
+            reasons.append(_t("registry.reason_provider_off", alias=e.alias, provider=e.provider))
             continue
         rule = denied_by(e, project)
         if rule is not None:
