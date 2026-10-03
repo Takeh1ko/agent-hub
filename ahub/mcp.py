@@ -5,7 +5,8 @@ No outside deps. Each tool calls a CLI handle in this process and returns its te
 (same L0–L3 limits, same savings). Wiring: `ahub mcp` as a stdio server in agent settings.
 
 Scope (ahub/scope.py): the server resolves the scope once from its own cwd at start, so its tools see and
-write only that project; a call may pass `project` (or `all`) to look at another one.
+write only that project; a call may pass `project` (or `all`) to look at another one. A tool on one task id belongs
+to that task's project — a task of another project comes back as an error with the way out.
 """
 
 from __future__ import annotations
@@ -21,8 +22,10 @@ from ahub import __version__, scope
 
 PROTOCOL = "2025-06-18"
 
-# The commands that take a scope; the server passes its own one to them (ahub/scope.py).
-SCOPED = frozenset({"status", "wait", "watch", "ack", "inbox", "say", "ask", "questions", "alarms", "history"})
+# The commands that take a scope; the server passes its own one to them (ahub/scope.py). A command on one
+# task is here too: a task of another project is refused unless the call names its project or asks for all.
+SCOPED = frozenset({"status", "wait", "watch", "ack", "inbox", "say", "ask", "questions", "alarms", "history",
+                    "result", "nudge", "budget", "accept", "reject", "rework", "continue", "stop"})
 
 # name → (description, param schema, how to build CLI argv)
 TOOLS: dict[str, tuple[str, dict, Any]] = {}
@@ -91,15 +94,15 @@ def _status(a: dict) -> list[str]:
     return _project_flag(a, argv)
 
 
-@tool("result", "Task result: short, or full=true for the full text.", {"task": S, "full": {"type": "boolean"}},
-      ["task"])
+@tool("result", "Task result: short, or full=true for the full text.",
+      {"task": S, "full": {"type": "boolean"}, "project": S, "all": {"type": "boolean"}}, ["task"])
 def _result(a: dict) -> list[str]:
-    return ["result", a["task"]] + (["--full"] if a.get("full") else [])
+    return _project_flag(a, ["result", a["task"]] + (["--full"] if a.get("full") else []))
 
 
 @tool("decide", "Decision on a task: accept | reject | rework (notes) | continue | stop.",
       {"task": S, "action": {"type": "string", "enum": ["accept", "reject", "rework", "continue", "stop"]},
-       "notes": S, "reason": S}, ["task", "action"])
+       "notes": S, "reason": S, "project": S, "all": {"type": "boolean"}}, ["task", "action"])
 def _decide(a: dict) -> list[str]:
     act = a["action"]
     argv = [act, a["task"]]
@@ -107,13 +110,13 @@ def _decide(a: dict) -> list[str]:
         argv += ["--notes", a.get("notes") or "rework"]
     elif a.get("reason") and act in ("accept", "reject", "continue", "stop"):
         argv += ["--reason", a["reason"]]
-    return argv + ["--by", "mcp"]
+    return _project_flag(a, argv + ["--by", "mcp"])
 
 
 @tool("nudge", "Message a working agent in its own session (a stuck or off-track worker; prefer it over "
-      "stop+continue).", {"task": S, "text": S}, ["task", "text"])
+      "stop+continue).", {"task": S, "text": S, "project": S, "all": {"type": "boolean"}}, ["task", "text"])
 def _nudge(a: dict) -> list[str]:
-    return ["nudge", a["task"], a["text"], "--by", "mcp"]
+    return _project_flag(a, ["nudge", a["task"], a["text"], "--by", "mcp"])
 
 
 @tool("wait", "Wait for orchestrator events (DONE/DECISION/ERROR/OWNER/ALARM lines).",
@@ -145,10 +148,10 @@ def _ask(a: dict) -> list[str]:
     return _project_flag(a, argv)
 
 
-@tool("budget", "Extend the task budget (a budget-blocked task resumes).", {"task": S, "add": {"type": "number"}},
-      ["task", "add"])
+@tool("budget", "Extend the task budget (a budget-blocked task resumes).",
+      {"task": S, "add": {"type": "number"}, "project": S, "all": {"type": "boolean"}}, ["task", "add"])
 def _budget(a: dict) -> list[str]:
-    return ["budget", a["task"], "--add", str(a["add"]), "--by", "mcp"]
+    return _project_flag(a, ["budget", a["task"], "--add", str(a["add"]), "--by", "mcp"])
 
 
 def call_cli(argv: list[str]) -> tuple[int, str]:

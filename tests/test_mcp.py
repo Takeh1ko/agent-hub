@@ -5,8 +5,19 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 from ahub import comms, mcp
+from ahub.scope import OWNER
 from ahub.store import Store
+
+
+@pytest.fixture(autouse=True)
+def _owner_scope(monkeypatch, tmp_path):
+    """These tests are not about the scope: the server is one started outside every project (the owner).
+    The CLI re-resolves the scope from the directory, so the tools run there too."""
+    monkeypatch.setattr(mcp, "_server_scope", OWNER)
+    monkeypatch.chdir(tmp_path)
 
 
 def rpc(lines):
