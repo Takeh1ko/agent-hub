@@ -570,3 +570,20 @@ def test_config_is_a_kv_block(capsys, monkeypatch, tmp_path):
     assert lines[5] == "  Denied models  deepseek"
     assert lines[6] == "  Allowed files  core/**, tests/**"
     assert lines[7].startswith("  Next  ahub setup ")
+
+
+def test_service_status_lists_the_task_processes_of_this_hub(capsys, monkeypatch):
+    from ahub import transitions
+    from ahub.commands import service as svccmd
+    from ahub.model import Kind, State
+
+    store = Store()
+    tid = store.create_task(project="P", kind=Kind.SCOUT, title="find the leak")
+    transitions.move(store, tid, State.PREPARING)
+    monkeypatch.setattr(svccmd, "live_workers", lambda: {tid: 4242, 999: 1})  # 999 — not our task
+    rc, out = run(capsys, "service", "status")
+    assert rc == 0
+    assert out.splitlines()[1] == "Task processes"
+    assert out.splitlines()[2].split() == ["task", "pid", "state"]
+    assert out.splitlines()[3].split() == ["T1", "4242", "preparing"]
+    assert "T999" not in out  # a live pid of a task this hub does not know is not ours to show

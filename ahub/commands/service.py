@@ -37,11 +37,12 @@ def cmd_status(args) -> int:
     tick = t("service.tick", age=age) if age is not None else t("service.no_tick")
     suffix = t("service.paused_suffix") if paused else ""
     out = [ui.kv([(t("service.lbl_service"), f"{state}{tick}{suffix}")], indent=2)]
-    if live:
-        rows = []
-        for tid, pid in sorted(live.items()):
-            tsk = store.get_task(tid)
-            rows.append([f"T{tid}", str(pid), views.state_word(tsk.state) if tsk else "?"])
+    rows = []  # a live pid of a task this hub does not know (an isolated AHUB_HOME) is not ours to show
+    for tid, pid in sorted(live.items()):
+        tsk = store.get_task(tid)
+        if tsk is not None:
+            rows.append([f"T{tid}", str(pid), views.state_word(tsk.state)])
+    if rows:
         out.append(ui.section(t("service.sec_tasks")))
         out.append(ui.table([t("views.col_id"), "pid", t("views.col_state")], rows,
                             max_width=[6, 7, 16], indent=2))

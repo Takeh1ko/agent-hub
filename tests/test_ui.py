@@ -319,3 +319,10 @@ def test_live_spins_when_the_total_is_unknown(monkeypatch):
         p.total(3)
         p.step()
     assert out.buf.count(ui.SPINNER[0]) == 1 and "Checking the providers… 1/3" in out.buf
+
+
+def test_plain_len_ignores_the_colour_codes(monkeypatch):
+    monkeypatch.setattr(ui.sys, "stdout", _Stream(tty=True))
+    coloured = ui.styled("✓", "green")
+    assert len(coloured) > 3 and ui.plain_len(coloured) == 1
+    assert ui.plain_len("plain") == 5

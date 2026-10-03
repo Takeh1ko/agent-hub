@@ -40,7 +40,7 @@ def _lines(checks: list[doctor.Check], w: int | None) -> list[str]:
         out.append(ui.section(t(title)))
         for c in block:
             head = f"  {ui.styled(_MARKS[c.ok], _STYLES[c.ok])} {t(f'doctor.name_{c.name}').ljust(nw)}  "
-            out.append((head + ui.para(c.detail, indent=len(head), w=w)).rstrip())
+            out.append((head + ui.para(c.detail, indent=ui.plain_len(head), w=w)).rstrip())
             if c.ok is False and c.fix:
                 out.append(ui.para(t("doctor.fix_line", fix=c.fix), indent=4, w=w))
     rest = [c for c in checks if c.name not in shown]  # a check the areas do not know about

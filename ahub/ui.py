@@ -35,6 +35,7 @@ CLEAR_LINE = "\r\033[K"
 _CODES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "blue": "34",
           "magenta": "35", "cyan": "36", "grey": "90"}
 PULSE_STYLE = {"working": "green", "waiting": "yellow", "silent": "red", "dead": "magenta", "unknown": "dim"}
+_ANSI = re.compile(r"\033\[[0-9;]*m")
 _ITEM = re.compile(r"^([-*•]|\d+\.)\s+(.*)$")
 _SENTENCE = re.compile(r"[.!?…](?=\s|$)")
 _PARAGRAPH = re.compile(r"\n[ \t]*\n")
@@ -69,6 +70,11 @@ def styled(text: str, *styles: str) -> str:
 def badge(mark: str, word: str, pulse: str = "") -> str:
     """The pulse symbol + the state word; the colour only repeats the pulse, it is never the message."""
     return styled(f"{mark} {word}".strip(), PULSE_STYLE.get(pulse, ""))
+
+
+def plain_len(text: str) -> int:
+    """The width as it is seen — the ANSI colour codes take no columns (for indenting what follows)."""
+    return len(_ANSI.sub("", text))
 
 
 def rule(n: int) -> str:
