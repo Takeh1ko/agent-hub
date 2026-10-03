@@ -45,8 +45,11 @@ def _real_db_untouched():
 
         con = sqlite3.connect(f"file:{real}?mode=ro", uri=True, timeout=5)
         try:
-            return tuple(con.execute(f"SELECT COALESCE(MAX(id), 0) FROM {t}").fetchone()[0]
-                         for t in ("task", "message", "question", "draft"))
+            return (
+                tuple(con.execute(f"SELECT COALESCE(MAX(id), 0) FROM {t}").fetchone()[0]
+                      for t in ("task", "message", "question", "draft")),
+                con.execute("SELECT COUNT(*) FROM task WHERE project='P'").fetchone()[0],
+            )
         except sqlite3.Error:
             return None
         finally:
@@ -58,14 +61,8 @@ def _real_db_untouched():
     if before is not None and after is not None:
         # the live hub may have added rows of its own while we ran — tests only write to tmp; make sure
         # no test row leaked out (fake project "P")
-        import sqlite3
-
-        con = sqlite3.connect(f"file:{real}?mode=ro", uri=True, timeout=5)
-        try:
-            leaked = con.execute("SELECT COUNT(*) FROM task WHERE project='P'").fetchone()[0]
-        finally:
-            con.close()
-        assert leaked == 0, "тесты записали задачи в боевую базу хаба"
+        leaked = after[1] - before[1]
+        assert leaked <= 0, "тесты записали задачи в боевую базу хаба"
 
 
 def write(path, text: str):

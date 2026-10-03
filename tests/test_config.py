@@ -390,3 +390,33 @@ def test_python_bin_explicit_venv_or_path(tmp_path):
     assert cfg.python_bin() == str(venv_py)
     fixed = config.parse_project({"schema_version": 2, "name": "A", "python": "/opt/py"}, tmp_path)
     assert fixed.python_bin() == "/opt/py"
+
+
+def test_hub_non_utf8_raises_config_error(tmp_path):
+    p = paths.global_config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes("# русский комментарий в cp1251\nlang = 'ru'\n".encode("cp1251"))
+    with pytest.raises(config.ConfigError) as ei:
+        config.load_hub()
+    assert str(p) in str(ei.value)
+
+
+def test_project_non_utf8_raises_config_error(tmp_path):
+    p = tmp_path / config.PROJECT_FILE
+    p.write_bytes("# русский комментарий в cp1251\nname = 'demo'\n".encode("cp1251"))
+    with pytest.raises(config.ConfigError) as ei:
+        config.load_project_file(p)
+    assert str(p) in str(ei.value)
+
+
+def test_hub_provider_case_insensitive(tmp_path, monkeypatch):
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    write(paths.global_config_path(), '[providers.Codex]\nenabled = false\nproxy = "socks5://127.0.0.1:1080"\n')
+    hub = config.load_hub()
+    assert hub.provider_enabled("codex") is False
+    assert hub.provider_enabled("Codex") is False
+    assert hub.provider("codex").proxy == "socks5://127.0.0.1:1080"
+    assert hub.provider("Codex").proxy == "socks5://127.0.0.1:1080"
+    assert hub.providers_off == ("codex",)
+
