@@ -540,6 +540,7 @@ def _free_default_step(store, ask: bool, out: Steps, alias: str | None = None) -
             out.line(f"! {warning}")
     if ask and not _ask_yes_no(t("setup.wizard_models_ask", alias=alias, roles=", ".join(bad)), True):
         out.line(t("setup.wizard_models_skip"))
+        out.note(t("setup.step_models"), t("setup.sum_models", roles=t("setup.wizard_models_skip")))
         return {}
     alias, changed = ensure_free_default(store, alias=alias, warn=lambda w: out.line(f"! {w}"))
     if changed:
@@ -547,6 +548,7 @@ def _free_default_step(store, ask: bool, out: Steps, alias: str | None = None) -
         out.note(t("setup.step_models"), t("setup.sum_models", roles=", ".join(f"{r}={alias}" for r in changed)))
     else:
         out.line(t("setup.wizard_models_skip"))
+        out.note(t("setup.step_models"), t("setup.sum_models", roles=t("setup.wizard_models_skip")))
     return {}
 
 
@@ -625,7 +627,7 @@ def _install_and_enable(out: Steps) -> None:
 
     kind, names, written, hint = svc.install_service_files()
     out.line(t("setup.wizard_service_done", names=", ".join(written)))
-    out.line(hint, wrap=False)
+    out.line(t("service.next", cmd=hint), wrap=False)  # the same wording as the install-only path
     for cmd, err in svc.enable_service(kind, names, written):
         out.line(t("setup.wizard_service_enable_fail", cmd=" ".join(cmd), err=err))
     age = svc.wait_for_heartbeat()

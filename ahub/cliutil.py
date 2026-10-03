@@ -40,7 +40,9 @@ def command_hint(message: str, known: frozenset[str] = frozenset()) -> str:
         parts = []
         for token in _TOKEN.findall(candidate):
             word = token.strip(".,")
-            if not word or word in known or word not in _PROSE:
+            if not word:
+                continue  # a lone dot or a comma is not a word
+            if word in known or word not in _PROSE:
                 parts.append(word)
                 continue
             break  # prose — the command ends here

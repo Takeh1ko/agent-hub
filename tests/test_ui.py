@@ -327,3 +327,24 @@ def test_plain_len_ignores_the_colour_codes(monkeypatch):
     coloured = ui.styled("✓", "green")
     assert len(coloured) > 3 and ui.plain_len(coloured) == 1
     assert ui.plain_len("plain") == 5
+
+
+def test_command_hint_is_a_runnable_command():
+    """The second line of an error must be a command a person can paste: backticks dropped, prose cut."""
+    from ahub import cli
+    from ahub.cliutil import command_hint
+
+    known = cli.command_names()
+    assert {"status", "models", "role", "providers", "enable", "task", "new", "setup"} <= known
+    assert command_hint("model codex: provider codex is off (ahub providers enable codex)", known) == \
+        "ahub providers enable codex"
+    assert command_hint("the fix: run `ahub doctor` and then retry", known) == "ahub doctor"
+    assert command_hint("run ahub setup . to rewrite", known) == "ahub setup"
+    assert command_hint("Run `ahub setup` to get started", known) == "ahub setup"
+    # a chain of commands: the last one is still a command, the prose around it is not
+    assert command_hint("roles need a free model; ahub models role scout --set-default spark-free", known) == \
+        "ahub models role scout --set-default spark-free"
+    # nothing runnable in the message — no hint line at all
+    for msg in ("no such task T99", "Telegram is not installed: pip install 'ahub[telegram]'",
+                "T1: the review has already started — it cannot be changed", "the hub runs the tasks"):
+        assert command_hint(msg, known) == "", msg

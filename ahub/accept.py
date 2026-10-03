@@ -259,8 +259,10 @@ REVIEW_PHASES = frozenset({State.CHECKING, State.REVIEWING, State.FIXING})  # th
 
 
 def review_started(store: Store, task_id: int) -> bool:
-    """Has the review begun? Every move into a review phase leaves a state event, so the history knows."""
-    return any(str((e.payload or {}).get("to") or "") in {s.value for s in REVIEW_PHASES}
+    """Has the review begun? Only a STATE event carries a state in "to" (MODEL_CHANGED writes a model
+    alias there too), so the history of the state events is what answers this."""
+    phases = {s.value for s in REVIEW_PHASES}
+    return any(e.kind == Ev.STATE.value and str((e.payload or {}).get("to") or "") in phases
                for e in store.events(task_id=task_id))
 
 

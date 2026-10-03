@@ -551,3 +551,24 @@ def test_service_flag_skips_wizard_questions(tmp_path, monkeypatch, capsys):
     assert cli.main(["setup", "--service"]) == 0
     capsys.readouterr()
     assert seen and seen[0][0] == "linux"
+
+
+def test_the_summary_always_has_the_models_row(tmp_path, monkeypatch, capsys):
+    """The owner refuses the free-model question — the row is still there (a summary with holes is worse
+    than a summary that says "left as is")."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)
+    from ahub.tg import launcher
+
+    monkeypatch.setattr(launcher, "claude_bin", lambda: None)
+    monkeypatch.setattr(sys, "platform", "linux")
+    from ahub.commands import service as svccmd
+
+    monkeypatch.setattr(svccmd, "install_service_files", lambda: ("linux", [], [], "hint"))
+    root = tmp_path / "nomodels"
+    make_repo(root)
+    _answers(monkeypatch, ["", str(root), "", "n", "n", "n", "n"])  # models: no; service: no, no; claude: no; tg: no
+    assert cli.main(["setup"]) == 0
+    summary = capsys.readouterr().out.split("Итог")[-1]
+    assert "Модели" in summary and "оставлены как есть" in summary

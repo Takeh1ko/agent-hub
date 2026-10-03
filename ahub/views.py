@@ -28,6 +28,10 @@ SUMMARY_BYTES = 900  # the byte budget of every block in L2 (the whole L2 stays 
 QUESTION_BYTES = 240
 NOTES_BYTES = 400
 REPORT_BYTES = 700
+FINDINGS_BYTES = 1200  # the whole "Review findings" block (a long finding is worth its room, not its budget)
+FINDING_BYTES = 400    # one issue / one fix
+FINDING_INDENT = 10
+FINDINGS_MAX = 6
 UNREAD_LINES = 3
 HISTORY_STATES = frozenset({State.ACCEPTED, State.REJECTED, State.DONE, State.NEEDS_DECISION, State.ERROR,
                             State.STOPPED})
@@ -232,13 +236,28 @@ def open_findings(t: Task, limit: int = 5) -> tuple[list, int]:
 
 
 def _findings_lines(t: Task, w: int | None) -> list[str]:
-    """The 'Review findings' block: severity, file:line, one wrapped line each."""
-    findings, more = open_findings(t)
+    """The 'Review findings' block: severity and file:line on their own line, the whole issue and its fix
+    wrapped under them — a finding is worth reading, so nothing of it is cut to a table cell.
+
+    The block has its own byte budget (FINDINGS_BYTES): the L2 cap is 4 KB and the summary, the report and
+    the facts come first — what does not fit here is counted, not truncated mid-sentence.
+    """
+    findings, more = open_findings(t, limit=FINDINGS_MAX)
     if not findings:
         return []
-    out = [ui.section(_t("views.sec_findings"))]
-    rows = [[f.severity, f"{f.file}:{f.line}" if f.line else f.file, f.issue] for f in findings]
-    out.append(ui.table(None, rows, max_width=[7, 28, None], indent=2, w=w))
+    out, used = [ui.section(_t("views.sec_findings"))], 0
+    for i, f in enumerate(findings):
+        block = [f"  {f.severity:<6} {f.file}:{f.line}" if f.line else f"  {f.severity:<6} {f.file}",
+                 ui.para(ui.fit(f.issue, FINDING_BYTES), indent=FINDING_INDENT, w=w)]
+        if f.fix:
+            block.append(ui.para(_t("views.finding_fix", fix=ui.fit(f.fix, FINDING_BYTES)),
+                                 indent=FINDING_INDENT, w=w))
+        size = sum(len(ln.encode()) + 1 for ln in block)
+        if used + size > FINDINGS_BYTES and i:
+            more += 1  # the rest is counted, not squeezed in
+            break
+        out += block
+        used += size
     if more:
         out.append(ui.para(_t("views.findings_more", n=more, label=t.label), indent=2, w=w))
     return out
@@ -295,10 +314,8 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
         out.append(ui.section(_t("views.sec_report", kb=f"{len(rep.encode()) / 1024:.1f}")))
         out.append(ui.para(ui.fit(report_essence(rep), REPORT_BYTES), indent=2, w=w))
     out.extend(_findings_lines(t, w))
-    if t.state in DECISION_STATES:
-        out.append(_next_line(t, "views.next_decide", w))
-    elif t.state in RESUME_STATES:
-        out.append(_next_line(t, "views.next_resume", w))
+    if t.state in DECISION_STATES or t.state in RESUME_STATES:
+        out.append(_next_line(t, next_key(t), w))
     return clip_bytes("\n".join(out), L2_LIMIT)
 
 
@@ -316,6 +333,11 @@ def _facts(groups: list[list[tuple[str, Value]]], w: int | None) -> list[str]:
         if block:
             out.append(block)
     return out
+
+
+def next_key(t: Task) -> str:
+    """The commands that fit the state: a decision (done / needs decision) or a resume (error / stopped)."""
+    return "views.next_decide" if t.state in DECISION_STATES else "views.next_resume"
 
 
 def _next_line(t: Task, key: str, w: int | None) -> str:

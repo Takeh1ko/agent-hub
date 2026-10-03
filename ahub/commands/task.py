@@ -63,7 +63,7 @@ def cmd_new(args) -> int:
     except tasks.TaskInvalid as e:
         from ahub.i18n import t as _t
 
-        raise CliError(_t("err.task_invalid", errors="; ".join(e.errors)), hint=_t("hint.doctor")) from e
+        raise CliError(_t("err.task_invalid", errors="; ".join(e.errors)), hint=_t("hint.task_new")) from e
     from ahub.i18n import t as _t
 
     word = _t("task.word_draft") if t.state is State.DRAFT else _t("task.word_queued")

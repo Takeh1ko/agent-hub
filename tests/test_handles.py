@@ -122,7 +122,7 @@ def test_say_ask_answer_alarms(env, capsys):
     comms.raise_alarm(store, "opencode недоступен 12 мин", critical=True)
     rc, out, _ = ahub(capsys, "alarms", "--ack")
     assert "ALARM! opencode недоступен 12 мин" in out and "#2" in out  # the id, so it can be acked by hand
-    assert "прочитанными" in out
+    assert out.splitlines()[-1] == "1 тревога отмечена прочитанной"  # the result, not a Next command
     assert ahub(capsys, "alarms")[1] == "тревог нет"
 
 

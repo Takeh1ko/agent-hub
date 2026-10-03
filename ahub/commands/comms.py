@@ -131,7 +131,7 @@ def cmd_alarms(args) -> int:
     out = [ui.table(head, body, max_width=[6, 8, None], indent=2)]
     if args.ack:  # the result of the command, not a suggestion for the next one
         events.ack(store, [e.id for e in al], scope=sc)
-        out.append(ui.styled(t("alarms.acked", n=len(al)), "dim"))
+        out.append(ui.styled(t("alarms.acked" if len(al) == 1 else "alarms.acked_many", n=len(al)), "dim"))
     else:
         out.append(ui.styled(ui.kv([(t("views.lbl_next"), t("alarms.next"))]), "dim"))
     emit(args, {"alarms": [e.payload | {"id": e.id, "critical": e.critical} for e in al]}, "\n".join(out))

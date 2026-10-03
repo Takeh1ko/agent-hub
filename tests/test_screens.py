@@ -7,6 +7,7 @@ One snapshot per screen the CLI draws: the home screen, doctor, providers, model
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -393,10 +394,14 @@ def test_review_findings_are_listed_in_the_task_detail(capsys, monkeypatch, tmp_
     rc, out = run(capsys, "status", t.label)
     assert rc == 0
     lines = out.splitlines()
-    assert "Review findings" in lines
     block = lines[lines.index("Review findings") + 1:]
-    assert " ".join(block[0].split()) == "high core/b.py:1 Y должен быть 3"
-    assert block[1].startswith("Next  ahub accept T1")  # and the decision commands, as before
+    assert block[0].split() == ["high", "core/b.py:1"]
+    assert block[1].strip() == "Y должен быть 3"  # the whole issue, on its own line
+    assert block[2].strip() == "fix: поставить 3"  # and what to do
+    assert block[-1].startswith("Next  ahub accept T1")  # and the decision commands, as before
+    from ahub import views
+
+    assert len(out.encode()) <= views.L2_LIMIT
 
 
 def test_no_findings_block_without_the_copy(tmp_path):
@@ -617,3 +622,111 @@ def test_the_service_step_never_stops_setup(capsys, monkeypatch, home):
     assert rc == 0
     assert "enable failed: install: PermissionError: [Errno 13] read-only file system" in out
     assert "Service      —" in out
+
+
+def test_open_findings_is_the_newest_round_and_skips_the_low_ones(tmp_path):
+    """Only the round the panel decided on matters, and a low finding never blocks (review.dedup/panel)."""
+    import json as _json
+
+    from ahub import review, views  # noqa: F401
+    from ahub.model import Kind
+    from ahub.store import Task
+
+    high = {"severity": "high", "file": "core/b.py", "line": 1, "issue": "Y должен быть 3", "fix": "поставить 3"}
+    low = {"severity": "low", "file": "core/b.py", "line": 2, "issue": "имя переменной"}
+    other = {"severity": "medium", "file": "core/c.py", "line": 7, "issue": "нет проверки", "fix": "добавить"}
+    wt = tmp_path / "wt"
+    (wt / ".ahub").mkdir(parents=True)
+    for round_no, findings in ((1, [high]), (2, [high, low]), (3, [high, other, low])):
+        (wt / ".ahub" / f"review_r{round_no}_fake.json").write_text(
+            _json.dumps({"verdict": "changes", "summary": "", "findings": findings}), encoding="utf-8")
+    task = Task(id=1, project="P", kind=Kind.CODE, title="x", worktree=str(wt), state="needs_decision")
+    found, more = views.open_findings(task, limit=10)
+    assert [(f.severity, f.file, f.line) for f in found] == [("high", "core/b.py", 1), ("medium", "core/c.py", 7)]
+    assert more == 0  # the low finding is not counted as a lost one
+    assert found[0].fix == "поставить 3"  # the fix is what a person needs
+    # round 1 only — the findings of an earlier round are not open any more
+    (wt / ".ahub" / "review_r3_fake.json").unlink()
+    (wt / ".ahub" / "review_r2_fake.json").unlink()
+    found, more = views.open_findings(task, limit=10)
+    assert [(f.severity, f.file) for f in found] == [("high", "core/b.py")] and more == 0
+    # the cap: `limit` findings and the rest counted
+    (wt / ".ahub" / "review_r1_fake.json").unlink()
+    (wt / ".ahub" / "review_r2_a.json").write_text(_json.dumps(
+        {"verdict": "changes", "summary": "",
+         "findings": [{"severity": "high", "file": f"core/{i}.py", "line": i, "issue": f"finding {i}"}
+                      for i in (1, 2, 3)]}), encoding="utf-8")
+    (wt / ".ahub" / "review_r2_b.json").write_text(_json.dumps(
+        {"verdict": "changes", "summary": "",
+         "findings": [{"severity": "high", "file": "core/9.py", "line": 9, "issue": "finding 9"}]}),
+        encoding="utf-8")
+    found, more = views.open_findings(task, limit=2)
+    assert [f.file for f in found] == ["core/1.py", "core/2.py"] and more == 2
+    assert review.dedup(found) == found  # the sort is the panel's own
+
+
+def test_the_home_screen_caps_the_task_list(capsys, monkeypatch, tmp_path):
+    """Six active tasks — five rows and a count of the rest (the same rule as the L1 overview)."""
+    from ahub import home, transitions
+    from ahub.model import Kind, State
+
+    monkeypatch.setattr("ahub.home.now_ms", lambda: NOW + 30_000)  # a frozen clock (the idle age)
+    write(paths.global_config_path(), "projects = []\n")
+    write(tmp_path / "shop" / ".hub.toml", 'schema_version = 2\nname = "shop"\n')
+    monkeypatch.chdir(tmp_path / "shop")
+    store = Store()
+    for i in range(home.MAX_TASKS + 1):
+        tid = store.create_task(project="shop", kind=Kind.SCOUT, title=f"find the leak {i}", now=NOW)
+        transitions.move(store, tid, State.PREPARING, now=NOW)
+    lines = home.text(w=W).splitlines()
+    task_rows = [ln for ln in lines if re.match(r"^\s*\S*\s+T\d+\s+scout", ln)]
+    assert len(task_rows) == home.MAX_TASKS  # the sixth one is counted, not dropped silently
+    assert "  +1 more — ahub status" in lines
+    assert "T6" not in "\n".join(task_rows)
+
+
+def test_home_offers_continue_for_a_task_that_failed(capsys, monkeypatch, tmp_path):
+    """The next commands follow the state, like `ahub status T<id>`: an error is continued, not accepted."""
+    from ahub import home, reasons, transitions
+    from ahub.model import Kind, State
+
+    monkeypatch.setattr("ahub.home.now_ms", lambda: NOW + 30_000)
+    write(paths.global_config_path(), "projects = []\n")
+    write(tmp_path / "shop" / ".hub.toml", 'schema_version = 2\nname = "shop"\n')
+    monkeypatch.chdir(tmp_path / "shop")
+    store = Store()
+    failed = store.create_task(project="shop", kind=Kind.CODE, title="fix the leak", now=NOW)
+    for st in (State.PREPARING, State.WORKING):
+        transitions.move(store, failed, st, now=NOW)
+    transitions.move(store, failed, State.ERROR, reason=reasons.dump("quota", err="limit"), now=NOW)
+    lines = home.text(w=W).splitlines()
+    row = lines.index("Waiting for your decision") + 1
+    assert lines[row].strip().startswith("T1  error")
+    assert lines[row + 1].strip().startswith("Next  ahub continue T1")  # views.next_resume, not next_decide
+    assert lines[-5] == "Next"  # and the suggested commands below, as before
+    assert "accept T1" not in lines[row + 1]
+
+    # with a decision pending, the decision commands come first
+    done = store.create_task(project="shop", kind=Kind.SCOUT, title="find the leak", now=NOW)
+    for st in (State.PREPARING, State.WORKING, State.DONE):
+        transitions.move(store, done, st, now=NOW)
+    lines = home.text(w=W).splitlines()
+    assert "ahub accept T2" in lines[row + 2]  # the decision outranks the resume
+
+
+def test_observer_run_prints_the_verdict_and_the_summary_once(capsys, monkeypatch):
+    """One verdict word, the summary wrapped under it once — a long summary must not make a long line."""
+    from ahub import observer
+
+    summary = "The pipeline was red because the retry pause grew with every attempt. " * 4
+    monkeypatch.setattr(observer, "cycle", lambda store, **kw: "alarm")
+    monkeypatch.setattr(observer, "reports", lambda store, n: [
+        {"ts": NOW, "kind": "quick", "verdict": "alarm", "summary": summary, "cost_go": 0.0}])
+    rc, out = run(capsys, "observer", "run", "--no-model")
+    assert rc == 0
+    lines = out.splitlines()
+    assert lines[0] == "alarm"  # the verdict word, not the verdict plus the whole summary
+    assert sum(1 for ln in lines if "retry pause" in ln) >= 1
+    assert out.count("retry pause") >= 1 and summary not in out  # the summary is fitted, not pasted
+    assert max(len(ln) for ln in lines) <= W  # nothing wider than the width (plain into a pipe)
+    assert lines[-1].strip().startswith("Next  ahub alarms")

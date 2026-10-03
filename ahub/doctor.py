@@ -667,7 +667,8 @@ _SLOW = frozenset({"opencode_health", "agy", "codex", "network"})
 
 def run_all(root: Path | None = None, step: Callable[[], None] | None = None) -> list[Check]:
     """All checks in display order; never raises. root — the project of the claude_skill check, cwd by
-    default. step() — called after every check (the caller's live line: one spin per check)."""
+    default. step() — the caller's live line: called after each slow check (the provider binaries), never
+    after a fast one, so the line only moves when something is really being waited for."""
     providers: list[str] = []
     try:
         providers = auth_providers()

@@ -21,7 +21,7 @@ def cmd_run(args) -> int:
         v = observer.cycle(store, deep_due=args.deep or None, use_model=not args.no_model)
         p.step()
     r = observer.reports(store, 1)[0]
-    out = [ui.styled(f"{v}: {r['summary']}", "bold" if v in ("alarm", "critical") else ""),
+    out = [ui.styled(v, "bold" if v in ("alarm", "critical") else ""),
            ui.para(ui.fit(str(r["summary"]), views.REPORT_BYTES), indent=2),
            ui.styled(ui.kv([(t("views.lbl_next"), t("observer.next"))], indent=2), "dim")]
     emit(args, {"verdict": v, "report": r}, "\n".join(out))

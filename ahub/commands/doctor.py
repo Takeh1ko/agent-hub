@@ -1,8 +1,8 @@
 """ahub doctor — installation check: what is wrong and what to do.
 
 The checks live in ahub/doctor.py; this module draws them: one section per area, the ✓/✗/– marks
-in a column of their own, and the fix of a failed check indented right under it. `ahub setup`
-renders the same list (setup.wizard_doctor_head + _text).
+in a column of their own, and the fix of a failed check indented right under it. `ahub setup` prints the
+same list as its last step (_text).
 """
 
 from __future__ import annotations

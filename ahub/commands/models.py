@@ -58,7 +58,7 @@ def cmd_list(args) -> int:
     lines = [ui.table(head, rows, max_width=[10, 18, None], indent=2)]
     if args.all:
         lines.append("")
-        lines.append(ui.table([t("models.col_model"), "provider", "model id"],
+        lines.append(ui.table([t("models.col_model"), t("models.col_provider"), t("models.col_model_id")],
                               [[m.alias + ("" if m.enabled else t("models.flag_off")), m.provider,
                                 m.model_id + (f" [{m.variant}]" if m.variant else "")
                                 + (t("models.flag_denied") if registry.denied_by(m, project) else "")]

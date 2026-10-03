@@ -14,7 +14,7 @@ from ahub import config, paths, pulse, reasons, ui, views
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION
 from ahub.service import HEARTBEAT_KEY, live_workers
-from ahub.store import Store
+from ahub.store import Store, Task
 from ahub.time import now_ms
 
 MAX_TASKS = 5  # the screen is a glance, not a list: `ahub status` has all of them
@@ -58,25 +58,36 @@ def text(*, w: int | None = None) -> str:
     live = live_workers()
     projects, _errors = config.load_projects()
     pulses = pulse.all_pulses(store, live=live, projects=projects, now=now)
-    active = store.list_tasks(states=ACTIVE)[:MAX_TASKS]
+    active = store.list_tasks(states=ACTIVE)
+    shown, rest = active[:MAX_TASKS], max(0, len(active) - MAX_TASKS)
     waiting = store.list_tasks(states=WAITING_DECISION)
 
-    if active:
+    if shown:
         out.append(ui.section(_t("home.sec_tasks")))
         out.append(ui.table(["", _t("views.col_id"), _t("views.col_kind"), _t("views.col_title"),
                              _t("views.col_state"), _t("views.col_model"), _t("views.col_idle")],
-                            _task_rows(active, live, pulses, now), max_width=[1, 6, 7, None, 13, 10, 8],
+                            _task_rows(shown, live, pulses, now), max_width=[1, 6, 7, None, 13, 10, 8],
                             indent=2, w=w))
+        if rest:  # the screen is a glance — what does not fit is counted, not dropped
+            out.append(ui.para(_t("home.more_tasks", n=rest), indent=2, w=w))
     else:
         out.append(ui.para(_t("home.no_tasks"), indent=2, w=w))
     if waiting:
         out.append(ui.section(_t("home.sec_decide")))
         out.append(ui.kv([(t.label, [views.state_word(t.state), reasons.text(t.state_reason)])
                           for t in waiting], indent=2, w=w))
-        out.append(ui.styled(ui.para(_t("views.next_decide", label=waiting[0].label), indent=2, w=w), "dim"))
+        out.append(ui.kv([(_t("views.lbl_next"), _t(views.next_key(_focus(waiting)), label=_focus(waiting).label))],
+                         indent=2, w=w))  # the same "Next" line as ahub status T<id>
     out.append(ui.section(_t("home.sec_next")))
     out.append(_suggestions(*_next_keys(alive, waiting)))
     return "\n".join(out)
+
+
+def _focus(waiting: list) -> Task:
+    """The task the "Next" line is about: a decision first (done / needs decision), else a resume."""
+    from ahub.views import DECISION_STATES
+
+    return next((t for t in waiting if t.state in DECISION_STATES), waiting[0])
 
 
 def _task_rows(tasks: list, live: dict[int, int], pulses: dict, now: int) -> list[list[str]]:
