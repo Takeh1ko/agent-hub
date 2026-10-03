@@ -195,7 +195,7 @@ def table(head: Sequence[str] | None, rows: Sequence[Sequence[Any]], *, max_widt
     head = list(head) if head else []
     cols = max([len(head)] + [len(r) for r in rows]) if rows else len(head)
     body = [list(r) + [""] * (cols - len(r)) for r in rows]
-    widths = [max(([len(str(head[i]))] if head else [0]) + [len(str(r[i])) for r in body])
+    widths = [max(([plain_len(str(head[i]))] if head else [0]) + [plain_len(str(r[i])) for r in body])
               for i in range(cols)]
     caps = list(max_width or []) + [None] * (cols - len(max_width or []))
     total = max(20, width(w) - indent)
@@ -213,12 +213,20 @@ def table(head: Sequence[str] | None, rows: Sequence[Sequence[Any]], *, max_widt
     pad = " " * indent
     out = []
     if head:
-        out.append((pad + (" " * gap).join(styled(clip(head[i], widths[i]).ljust(widths[i]), "dim")
+        out.append((pad + (" " * gap).join(styled(_cell(head[i], widths[i]), "dim")
                                           for i in range(cols))).rstrip())
     for r in body:
-        out.append((pad + (" " * gap).join(clip(r[i], widths[i]).ljust(widths[i])
-                                          for i in range(cols))).rstrip())
+        out.append((pad + (" " * gap).join(_cell(r[i], widths[i]) for i in range(cols))).rstrip())
     return "\n".join(out)
+
+
+def _cell(value: Any, n: int) -> str:
+    """A table cell padded to n visible columns; a coloured cell that fits keeps its colour, a cut one loses it
+    (an ellipsis is never placed inside an escape sequence)."""
+    text = str(value)
+    if plain_len(text) <= n:
+        return text + " " * (n - plain_len(text))
+    return clip(_ANSI.sub("", text), n).ljust(n)
 
 
 def _sentence_cut(text: str, budget: int) -> str:

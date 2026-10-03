@@ -348,3 +348,13 @@ def test_command_hint_is_a_runnable_command():
     for msg in ("no such task T99", "Telegram is not installed: pip install 'ahub[telegram]'",
                 "T1: the review has already started — it cannot be changed", "the hub runs the tasks"):
         assert command_hint(msg, known) == "", msg
+
+
+def test_table_measures_coloured_cells_by_what_is_seen():
+    """A coloured cell is as wide as its visible text; a cut never lands inside an escape sequence."""
+    mark = "\033[32m🟢\033[0m"
+    out = ui.table(["", "task"], [[mark, "T1"], ["x", "T22"]], w=40).split("\n")
+    assert mark in out[1]  # fits — kept whole, colour and all
+    assert out[1].index("T1") - len(mark) == out[2].index("T22") - 1  # the columns line up as seen
+    cut = ui.table(None, [["\033[1m" + "word " * 30 + "\033[0m", "end"]], w=30)
+    assert "…" in cut and "\033" not in cut  # a cut cell drops its colour instead of a broken code
