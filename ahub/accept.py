@@ -101,7 +101,10 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str) -
         store.add_event(Ev.ORCH_EDIT, task_id=t.id, project=t.project,
                         payload={"head": head[:12], "worker_commit": str(res.get("commit", ""))[:12], "by": by})
     g = gates.check(project, t, run_tests=False, orch_edit=orch_edit)
-    problems = g.fatal + [p for p in g.repairable if not (orch_edit and p.startswith("result.json"))]
+    # a result.json problem after an orchestrator edit is expected — decide by the problem code, not by
+    # its text (the text is translated)
+    problems = g.fatal + [p for p in g.repairable
+                          if not (orch_edit and isinstance(p, gates.Problem) and p.code in gates.RESULT_JSON_CODES)]
     if problems:
         raise DecisionError(_t("accept.gates_head", problems="; ".join(problems)),
                             reasons.dump("accept_gates", problems=gates.codes(problems)))

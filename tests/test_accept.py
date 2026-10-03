@@ -102,6 +102,20 @@ def test_orchestrator_edit(store, project):
     assert "orch_edit" in [e.kind for e in store.events(task_id=t.id)]
 
 
+@pytest.mark.parametrize("code", ["ru", "en"])
+def test_orchestrator_edit_is_decided_by_the_problem_code(store, project, monkeypatch, code):
+    """The result.json problem is recognised by its code — the wording of the language must not matter."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", code)
+    _reset()
+    t, _, _ = done_code(store, project)
+    (Path(t.worktree) / "core" / "b.py").write_text("Y = 5\n")
+    git(t.worktree, "commit", "-qam", "правка оркестратора")
+    accept.accept(store, project, t.id)  # HEAD is not the commit in result.json — allowed after an edit
+    assert store.get_task(t.id).state is State.ACCEPTED
+
+
 def test_uncommitted_orch_edit_refused(store, project):
     t, _, _ = done_code(store, project)
     (Path(t.worktree) / "core" / "b.py").write_text("Y = 4\n")

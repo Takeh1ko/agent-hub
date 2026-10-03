@@ -31,6 +31,8 @@ from ahub.store import Task
 TEST_TIMEOUT_S = 30 * 60
 LOCK_WAIT_S = 30 * 60
 TAIL_LINES = 15
+# the shape of .ahub/result.json — a problem an orchestrator's own edit over the result may cause
+RESULT_JSON_CODES = frozenset({"result_commit", "result_files", "no_result"})
 
 
 class Problem(str):
