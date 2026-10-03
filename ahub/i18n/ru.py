@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 MESSAGES: dict[str, str] = {
+    "alarms.acked_many": "{n} тревоги отмечены прочитанными",
     "alarms.acked": "{n} тревога отмечена прочитанной",
     "alarms.col_age": "возраст",
     "alarms.col_id": "#",
@@ -77,7 +78,7 @@ MESSAGES: dict[str, str] = {
     "draft.col_id": "#",
     "draft.col_status": "статус",
     "draft.col_task": "задача",
-    "draft.col_words": "словами",
+    "draft.col_text": "текст",
     "draft.drafting": "модель пишет черновик — она читает проект (1–3 мин)…",
     "draft.next_start": "ahub draft start {id}",
     "draft.queued": "T{tid} в очереди",
@@ -341,15 +342,12 @@ MESSAGES: dict[str, str] = {
     "setup.wizard_lang_bad": "нужно 'en' или 'ru'",
     "setup.wizard_path": "Путь проекта",
     "setup.wizard_project_bad": "{root} — не git-репозиторий, попробуйте ещё",
-    "setup.wizard_providers_head": "поставщики (найден / вход / заметка):",
     "setup.wizard_providers_ask": "Каких поставщиков включить? (через запятую, Enter = {default})",
     "setup.wizard_providers_bad": "нет такого поставщика: {name} (известные: {known}) — попробуйте ещё",
     "setup.wizard_providers_skipped": "{name} не найден — включить его нельзя",
     "setup.wizard_providers_on": "поставщики включены: {names}",
     "setup.wizard_providers_off": "поставщики выключены: {names}",
     "setup.wizard_providers_none": "не включён ни один поставщик — модели не заработают (ahub doctor)",
-    "setup.wizard_providers_auto": "поставщики по правилу (найден и есть вход): {names}",
-    "setup.wizard_models_head": "модели включённых поставщиков — короткая живая проверка каждой:",
     "setup.wizard_model_free": "бесплатно",
     "setup.wizard_model_paid": "платно",
     "setup.wizard_model_plan": "план",

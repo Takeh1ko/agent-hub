@@ -252,7 +252,7 @@ def _findings_lines(t: Task, w: int | None) -> list[str]:
                                  indent=FINDING_INDENT, w=w))
         size = sum(len(ln.encode()) + 1 for ln in block)
         if used + size > FINDINGS_BYTES and i:
-            more += 1  # the rest is counted, not squeezed in
+            more += len(findings) - i  # every finding that does not fit — not just this one
             break
         out += block
         used += size

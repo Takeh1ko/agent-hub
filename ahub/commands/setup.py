@@ -678,9 +678,13 @@ def _service_step(args, out: Steps, *, interactive: bool) -> None:
         elif _ask_yes_no(t("setup.wizard_service_ask_start"), False):
             import types
 
+            from ahub.cliutil import captured
             from ahub.commands import service as svc
 
-            svc.cmd_start(types.SimpleNamespace(json=False))
+            with captured() as lines:  # its lines are part of this step — not printed at indent 0
+                svc.cmd_start(types.SimpleNamespace(json=False))
+            for ln in "".join(ln + "\n" for ln in lines).splitlines():
+                out.line(ln)
             out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
         else:
             out.line(t("setup.wizard_service_skip"))
@@ -829,6 +833,9 @@ def _cmd_noninteractive(args) -> int:
     out.line(f"{cfg.name}  {cfg.root}")
     if register_project(root):
         out.line(t("setup.registered", path=paths.global_config_path()))
+    problems = config.check_project(cfg)
+    for problem in problems:
+        out.line(f"! {problem}")  # under "1. Project", like the wizard — not under the last step
     out.note(t("setup.step_project"), t("setup.sum_project", name=cfg.name, root=cfg.root))
     out.note(t("setup.step_config"), t("setup.sum_config", path=paths.global_config_path()))
     from ahub.store import Store
@@ -854,9 +861,6 @@ def _cmd_noninteractive(args) -> int:
         out.line(t("setup.wizard_claude_skip"))
         out.note(t("setup.step_claude"), t("setup.sum_none"))
     _service_step(args, out, interactive=False)
-    problems = config.check_project(cfg)
-    for problem in problems:
-        out.line(f"! {problem}")
     out.finish(t("setup.next"))
     emit(args, {"project": cfg.name, "file": str(f), "problems": problems, "providers": chosen,
                 "models": role_models}, out.text())

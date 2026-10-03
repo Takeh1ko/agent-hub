@@ -1,8 +1,7 @@
 """ahub entry point: subcommands are ahub/commands/*.py modules with register(subparsers).
 
 Shared `--json` flag — machine output; default compact text (orchestrator token savings).
-        if hint:  # the way out — one more line
-            print(t("cli.hint", hint=hint), file=sys.stderr)
+Config errors and expected refusals — one stderr line and exit 2, plus `  hint: …` when the way out is known.
 
 Imports live inside functions: main() refuses on Windows before command imports
 (some modules pull fcntl, which is missing there).
@@ -135,15 +134,15 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "lang", None):
         set_lang(args.lang)
     func = getattr(args, "func", None)
-    if func is None:
-        if getattr(args, "cmd", None):
-            ap.print_help()
-            return 2
-        from ahub.home import text
-
-        print(text())
-        return 0
     try:
+        if func is None:
+            if getattr(args, "cmd", None):
+                ap.print_help()
+                return 2
+            from ahub.home import text
+
+            print(text())  # the home screen reads the config, so it answers like any other command
+            return 0
         return int(func(args) or 0)
     except (ConfigError, CliError) as e:
         hint = getattr(e, "hint", "") or command_hint(str(e), command_names())

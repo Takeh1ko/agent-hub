@@ -125,6 +125,13 @@ def test_say_ask_answer_alarms(env, capsys):
     assert out.splitlines()[-1] == "1 тревога отмечена прочитанной"  # the result, not a Next command
     assert ahub(capsys, "alarms")[1] == "тревог нет"
 
+    # two at once — the plural branch has its own key (a missing one was a KeyError in front of a person)
+    comms.raise_alarm(store, "codex отвечает медленно", critical=True)
+    comms.raise_alarm(store, "telegram молчит", critical=True)
+    rc, out, _ = ahub(capsys, "alarms", "--ack")
+    assert rc == 0 and out.splitlines()[-1] == "2 тревоги отмечены прочитанными"
+    assert ahub(capsys, "alarms")[1] == "тревог нет"
+
 
 LONG_OWNER = ("Я тебе ставил конкретные цели на прошлой неделе, а ты сделал вид, что ничего не было, и я хочу "
               "понять почему так вышло и что ты собираешься с этим делать дальше, потому что сроки уже в четверг.")

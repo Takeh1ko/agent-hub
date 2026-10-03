@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 MESSAGES: dict[str, str] = {
+    "alarms.acked_many": "{n} alarms marked read",
     "alarms.acked": "{n} alarm marked read",
     "alarms.col_age": "age",
     "alarms.col_id": "#",
@@ -77,7 +78,7 @@ MESSAGES: dict[str, str] = {
     "draft.col_id": "#",
     "draft.col_status": "status",
     "draft.col_task": "task",
-    "draft.col_words": "words",
+    "draft.col_text": "text",
     "draft.drafting": "the model is drafting — it reads the project (1–3 min)…",
     "draft.next_start": "ahub draft start {id}",
     "draft.queued": "T{tid} queued",
@@ -341,15 +342,12 @@ MESSAGES: dict[str, str] = {
     "setup.wizard_lang_bad": "need 'en' or 'ru'",
     "setup.wizard_path": "Project path",
     "setup.wizard_project_bad": "{root} is not a git repository — try again",
-    "setup.wizard_providers_head": "providers (found / logged in / note):",
     "setup.wizard_providers_ask": "Which providers to enable? (comma-separated, Enter = {default})",
     "setup.wizard_providers_bad": "no such provider: {name} (known: {known}) — try again",
     "setup.wizard_providers_skipped": "{name} is not found — it cannot be enabled",
     "setup.wizard_providers_on": "providers on: {names}",
     "setup.wizard_providers_off": "providers off: {names}",
     "setup.wizard_providers_none": "no provider is on — the models will not work (ahub doctor)",
-    "setup.wizard_providers_auto": "providers by the rule (found and logged in): {names}",
-    "setup.wizard_models_head": "models of the providers on — one short live probe each:",
     "setup.wizard_model_free": "free",
     "setup.wizard_model_paid": "paid",
     "setup.wizard_model_plan": "plan",

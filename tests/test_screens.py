@@ -518,7 +518,7 @@ def test_draft_list_is_a_table(capsys, tmp_path):
                                          "paths": ["core/**"], "review_level": 2}))
     rc, out = run(capsys, "draft", "list")
     assert rc == 0
-    assert out == ("  #   status  words                    task\n"
+    assert out == ("  #   status  text                     task\n"
                    f"  #{did}  ready   кнопка повторной оплаты  —\n")
     # not ready — the reason instead of a task
     drafts._update(store, did, status="failed", errors="boom")
@@ -754,6 +754,46 @@ def test_the_findings_block_stays_inside_its_byte_budget(tmp_path):
     block = lines[lines.index("Review findings") + 1:]
     shown = [ln for ln in block if ln.strip().startswith(("high", "medium", "low"))]
     assert 0 < len(shown) < 8  # what does not fit is not squeezed in
-    assert any("more findings" in ln for ln in block)  # and it is counted
+    # and it is counted: what is shown plus what is named is the whole list
+    line = next(ln for ln in block if "more findings" in ln)
+    assert line.strip() == f"+{8 - len(shown)} more findings — ahub log T1"
     assert len(text.encode()) <= views.L2_LIMIT
     assert len(text.encode()) < views.L2_LIMIT // 2  # the budget leaves room for the summary and the report
+
+
+def test_a_broken_config_gives_one_error_line_not_a_traceback(capsys, monkeypatch, tmp_path):
+    """`ahub` with no arguments reads the config like every other command: one line + exit 2."""
+    from ahub.cliutil import CliError
+
+    def broken() -> str:
+        raise CliError("T1: no such task", hint="ahub top")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("ahub.home.text", broken)
+    write(paths.global_config_path(), "projects = []\n")
+    rc = cli.main([])
+    err = capsys.readouterr().err
+    assert rc == 2 and err.splitlines() == ["error: T1: no such task", "  hint: ahub top"]
+
+
+def test_the_waiting_list_is_capped_like_the_active_one(capsys, monkeypatch, tmp_path):
+    """12 tasks waiting a decision must not push the whole screen down — the screen is a glance."""
+    from ahub import home, transitions
+    from ahub.model import Kind, State
+
+    monkeypatch.setattr("ahub.home.now_ms", lambda: NOW + 30_000)
+    write(paths.global_config_path(), "projects = []\n")
+    write(tmp_path / "shop" / ".hub.toml", 'schema_version = 2\nname = "shop"\n')
+    monkeypatch.chdir(tmp_path / "shop")
+    store = Store()
+    for i in range(home.MAX_TASKS + 4):
+        task = store.create_task(project="shop", kind=Kind.SCOUT, title=f"scout {i}", now=NOW)
+        for st in (State.PREPARING, State.WORKING, State.DONE):
+            transitions.move(store, task, st, now=NOW)
+    lines = home.text(w=W).splitlines()
+    head = lines.index("Waiting for your decision") + 1
+    rows = [ln for ln in lines[head:] if ln.strip().startswith("T")]
+    assert len(rows) == home.MAX_TASKS  # the rest is counted, not listed
+    assert lines[head + home.MAX_TASKS].strip() == "+4 more — ahub status"
+    assert "T" + str(home.MAX_TASKS + 4) not in lines[head + home.MAX_TASKS + 1]
+    assert lines[head + home.MAX_TASKS + 1].strip().startswith("Next  ahub accept T1")  # the oldest decision

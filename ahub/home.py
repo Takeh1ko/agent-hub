@@ -61,6 +61,7 @@ def text(*, w: int | None = None) -> str:
     active = store.list_tasks(states=ACTIVE)
     shown, rest = active[:MAX_TASKS], max(0, len(active) - MAX_TASKS)
     waiting = store.list_tasks(states=WAITING_DECISION)
+    waiting_shown, waiting_rest = waiting[:MAX_TASKS], max(0, len(waiting) - MAX_TASKS)
 
     if shown:
         out.append(ui.section(_t("home.sec_tasks")))
@@ -72,11 +73,14 @@ def text(*, w: int | None = None) -> str:
             out.append(ui.para(_t("home.more_tasks", n=rest), indent=2, w=w))
     else:
         out.append(ui.para(_t("home.no_tasks"), indent=2, w=w))
-    if waiting:
+    if waiting_shown:
         out.append(ui.section(_t("home.sec_decide")))
         out.append(ui.kv([(t.label, [views.state_word(t.state), reasons.text(t.state_reason)])
-                          for t in waiting], indent=2, w=w))
-        out.append(ui.kv([(_t("views.lbl_next"), _t(views.next_key(_focus(waiting)), label=_focus(waiting).label))],
+                          for t in waiting_shown], indent=2, w=w))
+        if waiting_rest:  # capped like the list above — the screen is a glance, not a queue
+            out.append(ui.para(_t("home.more_tasks", n=waiting_rest), indent=2, w=w))
+        out.append(ui.kv([(_t("views.lbl_next"),
+                           _t(views.next_key(_focus(waiting_shown)), label=_focus(waiting_shown).label))],
                          indent=2, w=w))  # the same "Next" line as ahub status T<id>
     out.append(ui.section(_t("home.sec_next")))
     out.append(_suggestions(*_next_keys(alive, waiting)))

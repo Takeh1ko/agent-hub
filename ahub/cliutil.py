@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -61,13 +63,30 @@ def _candidates(text: str) -> list[str]:
     return out
 
 
+_captured: list[str] | None = None
+
+
 def emit(args, data: Any, text: str) -> None:
-    """--json → data as JSON, else text."""
+    """--json → data as JSON, else text (into captured() when a caller is collecting it)."""
     if getattr(args, "json", False):
         json.dump(data, sys.stdout, ensure_ascii=False, separators=(",", ":"), default=str)
         sys.stdout.write("\n")
+    elif _captured is not None:
+        _captured.append(text)
     else:
         sys.stdout.write(text if text.endswith("\n") or not text else text + "\n")
+
+
+@contextmanager
+def captured() -> Iterator[list[str]]:
+    """Collect what a command emits instead of printing it — the setup wizard renders a command's own
+    lines inside its numbered step (indent, width and one Next) instead of letting it print at indent 0."""
+    global _captured
+    prev, _captured = _captured, []
+    try:
+        yield _captured
+    finally:
+        _captured = prev
 
 
 def add_project_arg(parser) -> None:

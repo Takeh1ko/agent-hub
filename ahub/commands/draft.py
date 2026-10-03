@@ -50,7 +50,7 @@ def cmd_list(args) -> int:
     if not rows:
         emit(args, {"drafts": rows}, t("draft.empty"))
         return 0
-    body = ui.table([t("draft.col_id"), t("draft.col_status"), t("draft.col_words"), t("draft.col_task")],
+    body = ui.table([t("draft.col_id"), t("draft.col_status"), t("draft.col_text"), t("draft.col_task")],
                     [[f"#{r['id']}", r["status"], r["text"], f"T{r['task_id']}" if r["task_id"] else "—"]
                      for r in rows],
                     max_width=[4, 10, None, 6], indent=2)
