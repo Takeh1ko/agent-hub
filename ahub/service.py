@@ -5,7 +5,9 @@
 - A task process runs in its own group, independent of the service: a service restart does not kill it.
 - A queued task launches when: the queue is not paused, all "after X" are accepted, the project has
   a free slot (max_parallel), and its resources are free (capacity + external flock not held). Otherwise —
-  the wait reason is stored on the task.
+  the wait reason is stored on the task. Resources are only those the task names: the project test resource is
+  not added implicitly (acceptance takes its lock by itself, gates) — code tasks run in parallel, and their
+  acceptance runs queue up on the lock.
 - The service never changes task states (except the queue wait reason): the task's own process claims it (lease).
 - Orphans (V20): an active task with no live process and an expired lease → back to queue with an event and
   resume in place (same session); repeated orphaning → "Needs decision"; interrupted acceptance → "Needs decision".

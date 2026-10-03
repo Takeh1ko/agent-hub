@@ -8,6 +8,9 @@ Checks:
 - diff ⊆ task allowed files                                                 → unfixable: "Needs decision";
 - .ahub/result.json: commit == HEAD, files ⊆ diff (except orchestrator edit) → fixed by repair;
 - code: acceptance green under the project test resource                    → red — rework.
+
+The test resource lock is taken here and only while acceptance runs — that is why the queue does not hold it
+for the whole task (tasks.py); tasks that name it in --resources still get whole-task exclusivity.
 """
 
 from __future__ import annotations
