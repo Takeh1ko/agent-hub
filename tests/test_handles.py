@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from ahub import cli, comms, events, paths, transitions
+from ahub.commands import comms as comms_cmd
 from ahub.engine import Engine
 from ahub.model import State
 from ahub.store import Store
@@ -107,6 +109,150 @@ def test_wait_and_ack(env, capsys):
     rc, out, _ = ahub(capsys, "inbox")
     assert out.endswith("как там оплата?") and events.unacked(store) == []
     assert ahub(capsys, "inbox")[1] == "новых сообщений нет"
+
+
+def _locked_wait(*a, **kw):
+    raise sqlite3.OperationalError("database is locked")
+
+
+def test_wait_recovers_from_a_transient_failure(env, capsys, monkeypatch):
+    """A broken poll must not kill the wait: the event that comes after it is still delivered
+    (the one-shot call of the pre-T77 code raised out of the command)."""
+    store, _ = env
+    comms.owner_message(store, "как там оплата?", project="P")
+    real, state = events.wait, {"n": 0}
+
+    def flaky(*a, **kw):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(events, "wait", flaky)
+    monkeypatch.setattr(comms_cmd, "RETRY_S", 0.0)
+    rc, out, err = ahub(capsys, "wait", "--timeout", "5s")
+    assert rc == 0 and out == "OWNER «как там оплата?»" and err == ""
+    assert state["n"] == 2  # the failure was retried, not passed on
+
+
+def test_wait_gives_up_after_the_failure_cap(env, capsys, monkeypatch, caplog):
+    monkeypatch.setattr(events, "wait", _locked_wait)  # the database never opens
+    monkeypatch.setattr(comms_cmd, "RETRY_S", 0.0)
+    with caplog.at_level("WARNING", logger="wait"):
+        rc, out, err = ahub(capsys, "wait", "--timeout", "30m")
+    assert rc == 4 and out == ""
+    assert err.count("\n") == 0 and f"{comms_cmd.MAX_POLL_FAILURES} раз" in err and "database is locked" in err
+    assert len([r for r in caplog.records if r.name == "ahub.wait"]) == 1  # once per distinct error
+
+
+def test_wait_polls_once_with_a_zero_timeout(env, capsys, monkeypatch):
+    """`--timeout 0` is a poll of what is there right now, not a refusal: a pending event is delivered."""
+    store, _ = env
+    comms.owner_message(store, "как там оплата?", project="P")
+    seen, real = [], events.wait
+
+    def once(store_, *, timeout_s, **kw):
+        seen.append(timeout_s)
+        return real(store_, timeout_s=timeout_s, **kw)
+
+    monkeypatch.setattr(events, "wait", once)
+    rc, out, err = ahub(capsys, "wait", "--timeout", "0")
+    assert rc == 0 and out == "OWNER «как там оплата?»" and err == ""
+    assert seen == [0.0]  # exactly one poll, and nothing to wait for
+    assert ahub(capsys, "wait", "--timeout", "0") == (3, "", "")  # nothing left — but it did poll
+    assert seen == [0.0, 0.0]
+
+
+def test_wait_keeps_its_deadline(env, capsys, monkeypatch):
+    """`--timeout` is the deadline: no poll starts past it — not even a zero-length one after a failure
+    that ate the whole timeout."""
+    calls, fake_clock = [], {"t": 1000.0}
+    monkeypatch.setattr(comms_cmd, "clock", lambda: fake_clock["t"])
+    monkeypatch.setattr(comms_cmd, "RETRY_S", 0.0)
+
+    def timed_out(store, *, timeout_s, **kw):
+        calls.append(timeout_s)
+        fake_clock["t"] += timeout_s  # a poll takes exactly what it was given
+        return []
+
+    monkeypatch.setattr(events, "wait", timed_out)
+    rc, out, err = ahub(capsys, "wait", "--timeout", "30s")
+    assert rc == 3 and out == "" and err == ""
+    assert calls == [30.0]  # one poll, exactly the timeout
+
+    def failed_once(store, *, timeout_s, **kw):
+        calls.append(timeout_s)
+        fake_clock["t"] += timeout_s
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return []
+
+    calls.clear()
+    fake_clock["t"] = 1000.0
+    monkeypatch.setattr(events, "wait", failed_once)
+    rc, out, _ = ahub(capsys, "wait", "--timeout", "30s")
+    assert rc == 3 and calls == [30.0]  # the retry slept out the deadline and stopped — no poll of 0
+
+
+def _scripted_polls(monkeypatch, plan):
+    """Drive the endless watch loop: `plan(poll)` returns None (a real poll), "raise" (a locked database)
+    or "stop" (a Ctrl-C, as a Monitor's would be)."""
+    real = events.ready_batch
+    state = {"n": 0}
+
+    def fake(store, *, now=None, scope=None, window_ms=events.GROUP_WINDOW_MS):
+        state["n"] += 1
+        step = plan(state["n"])
+        if step == "raise":
+            raise sqlite3.OperationalError("database is locked")
+        if step == "stop":
+            raise KeyboardInterrupt
+        return real(store, now=now, scope=scope, window_ms=window_ms)
+
+    monkeypatch.setattr(events, "ready_batch", fake)
+
+
+def test_watch_streams_and_survives_a_transient_failure(env, capsys, monkeypatch, caplog):
+    store, _ = env
+    comms.owner_message(store, "как там оплата?", project="P")
+    _scripted_polls(monkeypatch, lambda n: "raise" if n == 2 else ("stop" if n >= 4 else None))
+    with caplog.at_level("WARNING", logger="watch"):
+        rc, out, err = ahub(capsys, "watch", "--poll", "0")
+    assert rc == 0 and out == "OWNER «как там оплата?»" and err == ""
+    assert [r.message for r in caplog.records if r.name == "ahub.watch"] == [
+        "watch: OperationalError: database is locked"]  # one line for the whole streak
+
+
+def test_watch_gives_up_after_the_failure_cap(env, capsys, monkeypatch, caplog):
+    _scripted_polls(monkeypatch, lambda n: "raise")  # the database never opens
+    with caplog.at_level("WARNING", logger="watch"):
+        rc, out, err = ahub(capsys, "watch", "--poll", "0")
+    assert rc == 4 and out == ""
+    assert err.count("\n") == 0 and f"{comms_cmd.MAX_POLL_FAILURES} раз" in err and "database is locked" in err
+    assert len([r for r in caplog.records if r.name == "ahub.watch"]) == 1  # once per distinct error, not per poll
+
+
+def test_watch_counts_failures_again_after_a_working_poll(env, capsys, monkeypatch, caplog):
+    """The cap counts a streak, not the total: a poll that works starts a new one (else a Monitor with two
+    short hiccups would be killed by MAX_POLL_FAILURES of them together)."""
+    cap = comms_cmd.MAX_POLL_FAILURES
+    real, state = events.ready_batch, {"n": 0}
+
+    def fake(store, *, now=None, scope=None, window_ms=events.GROUP_WINDOW_MS):
+        state["n"] += 1
+        if state["n"] == 3:
+            return real(store, now=now, scope=scope, window_ms=window_ms)  # the stream recovers
+        if state["n"] > 3 + cap:
+            raise KeyboardInterrupt  # the cap of the second streak must fire before this
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(events, "ready_batch", fake)
+    with caplog.at_level("WARNING", logger="watch"):
+        rc, out, err = ahub(capsys, "watch", "--poll", "0")
+    assert rc == 4 and out == "" and state["n"] == 3 + cap  # 2 + cap failures, counted from zero
+    assert err.count("\n") == 0 and f"{cap} раз" in err and "database is locked" in err
+    assert [r.message for r in caplog.records if r.name == "ahub.watch"] == [
+        "watch: OperationalError: database is locked"] * 2  # one line per streak, not per poll
 
 
 def test_say_ask_answer_alarms(env, capsys):

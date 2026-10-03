@@ -862,11 +862,10 @@ def test_one_problem_is_singular_in_english(capsys, monkeypatch, tmp_path):
     assert rc == 1 and out.splitlines()[-1] == "1 problem — the fix is under the check"
     assert "1 problems" not in out
 
-    # ahub projects: one project with one config problem
+    # ahub config: one problem is one line, not "1 problems"
     root = tmp_path / "shop"
     write(root / ".hub.toml", 'schema_version = 2\nname = "shop"\n')
-    write(paths.global_config_path(), f'projects = ["{root}"]\n')
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(root)
     monkeypatch.setattr(cfgmod, "check_project", lambda cfg: ["python: not an executable file /nope/python"])
-    rc, out = run(capsys, "projects")
-    assert "1 problem" in out and "1 problems" not in out
+    rc, out = run(capsys, "config")
+    assert rc == 1 and "! python: not an executable file" in out

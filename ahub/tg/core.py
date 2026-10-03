@@ -129,8 +129,9 @@ def _project_tag(project: str) -> str:
 def on_text(store: Store, chat_id: int, text: str, *, projects: list[str], now: int | None = None) -> Reply:
     """Human free text → message for Claude, in the project of the prefix, the last pick of this chat, or the hub.
 
-    A pick that is no longer in the hub is dropped with a notice: the message goes to the hub, which the
-    launcher starts for the owner (project='' rows are in every project's inbox as well).
+    A pick that is no longer in the hub is dropped, and the notice says where the message actually went: to
+    the hub — the launcher starts that for the owner, and project='' rows are in every project's inbox — or
+    to the project the prefix named.
     """
     remember_chat(store, chat_id, now=now)
     picked, body = split_project(text, projects)
@@ -146,7 +147,11 @@ def on_text(store: Store, chat_id: int, text: str, *, projects: list[str], now: 
     comms.owner_message(store, body, project=project, chat_id=chat_id, now=now)
     online = events.present(store, project=project or None, now=now)
     line = _t("tg.sent") if online else _t("tg.launching")
-    notice = _t("tg.project_gone", name=cur) + " " if stale else ""
+    # the notice must say where the message actually went — a prefix may have named a project
+    notice = ""
+    if stale:
+        notice = (_t("tg.project_gone_to", name=cur, project=project) if project
+                  else _t("tg.project_gone", name=cur)) + " "
     return Reply(f"{notice}{line} · {_project_tag(project)}")
 
 
