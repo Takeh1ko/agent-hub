@@ -1,4 +1,5 @@
-"""ahub models — model registry and role menus (view / edit). Never lifts project denies."""
+"""ahub models — model registry and role menus (view / edit), plus `check`: a live probe of the aliases.
+Never lifts project denies."""
 
 from __future__ import annotations
 
@@ -8,6 +9,8 @@ from ahub import registry
 from ahub.cliutil import CliError, add_project_arg, emit
 from ahub.model import Role
 from ahub.store import Store
+
+_MARKS = {True: "\u2713", False: "\u2717"}
 
 
 def _project_or_none(args):
@@ -83,6 +86,40 @@ def cmd_role(args) -> int:
     return 0
 
 
+def _role_defaults(store) -> list[str]:
+    """The default alias of every role menu, in role order, without repeats."""
+    out: list[str] = []
+    for role in Role:
+        try:
+            items = registry.menu(store, role)
+        except Exception:
+            continue
+        out += [e.alias for e, d in items if d and e.alias not in out]
+    return out
+
+
+def cmd_check(args) -> int:
+    """Live probe of the aliases (default: the role defaults): does the model answer at all."""
+    from ahub import doctor
+    from ahub.i18n import t
+
+    store = Store()
+    aliases = list(args.aliases or []) or _role_defaults(store)
+    if not aliases:
+        raise CliError(t("err.models_no_defaults"))
+    results, lines = [], []
+    for alias in aliases:
+        try:
+            entry = registry.get(store, alias)
+        except registry.RegistryError as e:
+            raise CliError(str(e)) from e
+        ok, detail = doctor.probe_model(entry)
+        results.append({"alias": alias, "ok": ok, "detail": detail})
+        lines.append(f"{_MARKS[ok]} {detail}")
+    emit(args, {"checked": results}, "\n".join(lines))
+    return 1 if any(not r["ok"] for r in results) else 0
+
+
 def cmd_enable(args, on: bool) -> int:
     from ahub.i18n import t
 
@@ -119,6 +156,9 @@ def register(subparsers) -> None:
     g.add_argument("--set-default", dest="default_to")
     r.add_argument("--default", action="store_true", help=t("help.models_default"))
     r.set_defaults(func=cmd_role)
+    c = sub.add_parser("check", help=t("help.models_check"))
+    c.add_argument("aliases", nargs="*", help=t("help.models_check"))
+    c.set_defaults(func=cmd_check)
     for name, on in (("enable", True), ("disable", False)):
         e = sub.add_parser(name)
         e.add_argument("alias")
