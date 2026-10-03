@@ -15,6 +15,7 @@ from ahub.i18n import Words
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION, Ev, State
 from ahub.providers import opencode_db
+from ahub.scope import Scope
 from ahub.service import HEARTBEAT_KEY, PAUSE_KEY, live_workers
 from ahub.store import Store, Task
 from ahub.time import fmt_local, now_ms, to_local
@@ -74,14 +75,21 @@ def _go_limit(hub_limit: float | None | object) -> float | None:
 
 
 def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | None | object = _UNSET,
-           history: bool = False) -> str:
+           history: bool = False, only: str = "") -> str:
+    """The header line: what is going on and what the machine has spent.
+
+    `only` — the project the table is narrowed to: the counts follow it (one scope per screen), the
+    hub-wide alarms are in it as everywhere. The money line does not: it is the machine's opencode.db
+    against the Go month limit, and that database knows nothing about the projects of the hub.
+    """
     hb = store.meta_get(HEARTBEAT_KEY)
     svc = _t("tui.svc_on") if hb and now - int(hb) < 30_000 else _t("tui.svc_off")
     claude = _t("tui.claude_on") if events.present(store, now=now) else _t("tui.claude_off")
-    active = store.list_tasks(states=ACTIVE)
-    waiting = store.list_tasks(states=WAITING_DECISION)
-    queued = store.list_tasks(states={State.QUEUED})
-    alarms = len(comms.alarms(store))
+    project = only or None
+    active = store.list_tasks(states=ACTIVE, project=project)
+    waiting = store.list_tasks(states=WAITING_DECISION, project=project)
+    queued = store.list_tasks(states={State.QUEUED}, project=project)
+    alarms = len(comms.alarms(store, scope=Scope((only,)) if only else None))
     limit = _go_limit(go_limit)
     lt = to_local(now)
     day0 = int(lt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
@@ -199,17 +207,18 @@ def snapshot(store: Store, projects: list[config.ProjectConfig] | None = None, *
              history: bool = False, only: str = "") -> tuple[Screen, dict, dict]:
     """The whole screen: the header, the rows (grouped by project, `only` — one of them), the feed.
 
-    The filter goes down into rows() as the SQL condition of the task list, so a filtered table is
-    complete (a history of one project is not cut by the newer tasks of another). `Screen.projects` is
-    every project that has tasks — the `o` key of the screen cycles it; it comes from the task table,
-    not from the rows, so a filtered screen keeps the whole list.
+    The filter goes down into header() and rows() as the SQL condition of the task list, so a filtered
+    screen is one scope: the counts of the header and the rows agree (a history of one project is not
+    cut by the newer tasks of another). `Screen.projects` is every project that has tasks — the `o` key
+    of the screen cycles it; it comes from the task table, not from the rows, so a filtered screen keeps
+    the whole list.
     """
     now = now_ms()
     live = live_workers()
     if projects is None:
         projects, _ = config.load_projects()
     pulses = pulse.all_pulses(store, live=live, projects=projects, now=now)
-    screen = Screen(header(store, live, now, history=history),
+    screen = Screen(header(store, live, now, history=history, only=only),
                     rows(store, live, pulses, now, history=history, only=only),
                     feed(store), store.task_projects())
     return screen, live, pulses

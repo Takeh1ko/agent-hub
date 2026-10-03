@@ -345,6 +345,23 @@ def test_top_filters_to_one_project(hub, store):
     assert data.snapshot(store, projects=[])[0].projects == ["A", "B"]
 
 
+def test_top_header_counts_follow_the_project_filter(hub, store):
+    """One scope per screen: the counts of the header describe the rows shown under it."""
+    filled(store)
+    comms.raise_alarm(store, "B is on fire", critical=True, project="B")
+    comms.raise_alarm(store, "the hub is on fire", critical=True)  # hub-wide — in every scope
+    whole = data.snapshot(store, projects=[])[0]
+    a = data.snapshot(store, projects=[], only="A")[0]
+    b = data.snapshot(store, projects=[], only="B")[0]
+    assert "работают 2" in whole.header and "ждут решения 1" in whole.header
+    assert "в очереди 1" in whole.header and "тревог 2" in whole.header
+    assert "работают 1" in a.header and "работают 1" in b.header  # one working task in each
+    assert "ждут решения 1" in a.header and "ждут решения 0" in b.header
+    assert "в очереди 0" in a.header and "в очереди 1" in b.header
+    assert "тревог 1" in a.header and "тревог 2" in b.header  # the hub-wide alarm is in both
+    assert {r.project for r in a.rows} == {"A"} and {r.project for r in b.rows} == {"B"}
+
+
 async def test_top_key_narrows_the_table_to_one_project(hub, store):
     from ahub.tui.app import TopApp
 
