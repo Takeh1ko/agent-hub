@@ -66,6 +66,14 @@ def test_providers_table_shows_every_provider(capsys, monkeypatch):
     assert not paths.global_config_path().exists()
 
 
+def test_providers_table_in_english(capsys, monkeypatch):
+    _states(monkeypatch)
+    assert cli.main(["--lang", "en", "providers"]) == 0
+    out = capsys.readouterr().out
+    rows = _rows(out)
+    assert rows[0].split() == ["name", "found", "login", "enabled"]
+
+
 def test_providers_json(capsys, monkeypatch):
     _states(monkeypatch, codex=doctor.ProviderState("codex", False, False, detail="not found", note="n",
                                                     hint="поставить codex"))

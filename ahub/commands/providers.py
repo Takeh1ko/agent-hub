@@ -31,7 +31,7 @@ def cmd_providers(args) -> int:
     for state in doctor.provider_states():
         aliases = [e.alias for e in registry.models(store) if e.provider == state.name]
         rows.append((_cells(state, state.name not in off), state, aliases))
-    head = t("providers.head").split()
+    head = [t(f"providers.col_{c}") for c in ("name", "found", "login", "enabled")]
     table = ui.table(head, [cells for cells, _s, _a in rows], max_width=None).split("\n")
     # the table is a table; the models of a provider, its note and its install/login hint are text under
     # its row — all of them, wrapped (a cell would be clipped at the end of a long list)

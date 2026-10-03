@@ -277,6 +277,8 @@ def table(head: Sequence[str] | None, rows: Sequence[Sequence[Any]], *, max_widt
     head=None — no column head (the rows speak for themselves)."""
     head = list(head) if head else []
     cols = max([len(head)] + [len(r) for r in rows]) if rows else len(head)
+    if head:
+        head = head + [""] * (cols - len(head))
     body = [list(r) + [""] * (cols - len(r)) for r in rows]
     widths = [max(([plain_len(str(head[i]))] if head else [0]) + [plain_len(str(r[i])) for r in body])
               for i in range(cols)]

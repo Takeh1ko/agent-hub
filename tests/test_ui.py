@@ -98,6 +98,16 @@ def test_table_ellipsis_only_in_a_cell():
     assert all(len(ln) <= 30 for ln in out.split("\n"))
 
 
+def test_table_tolerates_short_head():
+    """A head with fewer columns than the rows does not raise IndexError."""
+    head = ["col1", "col2"]
+    rows = [["a", "b", "c", "d"]]
+    out = ui.table(head, rows)
+    lines = out.split("\n")
+    assert lines[0].startswith("col1  col2")
+    assert lines[1] == "a     b     c  d"
+
+
 def test_fit_cuts_at_a_sentence_and_points_to_the_rest():
     first = "The wizard now asks for every provider and probes its models once before saving anything."
     text = first + " " + "filler words here and there " * 20
