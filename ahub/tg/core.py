@@ -2,6 +2,9 @@
 
 TG is not a hub console: it links the human to Claude and shows tasks.
 - Any human text → message for Claude (owner_message event); no Claude around — launcher starts one.
+- A message belongs to a project: the prefix in the text («по agent-hub: …», "agent-hub: …"), else the project
+  the owner picked last (/project, or the prefix of the previous message), else the hub (project='' — for the
+  owner's own session, not for every project).
 - Claude → human: `ahub say` (outbox), button questions (`ahub ask`), a button press answers Claude.
 - View: /tasks — active and recent with buttons, tap for a plain-words detail. Read-only.
 - The hub writes to the human directly only for observer alarms (comms.alarms_for_tg).
@@ -20,6 +23,7 @@ from ahub.time import fmt_local, now_ms
 
 MSG_LIMIT = 4000
 RECENT = 8
+PROJECT_KEY = "tg_project"  # the project the owner picked — until the next /project or prefix
 
 
 @dataclass(frozen=True)
@@ -77,16 +81,49 @@ def split_project(text: str, projects: list[str]) -> tuple[str | None, str]:
     return None, s
 
 
+def current_project(store: Store) -> str:
+    """The project the owner picked; '' — none (a message then goes to the hub, for the owner's session)."""
+    return store.meta_get(PROJECT_KEY) or ""
+
+
+def pick_project(store: Store, want: str, projects: list[str]) -> str | None:
+    """Remember the project of the next messages (`/project X` or a prefix). None — no such project."""
+    name = next((p for p in projects if p.lower() == want.strip().lower()), None)
+    if name is not None:
+        store.meta_set(PROJECT_KEY, name)
+    return name
+
+
+def project_reply(store: Store, projects: list[str], want: str | None = None) -> Reply:
+    """`/project X` — switch to that project; `/project` (or a button) — the current one and the list."""
+    if want:
+        name = pick_project(store, want, projects)
+        if name:
+            return Reply(_t("tg.project_set", name=name))
+        return Reply(_t("tg.project_unknown", name=want.strip(), projects=", ".join(projects) or "—"))
+    cur = current_project(store)
+    head = _t("tg.project_now", name=cur) if cur in projects else _t("tg.project_none")
+    rows = [[Button(_t("tg.project_mark", name=p) if p == cur else p, f"proj:{p}")] for p in projects]
+    return Reply(head, rows or None)
+
+
+def _project_tag(project: str) -> str:
+    return _t("tg.project_tag", name=project) if project else _t("tg.project_tag_any")
+
+
 def on_text(store: Store, chat_id: int, text: str, *, projects: list[str], now: int | None = None) -> Reply:
-    """Human free text → message for Claude."""
+    """Human free text → message for Claude, in the project of the prefix, the last pick, or the hub."""
     remember_chat(store, chat_id, now=now)
-    project, body = split_project(text, projects)
+    picked, body = split_project(text, projects)
     if not body:
         return Reply(_t("tg.empty"))
-    comms.owner_message(store, body, project=project or "", chat_id=chat_id, now=now)
-    if events.present(store, now=now):
-        return Reply(_t("tg.sent"))
-    return Reply(_t("tg.launching"))
+    if picked:
+        pick_project(store, picked, projects)
+    project = picked or current_project(store)
+    comms.owner_message(store, body, project=project, chat_id=chat_id, now=now)
+    online = events.present(store, project=project or None, now=now)
+    line = _t("tg.sent") if online else _t("tg.launching")
+    return Reply(f"{line} · {_project_tag(project)}")
 
 
 def help_text() -> str:

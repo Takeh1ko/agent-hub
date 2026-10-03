@@ -11,6 +11,7 @@ import pytest
 
 from ahub import comms, events, transitions
 from ahub.model import State
+from ahub.scope import Scope
 from ahub.store import Store
 from ahub.tg import core, launcher
 from ahub.time import now_ms
@@ -104,7 +105,7 @@ def test_launcher_flow(store, tmp_path):
     sp.procs[0].kill()
     sp.procs[0].wait()
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "finished"
-    assert json.loads(store.meta_get(launcher.SESSION_KEY))["id"] == "sess-1"
+    assert json.loads(store.meta_get(launcher.session_key("")))["id"] == "sess-1"
     assert [m["text"] for m in comms.inbox(store, mark=False)] == ["ещё вопрос"]  # the first was passed on
     assert launcher.tick(store, projects=[project], spawn=sp, binary="claude") == "launched"  # the backlog
     assert sp.calls[1][0][sp.calls[1][0].index("--resume") + 1] == "sess-1"  # the same TG session
@@ -148,6 +149,107 @@ def test_project_choice(store, tmp_path):
     launcher.tick(store, projects=[a, b], spawn=sp, binary="claude")
     assert sp.calls[0][1] == b.root  # the last project of Claude
     sp.procs[0].kill()
+
+
+# --- presence and the launcher per project ---
+
+def two_projects(tmp_path):
+    import dataclasses
+
+    a = make_project(tmp_path / "a")
+    b = dataclasses.replace(make_project(tmp_path / "b"), name="B")
+    return a, b
+
+
+def test_live_session_in_a_does_not_block_a_launch_for_b(store, tmp_path):
+    a, b = two_projects(tmp_path)
+    core.on_text(store, 1, "по B: почини кнопку", projects=["P", "B"])
+    events.touch_scope(store, Scope(("P",)), via="watch")  # a live Claude in P — it is not B's
+    sp = Spawner()
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    cmd, cwd = sp.calls[0]
+    assert cwd == b.root and "почини кнопку" in cmd[cmd.index("-p") + 1]
+    assert "Project: B" in cmd[cmd.index("-p") + 1]
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "running"
+    for p in sp.procs:
+        p.kill()
+
+
+def test_prompt_of_b_carries_no_text_of_a(store, tmp_path):
+    a, b = two_projects(tmp_path)
+    core.on_text(store, 1, "по P: дело A", projects=["P", "B"])
+    core.on_text(store, 1, "по B: дело B", projects=["P", "B"])
+    events.touch_scope(store, Scope(("P",)), via="watch")  # A is read by a live session, B is not
+    sp = Spawner()
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    prompt = sp.calls[0][0][sp.calls[0][0].index("-p") + 1]
+    assert _messages_block(prompt).strip() == "- дело B"
+    assert "Project: B" in prompt
+    for p in sp.procs:
+        p.kill()
+
+    # a launch for B passes on its own messages only — A's stay for its Claude
+    sp.procs[-1].kill()
+    sp.procs[-1].wait()
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "finished"
+    assert [m["text"] for m in comms.inbox(store, mark=False)] == ["дело A"]
+
+
+def test_every_project_without_a_live_session_gets_its_own_claude(store, tmp_path):
+    a, b = two_projects(tmp_path)
+    core.on_text(store, 1, "по P: дело A", projects=["P", "B"])
+    core.on_text(store, 1, "по B: дело B", projects=["P", "B"])
+    sp = Spawner()
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"  # the other project
+    assert [call[1] for call in sp.calls] == [a.root, b.root]
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "running"  # both are busy
+    with store.read() as c:
+        assert [r[0] for r in c.execute("SELECT project FROM claude_launch WHERE status='running'")] == ["P", "B"]
+    for p in sp.procs:
+        p.kill()
+
+
+def _messages_block(prompt: str) -> str:
+    """The owner messages of a launch prompt — the part that must not leak between projects."""
+    return prompt.split("Owner messages:\n")[1].split("\n\nHub summary")[0]
+
+
+def test_hub_wide_messages_go_to_the_owner_only(store, tmp_path):
+    a, b = two_projects(tmp_path)
+    core.on_text(store, 1, "всем сразу", projects=["P", "B"])
+    core.on_text(store, 1, "по B: только B", projects=["P", "B"])
+    sp = Spawner()
+    launcher.tick(store, projects=[a, b], spawn=sp, binary="claude")  # the owner group is the older one
+    prompt = sp.calls[0][0][sp.calls[0][0].index("-p") + 1]
+    assert _messages_block(prompt).strip() == "- всем сразу"
+    assert "--all" in prompt  # the owner's Claude reads every project
+    assert launcher.tick(store, projects=[a, b], spawn=sp, binary="claude") == "launched"
+    prompt = sp.calls[1][0][sp.calls[1][0].index("-p") + 1]
+    assert _messages_block(prompt).strip() == "- только B"
+    assert "Project: B" in prompt
+    for p in sp.procs:
+        p.kill()
+
+
+def test_the_bot_picks_a_project(store):
+    names = ["P", "B"]
+    assert "все проекты" in core.on_text(store, 1, "без префикса", projects=names).text  # nothing picked yet
+    core.on_text(store, 1, "по B: первое", projects=names)
+    assert core.current_project(store) == "B"  # the prefix is a pick
+    rep = core.on_text(store, 1, "второе", projects=names)
+    assert "проект: B" in rep.text
+    assert [m["project"] for m in comms.inbox(store, mark=False)] == ["", "B", "B"]
+
+    listed = core.project_reply(store, names)
+    assert "сейчас проект: B" in listed.text
+    assert [b.data for row in listed.buttons for b in row] == ["proj:P", "proj:B"]
+    assert core.project_reply(store, names).buttons[1][0].label == "✓ B"
+
+    assert "проект: P" in core.project_reply(store, names, "P").text  # /project P
+    assert core.current_project(store) == "P"
+    assert "нет" in core.project_reply(store, names, "нет такого").text
+    assert core.current_project(store) == "P"  # an unknown project changes nothing
 
 
 class FakeBot:

@@ -110,6 +110,18 @@ def build_dispatcher(store: Store):
     async def _status(msg: Message) -> None:
         await msg.answer(core.clip(await asyncio.to_thread(core.status_text, store)))
 
+    @r.message(Command("project"))
+    async def _project(msg: Message) -> None:
+        arg = " ".join((msg.text or "").split()[1:]).strip()
+        rep = await asyncio.to_thread(core.project_reply, store, _projects(), arg or None)
+        await msg.answer(rep.text, reply_markup=_markup(rep.buttons))
+
+    @r.callback_query(F.data.startswith("proj:"))
+    async def _pick_project(call: CallbackQuery) -> None:
+        rep = await asyncio.to_thread(core.project_reply, store, _projects(), call.data.split(":", 1)[1])
+        await call.message.edit_text(rep.text, reply_markup=_markup(rep.buttons))
+        await call.answer()
+
     @r.message(Command("tasks"))
     async def _tasks(msg: Message) -> None:
         rep = await asyncio.to_thread(core.tasks_reply, store)

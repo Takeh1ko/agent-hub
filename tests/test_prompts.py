@@ -69,7 +69,10 @@ def _collect(lang: str, tmp_path) -> list[str]:
         observer.TRIAGE_PROMPT.format(now_str="n", now_ms=1, since=1, since_str="s", log="l",
                                       kind="k", suspicions="s", log_digest="d", snapshot="snap"),
         observer.DEEP_CHECKLIST,
-        launcher.PROMPT.format(messages="hi", status="ok", lang_line=launcher._owner_lang_line()),
+        launcher.PROMPT.format(project_line=launcher.project_line("P"), messages="hi", status="ok",
+                               lang_line=launcher._owner_lang_line()),
+        launcher.PROMPT.format(project_line=launcher.OWNER_LINE, messages="hi", status="ok",
+                               lang_line=launcher._owner_lang_line()),
         oc.prompt_arg("x" * 70_000, str(tmp_path)),
         oc.prompt_arg("short", str(tmp_path)),
     ]
