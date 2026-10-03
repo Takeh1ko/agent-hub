@@ -730,3 +730,30 @@ def test_observer_run_prints_the_verdict_and_the_summary_once(capsys, monkeypatc
     assert out.count("retry pause") >= 1 and summary not in out  # the summary is fitted, not pasted
     assert max(len(ln) for ln in lines) <= W  # nothing wider than the width (plain into a pipe)
     assert lines[-1].strip().startswith("Next  ahub alarms")
+
+
+def test_the_findings_block_stays_inside_its_byte_budget(tmp_path):
+    """Findings are shown whole, but the block cannot eat the L2 budget: the rest is counted."""
+    import json as _json
+
+    from ahub import views
+    from ahub.model import Kind
+    from ahub.store import Store, Task
+
+    long_issue = "Очень длинная находка ревью. " * 20
+    wt = tmp_path / "wt"
+    (wt / ".ahub").mkdir(parents=True)
+    (wt / ".ahub" / "review_r1_fake.json").write_text(_json.dumps(
+        {"verdict": "changes", "summary": "",
+         "findings": [{"severity": "high", "file": f"core/{i}.py", "line": i, "issue": long_issue,
+                       "fix": long_issue} for i in range(1, 9)]}), encoding="utf-8")
+    task = Task(id=1, project="P", kind=Kind.CODE, title="findings", executor="bunny", worktree=str(wt),
+                state="needs_decision")
+    text = views.task_text(Store(), task, w=W)
+    lines = text.splitlines()
+    block = lines[lines.index("Review findings") + 1:]
+    shown = [ln for ln in block if ln.strip().startswith(("high", "medium", "low"))]
+    assert 0 < len(shown) < 8  # what does not fit is not squeezed in
+    assert any("more findings" in ln for ln in block)  # and it is counted
+    assert len(text.encode()) <= views.L2_LIMIT
+    assert len(text.encode()) < views.L2_LIMIT // 2  # the budget leaves room for the summary and the report
