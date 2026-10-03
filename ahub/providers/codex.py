@@ -19,7 +19,7 @@ reports no prices and no quota numbers.
 
 Non-interactive: `-c approval_policy="never"` (the flag that keeps exec from waiting for a human) plus
 stdin=DEVNULL, which the shared runner already gives the process; `--skip-git-repo-check` is added when
-the working copy is not a git repo (codex stops to ask about the trust otherwise — on resume too). `-s workspace-write` is the OS sandbox
+the working copy is not a git repo (codex stops to ask about the trust otherwise — on resume too). `-s <mode>` is the OS sandbox
 (Landlock inside bubblewrap on Linux, Seatbelt on macOS): the tools may read everything but write only
 the working copy, and they never ask. The mode comes from `[providers.codex] sandbox` in the hub config
 (read-only | workspace-write | danger-full-access; absent — workspace-write) and is passed to both `exec`

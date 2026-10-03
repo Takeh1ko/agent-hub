@@ -139,6 +139,20 @@ value sets it — `proxy` covers `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` and thei
 hub's own processes and the Telegram bot keep their behaviour (`[telegram] proxy` is separate). `ahub doctor` shows
 each provider's own proxy and whether it answers.
 
+The same section holds `sandbox` for Codex — the OS sandbox the worker runs in:
+
+```toml
+[providers.codex]
+sandbox = "workspace-write"     # read-only | workspace-write (default) | danger-full-access
+```
+
+`workspace-write` lets the tools read anything but write only the task copy (the kernel enforces it). On Ubuntu 24.04
+AppArmor blocks the unprivileged user namespaces bubblewrap needs, so codex then fails every command silently and the
+turn comes out empty — `ahub doctor` detects this case and gives both fixes in one hint: allow the namespaces
+(`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, plus a file in `/etc/sysctl.d/` to keep it — the
+admin's decision) or set `sandbox = "danger-full-access"`, where the task copy and the acceptance gates hold codex as
+they hold opencode and agy. The hub never changes system settings on its own.
+
 ## Documentation
 
 - [docs/ARCHITECTURE.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/ARCHITECTURE.md) — code map, start here

@@ -42,7 +42,7 @@ _WRITE_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch", "file_chan
                 "write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file"}
 _READ_TOOLS = {"read", "grep", "glob", "list", "webfetch", "websearch",
                "view_file", "list_dir", "grep_search", "find_by_name"}
-_CMD_TOOLS = {"bash", "run_command", "command_execution"}  # opencode bash; agy run_command; codex
+_CMD_TOOLS = {"bash", "run_command", "command_execution"}  # opencode bash; agy run_command; codex command_execution
 _CMD_KEYS = {"command", "commandline", "cmd"}  # agy keeps the command in the parameter CommandLine
 
 
