@@ -42,6 +42,13 @@ def scout(store, project, **kw):
                         project, collect=False)
 
 
+def code(store, project, **kw):
+    kw.setdefault("paths", ["core/**", "tests/**"])
+    kw.setdefault("accept", ["tests/test_a.py::test_x"])
+    return tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.CODE, title="починить", model="fake", **kw),
+                        project, collect=False)
+
+
 class Recorder:
     def __init__(self):
         self.spawned = []
@@ -116,6 +123,31 @@ def test_resources(store, tmp_path):
     assert rec.spawned == [a.id, c.id]
 
 
+def test_test_resource_not_held_by_the_queue(store, tmp_path):
+    """The project test resource is not added to a code task: two tasks run in parallel, acceptance queues on the lock."""
+    project = make_project(tmp_path, resources={"db": {"lock": str(tmp_path / "db.lock"), "capacity": 1}},
+                           test_resource="db", max_parallel=2)
+    install_fake(store, [])
+    a = code(store, project)
+    b = code(store, project)
+    assert a.limits["resources"] == [] and b.limits["resources"] == []
+    s, rec = svc(store, project, tmp_path)
+    report = s.tick()
+    assert rec.spawned == [a.id, b.id] and report.load["P"].waiting == {}
+
+
+def test_explicit_test_resource_blocks_the_queue(store, tmp_path):
+    """Named in --resources by hand — the queue holds it for the whole task, as before."""
+    project = make_project(tmp_path, resources={"db": {"capacity": 1}}, test_resource="db", max_parallel=5)
+    install_fake(store, [])
+    a = code(store, project, resources=["db"])
+    b = code(store, project, resources=["db"])
+    s, rec = svc(store, project, tmp_path)
+    s.tick()
+    assert rec.spawned == [a.id]
+    assert store.get_task(b.id).state_reason == "ждёт ресурс db"
+
+
 def test_pause(store, tmp_path):
     project = make_project(tmp_path)
     install_fake(store, [])
@@ -162,6 +194,8 @@ def test_end_to_end_real_worker(store, tmp_path, monkeypatch):
     q.mkdir()
     (q / "001.json").write_text(json.dumps(scout_ok("ses_e2e")), encoding="utf-8")
     monkeypatch.setenv("AHUB_FAKE_QUEUE", str(q))
+    # the worker process must run the code of this checkout, not whatever `ahub` the environment has installed
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
     install_fake(store, [])  # the "fake" model in the shared registry
     t = scout(store, project)
     s = service.Service(store)

@@ -44,12 +44,18 @@ def test_scout_defaults(store, project):
     assert t.budget_go == 1.5 and t.budget_usd == 0.0 and t.spec_hash
 
 
-def test_code_defaults_and_resource(store, project):
+def test_code_defaults_no_test_resource(store, project):
     t = tasks.create(store, spec(kind=Kind.CODE, title="починить", paths=["core/**", "tests/test_a.py"],
                                  accept=["tests/test_a.py::test_x"]), project)
     assert t.review == {"models": ["spark"], "rounds": 2}
-    assert t.limits["resources"] == ["test_db"]  # the acceptance run goes under the test resource
+    assert t.limits["resources"] == []  # acceptance takes the test resource lock itself — no queue hold
     assert t.limits["time_limit_min"] == 180
+
+
+def test_explicit_test_resource_kept(store, project):
+    t = tasks.create(store, spec(kind=Kind.CODE, title="починить", paths=["core/**"],
+                                 accept=["tests/test_a.py::test_x"], resources=["test_db", "payments"]), project)
+    assert t.limits["resources"] == ["test_db", "payments"]  # named by hand — held for the whole task
 
 
 def test_review_levels_and_explicit(store, project):
