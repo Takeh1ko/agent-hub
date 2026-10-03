@@ -2,8 +2,10 @@
 
 "View / Control" toggle (c): no actions in view mode. Refresh every 2 s in the background
 (thread; a new refresh never starts before the previous one finishes). The table shows the current
-work, `h` adds the history; `enter`/`t` — a live transcript of the task (ahub.tui.live): it reads the
-log and, in control mode, `m` messages the worker. Every table key waits behind that screen.
+work, grouped by project (a header row opens each project — several repositories share one hub),
+`h` adds the history, `o` narrows the table to one project and back to all; `enter`/`t` — a live
+transcript of the task (ahub.tui.live): it reads the log and, in control mode, `m` messages the worker.
+Every table key waits behind that screen.
 """
 
 from __future__ import annotations
@@ -23,8 +25,8 @@ from ahub.tui import data
 from ahub.tui.live import LiveView
 
 TABLE_ONLY = ("toggle", "new", "stop", "accept", "reject", "rework", "nudge", "model", "budget", "pause",
-              "history", "transcript")  # the keys of the table — they wait behind the transcript screen
-              # (that screen has its own m: a message to the worker of the task it shows)
+              "history", "transcript", "project")  # the keys of the table — they wait behind the transcript
+              # screen (that screen has its own m: a message to the worker of the task it shows)
 
 
 class Confirm(ModalScreen[bool]):
@@ -212,6 +214,7 @@ class TopApp(App):
                 Binding("M", "model", _t("tui.bind_model")),
                 ("b", "budget", _t("tui.bind_budget")),
                 ("p", "pause", _t("tui.bind_pause")), ("h", "history", _t("tui.bind_history")),
+                ("o", "project", _t("tui.bind_project")),
                 ("t", "transcript", _t("tui.bind_transcript"))]
 
     def __init__(self, store: Store | None = None, projects: list[config.ProjectConfig] | None = None,
@@ -221,10 +224,12 @@ class TopApp(App):
         self._projects = projects
         self.control = control
         self.history = False  # the table by default shows the current work, not the finished ones
+        self.project = ""  # "" — every project; `o` narrows the table to one of them
         self._busy = False
         self._live: dict = {}
         self._pulses: dict = {}
         self._ids: list[int] = []
+        self._names: list[str] = []  # the projects of the last refresh — the order of the `o` key
 
     def pulses(self) -> dict:
         """The pulses of the last refresh (the transcript screen shows the pulse in its header)."""
@@ -255,6 +260,8 @@ class TopApp(App):
 
     def _show_mode(self) -> None:
         text = (_t("tui.mode_control") if self.control else _t("tui.mode_view"))
+        if self.project:
+            text += " · " + _t("tui.filter_project", name=self.project)
         self.query_one("#mode", Static).update(text)
 
     @work(thread=True, exclusive=True, group="refresh")
@@ -263,20 +270,23 @@ class TopApp(App):
             return
         self._busy = True
         try:
-            screen, live, pulses = data.snapshot(self.store, self.projects(), history=self.history)
+            screen, live, pulses = data.snapshot(self.store, self.projects(), history=self.history,
+                                                 only=self.project)
         finally:
             self._busy = False
         self.call_from_thread(self._apply, screen, live, pulses)
 
     def _apply(self, screen: data.Screen, live: dict, pulses: dict) -> None:
         self._live, self._pulses = live, pulses
+        self._names = screen.projects
         self.query_one("#header", Static).update(screen.header)
         table = self.query_one("#tasks", DataTable)
         cur = self.selected()
         table.clear()
         self._ids = []
         for r in screen.rows:
-            table.add_row(r.mark, r.label, r.kind, r.title[:40], r.state, r.phase, r.model, str(r.round), r.age, r.cost)
+            table.add_row(r.mark, r.label, r.kind, r.title[:40], r.state, r.phase, r.model, str(r.round),
+                          r.age, r.cost)
             self._ids.append(r.task_id)
         if cur in self._ids:
             table.move_cursor(row=self._ids.index(cur))
@@ -309,9 +319,19 @@ class TopApp(App):
         self.history = not self.history
         self.refresh_data()
 
+    def action_project(self) -> None:
+        """`o` — the table of one project; again — the next one, and after the last back to all."""
+        order = [""] + self._names
+        if len(order) == 1:  # nothing to narrow to
+            return
+        cur = order.index(self.project) if self.project in order else 0
+        self.project = order[(cur + 1) % len(order)]
+        self._show_mode()
+        self.refresh_data()
+
     def action_transcript(self) -> None:
         tid = self.selected()
-        if tid is not None:
+        if tid:  # a project header row (0) has no task to open
             self.push_screen(Transcript(self.store, tid))
 
     def action_toggle(self) -> None:
