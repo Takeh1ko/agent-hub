@@ -4,46 +4,44 @@
 
 <p align="center"><a href="https://github.com/Takeh1ko/agent-hub/blob/main/README.ru.md">Русская версия</a></p>
 
-Let Claude Code hand work to cheap models — and only spend its own tokens on decisions.
+Let an orchestrator hand work to worker models and spend its own context only on decisions.
 
-agent-hub is a local service between an orchestrator (Claude Code, or any CLI agent) and worker models
-(opencode: Muse Spark, free models; Gemini via Antigravity). Claude files a task, goes quiet, and is woken by
-one line when there is something to decide: accept, send back with notes, or reject. Everything in between —
-running the worker in its own copy of the repo, checking its work, review by other models, retries, budgets —
-the hub does without Claude.
+agent-hub is a local service that sits between an orchestrator (Claude Code, or any CLI agent over MCP) and worker
+models. The orchestrator files a task and goes quiet. The hub runs the worker in its own git worktree, checks the
+result — a commit, a diff inside the allowed files, the acceptance tests — sends it to reviewer models in fresh
+sessions, retries failures, keeps the budgets, and wakes the orchestrator with one line when there is something to
+decide: accept, send back with notes, or reject. Nothing else reaches the orchestrator's context unless it asks for
+it: one event line, a summary capped at 4 KB, a one-word decision.
 
+The short version of everything below is in the [user guide](docs/guide.md).
 
-## Why
+## How it works
 
-- **Claude's context is the expensive part.** A delegated task costs Claude about 2 KB of text for the whole
-  cycle: one event line, a summary capped at 4 KB, a one-word decision. Reports, diffs and logs are there on
-  request, never pushed.
-- **Cheap models are good enough when the work is checked.** A task is not "done" because the model says so:
-  the commit exists, the diff stays inside the allowed files, the acceptance tests pass under a project lock,
-  and one or more reviewer models (in fresh sessions) agree. See [the real numbers](#what-it-costs-real-tasks-from-this-repository) below.
-- **Nothing gets lost.** Events are stored until acknowledged, so a restarted Claude session, a restarted hub or a
-  dead terminal does not drop a "done". Worker processes outlive service restarts; orphaned tasks are picked up
-  again; an observer watches the hub itself.
+```mermaid
+flowchart TD
+  C["Claude Code"] -->|"ahub task new"| S["ahub service: queue, budgets, events"]
+  S --> W["worker model in its own git worktree"]
+  W --> G{"gates: commit, diff inside paths, acceptance tests"}
+  G --> R["review panel: reviewer models in fresh sessions"]
+  R --> V{"all agree?"}
+  V -->|"no — up to N rounds"| W
+  V -->|"yes"| E["event DONE"]
+  E -->|"ahub watch wakes Claude"| C
+  C -->|"ahub accept / rework / reject"| S
+```
 
-## What it costs: real tasks from this repository
+The hub never merges on its own: the decision after `done` belongs to the orchestrator or to you. A network error is
+retried, silence gets one continuation, a quota / timeout / budget limit turns into `needs_decision` — a task never
+hangs silently. Events are stored until they are acknowledged, so a restarted session or a closed terminal does not
+drop a "done".
 
-agent-hub was released using itself: the 30 tasks that took it from a private tool to this release (i18n,
-macOS, the setup wizard, the agy provider…) cost **$1.10**. The same tokens billed at Claude Opus 5.5 API
-prices would be **≈ $110**.
+<details>
+<summary>See a task run</summary>
 
-| Task | Worker | Review | Paid | Same tokens at Opus 5.5 prices* |
-|---|---|---|---|---|
-| `ahub doctor`: 13 checks with fix hints + tests | Muse Spark 1.3 (xhigh) | Spark, 2 rounds | $0.094 | ≈ $6.30 |
-| i18n catalog (EN/RU) + whole CLI translated | Muse Spark 1.3 (xhigh) | Spark | $0.096 | ≈ $7.00 |
-| `ahub setup` wizard | Muse Spark 1.3 (xhigh) | Spark | $0.053 | ≈ $3.80 |
-| New provider: Google Antigravity (`agy`) | Space Bunny (free) | Spark, 2 rounds | $0.018 (review only) | ≈ $5.05 |
-| macOS CI: 6 failing tests fixed | Space Bunny (free) | Spark | $0.005 (review only) | ≈ $1.33 |
+<img src="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/demo.gif" alt="demo">
+</details>
 
-\* Token counts recorded by the hub for each session (input, output incl. reasoning, cache reads) multiplied by
-Opus 5.5 list prices ($4 / $20 / $0.20 per million). Opus might finish the same work in fewer steps, so read it as
-an order of magnitude, not an exact bill. Claude itself spent a few KB of context per task deciding what to accept.
-
-## What it does
+## Features
 
 | | |
 |---|---|
@@ -52,14 +50,63 @@ an order of magnitude, not an exact bill. Claude itself spent a few KB of contex
 | Gates | commit present, diff ⊆ allowed paths, structured result, acceptance tests under a shared lock |
 | Review | panel of reviewer models in new sessions; disputes count only with file, line and reason; N rounds |
 | Merge | `ahub accept` merges `--no-ff`, re-runs acceptance, rolls back if red |
-| Failures | network error → retry; silence → one nudge; quota/timeout/budget → "needs decision"; never a silent hang |
+| Failures | network error → retry; silence → one continuation; quota/timeout/budget → `needs_decision`; never a silent hang |
 | Budgets | per task (including review); at 100 % the worker is asked to save and stop, extension is one command |
+| Providers | opencode, Google Antigravity (`agy`), OpenAI Codex CLI (`codex`); `ahub providers` shows what is found, logged in and enabled, `ahub providers enable\|disable <name>` switches one |
+| Watching | `ahub status` — one line per task; `ahub status T12` — the task in detail; `ahub top` — current tasks, pulse, money and events in a terminal UI |
+| Live transcript | `ahub follow T12` — the prompt, the worker's text, tool calls and results as they happen (`ahub log T12` stays raw) |
+| Talking to a worker | `ahub nudge T12 "…"` — a message into the running session; the turn is interrupted and the same session continues |
 | Waking Claude | `ahub watch` for Claude Code's Monitor, `ahub wait`; stable codes `DONE` `DECISION` `ERROR` `OWNER` `ANSWER` `ALARM` |
+| Projects | one hub, several repositories; a Claude session sees only its project, the owner adds `--all`; `ahub projects`, `ahub cost` |
 | Pulse | 🟢 working · 🟡 waiting for a reason · 🔴 silent · ⚫ dead · ⚪ no data — from the provider, processes and locks |
 | Observer | code checks every 5 min, a model review every 30 min, escalation to Claude, then to you |
-| Human | `ahub top` terminal UI; optional Telegram bot that talks to Claude (and starts Claude if no session is live) |
+| Human | `ahub top`; optional Telegram bot that talks to Claude (and starts Claude if no session is live) |
 | Other agents | the same handles over MCP (`ahub mcp`) |
 | Languages | English and Russian (`AHUB_LANG`, `lang` in config, or the locale) |
+
+## Supported providers
+
+| Provider | CLI | How you pay | Notes |
+|---|---|---|---|
+| [opencode](https://opencode.ai) | `opencode` | per token, or a plan (opencode Go); many models are free | the widest catalog; the hub takes the token counts and the cost from the session |
+| Google Antigravity | `agy` | the quota of your Google account — no per-token money | Gemini models; a window quota rather than a budget |
+| OpenAI Codex CLI | `@openai/codex` | your ChatGPT plan | the worker runs in the OS sandbox configured for codex |
+
+The hub is not tied to any model. Any model a provider exposes can be added with `ahub models add` and given to a
+role with `ahub models role`; `ahub setup` probes what you actually have and picks the defaults.
+
+## What it costs
+
+What follows is what work on this repository actually cost, at the tariffs it actually paid.
+
+| Model | Tariff | Price per million tokens, input / output / cache read |
+|---|---|---|
+| Muse Spark 1.3 (reviewer, some workers) | opencode Go, contributor tier — a promotional rate | $0.10 / $0.20 / $0.002 |
+| Space Bunny (worker) | opencode, a free model — promotional | $0 |
+| Claude Opus 5.5 (for comparison only) | Anthropic API list price | $4 / $20 / $0.20 |
+
+| Task | Worker | Review | Paid | Same tokens at Opus 5.5 prices* |
+|---|---|---|---|---|
+| `ahub doctor`: 13 checks with fix hints + tests | Spark 1.3 | Spark, 2 rounds | $0.094 | ≈ $6.31 |
+| i18n catalog (EN/RU) + whole CLI translated | Spark 1.3 | Spark | $0.096 | ≈ $7.00 |
+| `ahub setup` wizard (first version) | Spark 1.3 | Spark | $0.053 | ≈ $3.83 |
+| New provider: Google Antigravity (`agy`) | Space Bunny (free) | Spark, 2 rounds | $0.018 | ≈ $5.05 |
+| Per-provider proxy | Space Bunny (free) | Spark, 2 rounds | $0.026 | ≈ $6.53 |
+| macOS CI: 6 failing tests fixed | Space Bunny (free) | Spark | $0.005 | ≈ $1.33 |
+
+\* The Opus column is the same token count — the ones the hub recorded for every session of the task — priced at
+Opus 5.5. Opus might finish the same work in fewer steps, so read it as an order of magnitude, not as a bill.
+
+These are promotional rates (the opencode Go contributor tier, free models). They can change or end; free models can
+also be rate-limited or disappear — the hub probes them (`ahub models check`) and falls back to another alias.
+
+The roles are not tied to these models either: any cheap model works in the worker or the reviewer role. Examples
+from the opencode Go catalog at the time of writing, per million tokens, input / output: MiMo v2.6 Flash $0.14 /
+$0.28, DeepSeek v4.1 Flash $0.15 / $0.60; agy (a Google account quota) and codex (a ChatGPT plan) cost no per-token
+money. `ahub setup` probes what you have and picks; `ahub models role` changes it later.
+
+On any tariff the hub saves the orchestrator's context: Claude spends a few KB per task — one event line, a capped
+summary, a one-word decision — instead of doing the work itself.
 
 ## How it compares
 
@@ -73,103 +120,66 @@ agent-hub is narrower in scope and deeper in the task lifecycle:
 | Review by other models | yes | no | yes |
 | Orchestrator token budget as a design rule | yes (hard size limits) | no | no |
 | Events survive restarts (ack) | yes | no | partly |
+| Several repositories, isolated per project | yes | no | partly |
 | Observer of the hub itself | yes | no | no |
 | Web dashboard | no (terminal UI + Telegram) | no | yes |
-| Number of supported agents | opencode, agy | one | many |
+| Number of supported agents | opencode, agy, codex | one | many |
 
 If you want a dashboard for twenty parallel agents with PR automation, use a fleet orchestrator. If you want
 Claude Code to stop burning its context on work a cheaper model can do — and to trust the result — this is it.
 
-<details>
-<summary>See it work: a real task on Muse Spark ($0.007)</summary>
-
-<img src="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/demo.gif" alt="demo">
-</details>
-
 ## Install
 
-Requires Python 3.11+, git, and at least one provider: [opencode](https://opencode.ai) (free models work),
-Google Antigravity CLI (`agy`) or Codex CLI (`@openai/codex`).
+Requires Python 3.11+, git, and at least one provider: [opencode](https://opencode.ai) (free models work), Google
+Antigravity CLI (`agy`) or Codex CLI (`@openai/codex`).
 
 ```
 pipx install ahub
 ahub setup                 # language, project, providers, models, service, Claude skill, Telegram (optional)
 ahub doctor                # what is wrong and how to fix it
-ahub providers             # the providers ahub knows; providers enable|disable <name>
+ahub providers             # the providers ahub knows: found, logged in, enabled, models
 ```
 
-`ahub setup --yes` takes all defaults without questions. The wizard finds every provider (opencode, agy, codex),
-shows which are installed and logged in, switches them on or off, and probes the models live to pick the role
-defaults. Telegram is optional: `pipx install 'ahub[telegram]'`.
+`ahub setup --yes` takes all defaults without questions. The wizard finds every provider, shows which are installed
+and logged in and which are missing with an install hint, lets you switch each one on or off, and probes the models
+live to pick the role defaults. Telegram is optional: `pipx install 'ahub[telegram]'`.
 
 Platforms: Linux (systemd), macOS (launchd; tested in CI), Windows via WSL2 only.
 
-## Use
+## Quick start for Claude Code
 
-In Claude Code (after `ahub setup` installs the skill):
-
-`ahub setup` gives Claude Code everything it needs in one step: the `ahub` skill, a short block in the project
-`CLAUDE.md` and the permission `Bash(ahub:*)` in `.claude/settings.json` — so `ahub …` runs without a question
-every time (`ahub doctor` shows both).
-
-Other agents talk to the same stdio server over MCP: `claude mcp add ahub -- ahub mcp`, and the same `ahub mcp`
-server in the Codex or Cursor config.
+`ahub setup --claude` gives Claude Code everything it needs in one step: the `ahub` skill, a short block in the
+project `CLAUDE.md` and the permission `Bash(ahub:*)` in `.claude/settings.json` — so `ahub …` runs without a
+question every time (`ahub doctor` shows both).
 
 ```
 ahub task new --kind code --title "add retry to the payment client" \
   --spec-file spec.md --paths "app/payments/**,tests/**" --accept "tests/test_payments.py"
 ```
 
-Claude keeps a Monitor on `ahub watch`; when a line like `DONE T12 …` arrives it runs `ahub status T12` and decides:
-`ahub accept T12`, `ahub rework T12 --notes "…"`, or `ahub reject T12`.
+Claude keeps a Monitor on `ahub watch`; when a line arrives it runs `ahub status T12` and decides:
 
-You: `ahub top` to watch (press `c` for control mode, `?` for help), `ahub status`, `ahub history`.
-Plain-language tasks: `ahub draft new "what you want, in your words"` → preview → `ahub draft start N`.
-Live transcript of what the worker is doing right now — the prompt, its text, tool calls and results: `ahub follow T12`
-(`--role`, `--round`, `--full`, `--no-follow`; `ahub log T12` stays raw).
-
-Everything else: `ahub --help`.
-
-## Advanced: per-provider proxy
-
-By default every provider process inherits the hub's environment, so one system proxy (`HTTPS_PROXY` and friends)
-applies to all of them. In `~/.config/ahub/config.toml` a provider can get its own — one through a proxy, another
-direct:
-
-```toml
-[providers.opencode]
-proxy = "http://127.0.0.1:8080"      # https_proxy/http_proxy/all_proxy for this provider's process
-no_proxy = "localhost,127.0.0.1"
-
-[providers.agy]
-proxy = ""                            # empty string = explicitly no proxy (the inherited variables are dropped)
+```
+DONE T12 code «add retry to the payment client» — report 2.1 KB; ready; $0.04
 ```
 
-A key that is absent inherits the hub variable as it is, `""` means explicitly none (the variable is dropped), and a
-value sets it — `proxy` covers `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` and their lowercase twins, `no_proxy` covers
-`NO_PROXY`/`no_proxy`, and the two keys do not affect each other. Only http/https/socks5/socks5h URLs are accepted. The
-hub's own processes and the Telegram bot keep their behaviour (`[telegram] proxy` is separate). `ahub doctor` shows
-each provider's own proxy and whether it answers.
-
-The same section holds `sandbox` for Codex — the OS sandbox the worker runs in:
-
-```toml
-[providers.codex]
-sandbox = "workspace-write"     # read-only | workspace-write (default) | danger-full-access
+```
+ahub accept T12                                # merge --no-ff, re-run acceptance
+ahub rework T12 --notes "…"                    # send it back with notes, same session
+ahub reject T12 --reason "…"                   # drop it, worktree cleaned up
 ```
 
-`workspace-write` lets the tools read anything but write only the task copy (the kernel enforces it). On Ubuntu 24.04
-AppArmor blocks the unprivileged user namespaces bubblewrap needs, so codex then fails every command silently and the
-turn comes out empty — `ahub doctor` detects this case and gives both fixes in one hint: allow the namespaces
-(`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, plus a file in `/etc/sysctl.d/` to keep it — the
-admin's decision) or set `sandbox = "danger-full-access"`, where the task copy and the acceptance gates hold codex as
-they hold opencode and agy. The hub never changes system settings on its own.
+Other agents talk to the same stdio server over MCP: `claude mcp add ahub -- ahub mcp`, and the same server in the
+Codex or Cursor config.
 
 ## Documentation
 
-- [docs/ARCHITECTURE.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/ARCHITECTURE.md) — code map, start here
-- [docs/architecture.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/architecture.md) — design
-- [docs/contracts.md](https://github.com/Takeh1ko/agent-hub/blob/main/docs/contracts.md) — interfaces between the parts
+- [docs/guide.md](docs/guide.md) — user guide: install, providers, tasks, watching, costs, troubleshooting
+- Developer docs, in English only:
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (code map, start here),
+  [docs/architecture.md](docs/architecture.md) (design),
+  [docs/contracts.md](docs/contracts.md) (interfaces between the parts),
+  [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Development
 
