@@ -26,6 +26,7 @@ DEFAULT_MODELS: dict[str, tuple[str, str, str, str]] = {
     "mimo-flash": ("opencode", "opencode-go/mimo-v2.6-flash", "", "MiMo 2.6 Flash"),
     "deepseek-flash": ("opencode", "opencode-go/deepseek-v4.1-flash", "high", "DeepSeek v4.1 Flash (pricier than Spark)"),
     "spark-free": ("opencode", "opencode/muse-spark-1.3-contributor-free", "xhigh", "free Spark (slower)"),
+    "bunny": ("opencode", "opencode/space-bunny-free", "", "Space Bunny free (opencode)"),
     "gemini": ("agy", "gemini-3.8-flash-high", "", "Gemini via agy (window quota)"),
     "gemini-low": ("agy", "gemini-3.8-flash-low", "", "Gemini via agy, fast (window quota)"),
     # Codex CLI: a ChatGPT subscription, no prices; the sandbox limits writes to the copy.
@@ -45,6 +46,11 @@ DEFAULT_MENUS: dict[Role, list[tuple[str, bool]]] = {
 }
 
 
+# Free aliases in the order the probe tries them: the first that answers becomes the default
+# (doctor.pick_free). A free model needs no opencode-go login.
+FREE_ALIASES: tuple[str, ...] = ("spark-free", "bunny")
+
+
 class RegistryError(ValueError):
     pass
 
@@ -60,13 +66,19 @@ class ModelEntry:
 
 
 def seed(store: Store) -> bool:
-    """Seed the registry with defaults if empty. True — seeded."""
+    """Seed the registry with defaults if empty. True — seeded.
+
+    A default model missing in an older hub (a new alias in the code) is added too: it is enabled,
+    but in no role menu — nothing changes until a human picks it.
+    """
     with store.tx() as c:
-        if c.execute("SELECT COUNT(*) FROM model").fetchone()[0]:
-            return False
+        seeded = not c.execute("SELECT COUNT(*) FROM model").fetchone()[0]
         for alias, (prov, mid, var, note) in DEFAULT_MODELS.items():
-            c.execute("INSERT INTO model(alias, provider, model_id, variant, note) VALUES(?,?,?,?,?)",
-                      (alias, prov, mid, var, note))
+            if not c.execute("SELECT 1 FROM model WHERE alias=?", (alias,)).fetchone():
+                c.execute("INSERT INTO model(alias, provider, model_id, variant, note) VALUES(?,?,?,?,?)",
+                          (alias, prov, mid, var, note))
+        if not seeded:
+            return False
         for role, items in DEFAULT_MENUS.items():
             for pos, (alias, is_def) in enumerate(items):
                 c.execute("INSERT INTO role_model(role, alias, position, is_default) VALUES(?,?,?,?)",
@@ -101,6 +113,21 @@ def menu(store: Store, role: Role | str) -> list[tuple[ModelEntry, bool]]:
         rows = c.execute("SELECT m.*, rm.is_default FROM role_model rm JOIN model m ON m.alias=rm.alias"
                          " WHERE rm.role=? ORDER BY rm.position, m.alias", (Role(role).value,)).fetchall()
     return [(_entry(r), bool(r["is_default"])) for r in rows]
+
+
+def is_free(entry: ModelEntry) -> bool:
+    """A model that answers without an opencode-go login: a known free alias or a free model id."""
+    if entry.alias in FREE_ALIASES:
+        return True
+    return "free" in entry.model_id.lower().rsplit("/", 1)[-1] or "free" in entry.alias.lower()
+
+
+def free_candidates(store: Store) -> list[ModelEntry]:
+    """Enabled free aliases to try, in order: FREE_ALIASES first, then any other free model."""
+    entries = models(store)  # ordered by alias
+    known = {e.alias: e for e in entries if e.enabled and e.alias in FREE_ALIASES}
+    out = [known[a] for a in FREE_ALIASES if a in known]
+    return out + [e for e in entries if e.enabled and is_free(e) and e.alias not in known]
 
 
 def denied_by(entry: ModelEntry, project: ProjectConfig | None) -> str | None:

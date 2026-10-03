@@ -3,6 +3,9 @@
 Checks live here so the `ahub setup` wizard (next task) can reuse them.
 Every user-visible string goes through t() (keys doctor.*); this module
 never logs secret values (auth.json values are never read into output).
+
+Also the live model probe (probe_model): one tiny request through the provider module, so setup never
+makes a model that does not answer the default (the free Spark was silent for hours on 2026-10-02).
 """
 
 from __future__ import annotations
@@ -13,12 +16,16 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from ahub.i18n import t as _t
 
 TIMEOUT_S = 10  # short timeout for external calls (spec: <= 15 s)
+PROBE_TIMEOUT_S = 60  # one tiny live turn of a model: enough for a slow one, short enough not to hang setup
+PROBE_PROMPT = "Reply with exactly: OK"  # to the model (not the user) — not translated
+FALLBACK_FREE = "spark-free"  # when the registry knows no free alias at all
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -260,20 +267,80 @@ def check_codex() -> Check:
     return Check("codex", False, _t("doctor.health_bad", problems=problems), fix)
 
 
-def _free_alias(store) -> str:
-    try:
-        from ahub import registry
+def probing_enabled() -> bool:
+    """AHUB_PROBE=0 — setup picks a free alias without a live request (an offline machine, the test suite).
 
-        models = registry.models(store)
+    An explicit `ahub models check` always probes: that is what the user asked for.
+    """
+    return os.environ.get("AHUB_PROBE", "1").strip().lower() not in ("0", "no", "off", "false")
+
+
+def probe_model(entry, timeout_s: int = PROBE_TIMEOUT_S) -> tuple[bool, str]:
+    """One tiny live request through the provider: does the model answer at all.
+
+    (ok, detail). The provider module runs the turn (the shared runner + its own classification),
+    so a dead model shows up with its real reason: silence, quota, no access, not started.
+    """
+    from ahub import providers
+    from ahub.providers import runner
+    from ahub.providers.base import RunSpec
+
+    try:
+        provider = providers.get(entry.provider)
+    except Exception as e:
+        return False, _t("doctor.probe_no_provider", alias=entry.alias, provider=entry.provider,
+                         err=f"{e.__class__.__name__}: {e}"[:200])
+    with tempfile.TemporaryDirectory(prefix="ahub-probe-") as tmp:
+        spec = RunSpec(prompt=PROBE_PROMPT, cwd=tmp, model_id=entry.model_id, variant=entry.variant,
+                       log_path=str(Path(tmp) / "probe.log"), timeout_s=timeout_s,
+                       idle_s=max(5, timeout_s // 2))  # a hung model is silence before the timeout
+        try:
+            r = runner.run(provider, spec)
+        except Exception as e:
+            return False, _t("doctor.probe_error", alias=entry.alias,
+                             err=f"{e.__class__.__name__}: {e}"[:200])
+    reply = (r.final_text or "").strip()
+    if r.ok and reply:
+        return True, _t("doctor.probe_ok", alias=entry.alias, reply=reply[:60])
+    return False, _t("doctor.probe_fail", alias=entry.alias, reason=(r.error or r.outcome.value)[:200])
+
+
+def free_candidates(store) -> list:
+    """Free model entries to try as a default, in order (empty when the registry is unreadable)."""
+    from ahub import registry
+
+    try:
+        return registry.free_candidates(store)
     except Exception:
-        return "spark-free"
-    for m in models:
-        if m.alias == "spark-free" and m.enabled:
-            return m.alias
-    for m in models:
-        if m.enabled and ("free" in m.model_id.lower() or "free" in m.alias.lower()):
-            return m.alias
-    return "spark-free"
+        return []
+
+
+def _free_alias(store) -> str:
+    """The free alias to offer (the first candidate) — no live request: hints and questions."""
+    cands = free_candidates(store)
+    return cands[0].alias if cands else FALLBACK_FREE
+
+
+def pick_free(store, *, timeout_s: int = PROBE_TIMEOUT_S) -> tuple[str, str]:
+    """(free alias, warning): the first candidate that answers the live probe.
+
+    The probe is one tiny free request per candidate. With none answering — the first candidate
+    (as before) and a warning for the caller to print; AHUB_PROBE=0 — no probe at all.
+    """
+    cands = free_candidates(store)
+    if not cands:
+        return FALLBACK_FREE, ""
+    if not probing_enabled():
+        return cands[0].alias, ""
+    for entry in cands:
+        try:
+            ok, _detail = probe_model(entry, timeout_s)
+        except Exception:
+            ok = False
+        if ok:
+            return entry.alias, ""
+    return cands[0].alias, _t("doctor.probe_none", tried=", ".join(e.alias for e in cands),
+                              fix=_t("doctor.probe_fix"))
 
 
 def check_models(auth: list[str] | None = None) -> Check:
@@ -405,7 +472,8 @@ def run_all() -> list[Check]:
     return checks
 
 
-__all__ = ["Check", "TIMEOUT_S", "auth_providers", "auth_file_path", "has_go_login", "run_all",
+__all__ = ["Check", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_PROMPT", "auth_providers", "auth_file_path",
+           "has_go_login", "run_all", "probe_model", "probing_enabled", "pick_free", "free_candidates",
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
            "check_opencode_health", "check_opencode_auth", "check_agy", "check_codex", "check_models",
            "check_network", "check_claude", "check_claude_skill", "check_telegram", "skill_path"]

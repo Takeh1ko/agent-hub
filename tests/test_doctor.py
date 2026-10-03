@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import shutil
 import socket
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from ahub import cli, doctor, paths
 from ahub.providers.base import Health
+from ahub.providers.fake import FakeProvider
 from ahub.service import HEARTBEAT_KEY
 from ahub.store import Store
 from ahub.time import now_ms
@@ -213,6 +215,78 @@ def test_models_fix_commands_execute(capsys):
             assert cli.main(part.split()[1:]) == 0
         capsys.readouterr()
     assert doctor.check_models([]).ok is True
+
+
+class _Scenario(FakeProvider):
+    """Fake provider playing one fixed scenario: the probe sends a prompt of its own."""
+
+    scenario = "{}"
+
+    def build_command(self, spec):
+        return super().build_command(dataclasses.replace(spec, prompt=self.scenario))
+
+
+def test_probe_model_answers_silent_error_and_provider(monkeypatch):
+    """One tiny live request through the provider: what the model does is what the probe reports."""
+    from ahub import providers, registry
+
+    entry = registry.ModelEntry("free1", "fake", "fake/model")
+
+    def _play(scenario: str) -> None:
+        prov = _Scenario()
+        prov.scenario = scenario
+        monkeypatch.setitem(providers._cache, "fake", prov)
+
+    _play('{"session": "ses_p", "steps": [{"event": {"type": "text", "text": "OK"}}]}')
+    ok, detail = doctor.probe_model(entry, timeout_s=20)
+    assert ok is True and "free1" in detail and "OK" in detail
+
+    _play('{"session": "ses_p", "steps": [{"sleep": 30}]}')  # silent — the case of 2026-10-02
+    ok, detail = doctor.probe_model(entry, timeout_s=6)
+    assert ok is False and "free1" in detail
+
+    _play('{"session": "ses_p", "steps": [{"event": {"type": "error", "message": "401 Unauthorized"}}],'
+          ' "exit": 1}')
+    ok, detail = doctor.probe_model(entry, timeout_s=20)
+    assert ok is False and "401" in detail
+
+    ok, detail = doctor.probe_model(registry.ModelEntry("x", "no-such-provider", "m"))
+    assert ok is False and "no-such-provider" in detail
+
+
+def test_pick_free_probes_candidates_then_warns(monkeypatch):
+    """The first free model is dead — the second becomes the default; none answers — as before + a warning."""
+    from ahub import registry
+
+    store = Store()
+    tried: list[str] = []
+
+    def _probe(entry, timeout_s=doctor.PROBE_TIMEOUT_S):
+        tried.append(entry.alias)
+        ok = entry.alias == "bunny"
+        return ok, f"{entry.alias}: {'ответил' if ok else 'молчит'}"
+
+    monkeypatch.setattr(doctor, "probing_enabled", lambda: True)
+    monkeypatch.setattr(doctor, "probe_model", _probe)
+    assert doctor.pick_free(store) == ("bunny", "")
+    assert tried == ["spark-free", "bunny"]
+
+    monkeypatch.setattr(doctor, "probe_model", lambda entry, timeout_s=60: (False, "молчит"))
+    alias, warning = doctor.pick_free(store)
+    assert alias == "spark-free" and "spark-free, bunny" in warning and "ahub doctor" in warning
+    # a registry without any free alias — the old fallback, no crash
+    monkeypatch.setattr(registry, "free_candidates", lambda store: [])
+    assert doctor.pick_free(store) == ("spark-free", "")
+    assert doctor._free_alias(store) == "spark-free"
+
+
+def test_probing_can_be_switched_off(monkeypatch):
+    monkeypatch.setenv("AHUB_PROBE", "0")
+    assert doctor.probing_enabled() is False
+    monkeypatch.setenv("AHUB_PROBE", "1")
+    assert doctor.probing_enabled() is True
+    monkeypatch.delenv("AHUB_PROBE")
+    assert doctor.probing_enabled() is True
 
 
 def test_network_no_proxy_and_down(monkeypatch):

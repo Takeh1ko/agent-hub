@@ -93,3 +93,46 @@ def test_cli_models(tmp_path, monkeypatch, capsys):
     assert cli.main(["models", "disable", "nope"]) == 2
     assert cli.main(["models", "--all"]) == 0
     assert "opencode-go/mimo-v2.6-flash" in capsys.readouterr().out
+
+
+def test_free_candidates_order(store):
+    """The probe tries the free aliases in the registry order: spark-free, then bunny."""
+    assert registry.get(store, "bunny").model_id == "opencode/space-bunny-free"
+    assert [e.alias for e in registry.free_candidates(store)][:2] == ["spark-free", "bunny"]
+    assert registry.is_free(registry.get(store, "bunny")) and not registry.is_free(registry.get(store, "spark"))
+    registry.set_enabled(store, "spark-free", False)
+    assert registry.free_candidates(store)[0].alias == "bunny"
+
+
+def test_seed_adds_defaults_missing_in_an_old_hub(store):
+    """An existing hub picks up a new default alias on upgrade: enabled, but in no role menu."""
+    registry.seed(store)
+    with store.tx() as c:
+        c.execute("DELETE FROM model WHERE alias='bunny'")
+    assert registry.seed(store) is False  # the registry is not empty, so nothing is seeded from scratch
+    assert registry.get(store, "bunny").model_id == "opencode/space-bunny-free"
+    assert all("bunny" not in [e.alias for e, _ in registry.menu(store, role)] for role in Role)
+
+
+def test_cli_models_check_probes(capsys, monkeypatch):
+    """`ahub models check` — a line per alias, exit 1 when one of them does not answer."""
+    from ahub import doctor
+
+    tried: list[str] = []
+
+    def _probe(entry, timeout_s=60):
+        tried.append(entry.alias)
+        ok = entry.alias != "spark"
+        return ok, f"{entry.alias}: {'ответил' if ok else 'молчит'}"
+
+    monkeypatch.setattr(doctor, "probe_model", _probe)
+    assert cli.main(["models", "check", "bunny", "spark-free"]) == 0
+    assert tried == ["bunny", "spark-free"]
+    assert capsys.readouterr().out.splitlines() == ["✓ bunny: ответил", "✓ spark-free: ответил"]
+    assert cli.main(["--json", "models", "check", "spark"]) == 1
+    data = json.loads(capsys.readouterr().out)
+    assert data["checked"] == [{"alias": "spark", "ok": False, "detail": "spark: молчит"}]
+    # no aliases — the role defaults (the observer/drafter default is spark-high)
+    assert cli.main(["models", "check"]) == 1
+    assert tried[-2:] == ["spark", "spark-high"]
+    assert cli.main(["models", "check", "nope"]) == 2
