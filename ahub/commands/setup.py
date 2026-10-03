@@ -651,39 +651,43 @@ def _install_only(out: Steps) -> None:
 
 
 def _service_step(args, out: Steps, *, interactive: bool) -> None:
-    """The service step: write the unit/plist, enable it, wait for a tick. Failures never stop setup."""
+    """The service step: write the unit/plist, enable it, wait for a tick.
+
+    Failures never stop setup — an OS the service does not exist for, a home that cannot be written to,
+    an enable that fails: each one is a line of the report and the summary says the step is empty.
+    """
     from ahub.i18n import t
 
     out.section("setup.step_service")
-    if bool(getattr(args, "service", False)):  # --service: install and enable, no questions
-        _install_and_enable(out)
-        return
-    if bool(getattr(args, "yes", False)):  # --yes: the files are written, the enable is not run
-        _install_only(out)
-        return
-    if not (sys.platform.startswith("linux") or sys.platform == "darwin"):
-        out.line(t("setup.wizard_service_unsupported"))
+    if not (sys.platform.startswith("linux") or sys.platform == "darwin"):  # the guard comes first:
+        out.line(t("setup.wizard_service_unsupported"))  # --service/--yes ask for the same files
         out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
         return
-    if not interactive:
-        out.line(t("setup.wizard_service_skip"))
-        out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
-        return
-    if _ask_yes_no(t("setup.wizard_service_ask_install"), True):
-        _install_and_enable(out)
-    elif _ask_yes_no(t("setup.wizard_service_ask_start"), False):
-        import types
+    try:
+        if bool(getattr(args, "service", False)):  # --service: install and enable, no questions
+            _install_and_enable(out)
+        elif bool(getattr(args, "yes", False)):  # --yes: the files are written, the enable is not run
+            _install_only(out)
+        elif not interactive:
+            out.line(t("setup.wizard_service_skip"))
+            out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
+        elif _ask_yes_no(t("setup.wizard_service_ask_install"), True):
+            _install_and_enable(out)
+        elif _ask_yes_no(t("setup.wizard_service_ask_start"), False):
+            import types
 
-        from ahub.commands import service as svc
+            from ahub.commands import service as svc
 
-        try:
             svc.cmd_start(types.SimpleNamespace(json=False))
             out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
-        except CliError as e:
-            out.line(str(e))
+        else:
+            out.line(t("setup.wizard_service_skip"))
             out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
-    else:
-        out.line(t("setup.wizard_service_skip"))
+    except CliError as e:  # the service refused (its own message is the one to show)
+        out.line(str(e))
+        out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
+    except Exception as e:  # an unwritable home, a missing systemctl — nothing of that stops setup
+        out.line(t("setup.wizard_service_enable_fail", cmd="install", err=f"{type(e).__name__}: {e}"[:300]))
         out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
 
 

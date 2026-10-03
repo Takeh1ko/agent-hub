@@ -13,11 +13,11 @@ import pytest
 
 from ahub import cli, doctor, paths
 from ahub.store import Store
-from ahub.time import now_ms
 from tests.conftest import write
 from tests.enginekit import make_repo
 
 W = 100
+NOW = 1_700_000_000_000  # a frozen clock for the screens that print an age or a tick
 
 
 @pytest.fixture(autouse=True)
@@ -79,7 +79,9 @@ def test_home_screen_with_work_and_a_decision(capsys, monkeypatch, tmp_path):
     write(paths.global_config_path(), "projects = []\n")
     write(tmp_path / "shop" / ".hub.toml", 'schema_version = 2\nname = "shop"\n')
     monkeypatch.chdir(tmp_path / "shop")
-    now = now_ms() - 30_000
+    # a frozen clock: the idle age of the snapshot must not depend on how busy the machine is
+    monkeypatch.setattr("ahub.home.now_ms", lambda: NOW + 30_000)
+    now = NOW
     store = Store()
     working = store.create_task(project="shop", kind=Kind.CODE, title="Setup wizard: choose providers",
                                 executor="spark", now=now)
@@ -90,7 +92,7 @@ def test_home_screen_with_work_and_a_decision(capsys, monkeypatch, tmp_path):
     for st in (State.PREPARING, State.WORKING):
         transitions.move(store, waiting, st, now=now)
     transitions.move(store, waiting, State.DONE, reason=reasons.dump("review_exhausted", n=2, highs=1), now=now)
-    store.meta_set(HEARTBEAT_KEY, str(now_ms()))
+    store.meta_set(HEARTBEAT_KEY, str(NOW + 30_000))
     lines = run(capsys)[1].splitlines()
     assert lines[0] == "ahub 3.0.0 · shop · service alive"
     assert lines[1] == "Active"
@@ -539,10 +541,11 @@ def test_service_status_shows_the_queue_and_the_next_command(capsys, monkeypatch
     from ahub.service import HEARTBEAT_KEY
 
     monkeypatch.setattr(svccmd, "live_workers", lambda: {})
+    monkeypatch.setattr(svccmd, "now_ms", lambda: NOW)  # a frozen clock: "tick 0s ago" stays true
     store = Store()
     tid = store.create_task(project="P", kind="scout", title="later")
     store.update_task(tid, state_reason=reasons.dump("wait_accept", task="T1", state="queued"))
-    store.meta_set(HEARTBEAT_KEY, str(now_ms()))
+    store.meta_set(HEARTBEAT_KEY, str(NOW))
     rc, out = run(capsys, "service", "status")
     assert rc == 0
     assert out == ("  Service  alive (tick 0s ago)\n"
@@ -587,3 +590,30 @@ def test_service_status_lists_the_task_processes_of_this_hub(capsys, monkeypatch
     assert out.splitlines()[2].split() == ["task", "pid", "state"]
     assert out.splitlines()[3].split() == ["T1", "4242", "preparing"]
     assert "T999" not in out  # a live pid of a task this hub does not know is not ours to show
+
+
+def _boom(*a, **k):
+    """The OS service files cannot be written (an unwritable home)."""
+    raise PermissionError(13, "read-only file system")
+
+
+def test_the_service_step_never_stops_setup(capsys, monkeypatch, home):
+    """An OS without a service, or a home that cannot be written to: a line of the report, not a crash."""
+    from ahub.commands import service as svccmd
+
+    _setup_env(monkeypatch)
+    root = home / "shop"
+    make_repo(root)
+    # an OS the OS service does not exist for — the guard runs before --yes asks for the files
+    monkeypatch.setattr(sys, "platform", "freebsd13")
+    rc, out = run(capsys, "setup", str(root), "--yes", "--service")
+    assert rc == 0
+    assert "OS service needs Linux or macOS" in out
+    assert "Service      —" in out  # the summary still has the row
+    # the files cannot be written (an unwritable home) — the step reports it and setup finishes
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(svccmd, "install_service_files", _boom)
+    rc, out = run(capsys, "setup", str(root), "--yes")
+    assert rc == 0
+    assert "enable failed: install: PermissionError: [Errno 13] read-only file system" in out
+    assert "Service      —" in out
