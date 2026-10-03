@@ -45,7 +45,7 @@ drop a "done".
 
 | | |
 |---|---|
-| Task kinds | `scout` (report only), `code` (branch + gates + review), `routine` (light changes) |
+| Task kinds | `scout` (report only), `code` (branch + gates + review), `routine` (light changes), `review` (of a branch/commit/range/files) |
 | Isolation | a git worktree per task, secrets hidden from the copy, clean environment for the worker |
 | Gates | commit present, diff ⊆ allowed paths, structured result, acceptance tests under a shared lock |
 | Review | panel of reviewer models in new sessions; disputes count only with file, line and reason; N rounds |
