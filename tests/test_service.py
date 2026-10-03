@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -35,6 +37,16 @@ def test_live_workers(tmp_path):
     fake_proc(root, 103, ["bash"])
     (root / "self").mkdir()
     assert service.live_workers(root) == {7: 100}
+
+
+def test_a_worker_process_runs_the_code_that_started_it():
+    """PYTHONPATH of a spawned process points at this hub: an editable install of another checkout
+    (with another schema) must not win in the child."""
+    root = str(Path(service.__file__).resolve().parent.parent)
+    assert service.hub_env()["PYTHONPATH"].split(os.pathsep)[0] == root
+    here = subprocess.run([sys.executable, "-c", "import ahub; print(ahub.__file__)"],
+                          capture_output=True, text=True, env=service.hub_env(), cwd="/").stdout.strip()
+    assert here == str(Path(service.__file__).parent / "__init__.py")
 
 
 def scout(store, project, **kw):

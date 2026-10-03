@@ -85,6 +85,18 @@ def external_lock_busy(path: str) -> bool:
         os.close(fd)
 
 
+def hub_env() -> dict[str, str]:
+    """The environment of a process this hub starts: ours, plus this hub on PYTHONPATH.
+
+    Such a process must run the code that started it, not whatever `ahub` the environment happens to
+    import: with an editable install of another checkout that other code wins (its schema is not ours).
+    """
+    env = dict(os.environ)
+    root = str(Path(__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = f"{root}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else root
+    return env
+
+
 def spawn_worker(task_id: int) -> int:
     """Start a task process detached from the service. Output — state_dir/workers/T<id>.log."""
     d = paths.state_dir() / "workers"
@@ -93,7 +105,7 @@ def spawn_worker(task_id: int) -> int:
     try:
         p = subprocess.Popen([sys.executable, "-m", "ahub.worker", f"T{task_id}"], stdout=out, stderr=out,
                              stdin=subprocess.DEVNULL, start_new_session=True, cwd=str(paths.data_dir()),
-                             env=dict(os.environ))
+                             env=hub_env())
     finally:
         out.close()
     return p.pid
@@ -335,7 +347,7 @@ def new_code_healthy() -> tuple[bool, str]:
     try:
         r = subprocess.run([sys.executable, "-c", "import ahub.service, ahub.engine, ahub.worker, ahub.cli;"
                             "from ahub.store import Store; Store()"],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, timeout=60, env=hub_env())
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, str(e)
     if r.returncode != 0:
