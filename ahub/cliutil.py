@@ -1,4 +1,4 @@
-"""Shared by subcommands: text/JSON output, project pick."""
+"""Shared by subcommands: text/JSON output, project pick, the scope guard of a single-task command."""
 
 from __future__ import annotations
 
@@ -7,11 +7,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ahub import config
+from ahub import config, scope
+from ahub.store import Task
 
 
 class CliError(RuntimeError):
-    """Expected command refusal: printed on one line, exit 2."""
+    """Expected command refusal: printed on one line, exit 2 (a hint — when the error carries one — under it)."""
+
+    def __init__(self, message: str, hint: str = ""):
+        super().__init__(message)
+        self.hint = hint
 
 
 def emit(args, data: Any, text: str) -> None:
@@ -36,6 +41,20 @@ def add_scope_args(parser) -> None:
 
     parser.add_argument("--project", "-P", default=None, help=t("cli.help_project"))
     parser.add_argument("--all", action="store_true", help=t("cli.help_all"))
+
+
+def check_task(args, task: Task) -> None:
+    """A command that names one task belongs to that task's project (architecture §9).
+
+    A task of another project is refused with the way out; `--all` or a matching `--project` opens the scope.
+    """
+    sc = scope.resolve(args)
+    if not scope.foreign(sc, task.project):
+        return
+    from ahub.i18n import t
+
+    raise CliError(t("err.foreign_task", label=task.label, project=task.project),
+                   t("err.foreign_task_hint", project=task.project))
 
 
 def resolve_project(args, cwd: str | Path | None = None) -> config.ProjectConfig:

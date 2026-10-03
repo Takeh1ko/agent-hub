@@ -12,6 +12,8 @@ wake on an event, read the result and decide. Don't poll the hub: it wakes you.
 - Start a Monitor on `ahub watch` (description: "ahub: events for Claude"). Each line is work for you.
   Monitor lives ≤ 30 min: restart on expiry (events are not lost — position is in the hub DB).
 - What's going on: `ahub status` (≤ 1.5 KB).
+- Everything is scoped to the repository you work in: a task of another project is refused (run from its repo or
+  add `--project X`; `--all` — every project, the owner's view).
 
 ## 2. File a task
 ```

@@ -1,7 +1,8 @@
 """ahub entry point: subcommands are ahub/commands/*.py modules with register(subparsers).
 
 Shared `--json` flag — machine output; default compact text (orchestrator token savings).
-Config errors and expected refusals — one stderr line and exit 2, no traceback.
+Config errors and expected refusals — one stderr line and exit 2, no traceback (a refusal that carries a hint —
+the way out — prints one more line under it).
 
 Imports live inside functions: main() refuses on Windows before command imports
 (some modules pull fcntl, which is missing there).
@@ -65,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
         return int(func(args) or 0)
     except (ConfigError, CliError) as e:
         print(t("cli.error", msg=e), file=sys.stderr)
+        hint = getattr(e, "hint", "")
+        if hint:
+            print(t("cli.hint", msg=hint), file=sys.stderr)  # the way out — one more line
         return 2
     except KeyboardInterrupt:
         return 130

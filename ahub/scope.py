@@ -39,6 +39,12 @@ class Scope:
 OWNER = Scope()  # the owner's scope — every project
 
 
+def foreign(sc: Scope, project: str) -> bool:
+    """True when a row of that project is outside the scope of the handle (architecture §9):
+    a task of another project is refused — unless the scope is every project (--all)."""
+    return not sc.all and project not in sc
+
+
 def where(scope: Scope | None, column: str = "project") -> tuple[str, list[str]]:
     """The scope as a SQL condition: `column IN (…) OR column=''`; the owner (or None) — no condition."""
     if scope is None or scope.all:
@@ -58,10 +64,14 @@ def resolve(args: Any = None, cwd: str | Path | None = None) -> Scope:
 
 
 def of_dir(start: str | Path) -> Scope:
-    """The scope of a directory: its project; outside every project — every project."""
+    """The scope of a directory: its project; outside every project — every project.
+
+    A broken .hub.toml is not a crash here: a read command must still work, so the scope is every project
+    and the file itself is reported by `ahub projects`.
+    """
     try:
         return Scope((config.load_project(start).name,))
-    except FileNotFoundError:
+    except (FileNotFoundError, config.ConfigError):
         return Scope()
 
 
