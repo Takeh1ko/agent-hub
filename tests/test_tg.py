@@ -470,6 +470,108 @@ async def test_background_tells_the_owner_when_the_hub_has_no_projects(store, mo
     assert text == t("tg.launch_no_dir_hub") and text != t("tg.launch_no_dir", name="")
 
 
+async def test_the_bot_re_exec_itself_when_the_code_changed(store, monkeypatch):
+    """The bot, like the service, runs the code that was just merged — but only after the pass it is in."""
+    import asyncio
+    import os
+
+    from ahub import selfupdate
+    from ahub.tg import run as tgrun
+
+    core.remember_chat(store, 7)
+    comms.say(store, "T12 готова")
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda *a, **kw: "idle")
+    prints = iter(["v1", "v2"])
+    monkeypatch.setattr(selfupdate, "code_fingerprint", lambda: next(prints, "v2"))
+    monkeypatch.setattr(selfupdate, "new_code_healthy", lambda: (True, ""))
+    monkeypatch.setattr(selfupdate, "CODE_CHECK_S", 0.0)
+    execs = []
+
+    def execv(exe, argv):
+        execs.append((exe, argv))
+        raise asyncio.CancelledError  # a real execv never returns
+
+    monkeypatch.setattr(os, "execv", execv)
+
+    async def stop(_):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", stop)
+    bot = FakeBot()
+    with pytest.raises(asyncio.CancelledError):
+        await tgrun.background(bot, store)
+    assert [text for _, text, _ in bot.sent] == ["T12 готова"]  # the message went before the restart
+    assert [exe for exe, _ in execs] == [sys.executable]
+    assert comms.outbox(store) == []
+
+
+async def test_the_bot_stays_on_old_code_that_fails_the_check(store, monkeypatch):
+    """New code that does not answer — the bot keeps the old one and is not checked again every CODE_CHECK_S."""
+    import asyncio
+    import os
+
+    from ahub import selfupdate
+    from ahub.tg import run as tgrun
+
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda *a, **kw: "idle")
+    prints = iter(["v1", "v2"])
+    monkeypatch.setattr(selfupdate, "code_fingerprint", lambda: next(prints, "v2"))
+    checks = []
+
+    def unhealthy():
+        checks.append(1)
+        return False, "SyntaxError"
+
+    monkeypatch.setattr(selfupdate, "new_code_healthy", unhealthy)
+    monkeypatch.setattr(selfupdate, "CODE_CHECK_S", 0.0)
+    monkeypatch.setattr(os, "execv", lambda *a: pytest.fail("restart onto broken code"))
+    sleeps = []
+
+    async def sleep(s):
+        sleeps.append(s)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await tgrun.background(FakeBot(), store)
+    assert checks == [1] and sleeps == [tgrun.LOOP_S]
+
+
+async def test_the_bot_loop_crash_loop_is_reported_once_and_backs_off(store, monkeypatch):
+    """The bot's loop failed for hours in silence — the same failure in a row is told once, then retried slowly."""
+    import asyncio
+
+    from ahub import selfupdate
+    from ahub.i18n import t
+    from ahub.model import Ev
+    from ahub.tg import run as tgrun
+
+    # the code check is not what this test is about
+    monkeypatch.setattr(selfupdate, "CODE_CHECK_S", 3600.0)
+    passes = []
+
+    def boom(*_a, **_kw):
+        passes.append(1)
+        raise TypeError("no such column: task.new_column")
+
+    monkeypatch.setattr(tgrun.comms, "outbox", boom)
+    sleeps = []
+
+    async def sleep(s):
+        sleeps.append(s)
+        if len(sleeps) > tgrun.FAIL_MAX + 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await tgrun.background(FakeBot(), store)
+    assert passes == [1] * (tgrun.FAIL_MAX + 2)
+    assert sleeps == [tgrun.LOOP_S] * (tgrun.FAIL_MAX - 1) + [tgrun.FAIL_BACKOFF_S] * 3
+    alarms = [e for e in store.events() if e.kind == Ev.ALARM.value]
+    assert len(alarms) == 1 and alarms[0].critical
+    assert alarms[0].payload["text"] == t("tg.alarm_loop", err="TypeError: no such column: task.new_column")
+
+
 def test_dispatcher_builds(store):
     from ahub.tg import run as tgrun
     assert tgrun.build_dispatcher(store) is not None

@@ -696,6 +696,7 @@ MESSAGES: dict[str, str] = {
     "tg.reply_sent": "reply to #{qid} sent to Claude",
     "tg.reply_closed": "#{qid}: already answered or closed",
     "tg.alarm_prefix": "Hub: ",
+    "tg.alarm_loop": "the bot's background loop keeps failing: {err} — retry every minute",
     "tg.err_no_token": "error: no Telegram token — set [telegram] token in ~/.config/ahub/config.toml or AHUB_TG_TOKEN",
     "tasks.no_python": "project python not found: {py}",
     "tasks.pytest_start": "pytest failed to start: {err}",

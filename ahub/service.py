@@ -33,6 +33,7 @@ from pathlib import Path
 from ahub import config, paths, procs, reasons, transitions
 from ahub import log as hublog
 from ahub.model import ACTIVE, Ev, State
+from ahub.selfupdate import CODE_CHECK_S, code_fingerprint, hub_env, new_code_healthy, restart_self
 from ahub.store import Store, Task
 from ahub.time import now_ms
 from ahub.worker import CMD_MARK
@@ -41,7 +42,6 @@ SPAWN_GRACE_S = 30.0  # after spawn the process may not be visible / may not hav
 ORPHAN_GRACE_MS = 60_000  # past lease expiry — another minute in case the process is just slow
 MAX_ORPHANS = 1  # one automatic pickup
 HEARTBEAT_KEY = "service_heartbeat"
-CODE_CHECK_S = 10.0  # how often to compare code (self-update)
 PAUSE_KEY = "queue_paused"
 _TASK_ARG = re.compile(r"^[Tt]?(\d+)$")
 
@@ -96,18 +96,6 @@ def external_lock_busy(path: str) -> bool:
         return False
     finally:
         os.close(fd)
-
-
-def hub_env() -> dict[str, str]:
-    """The environment of a process this hub starts: ours, plus this hub on PYTHONPATH.
-
-    Such a process must run the code that started it, not whatever `ahub` the environment happens to
-    import: with an editable install of another checkout that other code wins (its schema is not ours).
-    """
-    env = dict(os.environ)
-    root = str(Path(__file__).resolve().parent.parent)
-    env["PYTHONPATH"] = f"{root}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else root
-    return env
 
 
 def spawn_worker(task_id: int) -> int:
@@ -340,37 +328,3 @@ class Service:
                         code0 = code  # do not re-check every 10 s; the next change will be checked again
             self._stop.wait(poll_s)
         self.log.info("service stopped")
-
-
-def code_fingerprint() -> str:
-    """Fingerprint of the ahub package code (.py file mtimes and sizes): changed — time to restart."""
-    import hashlib
-
-    root = Path(__file__).resolve().parent
-    h = hashlib.sha256()
-    for f in sorted(root.rglob("*.py")):
-        try:
-            st = f.stat()
-        except OSError:
-            continue
-        h.update(f"{f.relative_to(root)}:{st.st_mtime_ns}:{st.st_size};".encode())
-    return h.hexdigest()
-
-
-def new_code_healthy() -> tuple[bool, str]:
-    """New code imports and answers — otherwise do not switch (no crash loop)."""
-    try:
-        r = subprocess.run([sys.executable, "-c", "import ahub.service, ahub.engine, ahub.worker, ahub.cli;"
-                            "from ahub.store import Store; Store()"],
-                           capture_output=True, text=True, timeout=60, env=hub_env())
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return False, str(e)
-    if r.returncode != 0:
-        return False, (r.stderr or r.stdout).strip()[-300:]
-    return True, ""
-
-
-def restart_self() -> None:
-    """Replace the service process with the same command line (pid stays — systemd never notices)."""
-    os.execv(sys.executable, [sys.executable, "-m", "ahub", *sys.argv[1:]] if sys.argv[0].endswith("ahub")
-             else [sys.executable, *sys.argv])

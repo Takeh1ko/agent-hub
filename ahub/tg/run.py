@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import sys
 
-from ahub import comms, config
+from ahub import comms, config, selfupdate
 from ahub import log as hublog
 from ahub.i18n import t as _t
 from ahub.store import Store
@@ -18,6 +19,8 @@ from ahub.tg import core, launcher
 
 LOOP_S = 5
 LAUNCH_S = 10
+FAIL_MAX = 3  # the same failure in a row — the owner hears about it once, the loop slows down
+FAIL_BACKOFF_S = 60.0
 _log = hublog.get("tg")
 _QMSG: dict[tuple[int, int], int] = {}  # (chat, bot_msg_id) → question_id — reply answers
 _NODIR: dict[str, int] = {}  # project → when it was last reported (this process, one bot for weeks)
@@ -63,9 +66,20 @@ async def _send(bot, store: Store, reply: core.Reply) -> list[tuple[int, int]]:
     return sent
 
 
+def _alarm(store: Store, err: str) -> None:
+    """The owner-visible alarm of a loop that keeps failing — a broken store may refuse it, then: a log line."""
+    try:
+        comms.raise_alarm(store, _t("tg.alarm_loop", err=err), critical=True)
+    except sqlite3.Error as e:
+        _log.error("the bot cannot raise its alarm: %s", e)
+
+
 async def background(bot, store: Store) -> None:
     last_launch = 0.0
     loop = asyncio.get_running_loop()
+    code0 = selfupdate.code_fingerprint()
+    last_code_check = loop.time()
+    fail_kind, fail_n, reported = "", 0, False
     while True:
         try:
             for m in await asyncio.to_thread(comms.outbox, store):
@@ -88,9 +102,32 @@ async def background(bot, store: Store) -> None:
                     name = res.split(":", 1)[1]
                     await _send(bot, store, core.Reply(_t("tg.launch_no_dir", name=name) if name
                                                        else _t("tg.launch_no_dir_hub")))
-        except Exception:
-            _log.exception("bot background loop crashed")
-        await asyncio.sleep(LOOP_S)
+            if loop.time() - last_code_check >= selfupdate.CODE_CHECK_S:
+                last_code_check = loop.time()
+                code = selfupdate.code_fingerprint()
+                if code != code0:  # a merge is in — the new code runs from here, not from the next restart
+                    ok, why = selfupdate.new_code_healthy()
+                    if ok:
+                        _log.info("hub code changed — the bot restarts on it (the messages of this pass are sent)")
+                        selfupdate.restart_self()
+                    else:
+                        _log.error("hub code changed but fails check — staying on old: %s", why)
+                        code0 = code  # do not re-check every CODE_CHECK_S; the next change is checked again
+            fail_kind, fail_n, reported = "", 0, False
+        except Exception as e:
+            kind = type(e).__name__
+            if kind != fail_kind:
+                fail_kind, fail_n, reported = kind, 1, False
+            else:
+                fail_n += 1
+            if fail_n < FAIL_MAX:
+                _log.exception("bot background loop crashed (%d/%d)", fail_n, FAIL_MAX)
+            elif not reported:  # the same failure for minutes: one log line, one alarm, then a slow retry
+                reported = True
+                _log.exception("bot background loop failed %d times in a row (%s) — retry in %d s",
+                               fail_n, kind, FAIL_BACKOFF_S)
+                _alarm(store, f"{kind}: {str(e)[:200]}")
+        await asyncio.sleep(FAIL_BACKOFF_S if reported else LOOP_S)
 
 
 def build_dispatcher(store: Store):
