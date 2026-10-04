@@ -6,9 +6,11 @@ current HEAD (orchestrator edit — if HEAD ≠ worker result commit: legitimate
 `git merge --no-ff` into the work branch → acceptance under the test resource → red — roll the merge back →
 push per config → "accepted", task_cleanup hook, copy and branch removed, archived.
 
-Resumable: if the task branch is already merged into the work branch (the accept was interrupted after the merge
-— the gates there see nothing but the merge commit), the gates and the merge are skipped: acceptance runs on HEAD
-(red — roll the merge back, as usual), then the same tail.
+Resumable: if accept's own merge commit (`merge T<n>: …`, second parent = the task branch tip) is the tip of the work
+branch (the accept was interrupted after the merge — the gates on the copy see nothing but the merge commit), the gates
+and the merge are skipped: acceptance runs on HEAD (red — roll the merge back, as usual), then the same tail. A foreign
+merge is never taken for that state: a hand-merge, or an extra commit on top of it, is refused for the orchestrator to
+finish by hand.
 
 The lease is taken with this process's pid and renewed in the background while the acceptance runs: a long
 acceptance is not an orphan, and `service` leaves an "accepting" task with a live owner process alone.
@@ -17,10 +19,6 @@ acceptance is not an orphan, and `service` leaves an "accepting" task with a liv
 from __future__ import annotations
 
 import os
-import sqlite3
-import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -63,13 +61,30 @@ def _merged_sha(project: ProjectConfig, t: Task) -> str:
     """The work branch HEAD when the task branch tip is already in it ('' — not merged yet).
 
     That is the state of an accept interrupted after the merge: the gates on the copy see an empty diff.
+    Only accept's own merge commit at the tip of the work branch qualifies.
     """
     if not t.branch:
         return ""
     r = workspace.git(project.root, "merge-base", "--is-ancestor", t.branch, project.work_branch, check=False)
     if r.returncode != 0:
         return ""
-    return workspace.git(project.root, "rev-parse", project.work_branch).stdout.strip()
+    head = workspace.git(project.root, "rev-parse", project.work_branch, check=False).stdout.strip()
+    if not head:
+        return ""
+    parents = workspace.git(project.root, "rev-parse", f"{head}^@", check=False).stdout.split()
+    if len(parents) < 2:
+        return ""
+    branch_tip = workspace.git(project.root, "rev-parse", t.branch, check=False).stdout.strip()
+    if parents[1] != branch_tip:
+        return ""
+    subj = workspace.git(project.root, "log", "-1", "--format=%s", head, check=False).stdout.strip()
+    if not subj.startswith(f"merge {t.label}:"):
+        return ""
+    if t.worktree and Path(t.worktree).is_dir():
+        wt_head = workspace.head(t.worktree)
+        if wt_head and branch_tip != wt_head:
+            return ""
+    return head
 
 
 def _root_ready(project: ProjectConfig) -> None:
@@ -80,34 +95,6 @@ def _root_ready(project: ProjectConfig) -> None:
              .splitlines() if ln.strip()]
     if dirty:
         raise DecisionError(_t("accept.root_dirty", files=", ".join(x[3:] for x in dirty[:5])))
-
-
-@contextmanager
-def _keep_lease(store: Store, task_id: int, owner: str, lease_ms: int = ACCEPT_LEASE_MS) -> Iterator[None]:
-    """Renew the lease while acceptance runs — the gates and the test run outlive one lease.
-
-    Acceptance takes minutes; without this the service sees an expired lease and calls the live accept an orphan
-    (a false "acceptance interrupted"). A lost lease is only logged: the final move still writes the state, and the
-    pid on the row keeps the service off the task.
-    """
-    done = threading.Event()
-
-    def _renew() -> None:
-        while not done.wait(RENEW_S):
-            try:
-                if not transitions.renew(store, task_id, owner, lease_ms=lease_ms):
-                    _log.warning("accept T%d: lease lost", task_id, extra={"task": task_id})
-                    return
-            except sqlite3.Error:
-                _log.exception("lease renewal failed")
-
-    keeper = threading.Thread(target=_renew, name=f"accept-lease-T{task_id}", daemon=True)
-    keeper.start()
-    try:
-        yield
-    finally:
-        done.set()
-        keeper.join(timeout=5)
 
 
 def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orchestrator") -> str:
@@ -133,7 +120,8 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
     if not transitions.acquire(store, t.id, owner, pid=os.getpid(), lease_ms=ACCEPT_LEASE_MS):
         raise DecisionError(_t("accept.busy", label=t.label))
     try:
-        with _keep_lease(store, t.id, owner, ACCEPT_LEASE_MS):
+        with transitions.keep_lease(store, t.id, owner, lease_ms=ACCEPT_LEASE_MS, interval_s=RENEW_S,
+                                    name=f"accept-lease-T{t.id}"):
             return _merge(store, project, _get(store, t.id), owner, by, merged=merged)
     except DecisionError as e:
         _back(store, t.id, owner, e.reason or str(e))
@@ -173,14 +161,18 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *
             raise DecisionError(_t("accept.gates_head", problems="; ".join(problems)),
                                 reasons.dump("accept_gates", problems=gates.codes(problems)))
         title = t.title.replace('"', "'")[:100]
+        head_before = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
         r = workspace.git(project.root, "merge", "--no-ff", "-m", f"merge {t.label}: {title}", t.branch, check=False)
         if r.returncode != 0:
-            listing = workspace.git(project.root, "diff", "--name-only", "--diff-filter=U", check=False)
-            conflicts = listing.stdout.split()
+            diff_u = workspace.git(project.root, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
             workspace.git(project.root, "merge", "--abort", check=False)
-            files = ", ".join(conflicts[:10]) or (r.stderr or r.stdout)[-300:]
-            raise DecisionError(_t("accept.conflict", info=files), reasons.dump("merge_conflict", files=files))
-        merged = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
+            conflicts = ", ".join(diff_u[:10]) or (r.stderr or r.stdout)[-300:]
+            raise DecisionError(_t("accept.conflict", info=conflicts), reasons.dump("merge_conflict", files=conflicts))
+        head_after = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
+        if head_after == head_before:
+            raise DecisionError(_t("accept.already_merged", branch=project.work_branch, label=t.label),
+                                reasons.dump("already_merged", branch=project.work_branch))
+        merged = head_after
     else:
         _log.info("T%d is already merged into %s (%s) — acceptance on HEAD", t.id, project.work_branch, merged[:10])
     nodes = list(t.limits.get("accept") or [])
@@ -191,7 +183,12 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *
             if head_now != merged:  # someone committed into the work branch meanwhile — leave foreign commits alone
                 raise DecisionError(_t("accept.root_moved", now=head_now[:10], merged=merged[:10]),
                                     reasons.dump("root_moved", now=head_now[:10], merged=merged[:10]))
-            workspace.git(project.root, "reset", "--keep", "HEAD~1", check=False)  # --keep leaves foreign dirt alone
+            rr = workspace.git(project.root, "reset", "--keep", "HEAD~1", check=False)  # --keep leaves foreign dirt alone
+            head_after_reset = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
+            if rr.returncode != 0 or head_after_reset == merged:
+                err = (rr.stderr or rr.stdout).strip()[-300:] or "reset did not move HEAD"
+                raise DecisionError(_t("accept.rollback_failed", err=err),
+                                    reasons.dump("rollback_failed", err=err))
             raise DecisionError(_t("accept.red_rolled_back", cmd=cmd, tail=tail[-600:]),
                                 reasons.dump("red_rolled_back", cmd=cmd))
     push_error = ""

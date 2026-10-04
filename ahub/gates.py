@@ -26,7 +26,7 @@ from pathlib import Path
 
 from ahub import archive, reasons, workspace
 from ahub.config import ProjectConfig
-from ahub.i18n import t as _t
+from ahub.i18n import t as _t, template
 from ahub.model import Kind
 from ahub.prepare import scrub_env, task_env
 from ahub.store import Task
@@ -52,8 +52,13 @@ class Problem(str):
 
 
 def problem(code: str, **params) -> Problem:
-    """One gate problem, e.g. problem("no_commit") — text for a prompt, code for the task reason."""
-    return Problem(_t("gates." + code, **params), code, params)
+    """One problem (a gate or a scout result): text for a prompt, code for the task reason.
+
+    The text is the `gates.` key of the code; a scout problem has none and takes the `reason.` one —
+    it is stored on the task as a reason, and the reason catalogue is what renders it.
+    """
+    key = "gates." + code if template("gates." + code) else "reason." + code
+    return Problem(_t(key, **params), code, params)
 
 
 def codes(items: list[str], prefix: str = "gate_") -> list[dict]:
