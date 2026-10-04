@@ -10,7 +10,7 @@ import time
 import pytest
 
 from ahub import comms, events, transitions
-from ahub.model import State
+from ahub.model import Ev, State
 from ahub.scope import Scope
 from ahub.store import Store
 from ahub.tg import core, launcher
@@ -558,3 +558,34 @@ def test_help_and_card_en(store, monkeypatch):
     assert not _re.search(r"[а-яА-ЯёЁ]", rep.text + card.text)
     assert card.buttons[0][0].data == "tasks"  # button codes are not translated
     _reset()
+
+
+def test_alarms_for_tg_filters_non_alarms_and_sent_in_sql(store):
+    """alarms_for_tg must only fetch and return unsent alarms, ignoring other events in SQL (Finding 3)."""
+    t0 = 1000
+    store.add_event(Ev.DONE, task_id=1, now=t0)
+    store.add_event(Ev.ANSWER, payload={"text": "ok"}, now=t0)
+    store.add_event(Ev.OWNER_MESSAGE, payload={"text": "hello"}, now=t0)
+
+    # Plain alarm, fresh (not escalated yet)
+    comms.raise_alarm(store, "disk warming", critical=False, now=t0)
+    # Critical alarm, fresh (escalated at once)
+    comms.raise_alarm(store, "database corrupt", critical=True, now=t0)
+    # Already sent alarm
+    sent_id = comms.raise_alarm(store, "network down", critical=True, now=t0)
+    comms.mark_tg_sent(store, [sent_id], now=t0)
+
+    # Right after creation (t0): only the unsent critical alarm is returned
+    due = comms.alarms_for_tg(store, now=t0)
+    assert len(due) == 1
+    assert due[0].payload["text"] == "database corrupt"
+
+    # After escalate_ms: the plain alarm is returned too
+    due_later = comms.alarms_for_tg(store, now=t0 + comms.ESCALATE_MS + 1)
+    assert len(due_later) == 2
+    assert {e.payload["text"] for e in due_later} == {"database corrupt", "disk warming"}
+
+    # Mark them sent: nothing due
+    comms.mark_tg_sent(store, [e.id for e in due_later], now=t0 + comms.ESCALATE_MS + 1)
+    assert comms.alarms_for_tg(store, now=t0 + comms.ESCALATE_MS + 1) == []
+

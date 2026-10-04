@@ -15,7 +15,7 @@ import json
 from ahub import events
 from ahub.model import Ev
 from ahub.scope import Scope, where
-from ahub.store import Store
+from ahub.store import Event, Store
 from ahub.time import now_ms
 
 
@@ -154,13 +154,14 @@ def alarms(store: Store, *, unacked_only: bool = True, scope: Scope | None = Non
 ESCALATE_MS = 15 * 60_000
 
 
-def alarms_for_tg(store: Store, *, now: int | None = None, escalate_ms: int = ESCALATE_MS) -> list:
+def alarms_for_tg(store: Store, *, now: int | None = None, escalate_ms: int = ESCALATE_MS) -> list[Event]:
     """Alarms due for the human: critical — at once; plain — unacked past escalate_ms."""
     ts = now if now is not None else now_ms()
+    sql = "SELECT * FROM event WHERE kind=? AND tg_sent_at IS NULL ORDER BY id"
+    with store.read() as c:
+        rows = [Event.from_row(r) for r in c.execute(sql, (Ev.ALARM.value,))]
     out = []
-    for e in store.events(needs_reaction=True):
-        if e.kind != Ev.ALARM.value or e.tg_sent_at is not None:
-            continue
+    for e in rows:
         if e.critical or (e.acked_at is None and ts - e.ts >= escalate_ms):
             out.append(e)
     return out
