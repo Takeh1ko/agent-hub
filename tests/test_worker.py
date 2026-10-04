@@ -16,6 +16,7 @@ from ahub import paths, procs, tasks, worker, workspace
 from ahub.engine import POLL_FAIL_MAX, Engine, PollFailed
 from ahub.model import Kind, State
 from ahub.store import Store
+from tests.conftest import wait_until
 from tests.enginekit import install_fake, make_project
 
 REPO = Path(__file__).resolve().parents[1]
@@ -48,15 +49,6 @@ def kill_agents(worktree: str) -> None:
             os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
-
-
-def wait_agent(worktree: str, timeout: float = 20.0) -> bool:
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if agent_of(worktree):
-            return True
-        time.sleep(0.1)
-    return False
 
 
 def test_poll_tolerates_two_failures_then_gives_up(store, project, monkeypatch):
@@ -140,8 +132,7 @@ def test_poll_failure_stops_provider_and_exits_nonzero(store, project, monkeypat
         assert worker.main([f"T{t.id}"]) == 4
         s = store.list_sessions(t.id)[0]
         assert s.status == "killed" and s.outcome == "killed" and s.ended_at
-        time.sleep(0.5)
-        assert not agent_of(wt), "процесс провайдера пережил отказ опроса"
+        assert wait_until(lambda: not agent_of(wt)), "процесс провайдера пережил отказ опроса"
         left = store.get_task(t.id)
         assert left.state is State.WORKING and not left.owner  # left to the service (orphan pickup)
     finally:
@@ -167,11 +158,10 @@ def test_sigterm_takes_the_provider_process_group_with_it(store, tmp_path, monke
                          env={**os.environ, "PYTHONPATH": str(REPO)},
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
     try:
-        assert wait_agent(wt), "процесс провайдера не стартовал"
+        assert wait_until(lambda: agent_of(wt)), "процесс провайдера не стартовал"
         p.send_signal(signal.SIGTERM)
         assert p.wait(timeout=30) == 0
-        time.sleep(0.5)
-        assert not agent_of(wt), "процесс провайдера остался сиротой после SIGTERM"
+        assert wait_until(lambda: not agent_of(wt)), "процесс провайдера остался сиротой после SIGTERM"
         assert store.get_task(t.id).state is State.WORKING  # the task is left for the service
     finally:
         if p.poll() is None:

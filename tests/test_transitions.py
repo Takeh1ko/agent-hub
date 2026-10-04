@@ -7,6 +7,7 @@ import pytest
 from ahub import transitions as tr
 from ahub.model import Ev, State
 from ahub.store import Store
+from tests.conftest import WAIT_S, wait_until
 
 
 @pytest.fixture
@@ -239,23 +240,20 @@ def test_acquire_race_one_winner(store):
     for p in procs:
         p.start()
     for p in procs:
-        p.join(20)
+        p.join(WAIT_S)
+    assert not any(p.is_alive() for p in procs), "the racing acquires did not finish"
     wins = [q.get(timeout=5) for _ in procs]
     assert wins.count(True) == 1
 
 
 def test_keep_lease_renews_and_reports_loss(store):
-    import time
     t = _task(store)
     tr.move(store, t, State.PREPARING)
     assert tr.acquire(store, t, "own", pid=1, lease_ms=500)
     lost = []
     with tr.keep_lease(store, t, "own", lease_ms=500, interval_s=0.05, on_lost=lambda: lost.append(True)):
         first = store.get_task(t).lease_until
-        time.sleep(0.15)
-        second = store.get_task(t).lease_until
-        assert second > first
+        assert wait_until(lambda: (store.get_task(t).lease_until or 0) > (first or 0)), "the lease was not renewed"
         with store.tx() as c:
             c.execute("UPDATE task SET owner='other' WHERE id=?", (t,))
-        time.sleep(0.15)
-        assert lost == [True]
+        assert wait_until(lambda: lost == [True]), "the loss of the lease was not reported"

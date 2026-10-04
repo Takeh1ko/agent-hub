@@ -14,7 +14,7 @@ from ahub.providers.base import Act, Outcome, RunSpec
 from ahub.providers.fake import FakeProvider
 from ahub.providers.runner import run
 from tests import provider_contract as contract
-from tests.conftest import write
+from tests.conftest import WAIT_S, wait_until, write
 
 
 @pytest.fixture
@@ -120,19 +120,20 @@ def test_should_stop_kills_group(fake, tmp_path):
         return flag["stop"]
 
     import threading
+
+    from ahub import procs
+
     th = threading.Thread(target=lambda: r_holder.setdefault("r", run(
         fake, spec(tmp_path, {"session": "s", "steps": [{"child": 30}]}, idle_s=0),
         on_start=pids.append, should_stop=stopper)))
     th.start()
-    time.sleep(1.0)
-    from ahub import procs
-    kids = procs.children(pids[0])
+    kids = wait_until(lambda: pids and procs.children(pids[0]))
     assert kids, "ребёнок не появился"
     flag["stop"] = True
-    th.join(20)
+    th.join(WAIT_S)
+    assert not th.is_alive(), "ход не остановился"
     assert r_holder["r"].outcome is Outcome.KILLED
-    time.sleep(0.3)
-    assert not any(procs.alive(k) for k in kids), "дети пережили остановку"
+    assert wait_until(lambda: not any(procs.alive(k) for k in kids)), "дети пережили остановку"
 
 
 def test_poll_failure_kills_the_group_and_lets_the_error_out(fake, tmp_path):
@@ -145,7 +146,7 @@ def test_poll_failure_kills_the_group_and_lets_the_error_out(fake, tmp_path):
     pids, holder, kids = [], {}, []
 
     def broken_stop():
-        kids.extend(procs.children(pids[0]))  # the agent is running its own child
+        kids.extend(wait_until(lambda: pids and procs.children(pids[0])) or [])  # the agent is running its own child
         raise PollFailed("request: TypeError")
 
     def go():
@@ -157,12 +158,12 @@ def test_poll_failure_kills_the_group_and_lets_the_error_out(fake, tmp_path):
 
     th = threading.Thread(target=go)
     th.start()
-    th.join(20)
+    th.join(WAIT_S)
+    assert not th.is_alive(), "отказ опроса не выпущен наружу"
     assert isinstance(holder.get("error"), PollFailed)
     assert kids, "ребёнок не появился"
-    time.sleep(0.3)
-    assert not procs.alive(pids[0]), "провайдер пережил отказ опроса"
-    assert not any(procs.alive(k) for k in kids), "дети пережили отказ опроса"
+    assert wait_until(lambda: not procs.alive(pids[0])), "провайдер пережил отказ опроса"
+    assert wait_until(lambda: not any(procs.alive(k) for k in kids)), "дети пережили отказ опроса"
 
 
 def test_request_stop_ends_a_live_run(fake, tmp_path):
@@ -177,13 +178,12 @@ def test_request_stop_ends_a_live_run(fake, tmp_path):
         fake, spec(tmp_path, {"session": "s", "steps": [{"sleep": 30}]}, idle_s=0),
         on_start=pids.append)))
     th.start()
-    time.sleep(1.0)
-    assert procs.alive(pids[0])
+    assert wait_until(lambda: pids and procs.alive(pids[0])), "процесс провайдера не стартовал"
     runner.request_stop()
-    th.join(20)
+    th.join(WAIT_S)
+    assert not th.is_alive(), "ход не остановился"
     assert holder["r"].outcome is Outcome.KILLED
-    time.sleep(0.3)
-    assert not procs.alive(pids[0]), "процесс провайдера пережил request_stop"
+    assert wait_until(lambda: not procs.alive(pids[0])), "процесс провайдера пережил request_stop"
 
 
 def test_transient_error(fake, tmp_path):
@@ -367,5 +367,4 @@ def test_leftover_processes_reaped_after_normal_exit(fake, tmp_path, detach):
     r = run(fake, spec(tmp_path, {"session": "s", "steps": [
         {"bg": secs, "detach": detach}, {"event": {"type": "text", "text": "готово"}}]}, idle_s=0))
     assert r.ok
-    time.sleep(1.0)
-    assert _sleepers(f"time.sleep({secs})") == [], "брошенный агентом процесс пережил ход"
+    assert wait_until(lambda: _sleepers(f"time.sleep({secs})") == []), "брошенный агентом процесс пережил ход"

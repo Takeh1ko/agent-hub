@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -15,6 +14,7 @@ from ahub.scope import Scope
 from ahub.store import Store
 from ahub.tg import core, launcher
 from ahub.time import now_ms
+from tests.conftest import wait_until
 from tests.enginekit import make_project
 
 
@@ -147,8 +147,7 @@ def test_launcher_timeout_kills(store, tmp_path):
     t0 = now_ms()
     launcher.tick(store, projects=[project], spawn=sp, binary="claude", now=t0)
     assert launcher.tick(store, projects=[project], now=t0 + launcher.TIMEOUT_MS + 1) == "killed"
-    time.sleep(0.5)
-    assert sp.procs[0].poll() is not None
+    assert wait_until(lambda: sp.procs[0].poll() is not None), "процесс лаунчера пережил таймаут"
 
 
 def test_project_choice(store, tmp_path):
