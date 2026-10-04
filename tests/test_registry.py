@@ -113,6 +113,23 @@ def test_cli_models(tmp_path, monkeypatch, capsys):
     assert "opencode-go/mimo-v2.6-flash" in capsys.readouterr().out
 
 
+def test_cli_models_says_a_broken_global_config(capsys, monkeypatch, tmp_path):
+    """T107: a config in the wrong encoding must not hide the models silently — one line, no traceback."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    p = paths.global_config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b'lang = "\xff\xfe"')  # the bytes a cp1251 editor leaves behind
+    assert cli.main(["models", "--role", "executor"]) == 0
+    out = capsys.readouterr().out
+    assert "executor" in out and "spark" in out  # the menu is still there
+    assert f"error: {p}: not UTF-8 text" in out  # and the reason is on the same screen
+    assert cli.main(["--json", "models", "--role", "executor"]) == 0
+    assert str(p) in json.loads(capsys.readouterr().out)["config_error"]
+
+
 def test_free_candidates_order(store):
     """The probe tries the free aliases in the registry order: spark-free, then bunny."""
     assert registry.get(store, "bunny").model_id == "opencode/space-bunny-free"
