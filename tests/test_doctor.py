@@ -5,13 +5,17 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import plistlib
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import types
 from pathlib import Path
+
+import pytest
 
 from ahub import cli, doctor, paths
 from ahub.commands import doctor as doctor_cmd
@@ -146,6 +150,188 @@ def test_auth_list_colors_and_free_only(monkeypatch):
         p.unlink()
     c = doctor.check_opencode_auth()
     assert c.ok is False and "auth login" in c.fix
+
+
+def _fake_systemctl(tmp_path, monkeypatch, unit_env: str, manager_env: str = "",
+                    main_pid: str = "0") -> Path:
+    """A systemctl on PATH: `show ahub.service -p Environment` answers unit_env, `show-environment`
+    answers manager_env (NAME=value lines), `-p MainPID` answers main_pid; the marker file records every
+    argv it was given."""
+    marker = tmp_path / "systemctl.argv"
+    exe = tmp_path / "systemctl"
+    exe.write_text("#!/bin/sh\n"
+                   f'printf "%s\\n" "$*" >> {marker}\n'
+                   "case \"$*\" in\n"
+                   f'*MainPID*) printf "%s\\n" "{main_pid}" ;;\n'
+                   f'*show-environment*) printf "%b\\n" "{manager_env}" ;;\n'
+                   f'*) printf "%s\\n" "{unit_env}" ;;\n'
+                   "esac\n", encoding="utf-8")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    return marker
+
+
+@pytest.fixture(autouse=True)
+def _no_host_systemctl(tmp_path, monkeypatch):
+    """No doctor test may ask the host's systemctl what the service env is: the fake answers for all of
+    them (a test that cares about the answer puts its own on PATH). macOS reads the plist in the faked HOME."""
+    _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1")
+
+
+def test_provider_key_the_service_cannot_see_linux(tmp_path, monkeypatch):
+    """T142: a key exported only in the shell profile — the unit env has it, or the auth store the provider."""
+    from ahub.i18n import _reset
+
+    secret = "sk-SECRET-4242"
+    calls = ["--user show ahub.service -p Environment", "--user show-environment"]
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    monkeypatch.setenv("OPENROUTER_API_KEY", secret)
+    marker = _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1 LANG=en_US.UTF-8",
+                             "LANG=en_US.UTF-8\\nPATH=/usr/bin")
+
+    c = doctor.check_provider_keys()
+    assert c.name == "provider_keys" and c.ok is False
+    assert "openrouter: OPENROUTER_API_KEY" in c.detail and "server error" in c.detail
+    assert "opencode auth login -p openrouter" in c.fix and "OPENROUTER_API_KEY" in c.fix
+    assert c.fix.endswith("then: systemctl --user daemon-reload && systemctl --user restart ahub.service")
+    assert secret not in c.detail + c.fix  # the value never leaves the env
+    seen = marker.read_text().splitlines()
+    assert calls[0] in seen and calls[1] in seen  # the hub unit and the manager, as asked
+
+    marker.unlink()
+    _write_auth({"openrouter": {"apiKey": secret}})  # opencode knows the provider — nothing to fix
+    c = doctor.check_provider_keys()
+    assert c.ok is True and "opencode auth" in c.detail and "OPENROUTER_API_KEY" in c.detail and not c.fix
+
+    doctor.auth_file_path().unlink()
+    marker.unlink()
+    _fake_systemctl(tmp_path, monkeypatch, f'Environment="OPENROUTER_API_KEY={secret}" LANG=en_US.UTF-8')
+    assert doctor.check_provider_keys().ok is True  # the unit carries the key
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the env of the process is read from /proc")
+def test_provider_key_in_the_running_service_process(tmp_path, monkeypatch):
+    """The env of the running process is what a turn gets — a unit without the key is not a problem when
+    the service already runs with it (the fake points MainPID at a child that has the key)."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-d")
+    with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                          env={"DEEPSEEK_API_KEY": "sk-d"}) as child:
+        _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1", main_pid=str(child.pid))
+        assert doctor.check_provider_keys().ok is True  # the unit does not carry it, the process does
+
+
+def test_provider_key_in_the_manager_env_only(tmp_path, monkeypatch):
+    """A key exported in the session profile reaches the user manager — the service does see it."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-m")
+    _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1",
+                    "PATH=/usr/bin\\nANTHROPIC_API_KEY=sk-m")
+    assert doctor.check_provider_keys().ok is True
+
+
+def test_provider_keys_one_fix_per_provider(tmp_path, monkeypatch):
+    """GEMINI_API_KEY and GOOGLE_API_KEY are one provider (google) — one fix line, both names in it."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.setenv(name, "sk-g")
+    _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1")
+    c = doctor.check_provider_keys()
+    assert c.ok is False
+    assert c.fix.count("opencode auth login -p google") == 1
+    assert "GEMINI_API_KEY, GOOGLE_API_KEY" in c.fix
+    assert c.detail.count("google") == 1  # one entry per provider
+
+
+def test_provider_key_name_is_matched_case_insensitively(tmp_path, monkeypatch):
+    """A shell that exports `opencode_api_key` and a unit that spells it lowercase are the same key."""
+    from ahub.i18n import _reset
+    from ahub.prepare import PROVIDER_KEYS
+
+    assert PROVIDER_KEYS["OPENCODE_API_KEY"] == "opencode"  # opencode's own key is one of them
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    monkeypatch.setenv("opencode_api_key", "sk-o")
+    _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1 opencode_api_key=sk-o")
+    assert doctor.check_provider_keys().ok is True
+
+
+def test_provider_keys_nothing_to_compare(tmp_path, monkeypatch):
+    """No key in this env — no data, and systemctl is not even asked; an unreadable unit env — no data."""
+    from ahub.prepare import PROVIDER_KEYS
+
+    marker = _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1")
+    for name in PROVIDER_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    c = doctor.check_provider_keys()
+    assert c.ok is None and not c.fix and not marker.exists()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
+    real_run, real_which = subprocess.run, shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name: None)  # no systemctl at all
+    assert doctor.check_provider_keys().ok is None
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/systemctl")
+
+    def _no_bus(cmd, **kw):
+        raise OSError("no bus")
+    monkeypatch.setattr(subprocess, "run", _no_bus)
+    assert doctor.check_provider_keys().ok is None
+
+    def _no_unit(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Unit ahub.service could not be found.")
+    monkeypatch.setattr(subprocess, "run", _no_unit)
+    assert doctor.check_provider_keys().ok is None
+
+    # no unit installed: systemd answers an empty `Environment=` with rc 0 — that is "no data", not
+    # "the service cannot see the key" (a hub-installed unit always carries PYTHONUNBUFFERED=1)
+    monkeypatch.setattr(subprocess, "run", real_run)
+    monkeypatch.setattr(shutil, "which", real_which)
+    marker = _fake_systemctl(tmp_path, monkeypatch, "Environment=")
+    c = doctor.check_provider_keys()
+    assert c.ok is None and not c.fix
+    assert "show-environment" not in marker.read_text()  # the manager is not even asked
+
+
+def test_provider_keys_macos_plist(tmp_path, monkeypatch):
+    """T142: on macOS the service env is the EnvironmentVariables of the plist."""
+    from ahub.commands.service import plist_dict
+
+    _english(monkeypatch)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-y")
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
+    assert doctor.check_provider_keys().ok is None  # no plist — nothing to compare with
+
+    data = plist_dict("ahub.service")
+    assert "OPENROUTER_API_KEY" not in data["EnvironmentVariables"]  # `ahub service install` keeps it out
+    path = Path.home() / "Library" / "LaunchAgents" / "dev.ahub.service.plist"
+    write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8"))
+    c = doctor.check_provider_keys()
+    assert c.ok is False and "openrouter" in c.detail and "opencode auth login -p openrouter" in c.fix
+    assert c.fix.endswith("then: launchctl kickstart -k gui/$(id -u)/dev.ahub.service")
+
+    data["EnvironmentVariables"]["OPENROUTER_API_KEY"] = "sk-y"
+    write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8"))
+    assert doctor.check_provider_keys().ok is True
+
+    # a plist cut in the middle of a write: XML that does not parse is "cannot read", not a red check
+    write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8")[:120])
+    assert doctor.check_provider_keys().ok is None
+
+    # a hand-written plist without EnvironmentVariables cannot say what the service runs with — the same
+    # "no data" Linux gives for a unit it does not know, not a warning about every key of the env
+    data.pop("EnvironmentVariables")
+    write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8"))
+    assert doctor.check_provider_keys().ok is None
 
 
 def test_agy_health_and_missing(monkeypatch, tmp_path):
@@ -743,11 +929,12 @@ def test_the_live_line_moves_only_on_the_slow_checks(monkeypatch):
     for name in ("python", "git", "config", "service", "opencode", "network", "claude", "claude_skill",
                  "claude_rule", "telegram"):
         monkeypatch.setattr(doctor, f"check_{name}", _fast(name))
-    for name in ("opencode_health", "agy", "codex", "models"):
+    for name in ("opencode_health", "agy", "codex", "models", "provider_keys"):
         monkeypatch.setattr(doctor, f"check_{name}", _slow(name))
     steps: list[str] = []
     doctor.run_all(step=lambda: steps.append(ran[-1]))
-    assert steps == ["opencode_health", "agy", "codex", "models"]  # the role menus, not the proxy
+    assert steps == ["opencode_health", "provider_keys", "agy", "codex", "models"]
+    # the role menus and the service unit env move the live line, the proxy does not
 
 
 def test_cli_codes_and_json(capsys, monkeypatch):
@@ -756,7 +943,7 @@ def test_cli_codes_and_json(capsys, monkeypatch):
     assert cli.main(["--json", "doctor"]) in (0, 1)
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert isinstance(data["checks"], list) and len(data["checks"]) == 15
+    assert isinstance(data["checks"], list) and len(data["checks"]) == 16
     assert secret not in out
     for c in data["checks"]:
         assert set(c) == {"name", "ok", "detail", "fix"}

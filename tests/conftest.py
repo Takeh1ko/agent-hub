@@ -25,7 +25,10 @@ def _isolated_env(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     from ahub import log
     from ahub.i18n import _reset
+    from ahub.prepare import PROVIDER_KEYS
 
+    for name in PROVIDER_KEYS:  # a developer shell exports its provider keys; the doctor check must not read them
+        monkeypatch.delenv(name, raising=False)
     _reset()  # language is picked lazily — reset it between tests
     from ahub import registry
 
