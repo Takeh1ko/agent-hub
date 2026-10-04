@@ -177,7 +177,8 @@ def test_quality_bar_in_code_not_scout(tmp_path, monkeypatch):
         assert "dead code" in text
         assert "except Exception" in text
         assert "fails without it" in text
-        assert "ruff" in text
+        assert "linter, if it has one" in text
+        assert "ruff" not in text
         assert "No new dependencies" in text
     assert "## Quality bar" not in scout
     assert "## Quality bar" not in prompts.scout_delivery()
@@ -215,3 +216,4 @@ def test_reviewer_checks_quality_bar(tmp_path, monkeypatch):
     assert "dead code" in prompt
     assert "except Exception" in prompt
     assert "stub test" in prompt.lower()
+    assert "tests that do not test" in prompt

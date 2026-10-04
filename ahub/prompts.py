@@ -133,7 +133,7 @@ Need more — do not change, write it in the result notes.
 - No dead code, commented-out code, or duplicated helpers.
 - No broad `except Exception` — catch what you expect.
 - Every behaviour change gets a test that fails without it.
-- Run the project's linter (ruff for Python) and the acceptance before the last commit.
+- Run the project's linter, if it has one, and the acceptance before the last commit.
 - No new dependencies.
 
 ## How to submit (required)
