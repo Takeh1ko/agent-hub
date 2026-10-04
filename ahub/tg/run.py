@@ -1,7 +1,7 @@
 """TG bot v2: aiogram 3, long polling via HTTPS_PROXY. Logic — ahub.tg.core, Claude launch — ahub.tg.launcher.
 
 Blocking (sqlite, /proc) goes via asyncio.to_thread. Background loops: Claude outbox, questions,
-observer alarms, launched-Claude supervision.
+observer alarms, launched-Claude supervision, the code check.
 """
 
 from __future__ import annotations
@@ -66,10 +66,10 @@ async def _send(bot, store: Store, reply: core.Reply) -> list[tuple[int, int]]:
     return sent
 
 
-def _alarm(store: Store, err: str) -> None:
+async def _alarm(store: Store, err: str) -> None:
     """The owner-visible alarm of a loop that keeps failing — a broken store may refuse it, then: a log line."""
     try:
-        comms.raise_alarm(store, _t("tg.alarm_loop", err=err), critical=True)
+        await asyncio.to_thread(comms.raise_alarm, store, _t("tg.alarm_loop", err=err), critical=True)
     except sqlite3.Error as e:
         _log.error("the bot cannot raise its alarm: %s", e)
 
@@ -77,7 +77,7 @@ def _alarm(store: Store, err: str) -> None:
 async def background(bot, store: Store) -> None:
     last_launch = 0.0
     loop = asyncio.get_running_loop()
-    code0 = selfupdate.code_fingerprint()
+    code0 = await asyncio.to_thread(selfupdate.code_fingerprint)
     last_code_check = loop.time()
     fail_kind, fail_n, reported = "", 0, False
     while True:
@@ -102,17 +102,6 @@ async def background(bot, store: Store) -> None:
                     name = res.split(":", 1)[1]
                     await _send(bot, store, core.Reply(_t("tg.launch_no_dir", name=name) if name
                                                        else _t("tg.launch_no_dir_hub")))
-            if loop.time() - last_code_check >= selfupdate.CODE_CHECK_S:
-                last_code_check = loop.time()
-                code = selfupdate.code_fingerprint()
-                if code != code0:  # a merge is in — the new code runs from here, not from the next restart
-                    ok, why = selfupdate.new_code_healthy()
-                    if ok:
-                        _log.info("hub code changed — the bot restarts on it (the messages of this pass are sent)")
-                        selfupdate.restart_self()
-                    else:
-                        _log.error("hub code changed but fails check — staying on old: %s", why)
-                        code0 = code  # do not re-check every CODE_CHECK_S; the next change is checked again
             fail_kind, fail_n, reported = "", 0, False
         except Exception as e:
             kind = type(e).__name__
@@ -126,7 +115,19 @@ async def background(bot, store: Store) -> None:
                 reported = True
                 _log.exception("bot background loop failed %d times in a row (%s) — retry in %d s",
                                fail_n, kind, FAIL_BACKOFF_S)
-                _alarm(store, f"{kind}: {str(e)[:200]}")
+                await _alarm(store, f"{kind}: {str(e)[:200]}")
+        if loop.time() - last_code_check >= selfupdate.CODE_CHECK_S:
+            # outside the try, like the service's: a pass that keeps failing is exactly when new code is wanted
+            last_code_check = loop.time()
+            code = await asyncio.to_thread(selfupdate.code_fingerprint)
+            if code != code0:  # a merge is in — the new code runs from here, not from the next restart
+                ok, why = await asyncio.to_thread(selfupdate.new_code_healthy)
+                if ok:
+                    _log.info("hub code changed — the bot restarts on it (the messages of this pass are sent)")
+                    selfupdate.restart_self()
+                else:
+                    _log.error("hub code changed but fails check — staying on old: %s", why)
+                    code0 = code  # do not re-check every CODE_CHECK_S; the next change is checked again
         await asyncio.sleep(FAIL_BACKOFF_S if reported else LOOP_S)
 
 

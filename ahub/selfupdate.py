@@ -55,6 +55,12 @@ def new_code_healthy() -> tuple[bool, str]:
 
 
 def restart_self() -> None:
-    """Replace the process with the same command line (pid stays — systemd never notices)."""
-    os.execv(sys.executable, [sys.executable, "-m", "ahub", *sys.argv[1:]] if sys.argv[0].endswith("ahub")
-             else [sys.executable, *sys.argv])
+    """Replace the process with the same command line (pid stays — systemd never notices).
+
+    The environment is ours as well: the command line runs `ahub/__main__.py` as a file, so the new process
+    must find the package — the same reason hub_env exists for the processes the hub starts.
+    """
+    os.execve(sys.executable,
+             [sys.executable, "-m", "ahub", *sys.argv[1:]] if sys.argv[0].endswith("ahub")
+             else [sys.executable, *sys.argv],
+             hub_env())

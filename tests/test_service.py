@@ -308,6 +308,23 @@ def test_code_fingerprint_and_health(tmp_path):
     assert ok, why
 
 
+def test_restart_self_execs_with_the_hub_on_pythonpath(monkeypatch):
+    """A process of `ahub service install` starts as `python -m ahub bot run`, so argv[0] is
+    `.../ahub/__main__.py`: the new process runs that file and must still find the package (without an install
+    it dies with ModuleNotFoundError — the same reason hub_env exists for the processes the hub starts)."""
+    from ahub import selfupdate
+
+    calls = []
+    monkeypatch.setattr(os, "execv", lambda *a: calls.append(a))
+    monkeypatch.setattr(os, "execve", lambda *a: calls.append(a))
+    service.restart_self()
+    assert len(calls) == 1 and len(calls[0]) == 3, "execve with our environment, not execv"
+    exe, argv, env = calls[0]
+    assert exe == sys.executable and argv[1] == sys.argv[0]
+    root = Path(selfupdate.__file__).resolve().parents[1]
+    assert Path(env["PYTHONPATH"].split(os.pathsep)[0]) == root
+
+
 def test_self_update_triggers_restart(store, tmp_path, monkeypatch):
     project = make_project(tmp_path)
     s, rec = svc(store, project, tmp_path)

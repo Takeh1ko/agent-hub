@@ -487,11 +487,11 @@ async def test_the_bot_re_exec_itself_when_the_code_changed(store, monkeypatch):
     monkeypatch.setattr(selfupdate, "CODE_CHECK_S", 0.0)
     execs = []
 
-    def execv(exe, argv):
-        execs.append((exe, argv))
-        raise asyncio.CancelledError  # a real execv never returns
+    def execve(exe, argv, env):
+        execs.append((exe, argv, env))
+        raise asyncio.CancelledError  # a real exec never returns
 
-    monkeypatch.setattr(os, "execv", execv)
+    monkeypatch.setattr(os, "execve", execve)
 
     async def stop(_):
         raise asyncio.CancelledError
@@ -501,8 +501,85 @@ async def test_the_bot_re_exec_itself_when_the_code_changed(store, monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await tgrun.background(bot, store)
     assert [text for _, text, _ in bot.sent] == ["T12 готова"]  # the message went before the restart
-    assert [exe for exe, _ in execs] == [sys.executable]
+    assert [exe for exe, _, _ in execs] == [sys.executable]
     assert comms.outbox(store) == []
+
+
+async def test_the_bot_restarts_onto_new_code_while_its_pass_fails(store, monkeypatch):
+    """Tonight's incident: old code, a new DB column, the pass crash-loops — the check must run after a failed
+    pass too, or the bot stays on the code that cannot read its own schema."""
+    import asyncio
+    import os
+
+    from ahub import selfupdate
+    from ahub.tg import run as tgrun
+
+    def boom(*_a, **_kw):
+        raise TypeError("no such column: task.new_column")
+
+    monkeypatch.setattr(tgrun.comms, "outbox", boom)
+    monkeypatch.setattr(selfupdate, "CODE_CHECK_S", 0.0)
+    prints = iter(["v1", "v2"])
+    monkeypatch.setattr(selfupdate, "code_fingerprint", lambda: next(prints, "v2"))
+    checks = []
+
+    def healthy():
+        checks.append(1)
+        return True, ""
+
+    monkeypatch.setattr(selfupdate, "new_code_healthy", healthy)
+    execs = []
+
+    def execve(_exe, argv, _env):
+        execs.append(argv)
+        raise asyncio.CancelledError  # a real exec never returns
+
+    monkeypatch.setattr(os, "execve", execve)
+
+    async def stop(_):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", stop)
+    with pytest.raises(asyncio.CancelledError):
+        await tgrun.background(FakeBot(), store)
+    assert checks == [1] and len(execs) == 1
+
+
+async def test_the_bot_code_check_does_not_block_the_event_loop(store, monkeypatch):
+    """new_code_healthy() runs a subprocess with a 60 s timeout: on the event loop it would freeze the bot for
+    that whole time, so it goes to a thread and the loop keeps running the polling meanwhile."""
+    import asyncio
+    import os
+    import time
+
+    from ahub import selfupdate
+    from ahub.tg import run as tgrun
+
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda *a, **kw: "idle")
+    monkeypatch.setattr(selfupdate, "CODE_CHECK_S", 0.0)
+    prints = iter(["v1", "v2"])
+    monkeypatch.setattr(selfupdate, "code_fingerprint", lambda: next(prints, "v2"))
+
+    def slow_health():
+        time.sleep(0.3)  # a subprocess that takes its time
+        return True, ""
+
+    monkeypatch.setattr(selfupdate, "new_code_healthy", slow_health)
+
+    def execve(_exe, _argv, _env):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(os, "execve", execve)
+    ticks = []
+
+    async def tick():
+        await asyncio.sleep(0.05)
+        ticks.append(1)
+
+    asyncio.create_task(tick())
+    with pytest.raises(asyncio.CancelledError):
+        await tgrun.background(FakeBot(), store)
+    assert ticks == [1], "the loop was busy inside the health check"
 
 
 async def test_the_bot_stays_on_old_code_that_fails_the_check(store, monkeypatch):
@@ -525,6 +602,7 @@ async def test_the_bot_stays_on_old_code_that_fails_the_check(store, monkeypatch
     monkeypatch.setattr(selfupdate, "new_code_healthy", unhealthy)
     monkeypatch.setattr(selfupdate, "CODE_CHECK_S", 0.0)
     monkeypatch.setattr(os, "execv", lambda *a: pytest.fail("restart onto broken code"))
+    monkeypatch.setattr(os, "execve", lambda *a: pytest.fail("restart onto broken code"))
     sleeps = []
 
     async def sleep(s):
