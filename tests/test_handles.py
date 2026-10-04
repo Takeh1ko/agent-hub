@@ -66,6 +66,23 @@ def test_new_errors_one_line(env, capsys):
     assert rc == 2 and err.startswith("ошибка: задача не создана:") and "«bot/**» вне" in err and "приёмка" in err
 
 
+def test_review_task_panel_by_flag(env, capsys):
+    """`--review` of a review kind is its panel; `--model` is one reviewer, --rounds is nothing for it."""
+    store, _ = env
+    install_fake(store, [])
+    rc, out, err = ahub(capsys, "task", "new", "--kind", "review", "--title", "посмотри ветку",
+                        "--review", "fake", "--input", "main..ahub/T1")
+    assert rc == 0 and "ревью fake×1" in out, err
+    assert store.get_task(1).review == {"models": ["fake"], "rounds": 1}
+    rc, _, err = ahub(capsys, "task", "new", "--kind", "review", "--title", "x", "--review", "fake",
+                      "--model", "fake", "--input", "main")
+    assert rc == 2 and "--review и --model вместе нельзя" in err
+    rc, _, err = ahub(capsys, "task", "new", "--kind", "review", "--title", "y", "--review", "fake",
+                      "--rounds", "2", "--input", "main")
+    assert rc == 2 and "--rounds задаче «ревью» не нужен" in err
+    assert store.get_task(2) is None
+
+
 def test_key_idempotent(env, capsys):
     store, _ = env
     install_fake(store, [])

@@ -335,6 +335,21 @@ def test_no_findings(store, project):
     assert report == "## Summary\nno findings\n"
 
 
+def test_panel_named_by_the_review_flag(store, project):
+    """A review task with a panel (--review): every reviewer of it runs, its findings are the result."""
+    from ahub import registry
+
+    registry.add_model(store, "fake2", "fake", "fake/model2")
+    install_fake(store, [verdict(v="changes", findings=HIGH), verdict(model="fake2", session="ses_rev2")])
+    t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="посмотреть свежий код",
+                                           review_input="core/a.py", review_models=["fake", "fake2"]),
+                     project, collect=False)
+    assert run(store, project, t.id).state is State.DONE
+    base = Path(store.get_task(t.id).worktree) / ".ahub"
+    assert (base / "review_r1_fake.json").exists() and (base / "review_r1_fake2.json").exists()
+    assert store.events(task_id=t.id, needs_reaction=True)[-1].payload["findings"] == 1
+
+
 def test_low_findings_only_agree(store, project):
     """A reviewer with low findings only has effectively approved — the summary counts them all anyway."""
     install_fake(store, [verdict(v="changes", findings=LOW)])

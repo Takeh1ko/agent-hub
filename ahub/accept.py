@@ -371,7 +371,8 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
             except registry.RegistryError as e:
                 raise DecisionError(str(e), hint=_t("hint.models")) from e
         if t.kind is Kind.REVIEW:
-            raise DecisionError(_t("tasks.review_self"), hint=_t("help.task_new_review"))
+            # its panel is what --review named at creation (ahub task new --kind review)
+            raise DecisionError(_t("accept.edit_review_panel"), hint=_t("hint.task_new"))
         fields["review"] = {"models": models, "rounds": count}
         changes.append(_t("accept.review_msg", models="+".join(models), rounds=count))
     if model:

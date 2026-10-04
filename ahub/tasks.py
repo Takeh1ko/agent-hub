@@ -153,6 +153,13 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
         executor = registry.pick(store, role, project, spec.model).alias
     except registry.RegistryError as e:
         errors.append(str(e))
+    # The review kind is not reviewed itself: --review names its panel, --model one reviewer — not both,
+    # and the panel of a review task reviews once, so --rounds is nothing for it.
+    if kind is Kind.REVIEW:
+        if spec.review_models and spec.model:
+            errors.append(_t("tasks.review_both"))
+        if spec.review_rounds is not None:
+            errors.append(_t("tasks.review_no_rounds"))
     level_default, time_default = KIND_DEFAULTS[kind]
     if spec.review_models is not None:
         rmodels, rounds = list(spec.review_models), spec.review_rounds or (1 if spec.review_models else 0)
@@ -174,8 +181,6 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
             registry.check(store, m, project)
         except registry.RegistryError as e:
             errors.append(_t("tasks.review_prefix", err=e))
-    if kind is Kind.REVIEW and rmodels:
-        errors.append(_t("tasks.review_self"))
 
     # Files and acceptance
     paths = [_norm(p) for p in spec.paths if p.strip()]

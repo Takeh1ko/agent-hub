@@ -504,6 +504,13 @@ def test_task_edit_changes_the_review_panel_and_the_executor(capsys, monkeypatch
     assert cli.main(["task", "edit", t.label, "--rounds", "-1"]) == 2
     assert cli.main(["task", "edit", t.label, "--review", "no-such-model"]) == 2
     assert "no model" in capsys.readouterr().err
+    # the panel of a review task is named at creation — the edit points there
+    r = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="look", review_input="main",
+                                           review_models=["spark"]), project, collect=False)
+    assert cli.main(["task", "edit", r.label, "--review", "bunny"]) == 2
+    err = capsys.readouterr().err
+    assert "named at creation" in err and "ahub task new --help" in err
+    assert store.get_task(r.id).review == {"models": ["spark"], "rounds": 1}
 
 
 def test_the_review_panel_is_locked_once_the_review_started(capsys, monkeypatch, tmp_path):
