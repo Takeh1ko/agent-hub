@@ -439,15 +439,21 @@ def _stopped_by_budget(store: Store, task_id: int) -> bool:
 
 
 def extend_budget(store: Store, task_id: int, *, add: float | None = None, set_to: float | None = None,
-                  add_usd: float | None = None, by: str = "orchestrator") -> str:
-    """Top up the budget in one move: raised + resumed (if the task was parked on budget).
+                  add_usd: float | None = None, set_usd: float | None = None, by: str = "orchestrator") -> str:
+    """Set the budget in one move: raised (or lowered) + resumed (if the task was parked on budget).
 
-    add/set_to — Go counter (subscription); add_usd — real money (default 0 = no spending).
+    add/set_to — Go counter (subscription); add_usd/set_usd — real money (default 0 = no spending).
+    set_usd cannot go below what the task already spent.
     """
     t = _get(store, task_id)
     new = set_to if set_to is not None else t.budget_go + (add or 0.0)
-    new_usd = t.budget_usd + (add_usd or 0.0)
-    if new <= t.budget_go and set_to is None and new_usd <= t.budget_usd:
+    new_usd = set_usd if set_usd is not None else t.budget_usd + (add_usd or 0.0)
+    if set_usd is not None:
+        spent = archive.task_cost(store, t.id)[1]
+        if new_usd < spent:
+            raise DecisionError(_t("accept.budget_below_spent", spent=f"{spent:.3f}"))
+    # an explicit set is a change even when it lowers the budget
+    if set_to is None and set_usd is None and new <= t.budget_go and new_usd <= t.budget_usd:
         raise DecisionError(_t("accept.budget_need"))
     store.update_task(t.id, budget_go=float(new), budget_usd=float(new_usd))
     store.add_event(Ev.BUDGET_EXTENDED, task_id=t.id, project=t.project,
