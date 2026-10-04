@@ -6,8 +6,9 @@ never logs secret values (auth.json values are never read into output, a proxy U
 
 Also the live model probe (probe_model): one tiny request through the provider module, so setup never
 makes a model that does not answer the default (the free Spark was silent for hours on 2026-10-02).
-And what every provider looks like right now (provider_states): the same checks, one state per provider,
-which `ahub setup` and `ahub providers` show and probe_models probes all at once.
+And what every provider looks like right now (provider_states): the auth check and, for opencode, its health —
+one state per provider, which `ahub setup` and `ahub providers` show and probe_models probes at once
+(one provider at a time, its models in parallel).
 """
 
 from __future__ import annotations
