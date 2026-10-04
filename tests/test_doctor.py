@@ -14,6 +14,8 @@ import time
 import types
 from pathlib import Path
 
+import pytest
+
 from ahub import cli, doctor, paths
 from ahub.commands import doctor as doctor_cmd
 from ahub.providers.base import Health
@@ -163,6 +165,13 @@ def _fake_systemctl(tmp_path, monkeypatch, unit_env: str, manager_env: str = "")
     exe.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     return marker
+
+
+@pytest.fixture(autouse=True)
+def _no_host_systemctl(tmp_path, monkeypatch):
+    """No doctor test may ask the host's systemctl what the service env is: the fake answers for all of
+    them (a test that cares about the answer puts its own on PATH). macOS reads the plist in the faked HOME."""
+    _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1")
 
 
 def test_provider_key_the_service_cannot_see_linux(tmp_path, monkeypatch):
