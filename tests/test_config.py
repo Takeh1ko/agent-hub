@@ -149,7 +149,23 @@ def test_hub_config_and_projects(tmp_path):
     projects, errors = config.load_projects()
     assert [p.name for p in projects] == ["A"]
     assert any("уже занято" in e for e in errors)
-    assert any("missing" in e for e in errors)
+    assert any(f'{tmp_path / "missing"}: нет .hub.toml' in e for e in errors)
+
+
+def test_a_project_entry_without_a_file_is_not_an_encoding_error(tmp_path, monkeypatch):
+    """T107 review: no file — FileNotFoundError, so load_projects names the entry; not 'not UTF-8 text'."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError):
+        config.load_project_file(empty / config.PROJECT_FILE)
+    write(paths.global_config_path(), f'projects = ["{empty}"]\n')
+    projects, errors = config.load_projects()
+    assert projects == []
+    assert errors == [f"{empty}: no .hub.toml"]  # config.entry_no_file, not the encoding message
 
 
 def test_hub_config_ignores_v1_location(tmp_path):

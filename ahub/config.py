@@ -425,11 +425,17 @@ def find_project_file(start: str | Path) -> Path | None:
 
 
 def load_project_file(path: str | Path) -> ProjectConfig:
+    """A project file read as UTF-8; no file — FileNotFoundError (the caller names the entry).
+
+    A file in another encoding — ConfigError, so a cp1251 .hub.toml is a message, not a traceback.
+    """
     p = Path(path)
     try:
         data = tomllib.loads(p.read_text(encoding="utf-8-sig"))
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(str(p), [_t("config.bad_toml", err=e)]) from e
+    except FileNotFoundError:
+        raise  # no file is not an encoding problem — the caller answers for it
     except (UnicodeDecodeError, OSError) as e:
         raise ConfigError(str(p), [_t("config.bad_encoding", err=e)]) from e
     return parse_project(data, p.parent, str(p))
