@@ -886,13 +886,13 @@ def _cmd_noninteractive(args) -> int:
     except (CliError, ConfigError, RegistryError, sqlite3.Error, OSError) as e:
         out.line(t("setup.wizard_models_skip"))
         out.line(f"! {e}")
+    _service_step(args, out, interactive=False)  # the wizard's order: service, then Claude
     out.section("setup.step_claude")
     if args.claude:
         _claude_install(root, ask=_can_ask(args), out=out)
     else:
         out.line(t("setup.wizard_claude_skip"))
         out.note(t("setup.step_claude"), t("setup.sum_none"))
-    _service_step(args, out, interactive=False)
     out.finish(t("setup.next"))
     emit(args, {"project": cfg.name, "file": str(f), "problems": problems, "providers": chosen,
                 "models": role_models}, out.text())

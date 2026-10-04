@@ -728,3 +728,21 @@ def test_yes_asks_nothing_and_still_writes_the_permission(tmp_path, monkeypatch,
     capsys.readouterr()
     assert json.loads((root / ".claude" / "settings.json").read_text(encoding="utf-8"))["permissions"][
         "allow"] == ["Bash(ahub:*)"]
+
+
+def test_yes_numbers_the_steps_like_the_wizard(tmp_path, monkeypatch, capsys):
+    """The same work reads the same way twice: service is step 4, Claude step 5 — in the wizard and in --yes."""
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")
+    from ahub.commands import service as svccmd
+
+    monkeypatch.setattr(svccmd, "install_service_files", lambda: ("linux", [], ["ahub.service"], "ahub top"))
+    root = tmp_path / "order"
+    make_repo(root)
+    assert cli.main(["setup", str(root), "--yes"]) == 0
+    out = capsys.readouterr().out
+    service = out.index("4. Сервис")
+    claude = out.index("5. Claude Code")
+    assert service < claude
+    assert out.index("1. Проект") < out.index("2. Поставщики") < out.index("3. Модели") < service

@@ -13,6 +13,14 @@ def test_version_text_and_json(capsys):
     assert json.loads(capsys.readouterr().out)["version"].startswith("3.")
 
 
+def test_version_json_carries_what_the_text_shows(capsys):
+    """The machine output has the runtime too — python/os/data are what a bug report needs."""
+    assert cli.main(["--json", "version"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert set(data) == {"version", "python", "os", "data"}
+    assert data["python"].count(".") == 2 and data["os"] and data["data"] == str(paths.data_dir())
+
+
 def test_config_by_cwd(tmp_path, monkeypatch, capsys):
     write(tmp_path / "p" / ".hub.toml", 'schema_version = 2\nname = "P"\nmax_parallel = 4\n')
     monkeypatch.chdir(tmp_path / "p")
