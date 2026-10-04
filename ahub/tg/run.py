@@ -18,9 +18,9 @@ from ahub.tg import core, launcher
 
 LOOP_S = 5
 LAUNCH_S = 10
-HEARTBEAT_KEY = "tg_heartbeat"
 _log = hublog.get("tg")
 _QMSG: dict[tuple[int, int], int] = {}  # (chat, bot_msg_id) → question_id — reply answers
+_NODIR: dict[str, int] = {}  # project → when it was last reported (this process, one bot for weeks)
 
 
 def _markup(rows):
@@ -81,14 +81,13 @@ async def background(bot, store: Store) -> None:
             await asyncio.to_thread(comms.mark_tg_sent, store, [e.id for e in alarms])
             if loop.time() - last_launch >= LAUNCH_S:
                 last_launch = loop.time()
-                res = await asyncio.to_thread(launcher.tick, store)
+                res = await asyncio.to_thread(launcher.tick, store, no_dir=_NODIR)
                 if res == "limit":
                     _log.warning("Claude launch hourly limit exhausted")
                 elif res.startswith("nodir:"):  # the launcher says it once — the owner hears it once
                     name = res.split(":", 1)[1]
                     await _send(bot, store, core.Reply(_t("tg.launch_no_dir", name=name) if name
                                                        else _t("tg.launch_no_dir_hub")))
-            await asyncio.to_thread(store.meta_set, HEARTBEAT_KEY, str(int(loop.time())))
         except Exception:
             _log.exception("bot background loop crashed")
         await asyncio.sleep(LOOP_S)
@@ -152,8 +151,10 @@ def build_dispatcher(store: Store):
     @r.message(F.text)
     async def _text(msg: Message) -> None:
         if msg.reply_to_message is not None:
-            qid = _QMSG.get((msg.chat.id, msg.reply_to_message.message_id))
+            key = (msg.chat.id, msg.reply_to_message.message_id)
+            qid = _QMSG.get(key)
             if qid is not None:
+                _QMSG.pop(key, None)  # the question is closed — a bot that runs for weeks must not keep every one
                 await msg.answer(await asyncio.to_thread(core.on_reply_to_question, store, qid, msg.text))
                 return
         rep = await asyncio.to_thread(core.on_text, store, msg.chat.id, msg.text, projects=_projects())
