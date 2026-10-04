@@ -504,13 +504,22 @@ def test_task_edit_changes_the_review_panel_and_the_executor(capsys, monkeypatch
     assert cli.main(["task", "edit", t.label, "--rounds", "-1"]) == 2
     assert cli.main(["task", "edit", t.label, "--review", "no-such-model"]) == 2
     assert "no model" in capsys.readouterr().err
-    # the panel of a review task is named at creation — the edit points there
+    # the panel of a review task is named at creation — the edit points there, and the executor of a
+    # review task with a panel is a reviewer the engine never reaches
     r = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="look", review_input="main",
                                            review_models=["spark"]), project, collect=False)
     assert cli.main(["task", "edit", r.label, "--review", "bunny"]) == 2
     err = capsys.readouterr().err
     assert "named at creation" in err and "ahub task new --help" in err
     assert store.get_task(r.id).review == {"models": ["spark"], "rounds": 1}
+    assert cli.main(["task", "edit", r.label, "--model", "bunny"]) == 2
+    err = capsys.readouterr().err
+    assert "runs that panel" in err and "ahub task new --help" in err
+    assert store.get_task(r.id).executor != "bunny"
+    one = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="look too", review_input="main",
+                                            model="spark"), project, collect=False)
+    out = run(capsys, "task", "edit", one.label, "--model", "bunny")[1].strip()
+    assert out == f"{one.label}: executor spark → bunny"  # no panel — the executor is the reviewer
 
 
 def test_the_review_panel_is_locked_once_the_review_started(capsys, monkeypatch, tmp_path):

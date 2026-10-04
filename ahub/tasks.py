@@ -174,6 +174,8 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
             rmodels, rounds = [], 0
         if spec.review_rounds is not None and rmodels:
             rounds = spec.review_rounds
+    if kind is Kind.REVIEW and rmodels:
+        rounds = 1  # the panel of a review task reviews once — the rounds of a level belong to a reworked task
     if rmodels and not 1 <= rounds <= MAX_ROUNDS:
         errors.append(_t("tasks.bad_rounds", rounds=rounds, max=MAX_ROUNDS))
     for m in rmodels:

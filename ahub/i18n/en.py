@@ -863,6 +863,7 @@ MESSAGES: dict[str, str] = {
     "accept.need_review": "--review with at least one model (or --rounds for the current panel)",
     "accept.edit_rounds_bad": "rounds {rounds}: allowed 1-{max}",
     "accept.edit_review_panel": "the panel of a review task is named at creation (ahub task new --kind review)",
+    "accept.edit_model_panel": "{label}: a review task with a panel runs that panel — --model would change nothing",
     "accept.edit_nothing": "{label}: nothing to change",
     "accept.edit_msg": "spec updated — continuation starts a new session",
     "accept.input_edit": "input {input}",

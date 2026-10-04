@@ -75,6 +75,8 @@ def test_review_task_panel(store, project):
     assert t.review == {"models": ["spark", "mimo-flash"], "rounds": 1}  # the panel reviews once
     t = tasks.create(store, spec(kind=Kind.REVIEW, title="y", review_input="main", model="mimo-flash"), project)
     assert t.review == {} and t.executor == "mimo-flash"  # one reviewer — the executor
+    t = tasks.create(store, spec(kind=Kind.REVIEW, title="w", review_input="main", review_level=4), project)
+    assert t.review == {"models": ["spark", "mimo-flash"], "rounds": 1}  # the rounds of a level are not its rounds
     with pytest.raises(tasks.TaskInvalid, match="--review и --model вместе нельзя"):
         tasks.resolve(store, spec(kind=Kind.REVIEW, title="z", review_input="main", model="mimo-flash",
                                   review_models=["spark"]), project)

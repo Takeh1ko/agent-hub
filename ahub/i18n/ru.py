@@ -863,6 +863,7 @@ MESSAGES: dict[str, str] = {
     "accept.need_review": "--review хотя бы с одной моделью (или --rounds для текущей панели)",
     "accept.edit_rounds_bad": "круги {rounds}: допустимо 1-{max}",
     "accept.edit_review_panel": "панель задачи «ревью» задаётся при создании (ahub task new --kind review)",
+    "accept.edit_model_panel": "{label}: у задачи «ревью» с панелью работает панель — --model ничего не поменяет",
     "accept.edit_nothing": "{label}: менять нечего",
     "accept.edit_msg": "постановка обновлена — при продолжении новая сессия",
     "accept.input_edit": "вход {input}",

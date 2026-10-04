@@ -376,6 +376,9 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
         fields["review"] = {"models": models, "rounds": count}
         changes.append(_t("accept.review_msg", models="+".join(models), rounds=count))
     if model:
+        if t.kind is Kind.REVIEW and t.review.get("models"):
+            # the executor of a review task with a panel is a fallback reviewer the engine never reaches
+            raise DecisionError(_t("accept.edit_model_panel", label=t.label), hint=_t("hint.task_new"))
         try:
             registry.check(store, model, project)
         except registry.RegistryError as e:
