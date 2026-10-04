@@ -189,10 +189,11 @@ def task_detail(store: Store, task_id: int) -> Reply:
     from ahub.service import live_workers
 
     live = live_workers()
+    pulses = {t.id: pulse.task_pulse(store, t, live=live)} if t.state in ACTIVE else {}
     with ui.plain():
-        text = views.task_text(store, t, live=live)
-    if t.state in ACTIVE:
-        pl = pulse.task_pulse(store, t, live=live)
+        text = views.task_text(store, t, live=live, pulses=pulses)
+    pl = pulses.get(t.id)
+    if pl:
         text = f"{pl.mark} {pl.reason or _t('tui.working_now')}\n" + text
     text += "\n" + _t("tg.created", when=fmt_local(t.created_at))
     return Reply(clip(text), [[Button(_t("tg.to_list"), "tasks")]])
