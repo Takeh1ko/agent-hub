@@ -688,3 +688,43 @@ def test_setup_reports_the_failures_it_survives(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "PermissionError" in out and "home is read-only" in out  # the service step says what failed
     assert "2." in out and "3." in out  # the report still numbers its steps
+
+
+def test_the_claude_flag_still_asks_about_the_permission(tmp_path, monkeypatch, capsys):
+    """--claude asks for the Bash(ahub:*) grant too — the flag picks the step, it does not sign it."""
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)
+    _fake_claude(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "platform", "linux")
+    root = tmp_path / "claudeflag"
+    make_repo(root)
+    _answers(monkeypatch, [
+        "", str(root), "", "",  # language, path, providers, models
+        "n", "n",  # service install, service start: no
+        "n",  # Bash(ahub:*): refused
+        "n",  # telegram: no
+    ])
+    assert cli.main(["setup", "--claude"]) == 0
+    out = capsys.readouterr().out
+    assert "Bash(ahub:*) не разрешён" in out
+    assert not (root / ".claude" / "settings.json").exists()  # the skill and the block are still there
+    assert (root / "CLAUDE.md").exists()
+
+
+def test_yes_asks_nothing_and_still_writes_the_permission(tmp_path, monkeypatch, capsys):
+    """--yes --claude: no question is possible, the default (the grant) is written — and nothing hangs."""
+
+    def _boom(_prompt=""):
+        raise AssertionError("input() при --yes --claude")
+
+    monkeypatch.setattr("builtins.input", _boom)
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)
+    root = tmp_path / "yesclaude"
+    make_repo(root)
+    assert cli.main(["setup", str(root), "--yes", "--claude"]) == 0
+    capsys.readouterr()
+    assert json.loads((root / ".claude" / "settings.json").read_text(encoding="utf-8"))["permissions"][
+        "allow"] == ["Bash(ahub:*)"]

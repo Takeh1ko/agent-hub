@@ -258,9 +258,12 @@ def allow_bash(root: Path) -> str:
     """Put BASH_RULE into .claude/settings.json permissions.allow; the rest of the file stays.
 
     The file and the directory are created if missing, the rule is never duplicated, the JSON is written
-    with a 2-space indent. Returns the line for the user; a settings.json that is not readable JSON is
+    with a 2-space indent — through a temp file and os.replace, so an interrupted write cannot truncate
+    the user's settings. Returns the line for the user; a settings.json that is not readable JSON is
     reported as is — setup does not refuse over it.
     """
+    import os
+
     from ahub.i18n import t
 
     f = root / ".claude" / "settings.json"
@@ -281,7 +284,13 @@ def allow_bash(root: Path) -> str:
     perms["allow"] = allow
     data["permissions"] = perms
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp = f.with_name(f.name + ".ahub-tmp")  # same dir — os.replace is atomic only within a filesystem
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, f)  # the user's file is replaced whole, never truncated in place
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
     return t("setup.perm_added", path=f, rule=BASH_RULE)
 
 
@@ -395,13 +404,19 @@ def _prompt(text: str, default: str = "") -> str:
 
 
 def _ask_yes_no(question: str, default: bool) -> bool:
+    """A yes/no question. --yes and a pipe cannot be asked — the default is the answer there."""
     from ahub.i18n import t
 
+    if not sys.stdin.isatty():
+        return default
     yes = {w.strip().lower() for w in t("setup.wizard_yes_words").split(",") if w.strip()}
     no = {w.strip().lower() for w in t("setup.wizard_no_words").split(",") if w.strip()}
     suffix = " (Y/n)" if default else " (y/N)"
     while True:
-        raw = input(f"{question}{suffix}: ").strip().lower()
+        try:
+            raw = input(f"{question}{suffix}: ").strip().lower()
+        except EOFError:
+            return default
         if not raw:
             return default
         if raw in yes:
@@ -410,8 +425,13 @@ def _ask_yes_no(question: str, default: bool) -> bool:
             return False
 
 
-def _is_interactive(args) -> bool:
+def _can_ask(args) -> bool:
+    """May this run ask anything at all: a terminal and no --yes (the flag answers with the defaults)."""
     return not bool(getattr(args, "yes", False)) and sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _is_interactive(args) -> bool:
+    return _can_ask(args)
 
 
 def _roles_needing_free(store) -> list[str]:
@@ -609,7 +629,8 @@ def _model_step(store, states, ask: bool, out: Steps) -> dict[str, str]:
 def _claude_install(root: Path, *, ask: bool, out: Steps) -> None:
     """The Claude Code step: skill, CLAUDE.md block, Bash(ahub:*) — then the MCP hint for other agents.
 
-    ask=False (the --claude flag) — the permission is written without a question, the default of the wizard.
+    ask=True asks about the permission — including when --claude asked for the step: the grant is the only
+    line here that lets ahub run without a question, so it is asked whenever a question is possible at all.
     """
     from ahub.i18n import t
 
@@ -757,14 +778,15 @@ def run_wizard(args) -> int:
     out.section("setup.step_claude")
     want_claude = bool(getattr(args, "claude", False))
     cl_check = doctor.check_claude()
+    ask = _can_ask(args)  # the permission is asked even with --claude; --yes takes the default
     if want_claude and not cl_check.ok:
-        _claude_install(root, ask=False, out=out)
+        _claude_install(root, ask=ask, out=out)
     elif cl_check.ok:
         from ahub.tg.launcher import claude_bin
 
         binary = claude_bin() or cl_check.detail
         if want_claude or _ask_yes_no(t("setup.wizard_claude_ask", binary=binary), True):
-            _claude_install(root, ask=not want_claude, out=out)
+            _claude_install(root, ask=ask, out=out)
     else:
         out.line(t("setup.wizard_claude_missing"))
         out.note(t("setup.step_claude"), t("setup.sum_claude", state=t("setup.sum_claude_no")))
@@ -866,7 +888,7 @@ def _cmd_noninteractive(args) -> int:
         out.line(f"! {e}")
     out.section("setup.step_claude")
     if args.claude:
-        _claude_install(root, ask=False, out=out)
+        _claude_install(root, ask=_can_ask(args), out=out)
     else:
         out.line(t("setup.wizard_claude_skip"))
         out.note(t("setup.step_claude"), t("setup.sum_none"))
