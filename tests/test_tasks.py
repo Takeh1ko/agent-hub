@@ -80,7 +80,7 @@ def test_review_task_panel(store, project):
     with pytest.raises(tasks.TaskInvalid, match="--review и --model вместе нельзя"):
         tasks.resolve(store, spec(kind=Kind.REVIEW, title="z", review_input="main", model="mimo-flash",
                                   review_models=["spark"]), project)
-    with pytest.raises(tasks.TaskInvalid, match="--rounds задаче «ревью» не нужен"):
+    with pytest.raises(tasks.TaskInvalid, match="--rounds неприменим к задаче «ревью»"):
         tasks.resolve(store, spec(kind=Kind.REVIEW, title="z", review_input="main", review_rounds=2), project)
 
 

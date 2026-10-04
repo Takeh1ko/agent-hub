@@ -474,6 +474,14 @@ def change_model(store: Store, project: ProjectConfig, task_id: int, alias: str,
         registry.check(store, alias, project)
     except registry.RegistryError as e:
         raise DecisionError(str(e), hint=_t("hint.models")) from e
+    panel = list(t.review.get("models") or []) if t.kind is Kind.REVIEW else []
+    if panel:
+        # what reviews is the panel (engine._review) — the executor is only the fallback reviewer
+        rounds = int(t.review.get("rounds") or 1)
+        store.update_task(t.id, review={"models": [alias], "rounds": rounds})
+        store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                        payload={"from": ", ".join(panel), "to": alias, "by": by})
+        return _t("accept.model_panel", label=t.label, old=", ".join(panel), new=alias)
     lim = dict(t.limits)
     lim["fresh_session"] = True  # never resume another model's session
     store.update_task(t.id, executor=alias, limits=lim)

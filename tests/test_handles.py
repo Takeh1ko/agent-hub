@@ -67,7 +67,7 @@ def test_new_errors_one_line(env, capsys):
 
 
 def test_review_task_panel_by_flag(env, capsys):
-    """`--review` of a review kind is its panel; `--model` is one reviewer, --rounds is nothing for it."""
+    """`--review` of a review kind is its panel; `--model` is one reviewer, --rounds does not apply."""
     store, _ = env
     install_fake(store, [])
     rc, out, err = ahub(capsys, "task", "new", "--kind", "review", "--title", "посмотри ветку",
@@ -79,7 +79,7 @@ def test_review_task_panel_by_flag(env, capsys):
     assert rc == 2 and "--review и --model вместе нельзя" in err
     rc, _, err = ahub(capsys, "task", "new", "--kind", "review", "--title", "y", "--review", "fake",
                       "--rounds", "2", "--input", "main")
-    assert rc == 2 and "--rounds задаче «ревью» не нужен" in err
+    assert rc == 2 and "--rounds неприменим к задаче «ревью»" in err
     assert store.get_task(2) is None
 
 

@@ -522,6 +522,28 @@ def test_task_edit_changes_the_review_panel_and_the_executor(capsys, monkeypatch
     assert out == f"{one.label}: executor spark → bunny"  # no panel — the executor is the reviewer
 
 
+def test_ahub_model_names_the_panel_of_a_review_task(capsys, monkeypatch, tmp_path):
+    """What reviews a review task is its panel — `ahub model` renames that, not the unused executor."""
+    from ahub import tasks
+    from ahub.model import Kind
+    from tests.enginekit import install_fake, make_project
+
+    project = make_project(tmp_path)
+    store = Store()
+    install_fake(store, [])
+    in_project(project, tmp_path, monkeypatch)
+    panel = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="look", review_input="main",
+                                               review_models=["spark", "bunny"]), project, collect=False)
+    rc, out = run(capsys, "model", panel.label, "bunny")
+    assert rc == 0 and out.splitlines()[0] == f"{panel.label}: review panel spark, bunny → bunny"
+    row = store.get_task(panel.id)
+    assert row.review == {"models": ["bunny"], "rounds": 1} and row.executor == "spark"  # fallback reviewer
+    one = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="one", review_input="main",
+                                             model="spark"), project, collect=False)
+    out = run(capsys, "model", one.label, "bunny")[1].splitlines()[0]
+    assert out == f"{one.label}: model spark → bunny" and store.get_task(one.id).executor == "bunny"
+
+
 def test_the_review_panel_is_locked_once_the_review_started(capsys, monkeypatch, tmp_path):
     from ahub import cli, tasks, transitions
     from ahub.model import Kind, State

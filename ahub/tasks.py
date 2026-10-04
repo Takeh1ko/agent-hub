@@ -154,7 +154,7 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
     except registry.RegistryError as e:
         errors.append(str(e))
     # The review kind is not reviewed itself: --review names its panel, --model one reviewer — not both,
-    # and the panel of a review task reviews once, so --rounds is nothing for it.
+    # and --rounds does not apply to it: the panel of a review task reviews once.
     if kind is Kind.REVIEW:
         if spec.review_models and spec.model:
             errors.append(_t("tasks.review_both"))
