@@ -504,22 +504,27 @@ def test_task_edit_changes_the_review_panel_and_the_executor(capsys, monkeypatch
     assert cli.main(["task", "edit", t.label, "--rounds", "-1"]) == 2
     assert cli.main(["task", "edit", t.label, "--review", "no-such-model"]) == 2
     assert "no model" in capsys.readouterr().err
-    # the panel of a review task is named at creation — the edit points there, and the executor of a
-    # review task with a panel is a reviewer the engine never reaches
+    # a review task runs its panel: --review names it, --model renames it to one reviewer, --rounds is
+    # nothing for it and both flags together are the same mistake as at creation
     r = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="look", review_input="main",
                                            review_models=["spark"]), project, collect=False)
-    assert cli.main(["task", "edit", r.label, "--review", "bunny"]) == 2
-    err = capsys.readouterr().err
-    assert "named at creation" in err and "ahub task new --help" in err
+    out = run(capsys, "task", "edit", r.label, "--review", "bunny")[1].strip()
+    assert out == f"{r.label}: review panel bunny ×1"
+    assert store.get_task(r.id).review == {"models": ["bunny"], "rounds": 1}
+    out = run(capsys, "task", "edit", r.label, "--model", "spark")[1].strip()
+    assert out == f"{r.label}: review panel spark ×1"  # the panel, not the executor (it is spark already)
     assert store.get_task(r.id).review == {"models": ["spark"], "rounds": 1}
-    assert cli.main(["task", "edit", r.label, "--model", "bunny"]) == 2
-    err = capsys.readouterr().err
-    assert "runs that panel" in err and "ahub task new --help" in err
-    assert store.get_task(r.id).executor != "bunny"
+    assert store.get_task(r.id).executor == "spark"
+    assert cli.main(["task", "edit", r.label, "--review", "bunny", "--rounds", "2"]) == 2
+    assert "--rounds does not apply to a review task" in capsys.readouterr().err
+    assert cli.main(["task", "edit", r.label, "--review", "bunny", "--model", "spark"]) == 2
+    assert "--review and --model together" in capsys.readouterr().err
+    assert store.get_task(r.id).review == {"models": ["spark"], "rounds": 1}  # refused — untouched
     one = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="look too", review_input="main",
-                                            model="spark"), project, collect=False)
+                                             model="spark"), project, collect=False)
     out = run(capsys, "task", "edit", one.label, "--model", "bunny")[1].strip()
     assert out == f"{one.label}: executor spark → bunny"  # no panel — the executor is the reviewer
+
 
 
 def test_ahub_model_names_the_panel_of_a_review_task(capsys, monkeypatch, tmp_path):
@@ -564,6 +569,21 @@ def test_the_review_panel_is_locked_once_the_review_started(capsys, monkeypatch,
     err = capsys.readouterr().err
     assert "the review has already started" in err and f"ahub status {t.label}" in err
     assert store.get_task(t.id).review["models"] == ["spark"]  # untouched
+    # a review task: its panel is named the same way before the review, and by no way after it
+    r = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="look", review_input="main",
+                                           review_models=["spark"]), project, collect=False)
+    assert cli.main(["model", r.label, "bunny"]) == 0  # before: the panel takes the model
+    assert store.get_task(r.id).review == {"models": ["bunny"], "rounds": 1}
+    for st in (State.PREPARING, State.WORKING, State.REVIEWING):
+        transitions.move(store, r.id, st)
+    transitions.move(store, r.id, State.NEEDS_DECISION)
+    for argv, flag in ((["task", "edit", r.label, "--review", "spark"], "--review"),
+                       (["task", "edit", r.label, "--model", "spark"], "--model"),
+                       (["model", r.label, "spark"], "ahub model")):
+        assert cli.main(argv) == 2
+        err = capsys.readouterr().err
+        assert "the review has already started" in err and f"({flag})" in err
+    assert store.get_task(r.id).review == {"models": ["bunny"], "rounds": 1}  # untouched
 
 
 def test_an_error_is_one_line_and_names_the_command(capsys, monkeypatch, tmp_path):
