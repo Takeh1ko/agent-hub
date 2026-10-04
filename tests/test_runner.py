@@ -363,7 +363,10 @@ def _sleepers(marker: str) -> list[int]:
 
 @pytest.mark.parametrize("detach", [False, True])
 def test_leftover_processes_reaped_after_normal_exit(fake, tmp_path, detach):
-    secs = 97.123 if detach else 96.321  # marker in the cmdline of an abandoned process
+    # the seconds are the marker in the abandoned process's cmdline, and the whole machine is scanned for it:
+    # a constant marker also finds the stray of a suite running in parallel (the hub runs acceptances one at a
+    # time, but a worker or a person can run the suite at the same time) — so it is unique per pytest process
+    secs = round(90 + (os.getpid() % 100_000) / 1000, 3) + (0.5 if detach else 0.0)
     r = run(fake, spec(tmp_path, {"session": "s", "steps": [
         {"bg": secs, "detach": detach}, {"event": {"type": "text", "text": "готово"}}]}, idle_s=0))
     assert r.ok
