@@ -40,7 +40,13 @@ def _lines(checks: list[doctor.Check], w: int | None) -> list[str]:
         out.append(ui.section(t(title)))
         for c in block:
             head = f"  {ui.styled(_MARKS[c.ok], _STYLES[c.ok])} {t(f'doctor.name_{c.name}').ljust(nw)}  "
-            out.append((head + ui.para(c.detail, indent=ui.plain_len(head), w=w)).rstrip())
+            if c.detail:
+                indent = ui.plain_len(head)
+                lines = ui.para(c.detail, indent=indent, w=w).split("\n")
+                out.append(head + lines[0][indent:])
+                out.extend(lines[1:])
+            else:
+                out.append(head.rstrip())
             if c.ok is False and c.fix:
                 out.append(ui.para(t("doctor.fix_line", fix=c.fix), indent=4, w=w))
     rest = [c for c in checks if c.name not in shown]  # a check the areas do not know about
@@ -50,8 +56,9 @@ def _lines(checks: list[doctor.Check], w: int | None) -> list[str]:
             out.append(f"  {_MARKS[c.ok]} {t(f'doctor.name_{c.name}')}: {c.detail}")
     bad = sum(1 for c in checks if c.ok is False)
     # one / few / many — Russian inflects the noun by the count
-    out.append(ui.styled(plural(bad, "doctor.problem_one", "doctor.problems_few", "doctor.problems")
-                         if bad else t("doctor.ok_all"), "dim"))
+    last = plural(bad, "doctor.problem_one", "doctor.problems_few", "doctor.problems") if bad \
+        else t("doctor.ok_all")
+    out.append(ui.item(last) if ui.colour_on() else ui.styled(last, "dim"))
     return out
 
 

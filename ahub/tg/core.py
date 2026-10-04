@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from ahub import archive, comms, config, events, views
+from ahub import archive, comms, config, events, ui, views
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION
 from ahub.store import Store
@@ -160,12 +160,14 @@ def help_text() -> str:
 
 
 def status_text(store: Store) -> str:
-    return views.status_text(store)
+    """Telegram has no terminal: the hub text stays plain (ui.plain), never coloured for nobody."""
+    with ui.plain():
+        return views.status_text(store)
 
 
 def _task_label(t) -> str:
     st = archive.STATE_WORDS.get(t.state.value, t.state.value)
-    return f"{t.label} · {st} · {views._short(t.title, 30)}"[:60]
+    return f"{t.label} · {st} · {ui.clip(t.title, 30)}"[:60]
 
 
 def tasks_reply(store: Store) -> Reply:
@@ -187,9 +189,11 @@ def task_detail(store: Store, task_id: int) -> Reply:
     from ahub.service import live_workers
 
     live = live_workers()
-    text = views.task_text(store, t, live=live)
-    if t.state in ACTIVE:
-        pl = pulse.task_pulse(store, t, live=live)
+    pulses = {t.id: pulse.task_pulse(store, t, live=live)} if t.state in ACTIVE else {}
+    with ui.plain():
+        text = views.task_text(store, t, live=live, pulses=pulses)
+    pl = pulses.get(t.id)
+    if pl:
         text = f"{pl.mark} {pl.reason or _t('tui.working_now')}\n" + text
     text += "\n" + _t("tg.created", when=fmt_local(t.created_at))
     return Reply(clip(text), [[Button(_t("tg.to_list"), "tasks")]])

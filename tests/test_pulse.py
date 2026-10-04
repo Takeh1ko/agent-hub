@@ -149,3 +149,23 @@ def test_waiting_without_locks_names_no_holder(store, tmp_path):
         assert p.state == "waiting" and p.reason == "ждёт"
     finally:
         os.close(fd)
+
+
+def test_describe_short_cmdline(monkeypatch):
+    """Pulse reasons are short: program basename and first argument (including module for -m)."""
+    from ahub import procs
+
+    monkeypatch.setattr(procs, "cmdline", lambda pid, root: ["/home/user/venv/bin/python", "-m", "pytest", "tests/"])
+    assert pulse._describe(42, "/proc") == "python -m pytest"
+
+    monkeypatch.setattr(procs, "cmdline", lambda pid, root: ["/usr/bin/git", "status", "-s"])
+    assert pulse._describe(42, "/proc") == "git status"
+
+    monkeypatch.setattr(procs, "cmdline", lambda pid, root: ["/bin/sleep", "10"])
+    assert pulse._describe(42, "/proc") == "sleep 10"
+
+    monkeypatch.setattr(procs, "cmdline", lambda pid, root: ["/bin/sh"])
+    assert pulse._describe(42, "/proc") == "sh"
+
+    monkeypatch.setattr(procs, "cmdline", lambda pid, root: [])
+    assert pulse._describe(42, "/proc") == "pid 42"

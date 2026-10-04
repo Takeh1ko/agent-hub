@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
 
         print(_t("cli.err_win"), file=sys.stderr)
         return 2
-    from ahub import log, scope
+    from ahub import log, scope, ui
     from ahub.cliutil import CliError, command_hint, emit
     from ahub.config import ConfigError
     from ahub.i18n import set_lang, t
@@ -170,9 +170,13 @@ def main(argv: list[str] | None = None) -> int:
         return int(func(args) or 0)
     except (ConfigError, CliError) as e:
         hint = getattr(e, "hint", "") or command_hint(str(e), command_names())
-        print(t("cli.error", msg=e), file=sys.stderr)
-        if hint:  # the way out — one more line
-            print(t("cli.hint", hint=hint), file=sys.stderr)
+        if ui.colour_on():  # a terminal: ✗ <what>, the way out under it; a pipe keeps "error: …"
+            print(ui.failed(str(e), t("cli.hint_tty", hint=hint)) if hint else ui.failed(str(e)),
+                  file=sys.stderr)
+        else:
+            print(t("cli.error", msg=e), file=sys.stderr)
+            if hint:  # the way out — one more line
+                print(t("cli.hint", hint=hint), file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 130

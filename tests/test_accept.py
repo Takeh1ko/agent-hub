@@ -436,3 +436,188 @@ def test_slow_acceptance_is_not_an_orphan(store, project, tmp_path, monkeypatch)
     assert seen == [(State.ACCEPTING, os.getpid())]  # no orphan event, no "acceptance interrupted"
     assert store.get_task(t.id).state is State.ACCEPTED
     assert "orphan" not in [e.kind for e in store.events(task_id=t.id)]
+
+
+def two_done_tasks(store, project, b_text="B = 1\n", c_text="C = 1\n"):
+    """Two code tasks of one project, both done, each touching its own file."""
+    t1, res1, _ = done_code(store, project, scenarios=[work(path="core/b.py", text=b_text)],
+                            paths=["core/**", "tests/**"], accept=["tests/test_a.py::test_x"])
+    t2, res2, _ = done_code(store, project, scenarios=[work(path="core/c.py", text=c_text)],
+                            paths=["core/**", "tests/**"], accept=["tests/test_a.py::test_x"])
+    assert res1.state is State.DONE and res2.state is State.DONE
+    return t1, t2
+
+
+def test_two_accepts_started_together_merge_one_after_another(store, project, monkeypatch):
+    """Two accepts entered at the same moment merge one after another — each acceptance runs on its own merge."""
+    import threading
+    import time
+
+    from ahub import gates as g
+
+    t1, t2 = two_done_tasks(store, project)
+    own = {f"T{t1.id}": "core/b.py", f"T{t2.id}": "core/c.py"}
+    runs = []  # one entry per acceptance run: the merge it ran on and whether the root moved under it
+    together = threading.Barrier(2)  # the two accepts enter accept() at the same moment
+
+    def tracking_run_acceptance(project_, cwd, nodes, **kw):
+        run = {"label": kw.get("task_label", ""), "start": time.monotonic(),
+               "head": git_out(cwd, "rev-parse", "HEAD").strip(),
+               "files": sorted(f for f in own.values() if (Path(cwd) / f).exists())}
+        time.sleep(0.5)  # the lock is held for a while — a second accept has to wait it out
+        run["end"] = time.monotonic()
+        run["head_after"] = git_out(cwd, "rev-parse", "HEAD").strip()
+        run["subject"] = git_out(cwd, "log", "-1", "--format=%s").strip()
+        runs.append(run)
+        return True, "", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", tracking_run_acceptance)
+    errors = []
+
+    def run_accept(tid):
+        try:
+            together.wait(timeout=10)
+            accept.accept(store, project, tid)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=run_accept, args=(tid,)) for tid in (t1.id, t2.id)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=30)
+
+    assert not errors, errors
+    assert [store.get_task(t.id).state for t in (t1, t2)] == [State.ACCEPTED, State.ACCEPTED]
+
+    first, second = sorted(runs, key=lambda r: r["start"])  # the two runs are one after another
+    assert first["end"] <= second["start"]  # never interleaved
+    assert first["label"] != second["label"] and set(r["label"] for r in runs) == set(own)
+    for run in runs:
+        assert run["subject"].startswith(f"merge {run['label']}:"), run  # its own merge commit
+        assert run["head_after"] == run["head"], run  # and no other merge landed under the running tests
+        assert store.get_task(int(run["label"][1:])).accepted_sha == run["head"]
+    assert first["files"] == [own[first["label"]]]  # the first acceptance saw its own merge only
+    assert second["files"] == sorted(own.values())  # the second one saw both
+
+
+@pytest.mark.parametrize("tty", [True, False])
+def test_second_accept_waits_and_names_the_holder_on_a_tty(store, project, monkeypatch, tty):
+    """A second accept waits for the project lock; on a terminal it names the accept it waits for."""
+    import io
+    import sys
+    import threading
+    import time
+
+    from ahub import gates as g
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+
+    t1, t2 = two_done_tasks(store, project, b_text="B = 2\n", c_text="C = 2\n")
+    first_in = threading.Event()
+    heads = []
+
+    def slow_acceptance(project_, cwd, nodes, **kw):
+        if kw.get("task_label") == f"T{t1.id}":
+            head = git_out(cwd, "rev-parse", "HEAD").strip()
+            first_in.set()
+            time.sleep(0.5)
+            heads.append((head, git_out(cwd, "rev-parse", "HEAD").strip()))
+        return True, "", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", slow_acceptance)
+    out = io.StringIO()
+    out.isatty = lambda: tty  # type: ignore[assignment]
+    monkeypatch.setattr(sys, "stdout", out)
+
+    threads = [threading.Thread(target=accept.accept, args=(store, project, tid)) for tid in (t1.id, t2.id)]
+    threads[0].start()
+    assert first_in.wait(timeout=10), "the first accept did not reach the acceptance"
+    threads[1].start()  # the second one has to wait for the lock the first one holds
+    for th in threads:
+        th.join(timeout=30)
+
+    assert [store.get_task(t.id).state for t in (t1, t2)] == [State.ACCEPTED, State.ACCEPTED]
+    assert heads and heads[0][0] == heads[0][1]  # nothing merged into the root while the tests ran
+    line = f"waiting for the accept of T{t1.id}…\n"
+    if tty:
+        assert out.getvalue().count(line) == 1  # one line, naming the holder, printed once
+    else:
+        assert out.getvalue() == ""  # in a pipe the accept output is unchanged
+
+
+def test_accept_waiting_for_the_lock_keeps_the_lease(store, project, monkeypatch):
+    """A long wait for the project lock is not an expired lease — the service must not call the waiter an orphan."""
+    import threading
+    import time
+
+    from ahub import gates as g
+    from ahub import transitions
+    from ahub.time import now_ms
+
+    t1, t2 = two_done_tasks(store, project, b_text="B = 3\n", c_text="C = 3\n")
+    first_in = threading.Event()
+    seen = []
+
+    def slow_acceptance(project_, cwd, nodes, **kw):
+        if kw.get("task_label") == f"T{t1.id}":
+            first_in.set()
+            time.sleep(0.6)  # longer than the lease below — the waiter is queued all this time
+            waiter = store.get_task(t2.id)  # the verdict is read here: the wait is over by the time the test asserts
+            seen.append((waiter, transitions.is_orphan(waiter, now_ms())))
+        return True, "", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", slow_acceptance)
+    monkeypatch.setattr(accept, "RENEW_S", 0.05)
+    monkeypatch.setattr(accept, "ACCEPT_LEASE_MS", 200)  # without renewal it would be gone before the wait is over
+    threads = [threading.Thread(target=accept.accept, args=(store, project, tid)) for tid in (t1.id, t2.id)]
+    threads[0].start()
+    assert first_in.wait(timeout=10)
+    threads[1].start()
+    for th in threads:
+        th.join(timeout=30)
+
+    assert store.get_task(t2.id).state is State.ACCEPTED
+    waiter, orphan = seen[0]
+    assert waiter.state is State.ACCEPTING  # claimed and queued, its merge is not in the root yet
+    assert not orphan  # the lease keeper runs while it waits
+
+
+def test_second_accept_merges_after_the_first_rolled_back(store, project, monkeypatch):
+    """The first accept goes red and rolls its merge back — the waiting second one then merges onto a clean root."""
+    import threading
+    import time
+
+    from ahub import gates as g
+
+    t1, t2 = two_done_tasks(store, project, b_text="B = 4\n", c_text="C = 4\n")
+    first_in = threading.Event()
+
+    def red_first_acceptance(project_, cwd, nodes, **kw):
+        if kw.get("task_label") == f"T{t1.id}":
+            first_in.set()
+            time.sleep(0.4)
+            return False, "FAILED tests/test_a.py", "pytest"
+        return True, "", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", red_first_acceptance)
+
+    def run_first():
+        with pytest.raises(accept.DecisionError, match="приёмка красная"):
+            accept.accept(store, project, t1.id)
+
+    threads = [threading.Thread(target=run_first),
+               threading.Thread(target=accept.accept, args=(store, project, t2.id))]
+    threads[0].start()
+    assert first_in.wait(timeout=10)
+    threads[1].start()
+    for th in threads:
+        th.join(timeout=30)
+
+    assert store.get_task(t1.id).state is State.NEEDS_DECISION
+    assert store.get_task(t2.id).state is State.ACCEPTED
+    assert not (Path(project.root) / "core" / "b.py").exists()  # the red merge was rolled back
+    assert (Path(project.root) / "core" / "c.py").read_text() == "C = 4\n"
+    assert git_out(project.root, "status", "--porcelain", "--untracked-files=no") == ""

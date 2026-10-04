@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ahub import config, scope
+from ahub.i18n import t as _t
 from ahub.store import Task
 
 _TOKEN = re.compile(r"[\w:.,=<>/*-]+")
@@ -75,6 +76,19 @@ def emit(args, data: Any, text: str) -> None:
         _captured.append(text)
     else:
         sys.stdout.write(text if text.endswith("\n") or not text else text + "\n")
+
+
+def result(args, data: Any, msg: str, nxt_key: str = "", label: str = "") -> None:
+    """What an action did: `⏺ <msg>` with the way out under it on a terminal, the plain two lines in a
+    pipe (that is the one the orchestrator reads — contracts §5)."""
+    from ahub import ui, views
+
+    if ui.colour_on():
+        details = [_t("views.hint_next", cmd=_t(nxt_key, label=label))] if nxt_key else []
+        emit(args, data, ui.item(msg, details))
+        return
+    nxt = views.next_line(nxt_key, label) if nxt_key else ""
+    emit(args, data, f"{msg}\n{nxt}" if nxt else msg)
 
 
 @contextmanager

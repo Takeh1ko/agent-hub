@@ -25,7 +25,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from ahub import config, events, paths, procs, views
+from ahub import config, events, paths, procs, ui, views
 from ahub import log as hublog
 from ahub.scope import Scope
 from ahub.store import Store
@@ -37,7 +37,6 @@ MAX_TURNS = 30
 MAX_PER_HOUR = 6  # hub-wide — one launch per project spends it
 MIN_ALIVE_MS = 20_000  # lived too briefly with no session — messages stay undelivered (a restart picks them up)
 NO_DIR_MS = 15 * 60_000  # how often a project without a directory is reported again
-_no_dir: dict[str, int] = {}  # project → when it was last reported (this process)
 _log = hublog.get("launcher")
 
 
@@ -234,15 +233,16 @@ def _reap(store: Store, ts: int) -> str | None:
     return outcome
 
 
-def _no_directory(target: str, ts: int) -> bool:
+def _no_directory(target: str, ts: int, reported: dict[str, int]) -> bool:
     """A group with no directory: log it once in a while (not on every tick). True — tell the owner.
 
     target='' is the hub-wide group: with no project configured there is nowhere to run it, and that is said
-    too — an owner launch must never sit idle unnoticed.
+    too — an owner launch must never sit idle unnoticed. `reported` (project → when it was last said) is
+    the caller's memory — the bot process that runs for weeks, not a module global.
     """
-    if ts - _no_dir.get(target, 0) < NO_DIR_MS:
+    if ts - reported.get(target, 0) < NO_DIR_MS:
         return False
-    _no_dir[target] = ts
+    reported[target] = ts
     if target:
         _log.warning("cannot launch Claude: no directory for project %s — no such project in the hub config", target)
     else:
@@ -251,14 +251,16 @@ def _no_directory(target: str, ts: int) -> bool:
 
 
 def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, now: int | None = None,
-         spawn=None, binary: str | None = None) -> str:
+         spawn=None, binary: str | None = None, no_dir: dict[str, int] | None = None) -> str:
     """One supervise/launch step.
 
     Returns what happened: idle | running | finished | killed | launched | limit | nodir:<project>
     (nothing will ever be launched for that project — each group with no directory is said once in NO_DIR_MS,
-    one per tick; an empty name — the hub-wide group with no configured project).
+    one per tick; an empty name — the hub-wide group with no configured project). `no_dir` — the caller's
+    memory of what was already reported (without it every tick reports again).
     """
     ts = now if now is not None else now_ms()
+    reported = no_dir if no_dir is not None else {}
     ended = _reap(store, ts)
     if ended is not None:
         return ended
@@ -275,17 +277,19 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
         if _launches_last_hour(store, ts) >= MAX_PER_HOUR:
             return "limit"
         root = _root_for(target, projects, store)
-        binary = binary or claude_bin()
-        if binary is None:
+        exe = binary or claude_bin()
+        if exe is None:
             _log.error("cannot launch Claude: no claude binary")
             return "idle"
         if root is None:
             nodir.append(target)
             continue
         scope = Scope((target,)) if target else Scope()
+        with ui.plain():  # a prompt for Claude, not a screen — no colour, no marks
+            status = views.status_text(store, scope=scope, now=ts)
         prompt = PROMPT.format(project_line=project_line(target),
                                messages="\n".join(f"- {m['text']}" for m in msgs)[:6000],
-                               status=views.status_text(store, scope=scope, now=ts),
+                               status=status,
                                lang_line=_owner_lang_line())
         resume = _session(store, ts, target)
         with store.tx() as c:
@@ -293,7 +297,7 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
                                 (ts, target, resume or "", f"{len(msgs)} messages")).lastrowid)
         log_path = paths.state_dir() / "claude" / f"launch_{lid}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = build_command(binary, prompt, resume)
+        cmd = build_command(exe, prompt, resume)
         if spawn is None:
             with open(log_path, "ab") as out:
                 p = subprocess.Popen(cmd, cwd=root, stdout=out, stderr=subprocess.STDOUT,
@@ -309,6 +313,6 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
                   "resume" if resume else "new session")
         return "launched"
     for target in nodir:
-        if _no_directory(target, ts):
+        if _no_directory(target, ts, reported):
             return f"nodir:{target}"  # one per tick; the rest of them are due on the next ones
     return "running" if alive else "idle"

@@ -19,7 +19,7 @@ from ahub.scope import OWNER, Scope
 from ahub.store import Store
 from ahub.time import fmt_local, now_ms
 from ahub.tui import data
-from tests.conftest import write
+from tests.conftest import rows_ready, write
 
 
 @pytest.fixture
@@ -277,7 +277,7 @@ def test_projects_table_keeps_the_name_whole_in_a_narrow_terminal(hub, store, ca
     monkeypatch.setenv("COLUMNS", "60")
     out = ahub(capsys, "--lang", "en", "projects")[1]
     lines = out.splitlines()
-    assert "! Ghost" in out and ("\n    A " in out or "\n  A " in out)  # the whole name cells, no `!…`
+    assert "! Ghost" in out and any(ln.strip().startswith("A ") for ln in lines)  # the whole name cells, no `!…`
     assert not any(ln.rstrip().endswith("…") and len(ln.split()) < 3 for ln in lines)
     for dropped in ("path", "questions", "last"):
         assert t(f"projects.col_{dropped}") not in lines[0]
@@ -310,7 +310,7 @@ def test_top_group_money_is_the_true_sum_not_a_sum_of_rounded_cells(hub, store):
         working(store, "A", f"a{i}", go=0.0006)
     working(store, "A", "a4", go=0.0006, usd=0.0004)
     working(store, "B", "b", go=0.01)
-    rows = data.rows(store, {}, {}, now_ms())
+    rows = data.rows(store, {}, now_ms())
     group = {r.project: r for r in rows if r.header}["A"]
     assert group.cost == "0.003"  # 0.0030 go + 0.0004 usd, rounded once
     assert abs(group.go - 0.003) < 1e-12 and group.usd == 0.0004
@@ -335,7 +335,7 @@ def test_top_filtered_history_is_complete(hub, store):
 
 def test_top_rows_are_grouped_by_project(hub, store):
     tids = filled(store)
-    rows = data.rows(store, {}, {}, now_ms())
+    rows = data.rows(store, {}, now_ms())
     groups = [r for r in rows if r.header]
     assert [r.project for r in groups] == ["A", "B"]
     assert [r.label for r in groups] == ["A", "B"]
@@ -355,22 +355,22 @@ def test_top_group_row_is_money_of_the_shown_tasks_only(hub, store):
         transitions.move(store, done, st)
     session(store, done, "spark", 5.00)
     working(store, "B", "c", go=0.01)
-    groups = {r.project: r.cost for r in data.rows(store, {}, {}, now_ms()) if r.header}
+    groups = {r.project: r.cost for r in data.rows(store, {}, now_ms()) if r.header}
     assert groups == {"A": "0.100", "B": "0.010"}
-    old = {r.project: r.cost for r in data.rows(store, {}, {}, now_ms(), history=True) if r.header}
+    old = {r.project: r.cost for r in data.rows(store, {}, now_ms(), history=True) if r.header}
     assert old["A"] == "5.100"
 
 
 def test_top_one_project_needs_no_group_row(hub, store):
     """A single project in the table: no header row — the name would say nothing new."""
     working(store, "A", "only one")
-    rows = data.rows(store, {}, {}, now_ms())
+    rows = data.rows(store, {}, now_ms())
     assert [r.header for r in rows] == [False]
 
 
 def test_top_filters_to_one_project(hub, store):
     filled(store)
-    only_a = data.rows(store, {}, {}, now_ms(), only="A")
+    only_a = data.rows(store, {}, now_ms(), only="A")
     assert [r.project for r in only_a] == ["A", "A"]
     assert not any(r.header for r in only_a)  # one project left — no header
     screen, _live, _pulses = data.snapshot(store, projects=[], only="B")
@@ -400,21 +400,22 @@ async def test_top_key_narrows_the_table_to_one_project(hub, store):
     from ahub.tui.app import TopApp
 
     tids = filled(store)
+    whole = [0, tids["a_working"], tids["a_done"], 0, tids["b_working"], tids["b_queued"]]
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot, want=whole)  # the refresh of the `o` key lands in its own time
         assert app._ids[0] == 0  # the header row of A
-        assert app._ids == [0, tids["a_working"], tids["a_done"], 0, tids["b_working"], tids["b_queued"]]
         await pilot.press("o")
-        await pilot.pause(0.4)
-        assert app.project == "A" and app._ids == [tids["a_working"], tids["a_done"]]  # A alone
+        await rows_ready(app, pilot, want=[tids["a_working"], tids["a_done"]])
+        assert app.project == "A"  # A alone
         assert "проект: A" in str(app.query_one("#mode").render())
         await pilot.press("o")
-        await pilot.pause(0.4)
-        assert app.project == "B" and app._ids == [tids["b_working"], tids["b_queued"]]
+        await rows_ready(app, pilot, want=[tids["b_working"], tids["b_queued"]])
+        assert app.project == "B"
         await pilot.press("o")
-        await pilot.pause(0.4)
-        assert app.project == "" and len(app._ids) == 6  # back to every project
+        await rows_ready(app, pilot, want=whole)
+        assert app.project == ""  # back to every project
 
 
 async def test_top_header_row_opens_nothing(hub, store):
@@ -425,6 +426,7 @@ async def test_top_header_row_opens_nothing(hub, store):
     app = TopApp(store=store, projects=[], control=True)
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot, want=6)
         assert app.query_one("#tasks").cursor_row == 0
         await pilot.press("enter")  # the transcript of... no task
         await pilot.pause(0.3)
@@ -455,7 +457,7 @@ async def test_top_project_filter_waits_for_the_refresh_in_flight(hub, store, mo
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
-        assert len(app._ids) == 6
+        await rows_ready(app, pilot, want=6)
         gate, real = threading.Event(), tdata.snapshot
         monkeypatch.setattr(tdata, "snapshot",
                             lambda *a, **kw: (gate.wait(10), real(*a, **kw))[1])
@@ -467,9 +469,8 @@ async def test_top_project_filter_waits_for_the_refresh_in_flight(hub, store, mo
         assert app.project == "A" and app._pending is True and len(app._ids) == 6
         monkeypatch.setattr(tdata, "snapshot", real)  # the kept request must not wait at the gate
         gate.set()  # the refresh in flight ends...
-        await pilot.pause(0.5)  # ...and the kept request is served right after it
+        await rows_ready(app, pilot, want=[tids["a_working"], tids["a_done"]])  # ...and the kept one is served
         assert app._pending is False
-        assert app._ids == [tids["a_working"], tids["a_done"]]
 
 
 async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
@@ -480,6 +481,7 @@ async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot, want=6)
         app.query_one("#tasks").move_cursor(row=3)  # the header row of B
         await pilot.pause(2.5)  # a refresh of the screen
         assert app.query_one("#tasks").cursor_row == 3
@@ -493,6 +495,7 @@ async def test_top_cursor_survives_a_refresh_that_empties_the_table(hub, store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot, want=6)
         app.query_one("#tasks").move_cursor(row=3)  # the header row of B
         ahead = {State.QUEUED: (State.PREPARING, State.WORKING, State.DONE, State.ACCEPTED),
                  State.WORKING: (State.DONE, State.ACCEPTED), State.DONE: (State.ACCEPTED,)}
@@ -500,7 +503,7 @@ async def test_top_cursor_survives_a_refresh_that_empties_the_table(hub, store):
             for st in ahead[store.get_task(tid).state]:
                 transitions.move(store, tid, st)
         app.refresh_data()
-        await pilot.pause(0.4)
+        await rows_ready(app, pilot, want=[])
         assert app._ids == [] and app.selected() is None
         assert app.query_one("#tasks").cursor_row == 0
         assert "нет задач" in str(app.query_one("#detail").render())

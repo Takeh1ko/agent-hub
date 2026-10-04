@@ -10,7 +10,7 @@ import time
 import pytest
 
 from ahub import comms, events, transitions
-from ahub.model import State
+from ahub.model import Ev, State
 from ahub.scope import Scope
 from ahub.store import Store
 from ahub.tg import core, launcher
@@ -262,9 +262,11 @@ def test_a_group_without_a_directory_is_reported_once(store, tmp_path, caplog):
     a, _b = two_projects(tmp_path)
     comms.owner_message(store, "по Z: в никуда", project="Z")  # Z is not a project of this hub
     sp = Spawner()
+    said: dict[str, int] = {}  # the memory of what was reported — the caller's, not a module global
     with caplog.at_level("WARNING", logger="launcher"):
-        assert launcher.tick(store, projects=[a], spawn=sp, binary="claude") == "nodir:Z"
-        assert launcher.tick(store, projects=[a], spawn=sp, binary="claude") == "idle"  # said once
+        assert launcher.tick(store, projects=[a], spawn=sp, binary="claude", no_dir=said) == "nodir:Z"
+        assert launcher.tick(store, projects=[a], spawn=sp, binary="claude", no_dir=said) == "idle"  # said once
+        assert list(said) == ["Z"] and said["Z"] > 0  # the memory of it is the caller's
     assert [r.message for r in caplog.records] == [
         "cannot launch Claude: no directory for project Z — no such project in the hub config"]
     assert sp.calls == []
@@ -274,24 +276,25 @@ def test_the_owner_group_without_any_project_is_reported_once(store, caplog):
     """'' is a target too: with no project configured the hub-wide group has no directory — say it, never idle."""
     comms.owner_message(store, "всем сразу", project="")
     sp = Spawner()
+    said: dict[str, int] = {}
     with caplog.at_level("WARNING", logger="launcher"):
-        assert launcher.tick(store, projects=[], spawn=sp, binary="claude") == "nodir:"
-        assert launcher.tick(store, projects=[], spawn=sp, binary="claude") == "idle"  # said once
+        assert launcher.tick(store, projects=[], spawn=sp, binary="claude", no_dir=said) == "nodir:"
+        assert launcher.tick(store, projects=[], spawn=sp, binary="claude", no_dir=said) == "idle"  # said once
     assert [r.message for r in caplog.records] == [
         "cannot launch Claude: no directory for the hub-wide group — no projects in the hub config"]
     assert sp.calls == []
 
 
-def test_every_group_without_a_directory_is_reported(store, monkeypatch, caplog):
+def test_every_group_without_a_directory_is_reported(store, caplog):
     """'' and a project that left the hub both have nowhere to run: each is reported once, not only the first."""
-    monkeypatch.setattr(launcher, "_no_dir", {})  # the once-in-a-while memory starts empty
     comms.owner_message(store, "всем сразу", project="")
     comms.owner_message(store, "по Z: в никуда", project="Z")  # Z is not a project of this hub
     sp = Spawner()
+    said: dict[str, int] = {}
     with caplog.at_level("WARNING", logger="launcher"):
-        first = launcher.tick(store, projects=[], spawn=sp, binary="claude")
-        second = launcher.tick(store, projects=[], spawn=sp, binary="claude")
-        third = launcher.tick(store, projects=[], spawn=sp, binary="claude")
+        first = launcher.tick(store, projects=[], spawn=sp, binary="claude", no_dir=said)
+        second = launcher.tick(store, projects=[], spawn=sp, binary="claude", no_dir=said)
+        third = launcher.tick(store, projects=[], spawn=sp, binary="claude", no_dir=said)
     assert [first, second] == ["nodir:", "nodir:Z"]  # one per tick — the older group first
     assert third == "idle"  # both said once
     assert [r.message for r in caplog.records] == [
@@ -410,7 +413,7 @@ async def test_background_one_pass(store, monkeypatch):
     comms.say(store, "T12 готова")
     comms.ask(store, "сливать?", ["да", "нет"])
     comms.raise_alarm(store, "opencode лёг", critical=True)
-    monkeypatch.setattr(tgrun.launcher, "tick", lambda s: "idle")
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda *a, **kw: "idle")
 
     async def stop(_):
         raise asyncio.CancelledError
@@ -433,7 +436,7 @@ async def test_background_tells_the_owner_about_a_project_without_a_directory(st
     from ahub.tg import run as tgrun
 
     core.remember_chat(store, 7)
-    monkeypatch.setattr(tgrun.launcher, "tick", lambda s: "nodir:B")
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda *a, **kw: "nodir:B")
 
     async def stop(_):
         raise asyncio.CancelledError
@@ -454,7 +457,7 @@ async def test_background_tells_the_owner_when_the_hub_has_no_projects(store, mo
     from ahub.tg import run as tgrun
 
     core.remember_chat(store, 7)
-    monkeypatch.setattr(tgrun.launcher, "tick", lambda s: "nodir:")
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda *a, **kw: "nodir:")
 
     async def stop(_):
         raise asyncio.CancelledError
@@ -470,6 +473,56 @@ async def test_background_tells_the_owner_when_the_hub_has_no_projects(store, mo
 def test_dispatcher_builds(store):
     from ahub.tg import run as tgrun
     assert tgrun.build_dispatcher(store) is not None
+
+
+async def test_a_reply_to_a_question_forgets_its_key(store, monkeypatch):
+    """The bot runs for weeks: the map of question messages must not grow one entry per question asked."""
+    from types import SimpleNamespace
+
+    from ahub.tg import run as tgrun
+
+    dp = tgrun.build_dispatcher(store)
+    handler = next(h.callback for h in dp.sub_routers[0].message.handlers if h.callback.__name__ == "_text")
+
+    class FakeMsg:  # only what the handler reads: the chat, the replied-to message, the text
+        def __init__(self, chat_id: int, text: str, reply_to: int | None = None) -> None:
+            self.chat = SimpleNamespace(id=chat_id)
+            self.text = text
+            self.reply_to_message = SimpleNamespace(message_id=reply_to) if reply_to else None
+            self.answers: list[str] = []
+
+        async def answer(self, text: str, **_kw) -> None:
+            self.answers.append(text)
+
+    monkeypatch.setattr(tgrun, "_QMSG", {})
+    qid = comms.ask(store, "сливать?", ["да", "нет"])
+    tgrun._QMSG[(7, 1)] = qid
+    msg = FakeMsg(7, "да", reply_to=1)
+    await handler(msg)
+    assert msg.answers and comms.question(store, qid)["status"] == "answered"
+    assert tgrun._QMSG == {}  # the entry is gone with the answer
+
+    # a plain message in the same chat is not an answer — the map stays empty
+    plain = FakeMsg(7, "просто текст")
+    await handler(plain)
+    assert tgrun._QMSG == {}
+
+
+async def test_the_bot_writes_no_heartbeat_of_its_own(store, monkeypatch):
+    """`tg_heartbeat` was written with a monotonic clock and read by nobody — it is gone."""
+    import asyncio
+
+    from ahub.tg import run as tgrun
+
+    async def stop(_):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", stop)
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda *a, **kw: "idle")
+    with pytest.raises(asyncio.CancelledError):
+        await tgrun.background(FakeBot(), store)
+    assert store.meta_get("tg_heartbeat") is None
+    assert not hasattr(tgrun, "HEARTBEAT_KEY")
 
 
 def test_chats_empty_and_fallback(store, tmp_path, monkeypatch):
@@ -558,3 +611,34 @@ def test_help_and_card_en(store, monkeypatch):
     assert not _re.search(r"[а-яА-ЯёЁ]", rep.text + card.text)
     assert card.buttons[0][0].data == "tasks"  # button codes are not translated
     _reset()
+
+
+def test_alarms_for_tg_filters_non_alarms_and_sent_in_sql(store):
+    """alarms_for_tg must only fetch and return unsent alarms, ignoring other events in SQL (Finding 3)."""
+    t0 = 1000
+    store.add_event(Ev.DONE, task_id=1, now=t0)
+    store.add_event(Ev.ANSWER, payload={"text": "ok"}, now=t0)
+    store.add_event(Ev.OWNER_MESSAGE, payload={"text": "hello"}, now=t0)
+
+    # Plain alarm, fresh (not escalated yet)
+    comms.raise_alarm(store, "disk warming", critical=False, now=t0)
+    # Critical alarm, fresh (escalated at once)
+    comms.raise_alarm(store, "database corrupt", critical=True, now=t0)
+    # Already sent alarm
+    sent_id = comms.raise_alarm(store, "network down", critical=True, now=t0)
+    comms.mark_tg_sent(store, [sent_id], now=t0)
+
+    # Right after creation (t0): only the unsent critical alarm is returned
+    due = comms.alarms_for_tg(store, now=t0)
+    assert len(due) == 1
+    assert due[0].payload["text"] == "database corrupt"
+
+    # After escalate_ms: the plain alarm is returned too
+    due_later = comms.alarms_for_tg(store, now=t0 + comms.ESCALATE_MS + 1)
+    assert len(due_later) == 2
+    assert {e.payload["text"] for e in due_later} == {"database corrupt", "disk warming"}
+
+    # Mark them sent: nothing due
+    comms.mark_tg_sent(store, [e.id for e in due_later], now=t0 + comms.ESCALATE_MS + 1)
+    assert comms.alarms_for_tg(store, now=t0 + comms.ESCALATE_MS + 1) == []
+

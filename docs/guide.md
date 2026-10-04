@@ -68,7 +68,7 @@ Roles:
 | Role | What it does |
 |---|---|
 | `executor` | works on `code` tasks: writes code and tests in the task copy, commits |
-| `reviewer` | the review panel: fresh sessions, one verdict each, disputes and fixes |
+| `reviewer` | the review panel: fresh sessions, one verdict each, disputes and fixes — and `review` tasks |
 | `scout` | `scout` tasks: reads and reports, changes nothing |
 | `routine` | `routine` tasks: light file work, no acceptance tests |
 | `observer` | watches the hub itself: a code check every 5 min, a model review every 30 min |
@@ -90,13 +90,14 @@ ahub task new --kind code --title "add retry to the payment client" \
 |---|---|---|
 | `scout` | a report | the report exists and fits the shape; nothing changed |
 | `code` | a branch + a report | a commit exists, the diff ⊆ `--paths`, acceptance is green under the project lock |
+| `review` | findings (of a branch, a commit, a range or files) | no gates; every reviewer submits a verdict, nothing changed |
 | `routine` | changes + a report | a commit exists, the diff ⊆ `--paths` |
 
 Flags worth knowing: `--paths` (allowed files, comma-separated globs), `--accept` (pytest nodes that must pass),
 `--model` (an alias, otherwise the role default), `--budget` (Go dollars for the whole task) and `--budget-usd`
 (real money), `--after T3,T4` (start only after those tasks are accepted), `--review` / `--rounds` / `--no-review`
-(the panel), `--time-limit` (minutes), `--resources` (make the task exclusive), `--draft` (file a draft instead of
-a task).
+(the panel), `--time-limit` (minutes), `--input` (what a `review` task looks at: a branch, a sha, `a..b` or files),
+`--resources` (make the task exclusive), `--draft` (file a draft instead of a task).
 
 A task is validated before anything is paid for: the allowed files must be inside the project's `allowed_paths`,
 the files to read must exist, the acceptance must collect, the model must be available. A refusal comes with the

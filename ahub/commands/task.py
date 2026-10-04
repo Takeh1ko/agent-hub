@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from ahub import events, scope, tasks, transitions, views
-from ahub.cliutil import CliError, add_project_arg, add_scope_args, check_task, emit, resolve_project
+from ahub.cliutil import CliError, add_project_arg, add_scope_args, check_task, emit, resolve_project, result
 from ahub.model import ACTIVE, WAITING_DECISION, Kind, State, parse_task_id
 from ahub.service import live_workers
 from ahub.store import Store, Task
@@ -71,9 +71,8 @@ def cmd_new(args) -> int:
         extra = _t("task.review_extra", models="+".join(t.review["models"]), rounds=t.review["rounds"])
     else:
         extra = ""
-    text = _t("task.created", label=t.label, word=word, kind=t.kind.value, executor=t.executor, extra=extra)
-    text += "\n" + views.next_line("views.next_new", t.label)
-    emit(args, {"id": t.id, "label": t.label, "state": t.state.value}, text)
+    msg = _t("task.created", label=t.label, word=word, kind=t.kind.value, executor=t.executor, extra=extra)
+    result(args, {"id": t.id, "label": t.label, "state": t.state.value}, msg, "views.next_new", t.label)
     return 0
 
 
@@ -108,9 +107,11 @@ def cmd_status(args) -> int:
 
 def cmd_result(args) -> int:
     store = Store()
+    live = live_workers()
     t = _task(store, args.task, args)
     events.ack_task(store, t.id)
-    emit(args, {"task": asdict(t)}, views.result_text(store, t, full=args.full, max_bytes=args.max_bytes))
+    emit(args, {"task": asdict(t)},
+         views.result_text(store, t, full=args.full, max_bytes=args.max_bytes, live=live))
     return 0
 
 
@@ -143,8 +144,7 @@ def _decide(args, fn, next_key: str = "") -> int:
         msg = fn(store, t)
     except DecisionError as e:
         raise CliError(str(e), hint=getattr(e, "hint", "")) from e
-    text = msg + ("\n" + views.next_line(next_key, t.label) if next_key else "")
-    emit(args, {"id": t.id, "result": msg}, text)
+    result(args, {"id": t.id, "result": msg}, msg, next_key, t.label)
     return 0
 
 
@@ -181,7 +181,7 @@ def cmd_edit(args) -> int:
     review = _csv(args.review) or None
     return _decide(args, lambda s, t: accept.edit(s, _project_of(s, t), t.id, spec=spec, title=args.title,
                                                   review=review, rounds=args.rounds, model=args.model,
-                                                  by=args.by))
+                                                  input=args.input, by=args.by))
 
 
 def cmd_extend(args) -> int:
@@ -216,8 +216,8 @@ def cmd_stop(args) -> int:
                                        by=args.by)
     except transitions.TransitionError as e:
         raise CliError(str(e), hint=_t("hint.status_task", label=t.label)) from e
-    text = _t("task.stopped", label=t.label) if how == "stopped" else _t("task.stop_requested", label=t.label)
-    emit(args, {"id": t.id, "result": how}, text + "\n" + views.next_line("views.next_task", t.label))
+    msg = _t("task.stopped", label=t.label) if how == "stopped" else _t("task.stop_requested", label=t.label)
+    result(args, {"id": t.id, "result": how}, msg, "views.next_task", t.label)
     return 0
 
 
@@ -231,8 +231,8 @@ def cmd_nudge(args) -> int:
         transitions.request_nudge(store, t.id, text=args.text, by=args.by)
     except transitions.TransitionError as e:
         raise CliError(str(e), hint=_t("hint.status_task", label=t.label)) from e
-    emit(args, {"id": t.id, "result": "requested", "text": args.text},
-         _t("task.nudge_requested", label=t.label))
+    result(args, {"id": t.id, "result": "requested", "text": args.text},
+           _t("task.nudge_requested", label=t.label))
     return 0
 
 
@@ -339,6 +339,7 @@ def register(subparsers) -> None:
     ed.add_argument("--review", help=t("help.task_edit_review"))
     ed.add_argument("--rounds", type=int, help=t("help.task_edit_rounds"))
     ed.add_argument("--model", help=t("help.task_edit_model"))
+    ed.add_argument("--input", help=t("help.task_new_input"))
     ed.add_argument("--by", default="orchestrator")
     add_scope_args(ed)
     ed.set_defaults(func=cmd_edit)

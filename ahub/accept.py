@@ -1,7 +1,8 @@
 """Decisions on results (V15–V18, architecture §6.7–§6.8): accept/merge, rework, reject, orchestrator edit,
 path extension, budget top-up, model change, resume with a new brief.
 
-Merge: task → "accepting" (lease held by whoever accepts; a second "accept" is refused) → gates at the copy's
+Merge: task → "accepting" (lease held by whoever accepts; a second "accept" is refused) → a per-project flock
+(the whole sequence below is one at a time per project, a second accept waits) → gates at the copy's
 current HEAD (orchestrator edit — if HEAD ≠ worker result commit: legitimate, with an event) → in the project root
 `git merge --no-ff` into the work branch → acceptance under the test resource → red — roll the merge back →
 push per config → "accepted", task_cleanup hook, copy and branch removed, archived.
@@ -18,11 +19,16 @@ acceptance is not an orphan, and `service` leaves an "accepting" task with a liv
 
 from __future__ import annotations
 
+import fcntl
 import os
+import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from ahub import archive, events, gates, prepare, reasons, registry, tasks, transitions, workspace
+from ahub import archive, events, gates, paths, prepare, reasons, registry, tasks, transitions, workspace
 from ahub import log as hublog
 from ahub.config import ProjectConfig
 from ahub.engine import owner_token
@@ -35,6 +41,7 @@ _log = hublog.get("accept")
 
 ACCEPT_LEASE_MS = transitions.DEFAULT_LEASE_MS  # the accept process holds the lease while it runs
 RENEW_S = 20.0  # how often the lease is renewed during acceptance (minutes-long runs on a big repo)
+LOCK_POLL_S = 0.2  # how often a waiting accept retries the project accept lock
 
 
 class DecisionError(RuntimeError):
@@ -97,6 +104,68 @@ def _root_ready(project: ProjectConfig) -> None:
         raise DecisionError(_t("accept.root_dirty", files=", ".join(x[3:] for x in dirty[:5])))
 
 
+def _is_tty() -> bool:
+    try:
+        return sys.stdout.isatty()
+    except (AttributeError, ValueError):  # a replaced or closed stdout
+        return False
+
+
+def _holder_label(fd: int, tries: int = 1) -> str:
+    """The label the lock holder wrote in ('' — it has just taken the lock, or the write has not landed).
+
+    The flock and the label are two steps, so a waiter that reads in between sees an empty file — hence `tries`.
+    """
+    for _ in range(tries):
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            raw = os.read(fd, 200).decode("utf-8", errors="replace").strip()
+        except OSError:
+            raw = ""
+        if raw:
+            return raw.splitlines()[0]
+        time.sleep(0.05)  # the holder writes it within microseconds of the flock
+    return ""
+
+
+@contextmanager
+def _project_lock(project: ProjectConfig, t: Task) -> Iterator[None]:
+    """One accept at a time per project: the whole merge -> acceptance -> rollback-or-push under an flock.
+
+    Two accepts of one project interleaved once: the second merge moved the root under a running acceptance, the red
+    one could no longer roll its merge back ("acceptance is red after the merge, but the root moved"), and both
+    merges went to the branch. The lock file is in the hub data dir, keyed by the project name; the holder writes
+    its label in, so a waiter can name it. A dead holder releases the flock with its fd — nobody waits forever.
+    """
+    lock_file = paths.accept_lock_path(project.name)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o666)
+    try:
+        waited = False
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not waited:
+                    waited = True
+                    _log.info("accept T%d: waiting for the project accept lock", t.id, extra={"task": t.id})
+                    if _is_tty():  # one line on a terminal; in a pipe the accept output is unchanged
+                        sys.stdout.write(_t("accept.waiting", label=_holder_label(fd, tries=10)) + "\n")
+                        sys.stdout.flush()
+                time.sleep(LOCK_POLL_S)
+        try:
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, f"{t.label}\n".encode("utf-8"))
+            yield
+        finally:
+            os.ftruncate(fd, 0)  # the holder is named only while it holds the lock
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orchestrator") -> str:
     t = _get(store, task_id)
     if t.kind not in CHANGES_FILES:
@@ -122,7 +191,11 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
     try:
         with transitions.keep_lease(store, t.id, owner, lease_ms=ACCEPT_LEASE_MS, interval_s=RENEW_S,
                                     name=f"accept-lease-T{t.id}"):
-            return _merge(store, project, _get(store, t.id), owner, by, merged=merged)
+            # the lease keeper wraps the lock: a long wait for it is not an expired lease either
+            with _project_lock(project, t):
+                _root_ready(project)  # the root may have moved or got dirty while we were waiting for the lock
+                merged = _merged_sha(project, t)  # so may the branch: an interrupted accept is re-read under the lock
+                return _merge(store, project, _get(store, t.id), owner, by, merged=merged)
     except DecisionError as e:
         _back(store, t.id, owner, e.reason or str(e))
         raise
@@ -183,7 +256,8 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *
             if head_now != merged:  # someone committed into the work branch meanwhile — leave foreign commits alone
                 raise DecisionError(_t("accept.root_moved", now=head_now[:10], merged=merged[:10]),
                                     reasons.dump("root_moved", now=head_now[:10], merged=merged[:10]))
-            rr = workspace.git(project.root, "reset", "--keep", "HEAD~1", check=False)  # --keep leaves foreign dirt alone
+            # --keep leaves foreign dirt alone; it refuses rather than overwrite it
+            rr = workspace.git(project.root, "reset", "--keep", "HEAD~1", check=False)
             head_after_reset = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
             if rr.returncode != 0 or head_after_reset == merged:
                 err = (rr.stderr or rr.stdout).strip()[-300:] or "reset did not move HEAD"
@@ -265,7 +339,7 @@ def review_started(store: Store, task_id: int) -> bool:
 
 def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None = None,
          title: str | None = None, review: list[str] | None = None, rounds: int | None = None,
-         model: str | None = None, by: str = "orchestrator") -> str:
+         model: str | None = None, input: str | None = None, by: str = "orchestrator") -> str:
     """New brief: on resume — a fresh executor session (different fingerprint).
 
     review/rounds — before the review starts: the panel decides what the task is checked against, so it
@@ -309,10 +383,19 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
             changes.append(_t("accept.model_edit", old=t.executor or "—", new=model))
             fields["executor"] = model
             limits["fresh_session"] = True  # never resume another model's session
+    cur_input = input.strip() if input is not None else str(t.limits.get("input") or "")
+    if input is not None:
+        if t.kind is not Kind.REVIEW:
+            raise DecisionError(_t("accept.input_not_review", label=t.label))
+        if not input.strip():
+            raise DecisionError(_t("tasks.need_input"))
+        if cur_input != str(t.limits.get("input") or ""):
+            limits["input"] = cur_input
+            changes.append(_t("accept.input_edit", input=cur_input))
     new = tasks.TaskSpec(project=t.project, kind=t.kind, title=title if title is not None else t.title,
-                             spec=spec if spec is not None else t.spec, result_format=t.result_format,
-                             paths=list(t.limits.get("paths") or []), accept=list(t.limits.get("accept") or []),
-                             review_input=str(t.limits.get("input") or ""))
+                         spec=spec if spec is not None else t.spec, result_format=t.result_format,
+                         paths=list(t.limits.get("paths") or []), accept=list(t.limits.get("accept") or []),
+                         review_input=cur_input)
     h = tasks.spec_hash(new)
     if h != t.spec_hash:
         limits["fresh_session"] = True
