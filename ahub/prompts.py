@@ -1,11 +1,21 @@
-"""Worker prompts: minimal, per result contract (contracts §2). Project rules first."""
+"""Worker prompts: global/project/local guidance per role on top of a lean built-in layer."""
 
 from __future__ import annotations
 
-from ahub.config import ProjectConfig
+from dataclasses import dataclass
+from pathlib import Path
+
+from ahub import paths
+from ahub.config import PROJECT_FILE, ProjectConfig
 from ahub.i18n import lang
+from ahub.i18n import t as _t
 from ahub.model import Kind
 from ahub.store import Task
+
+ROLES = ("all", "code", "routine", "scout", "review")
+WARN_BYTES = 4 * 1024
+REFUSE_BYTES = 16 * 1024
+REPORT_LIMIT_KB = 12
 
 DEFAULT_RULES = """# agent-hub worker rules
 - You are in a separate repo copy (git worktree). Never go outside it.
@@ -14,11 +24,90 @@ DEFAULT_RULES = """# agent-hub worker rules
 - Interfaces and names from the task are a contract: do not rename them.
 """
 
-REPORT_LIMIT_KB = 12
+
+@dataclass(frozen=True)
+class PromptLayer:
+    scope: str
+    role: str
+    path: Path
+    content: str
+    exists: bool
+    heading: str
+
+
+def resolve_project_all_file(project: ProjectConfig) -> tuple[Path | None, bool]:
+    """Returns (path, is_legacy). Checks .hub/prompts/all.md first, then legacy project.rules_path()."""
+    hub_all = paths.project_prompts_dir(project.root) / "all.md"
+    if hub_all.is_file():
+        return hub_all, False
+    rp = project.rules_path()
+    if rp is not None and rp.is_file():
+        return rp, True
+    return None, False
+
+
+def assemble_guidance(project: ProjectConfig, role: str) -> tuple[list[str], str, list[PromptLayer]]:
+    """Assemble user guidance for a session role:
+    Order:
+      1. global all.md
+      2. project all.md (or legacy rules)
+      3. local all.md
+      4. global <role>.md (if role != 'all')
+      5. project <role>.md (if role != 'all')
+      6. local <role>.md (if role != 'all')
+    Returns:
+      (sections, summary_line, layers)
+    where each section has heading '## Global guidance', '## Project guidance', or '## Local guidance'.
+    """
+    candidates: list[tuple[str, str, Path, str]] = []
+    # all.md of a, b, c
+    candidates.append(("global", "all", paths.global_prompts_dir() / "all.md", "Global guidance"))
+    p_all_path, _ = resolve_project_all_file(project)
+    p_all_target = p_all_path if p_all_path is not None else paths.project_prompts_dir(project.root) / "all.md"
+    candidates.append(("project", "all", p_all_target, "Project guidance"))
+    candidates.append(("local", "all", paths.local_prompts_dir(project.name) / "all.md", "Local guidance"))
+
+    # role.md of a, b, c
+    if role != "all":
+        candidates.append(("global", role, paths.global_prompts_dir() / f"{role}.md", "Global guidance"))
+        candidates.append(("project", role, paths.project_prompts_dir(project.root) / f"{role}.md", "Project guidance"))
+        candidates.append(("local", role, paths.local_prompts_dir(project.name) / f"{role}.md", "Local guidance"))
+
+    sections: list[str] = []
+    layers: list[PromptLayer] = []
+    used_by_scope: dict[str, list[str]] = {"global": [], "project": [], "local": []}
+
+    for scope, r, path, heading_name in candidates:
+        content = ""
+        exists = False
+        if path.is_file():
+            try:
+                content = path.read_text(encoding="utf-8")
+                exists = True
+            except OSError:
+                pass
+        heading = f"## {heading_name}"
+        layer = PromptLayer(scope=scope, role=r, path=path, content=content, exists=exists, heading=heading)
+        layers.append(layer)
+        if content.strip():
+            sections.append(f"{heading}\n{content.strip()}")
+            if r not in used_by_scope[scope]:
+                used_by_scope[scope].append(r)
+
+    # Form summary: e.g. "built-in + global(code) + project(all, code)"
+    parts = ["built-in"]
+    for sc in ("global", "project", "local"):
+        roles_in_sc = used_by_scope[sc]
+        if roles_in_sc:
+            parts.append(f"{sc}({', '.join(roles_in_sc)})")
+    summary = " + ".join(parts)
+
+    return sections, summary, layers
 
 
 def rules_text(project: ProjectConfig) -> str:
-    p = project.rules_path()
+    """Legacy helper: read project all.md, fallback to project.rules_path() or DEFAULT_RULES."""
+    p, _ = resolve_project_all_file(project)
     if p is not None and p.is_file():
         try:
             return p.read_text(encoding="utf-8")
@@ -73,7 +162,7 @@ def _header(task: Task) -> str:
 def scout_delivery() -> str:
     head = report_heading()
     return f"""## How to submit (required; overrides project rules about commits and reports)
-1. Change and commit nothing in the project — this is reconnaissance. Create files only in `.ahub/`.
+1. Stay in the copy (git worktree); never touch real data or secrets. Change and commit nothing in the project — this is reconnaissance. Create files only in `.ahub/`.
 2. Report — `.ahub/report.md` (<= {REPORT_LIMIT_KB} KB). First section — `{head}`: at most 10 lines, the key
    points needed for a decision. Cite `file:line` for every claim; say what you did not check.
 3. Result — `.ahub/result.json`:
@@ -85,7 +174,9 @@ def scout_delivery() -> str:
 
 
 def scout_prompt(project: ProjectConfig, task: Task) -> str:
-    return "\n\n".join([rules_text(project).strip(), _header(task), scout_delivery()])
+    sections, summary, _ = assemble_guidance(project, "scout")
+    task.limits["prompts"] = summary
+    return "\n\n".join([*sections, _header(task), scout_delivery()])
 
 
 def repair_prompt(problem: str) -> str:
@@ -117,12 +208,12 @@ def nudge_prompt(text: str) -> str:
 
 
 def code_delivery(task: Task) -> str:
-    paths = ", ".join(f"`{p}`" for p in task.limits.get("paths") or [])
+    paths_list = ", ".join(f"`{p}`" for p in task.limits.get("paths") or [])
     accept = task.limits.get("accept") or []
     tests = ("\n".join(f"   - `{a}`" for a in accept)) if accept else "   (no acceptance — routine)"
     commit_lang = "Russian" if lang() == "ru" else "English"
     return f"""## Allowed files
-{paths}
+{paths_list}
 Need more — do not change, write it in the result notes.
 
 ## Acceptance (must be green)
@@ -137,7 +228,7 @@ Need more — do not change, write it in the result notes.
 - No new dependencies.
 
 ## How to submit (required)
-1. Commit as you go: `git add <paths>` by name (never `-A`/`.`), commit message in {commit_lang}. No uncommitted changes at the end.
+1. Stay in the copy (git worktree); never touch real data or secrets. Commit as you go: `git add <paths>` by name (never `-A`/`.`), commit message in {commit_lang}. No uncommitted changes at the end.
 2. Result — `.ahub/result.json`:
    {{"summary": "1-3 sentences", "status": "done", "commit": "<HEAD sha>", "files": ["changed files"],
     "tests": {{"cmd": "...", "ok": true, "tail": "last output lines"}}, "notes": "what is not done / open questions"}}
@@ -148,4 +239,87 @@ Need more — do not change, write it in the result notes.
 
 
 def code_prompt(project: ProjectConfig, task: Task) -> str:
-    return "\n\n".join([rules_text(project).strip(), _header(task), code_delivery(task)])
+    role = "routine" if task.kind is Kind.ROUTINE else "code"
+    sections, summary, _ = assemble_guidance(project, role)
+    task.limits["prompts"] = summary
+    return "\n\n".join([*sections, _header(task), code_delivery(task)])
+
+
+@dataclass(frozen=True)
+class PromptCheckIssue:
+    path: Path
+    severity: str  # "error" | "warning" | "hint"
+    message: str
+    fix: str = ""
+
+
+def check_prompts_for_project(project: ProjectConfig | None = None) -> list[PromptCheckIssue]:
+    """Check prompts directories: unknown files, size over 4 KB, refusal size over 16 KB, legacy rules."""
+    issues: list[PromptCheckIssue] = []
+    dirs: list[tuple[str, Path]] = [("global", paths.global_prompts_dir())]
+    if project is not None:
+        dirs.append(("project", paths.project_prompts_dir(project.root)))
+        dirs.append(("local", paths.local_prompts_dir(project.name)))
+
+    for _scope, d in dirs:
+        if not d.is_dir():
+            continue
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_file():
+                issues.append(PromptCheckIssue(
+                    path=entry,
+                    severity="error",
+                    message=_t("prompts.err_unknown_file", path=str(entry), known=", ".join(f"{r}.md" for r in ROLES)),
+                    fix="remove or rename",
+                ))
+                continue
+            if entry.name not in {f"{r}.md" for r in ROLES}:
+                issues.append(PromptCheckIssue(
+                    path=entry,
+                    severity="error",
+                    message=_t("prompts.err_unknown_file", path=str(entry), known=", ".join(f"{r}.md" for r in ROLES)),
+                    fix="remove or rename",
+                ))
+                continue
+            try:
+                size = entry.stat().st_size
+            except OSError:
+                continue
+            if size > REFUSE_BYTES:
+                issues.append(PromptCheckIssue(
+                    path=entry,
+                    severity="error",
+                    message=_t("prompts.err_size", path=str(entry), kb=size / 1024),
+                    fix="trim guidance under 16 KB",
+                ))
+            elif size > WARN_BYTES:
+                issues.append(PromptCheckIssue(
+                    path=entry,
+                    severity="warning",
+                    message=_t("prompts.warn_size", path=str(entry), kb=size / 1024),
+                    fix="trim guidance under 4 KB",
+                ))
+
+    if project is not None and project.rules:
+        proj_all = paths.project_prompts_dir(project.root) / "all.md"
+        cfg_file = Path(project.root) / PROJECT_FILE
+        if proj_all.is_file():
+            issues.append(PromptCheckIssue(
+                path=cfg_file,
+                severity="hint",
+                message=_t("prompts.legacy_rules_ignored", rules=project.rules),
+                fix="remove rules from .hub.toml",
+            ))
+        else:
+            issues.append(PromptCheckIssue(
+                path=cfg_file,
+                severity="hint",
+                message=_t("prompts.legacy_rules_hint", rules=project.rules),
+                fix="move to .hub/prompts/all.md",
+            ))
+
+    return issues

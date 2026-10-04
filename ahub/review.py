@@ -17,7 +17,7 @@ from ahub import reasons, workspace
 from ahub.config import ProjectConfig
 from ahub.gates import GateResult
 from ahub.model import Kind
-from ahub.prompts import orchestrator_heading, reply_language_line, rules_text
+from ahub.prompts import assemble_guidance, orchestrator_heading, reply_language_line
 from ahub.store import Task
 
 VERDICTS = ("approve", "changes", "dispute")
@@ -89,7 +89,10 @@ def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResul
     those sections are replaced by the input itself (`gate` is then an empty result).
     """
     out = review_path(".", round_no, model).as_posix().removeprefix("./")
-    sections = [rules_text(project).strip(),
+    guidance_sections, summary, _ = assemble_guidance(project, "review")
+    if task.kind is Kind.REVIEW or "prompts" not in task.limits:
+        task.limits["prompts"] = summary
+    sections = [*guidance_sections,
                 f"# Review of {task.label}: {task.title}\nYou are a reviewer in a fresh session; you have not seen "
                 "the worker's work. Do not change or commit project files.",
                 "## Task\n" + strip_arbiter(task.spec.strip() or "(empty description)")]

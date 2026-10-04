@@ -564,7 +564,7 @@ def test_run_all_never_raises(monkeypatch):
         raise RuntimeError("boom")
     monkeypatch.setattr(doctor, "check_git", _boom)
     checks = doctor.run_all()
-    assert len(checks) == 14
+    assert len(checks) == 15
     git = next(c for c in checks if c.name == "git")
     assert git.ok is False and "boom" in git.detail
 
@@ -575,7 +575,7 @@ def test_cli_codes_and_json(capsys, monkeypatch):
     assert cli.main(["--json", "doctor"]) in (0, 1)
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert isinstance(data["checks"], list) and len(data["checks"]) == 14
+    assert isinstance(data["checks"], list) and len(data["checks"]) == 15
     assert secret not in out
     for c in data["checks"]:
         assert set(c) == {"name", "ok", "detail", "fix"}

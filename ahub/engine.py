@@ -664,6 +664,8 @@ class Engine:
         resume_sid = prev[-1].external_id if prev and not t.limits.get("fresh_session") else None  # resume
         self._clear_fresh(t)
         prompt = prompts.CONTINUE_PROMPT if resume_sid else prompts.scout_prompt(self.project, t)
+        if not resume_sid:
+            self.store.update_task(t.id, limits=t.limits)
         r, final = self._step_with_continue(Role.SCOUT, t.executor, prompt, session_id=resume_sid,
                                             log_name="scout",
                                             prompt_kind="continue" if resume_sid else "start")
@@ -834,6 +836,7 @@ class Engine:
             self.store.update_task(t.id, limits=lim)
         if fresh:  # new session (different model/brief, or no session before): full brief + instructions
             prompt, kind = prompts.code_prompt(self.project, t), "start"
+            self.store.update_task(t.id, limits=t.limits)
             if notes:
                 prompt += f"\n\n{prompts.orchestrator_heading(rework=True)}\n" + notes
                 kind = "rework"
@@ -945,6 +948,8 @@ class Engine:
 
         with ThreadPoolExecutor(max_workers=len(models)) as ex:
             results = list(ex.map(one, models))
+        if t.kind is Kind.REVIEW and "prompts" in t.limits:
+            self.store.update_task(t.id, limits=t.limits)
         if (stop := self._review_interrupted(results)) is not None:
             return stop
         self._revert_reviewer(t)

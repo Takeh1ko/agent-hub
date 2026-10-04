@@ -132,6 +132,16 @@ def _budget(a: dict) -> list[str]:
     return _project_flag(a, ["budget", a["task"], "--add", str(a["add"]), "--by", "mcp"])
 
 
+@tool("prompts_show", "Show assembled prompt for a role (all|code|routine|scout|review).",
+      {"role": {"type": "string", "enum": ["all", "code", "routine", "scout", "review"]},
+       "project": S}, ["role"])
+def _prompts_show(a: dict) -> list[str]:
+    argv = ["prompts", "show", a["role"]]
+    if a.get("project"):
+        argv += ["--project", str(a["project"])]
+    return argv
+
+
 def call_cli(argv: list[str]) -> tuple[int, str]:
     from ahub import cli
 

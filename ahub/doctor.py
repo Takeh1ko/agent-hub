@@ -654,6 +654,25 @@ def check_telegram() -> Check:
     return Check("telegram", False, _t("doctor.telegram_no_aiogram"), _t("doctor.telegram_fix"))
 
 
+def check_prompts(root: Path | None = None) -> Check:
+    from ahub import config, prompts
+
+    project = None
+    try:
+        project = config.load_project(root or Path.cwd())
+    except Exception:
+        pass
+    issues = prompts.check_prompts_for_project(project)
+    errors = [i for i in issues if i.severity == "error"]
+    warnings = [i for i in issues if i.severity != "error"]
+    if errors:
+        return Check("prompts", False, _t("doctor.prompts_bad", problems="; ".join(i.message for i in errors)),
+                     "; ".join(i.fix for i in errors if i.fix) or _t("doctor.prompts_fix"))
+    if warnings:
+        return Check("prompts", True, "; ".join(i.message for i in warnings), "")
+    return Check("prompts", True, _t("doctor.prompts_ok"), "")
+
+
 def _safe(name: str, fn) -> Check:
     try:
         return fn()
@@ -688,6 +707,7 @@ def run_all(root: Path | None = None, step: Callable[[], None] | None = None) ->
         ("network", check_network),
         ("claude", check_claude),
         ("claude_skill", lambda: check_claude_skill(root)),
+        ("prompts", lambda: check_prompts(root)),
         ("telegram", check_telegram),
     ]
     out: list[Check] = []
@@ -704,5 +724,6 @@ __all__ = ["Check", "ProviderState", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_WIZA
            "provider_states", "provider_state", "provider_line", "install_hint",
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
            "check_opencode_health", "check_opencode_auth", "check_agy", "check_codex", "check_models",
-           "check_network", "check_claude", "check_claude_skill", "check_telegram", "provider_proxy_detail",
+           "check_network", "check_claude", "check_claude_skill", "check_prompts", "check_telegram",
+           "provider_proxy_detail",
            "skill_path", "settings_path", "bash_allowed", "apparmor_blocks_userns", "codex_sandbox_fix"]

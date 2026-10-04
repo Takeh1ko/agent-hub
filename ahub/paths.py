@@ -62,3 +62,18 @@ def accept_lock_path(project_name: str) -> Path:
     """Per-project accept lock file (serializes merges and acceptance within a project)."""
     safe = re.sub(r"[^\w\-.]", "_", project_name)
     return data_dir() / f"accept-{safe}.lock"
+
+
+def global_prompts_dir() -> Path:
+    """Global prompts directory: ~/.config/ahub/prompts (or AHUB_HOME/config/prompts)."""
+    return config_dir() / "prompts"
+
+
+def project_prompts_dir(project_root: str | Path) -> Path:
+    """Project prompts directory: <repo>/.hub/prompts."""
+    return Path(project_root) / ".hub" / "prompts"
+
+
+def local_prompts_dir(project_name: str) -> Path:
+    """Local project prompts directory: ~/.config/ahub/projects/<project-name>/prompts."""
+    return config_dir() / "projects" / project_name / "prompts"

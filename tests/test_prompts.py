@@ -217,3 +217,355 @@ def test_reviewer_checks_quality_bar(tmp_path, monkeypatch):
     assert "except Exception" in prompt
     assert "stub test" in prompt.lower()
     assert "tests that do not test" in prompt
+
+
+def test_assembly_order_and_headings(tmp_path, monkeypatch):
+    """Layers assemble in exact order: global all, project all, local all, then role global, project, local,
+    under their respective headings, followed by task spec and built-in hub layer LAST."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub import paths, prompts
+    from ahub.store import Store
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    store = Store()
+    tid = store.create_task(project="P", kind="code", title="implement feature", spec="Spec for T1")
+    store.update_task(tid, limits={"paths": ["core/**"], "accept": ["tests/test_a.py::test_x"]})
+    task = store.get_task(tid)
+
+    # 1. Global guidance
+    write(paths.global_prompts_dir() / "all.md", "GLOBAL_ALL_RULE")
+    write(paths.global_prompts_dir() / "code.md", "GLOBAL_CODE_RULE")
+
+    # 2. Project guidance
+    write(paths.project_prompts_dir(project.root) / "all.md", "PROJECT_ALL_RULE")
+    write(paths.project_prompts_dir(project.root) / "code.md", "PROJECT_CODE_RULE")
+
+    # 3. Local guidance
+    write(paths.local_prompts_dir(project.name) / "all.md", "LOCAL_ALL_RULE")
+    write(paths.local_prompts_dir(project.name) / "code.md", "LOCAL_CODE_RULE")
+
+    prompt = prompts.code_prompt(project, task)
+
+    # Check headings and content
+    assert "## Global guidance\nGLOBAL_ALL_RULE" in prompt
+    assert "## Project guidance\nPROJECT_ALL_RULE" in prompt
+    assert "## Local guidance\nLOCAL_ALL_RULE" in prompt
+    assert "## Global guidance\nGLOBAL_CODE_RULE" in prompt
+    assert "## Project guidance\nPROJECT_CODE_RULE" in prompt
+    assert "## Local guidance\nLOCAL_CODE_RULE" in prompt
+
+    # Verify exact order
+    i_g_all = prompt.index("GLOBAL_ALL_RULE")
+    i_p_all = prompt.index("PROJECT_ALL_RULE")
+    i_l_all = prompt.index("LOCAL_ALL_RULE")
+    i_g_code = prompt.index("GLOBAL_CODE_RULE")
+    i_p_code = prompt.index("PROJECT_CODE_RULE")
+    i_l_code = prompt.index("LOCAL_CODE_RULE")
+    i_spec = prompt.index("Spec for T1")
+    i_builtin = prompt.index("## Allowed files")
+    i_submit = prompt.index("## How to submit")
+
+    assert i_g_all < i_p_all < i_l_all < i_g_code < i_p_code < i_l_code < i_spec < i_builtin < i_submit
+
+    # Task limits recorded summary
+    assert task.limits.get("prompts") == "built-in + global(all, code) + project(all, code) + local(all, code)"
+
+
+def test_missing_files(tmp_path, monkeypatch):
+    """Missing prompt files produce no guidance headings; only task header and built-in layer."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub import paths, prompts
+    from ahub.store import Store
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    store = Store()
+    tid = store.create_task(project="P", kind="code", title="implement feature", spec="Spec for T1")
+    store.update_task(tid, limits={"paths": ["core/**"], "accept": []})
+    task = store.get_task(tid)
+
+    # All files missing
+    prompt = prompts.code_prompt(project, task)
+    assert "## Global guidance" not in prompt
+    assert "## Project guidance" not in prompt
+    assert "## Local guidance" not in prompt
+    assert prompt.startswith(f"# Task {task.label} (code): implement feature")
+    assert "## How to submit" in prompt
+    assert task.limits.get("prompts") == "built-in"
+
+    # Only one file present (e.g. project code.md)
+    write(paths.project_prompts_dir(project.root) / "code.md", "ONLY_CODE_RULE")
+    prompt2 = prompts.code_prompt(project, task)
+    assert "## Global guidance" not in prompt2
+    assert "## Local guidance" not in prompt2
+    assert prompt2.count("## Project guidance") == 1
+    assert "ONLY_CODE_RULE" in prompt2
+    assert task.limits.get("prompts") == "built-in + project(code)"
+
+
+def test_legacy_rules(tmp_path, monkeypatch):
+    """rules = '...' in .hub.toml is used as project all.md when .hub/prompts/all.md does not exist."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub import paths, prompts
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    # Create project with legacy rules
+    legacy_file = tmp_path / "proj" / "rules.md"
+    write(legacy_file, "LEGACY_RULES_CONTENT")
+    project = make_project(tmp_path, rules="rules.md")
+
+    # Case 1: .hub/prompts/all.md does not exist
+    sections, summary, _ = prompts.assemble_guidance(project, "code")
+    assert any("LEGACY_RULES_CONTENT" in s for s in sections)
+    assert "project(all)" in summary
+    assert prompts.rules_text(project) == "LEGACY_RULES_CONTENT"
+
+    issues = prompts.check_prompts_for_project(project)
+    hints = [i for i in issues if i.severity == "hint"]
+    assert len(hints) == 1
+    assert "rules" in hints[0].message and ".hub/prompts/all.md" in hints[0].fix
+
+    # Case 2: .hub/prompts/all.md exists
+    write(paths.project_prompts_dir(project.root) / "all.md", "MODERN_RULES_CONTENT")
+    sections2, summary2, _ = prompts.assemble_guidance(project, "code")
+    assert any("MODERN_RULES_CONTENT" in s for s in sections2)
+    assert not any("LEGACY_RULES_CONTENT" in s for s in sections2)
+    assert "project(all)" in summary2
+    assert prompts.rules_text(project) == "MODERN_RULES_CONTENT"
+
+    issues2 = prompts.check_prompts_for_project(project)
+    hints2 = [i for i in issues2 if i.severity == "hint"]
+    assert len(hints2) == 1
+    assert "ignored" in hints2[0].message or "игнорируется" in hints2[0].message or "remove" in hints2[0].fix
+
+
+def test_review_role_used_for_code_review_and_review_kind(tmp_path, monkeypatch):
+    """Reviewers of code tasks and review kind tasks use the 'review' role guidance."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub import gates, paths, review
+    from ahub.store import Store
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    store = Store()
+
+    # Set up prompt files
+    write(paths.project_prompts_dir(project.root) / "all.md", "PROJECT_ALL_RULE")
+    write(paths.project_prompts_dir(project.root) / "code.md", "PROJECT_CODE_RULE")
+    write(paths.project_prompts_dir(project.root) / "review.md", "PROJECT_REVIEW_RULE")
+
+    # 1. Code task review session
+    code_tid = store.create_task(project="P", kind="code", title="fix issue")
+    code_task = store.get_task(code_tid)
+    gate = gates.GateResult(base="b", head="h", diffstat="1 file")
+    code_prompt = review.review_prompt(project, code_task, "diff text", gate, 1, "model")
+
+    assert "PROJECT_REVIEW_RULE" in code_prompt
+    assert "PROJECT_CODE_RULE" not in code_prompt
+    assert "PROJECT_ALL_RULE" in code_prompt
+    assert code_task.limits.get("prompts") == "built-in + project(all, review)"
+    # Built-in submission instructions are at the end
+    assert code_prompt.rfind("verdict") > code_prompt.find("PROJECT_REVIEW_RULE")
+
+    # 2. Review task kind
+    rev_tid = store.create_task(project="P", kind="review", title="review branch", limits={"input": "feature"})
+    rev_task = store.get_task(rev_tid)
+    rev_prompt = review.review_prompt(project, rev_task, "diff text", gate, 1, "model")
+
+    assert "PROJECT_REVIEW_RULE" in rev_prompt
+    assert "PROJECT_CODE_RULE" not in rev_prompt
+    assert rev_task.limits.get("prompts") == "built-in + project(all, review)"
+
+
+def test_check_thresholds(tmp_path, monkeypatch):
+    """ahub prompts check: warning >4 KB, refusal error >16 KB, unknown file names."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from pathlib import Path
+
+    from ahub import cli, doctor, paths, prompts
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    write(Path(project.root) / ".hub.toml", 'schema_version = 2\nname = "P"\n')
+
+    # 1. Clean
+    write(paths.project_prompts_dir(project.root) / "code.md", "short code guidance")
+    assert prompts.check_prompts_for_project(project) == []
+
+    # 2. Size > 4 KB warning
+    write(paths.project_prompts_dir(project.root) / "code.md", "x" * 4097)
+    issues_warn = prompts.check_prompts_for_project(project)
+    assert len(issues_warn) == 1
+    assert issues_warn[0].severity == "warning"
+    assert "4.0 KB" in issues_warn[0].message
+
+    # 3. Size > 16 KB error (refusal level)
+    write(paths.project_prompts_dir(project.root) / "code.md", "x" * 16385)
+    issues_err = prompts.check_prompts_for_project(project)
+    assert len(issues_err) == 1
+    assert issues_err[0].severity == "error"
+    assert "16.0 KB" in issues_err[0].message
+
+    # 4. Unknown file in prompts directory
+    write(paths.project_prompts_dir(project.root) / "code.md", "short")
+    write(paths.project_prompts_dir(project.root) / "unknown.txt", "notes")
+    issues_unknown = prompts.check_prompts_for_project(project)
+    assert any(i.severity == "error" and "unknown.txt" in str(i.path) for i in issues_unknown)
+
+    # Doctor check includes prompts
+    doctor_res = doctor.check_prompts(Path(project.root))
+    assert not doctor_res.ok
+    assert "unknown.txt" in doctor_res.detail
+
+    # CLI check returns 1 on error
+    monkeypatch.chdir(project.root)
+    assert cli.main(["prompts", "check"]) == 1
+
+    # Remove unknown file -> returns 0
+    (paths.project_prompts_dir(project.root) / "unknown.txt").unlink()
+    assert cli.main(["prompts", "check"]) == 0
+
+
+def test_edit_creates_template(tmp_path, monkeypatch, capsys):
+    """ahub prompts edit <role> creates template if missing and invokes editor or prints path."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from pathlib import Path
+
+    from ahub import cli, paths
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    write(Path(project.root) / ".hub.toml", 'schema_version = 2\nname = "P"\n')
+    monkeypatch.chdir(project.root)
+
+    # Unset EDITOR and VISUAL to test fallback output
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.delenv("VISUAL", raising=False)
+
+    # Default: project scope
+    code_path = paths.project_prompts_dir(project.root) / "code.md"
+    assert not code_path.exists()
+    assert cli.main(["prompts", "edit", "code"]) == 0
+    out = capsys.readouterr().out
+    assert str(code_path) in out
+    assert code_path.is_file()
+    content = code_path.read_text(encoding="utf-8")
+    assert "<!-- Guidance for code (project) -->" in content
+
+    # Global scope
+    global_path = paths.global_prompts_dir() / "scout.md"
+    assert not global_path.exists()
+    assert cli.main(["prompts", "edit", "scout", "--global"]) == 0
+    assert global_path.is_file()
+    assert "<!-- Guidance for scout (global) -->" in global_path.read_text(encoding="utf-8")
+
+    # Local scope
+    local_path = paths.local_prompts_dir(project.name) / "review.md"
+    assert not local_path.exists()
+    assert cli.main(["prompts", "edit", "review", "--local"]) == 0
+    assert local_path.is_file()
+    assert "<!-- Guidance for review (local) -->" in local_path.read_text(encoding="utf-8")
+
+    # Test with EDITOR set
+    monkeypatch.setenv("EDITOR", "true")
+    assert cli.main(["prompts", "edit", "code"]) == 0
+
+
+def test_card_line(monkeypatch):
+    """The task card (views.task_text) shows the dim prompts line."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub import views
+    from ahub.store import Store
+
+    store = Store()
+    tid = store.create_task(project="P", kind="code", title="do something")
+    store.update_task(tid, limits={"prompts": "built-in + global(code) + project(all, code)"})
+    task = store.get_task(tid)
+
+    card = views.task_text(store, task)
+    assert "prompts: built-in + global(code) + project(all, code)" in card
+
+
+def test_ahub_home_isolation(tmp_path, monkeypatch):
+    """An isolated instance never reads the real ~/.config prompts."""
+    from ahub import paths, prompts
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    # Real user home config
+    fake_user_home = tmp_path / "user_home"
+    monkeypatch.setenv("HOME", str(fake_user_home))
+    write(fake_user_home / ".config" / "ahub" / "prompts" / "all.md", "LEAK REAL HOME")
+
+    # Isolated AHUB_HOME
+    isolated_dir = tmp_path / "isolated"
+    monkeypatch.setenv("AHUB_HOME", str(isolated_dir))
+
+    # paths.global_prompts_dir() points to isolated_dir / config / prompts
+    assert paths.global_prompts_dir() == isolated_dir / "config" / "prompts"
+    assert paths.local_prompts_dir("P") == isolated_dir / "config" / "projects" / "P" / "prompts"
+
+    project = make_project(tmp_path)
+
+    # When isolated global prompts has content:
+    write(isolated_dir / "config" / "prompts" / "all.md", "ISOLATED HOME PROMPT")
+    sections, _, _ = prompts.assemble_guidance(project, "code")
+    assert any("ISOLATED HOME PROMPT" in s for s in sections)
+    assert not any("LEAK REAL HOME" in s for s in sections)
+
+    # When isolated global prompts is removed:
+    (isolated_dir / "config" / "prompts" / "all.md").unlink()
+    sections_empty, _, _ = prompts.assemble_guidance(project, "code")
+    assert not any("LEAK REAL HOME" in s for s in sections_empty)
+
+
+def test_cli_prompts_and_show(tmp_path, monkeypatch, capsys):
+    """ahub prompts and ahub prompts show CLI subcommands."""
+    import json
+    from pathlib import Path
+
+    from ahub import cli, paths
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    write(Path(project.root) / ".hub.toml", 'schema_version = 2\nname = "P"\n')
+    monkeypatch.chdir(project.root)
+
+    # ahub prompts: shows table and hints for empty roles
+    assert cli.main(["prompts"]) == 0
+    out = capsys.readouterr().out
+    assert "all" in out and "code" in out and "review" in out
+
+    # Add a project prompt
+    write(paths.project_prompts_dir(project.root) / "code.md", "CUSTOM_CODE_GUIDANCE")
+
+    # ahub prompts show code
+    assert cli.main(["prompts", "show", "code"]) == 0
+    out_show = capsys.readouterr().out
+    assert "CUSTOM_CODE_GUIDANCE" in out_show
+    assert "## Project guidance" in out_show
+    assert "## Allowed files" in out_show
+
+    # ahub prompts show code --json
+    assert cli.main(["--json", "prompts", "show", "code"]) == 0
+    out_json = capsys.readouterr().out
+    data = json.loads(out_json)
+    assert data["role"] == "code"
+    assert "project(code)" in data["summary"]
+    assert any(g["scope"] == "project" and "CUSTOM_CODE_GUIDANCE" in g["content"] for g in data["guidance"])
+    assert "CUSTOM_CODE_GUIDANCE" in data["prompt"]
+
+    # Unknown role
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["prompts", "show", "invalid_role"])
+    assert exc.value.code == 2
+

@@ -13,7 +13,7 @@ from typing import Any
 from ahub import archive, events, pulse, reasons, ui, workspace
 from ahub.i18n import Words, plural
 from ahub.i18n import t as _t
-from ahub.model import ACTIVE, FINAL, WAITING_DECISION, State
+from ahub.model import ACTIVE, FINAL, WAITING_DECISION, Kind, State
 from ahub.scope import OWNER, Scope
 from ahub.scope import where as scope_where  # the SQL condition of a scope
 from ahub.store import Store, Task
@@ -349,6 +349,24 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
         since.append((_t("views.lbl_after"), ", ".join(f"T{a}" for a in t.after)))
     groups.append([(_t("views.lbl_age"), since)])
     out.extend(_facts(groups, w))
+
+    prompts_line = t.limits.get("prompts")
+    if not prompts_line:
+        try:
+            from ahub import config, prompts
+            projects, _ = config.load_projects()
+            for p in projects:
+                if p.name == t.project:
+                    role = ("scout" if t.kind is Kind.SCOUT else
+                            ("review" if t.kind is Kind.REVIEW else
+                             ("routine" if t.kind is Kind.ROUTINE else "code")))
+                    _, prompts_line, _ = prompts.assemble_guidance(p, role)
+                    break
+        except Exception:
+            pass
+    if prompts_line:
+        line = prompts_line if prompts_line.startswith("prompts:") else f"prompts: {prompts_line}"
+        out.append(ui.styled(line, "dim"))
 
     rj, rp = _result_paths(t)
     if rj is not None and rj.exists():
