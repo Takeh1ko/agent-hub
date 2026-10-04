@@ -34,13 +34,17 @@ def fill(store):
     return a, b
 
 
-async def _table_ready(app: TopApp, pilot, want: int = 1) -> None:
-    """The first refresh is built in a worker thread — wait for the rows instead of guessing a pause."""
+async def _table_ready(app: TopApp, pilot, want: int = 1, exact: bool = False) -> None:
+    """The rows of a refresh are built in a worker thread — wait for them instead of guessing a pause.
+
+    `exact` — for a screen whose row count changes (the `o` filter): wait until the table has exactly
+    that many rows, so the assertions read the refresh of the new filter and not the one before it.
+    """
     for _ in range(100):
-        if len(app._ids) >= want:
+        if len(app._ids) == want if exact else len(app._ids) >= want:
             return
         await pilot.pause(0.1)
-    raise AssertionError(f"the table of `ahub top` never got {want} rows")
+    raise AssertionError(f"the table of `ahub top` has {len(app._ids)} rows, not the {want} the test waits for")
 
 
 def accepted(store) -> int:
@@ -513,17 +517,19 @@ async def test_the_o_key_narrows_the_table_and_the_feed(tmp_path, store):
                                         _project_config(tmp_path / "B", "B")])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        # two projects — a header row opens each group, so four rows; one project — the task alone
+        await _table_ready(app, pilot, want=4, exact=True)
         assert "сообщение B" in str(app.query_one("#feed").render())  # the whole feed at first
         await pilot.press("o")
-        await pilot.pause(0.4)
+        await _table_ready(app, pilot, want=1, exact=True)
         assert app.project == "A" and "проект: A" in str(app.query_one("#mode").render())
         assert {r.project for r in data.snapshot(app.store, projects=[], only=app.project)[0].rows} == {"A"}
         feed = str(app.query_one("#feed").render())
         assert "сообщение B" not in feed and "сообщение A" in feed and "сообщение всем" in feed
         await pilot.press("o")
-        await pilot.pause(0.4)
+        await _table_ready(app, pilot, want=1, exact=True)
         assert app.project == "B"
         assert "сообщение A" not in str(app.query_one("#feed").render())
         await pilot.press("o")
-        await pilot.pause(0.4)
+        await _table_ready(app, pilot, want=4, exact=True)
         assert app.project == ""  # after the last project back to all
