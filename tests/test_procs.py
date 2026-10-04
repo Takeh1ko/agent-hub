@@ -67,12 +67,13 @@ def test_psutil_no_data_without_psutil(monkeypatch):
 
 
 def test_psutil_live_workers_finds_marked():
-    tid = 987654
+    # live_workers() keys the map by task id and the scan is machine-wide, so the id must belong to this
+    # run alone: another suite (or the live hub) spawning "ahub.worker T987654" would own that key.
+    tid = 900_000 + os.getpid() % 90_000
     s = _sleep(["-m", "ahub.worker", f"T{tid}"])  # the shape the service spawns
     try:
         time.sleep(0.5)
-        live = service.live_workers(NOPROC)
-        assert live.get(tid) == s.pid
+        assert service.live_workers(NOPROC).get(tid) == s.pid
     finally:
         s.kill()
         s.wait()

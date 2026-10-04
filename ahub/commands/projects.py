@@ -47,13 +47,13 @@ class Stat:
     last: int = 0
 
 
-def _bump(st: Stat, state: State) -> None:
+def _bump(st: Stat, state: State, count: int = 1) -> None:
     if state in ACTIVE:
-        st.active += 1
+        st.active += count
     elif state is State.QUEUED:
-        st.queued += 1
+        st.queued += count
     elif state in WAITING_DECISION:
-        st.decision += 1
+        st.decision += count
 
 
 def stats(store: Store, since: int) -> dict[str, Stat]:
@@ -71,7 +71,7 @@ def stats(store: Store, since: int) -> dict[str, Stat]:
         for r in c.execute("SELECT project, state, COUNT(*) AS n, MAX(updated_at) AS last FROM task"
                            " WHERE project!='' GROUP BY project, state"):
             st = of(str(r["project"]))
-            _bump(st, State(r["state"]))
+            _bump(st, State(r["state"]), int(r["n"]))
             st.last = max(st.last, int(r["last"] or 0))
         for r in c.execute("SELECT project, COUNT(*) AS n FROM question WHERE status='open' GROUP BY project"):
             of(str(r["project"])).questions = int(r["n"])

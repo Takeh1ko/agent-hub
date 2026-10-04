@@ -76,10 +76,43 @@ def test_home_screen_without_a_hub(capsys, monkeypatch, tmp_path):
     assert rc == 0
     assert snap(out, tmp_path) == (
         "ahub 3.0.0 · no project in this directory · service not running\n"
-        "  the hub is not configured yet — Run `ahub setup` to get started\n"
+        "  the hub is not configured yet — run `ahub setup` to get started\n"
         "  • ahub setup\n"
         "  • ahub doctor\n"
         "  • ahub models\n")
+
+
+def test_home_screen_builds_only_emitted_representation(capsys, monkeypatch, tmp_path):
+    """Running ahub builds only text; ahub --json builds only data (no double evaluation)."""
+    import ahub.home
+
+    monkeypatch.chdir(tmp_path)
+    data_calls = 0
+    text_calls = 0
+
+    orig_data = ahub.home.data
+    orig_text = ahub.home.text
+
+    def mock_data(*a, **kw):
+        nonlocal data_calls
+        data_calls += 1
+        return orig_data(*a, **kw)
+
+    def mock_text(*a, **kw):
+        nonlocal text_calls
+        text_calls += 1
+        return orig_text(*a, **kw)
+
+    monkeypatch.setattr(ahub.home, "data", mock_data)
+    monkeypatch.setattr(ahub.home, "text", mock_text)
+
+    run(capsys)
+    assert text_calls == 1
+    assert data_calls == 0
+
+    run(capsys, "--json")
+    assert text_calls == 1
+    assert data_calls == 1
 
 
 def test_home_screen_with_work_and_a_decision(capsys, monkeypatch, tmp_path):
@@ -319,22 +352,22 @@ SETUP = """\
     providers off: codex
 3. Models
     roles executor, reviewer, scout, routine, observer, drafter now default to spark-free
-4. Claude Code
+4. Service
+    service files written: {tmp}/.config/systemd/user/ahub.service
+    next  systemctl --user daemon-reload && systemctl --user enable --now ahub.service
+5. Claude Code
     Claude skill: {tmp}/.claude/skills/ahub/SKILL.md
     CLAUDE.md: block added
     permission Bash(ahub:*) allowed ({tmp}/shop/.claude/settings.json)
     for other agents (Codex, Cursor): claude mcp add ahub -- ahub mcp
-5. Service
-    service files written: {tmp}/.config/systemd/user/ahub.service
-    next  systemctl --user daemon-reload && systemctl --user enable --now ahub.service
 Summary
   Project      shop · {tmp}/shop
   Config       config {tmp}/d/config/config.toml
   Providers    opencode, agy
   Models       executor=spark-free, reviewer=spark-free, scout=spark-free, routine=spark-free,
                observer=spark-free, drafter=spark-free
-  Claude Code  skill + CLAUDE.md + Bash(ahub:*)
   Service      —
+  Claude Code  skill + CLAUDE.md + Bash(ahub:*)
   Next  ahub task new --kind scout --title "…" · ahub doctor
 """
 
@@ -361,19 +394,19 @@ SETUP_YES_NO_CLAUDE = """\
     providers off: codex
 3. Models
     roles executor, reviewer, scout, routine, observer, drafter now default to spark-free
-4. Claude Code
-    skipped — later: ahub setup --claude
-5. Service
+4. Service
     service files written: {tmp}/.config/systemd/user/ahub.service
     next  systemctl --user daemon-reload && systemctl --user enable --now ahub.service
+5. Claude Code
+    skipped — later: ahub setup --claude
 Summary
   Project      shop · {tmp}/shop
   Config       config {tmp}/d/config/config.toml
   Providers    opencode, agy
   Models       executor=spark-free, reviewer=spark-free, scout=spark-free, routine=spark-free,
                observer=spark-free, drafter=spark-free
-  Claude Code  —
   Service      —
+  Claude Code  —
   Next  ahub task new --kind scout --title "…" · ahub doctor
 """
 
@@ -507,11 +540,10 @@ def test_an_error_is_one_line_and_names_the_command(capsys, monkeypatch, tmp_pat
     assert err.splitlines()[1] == "  hint: ahub status"  # what to do
     # a provider that is off: the refusal itself already names the command
     from ahub import tasks
-    from ahub.commands.setup import set_provider_enabled
     from tests.enginekit import make_project
 
     project = make_project(tmp_path / "proj")
-    set_provider_enabled("codex", False)
+    registry.set_provider_enabled("codex", False)
     with pytest.raises(registry.RegistryError) as ei:
         registry.check(Store(), "codex", None)
     assert command_hint(str(ei.value)) == "ahub providers enable codex"
@@ -996,3 +1028,19 @@ def test_the_root_scope_flags_survive_a_subcommand(capsys, monkeypatch, tmp_path
 def home_lines(capsys, monkeypatch, *argv: str) -> str:
     assert cli.main(list(argv)) == 0
     return capsys.readouterr().out
+
+
+def test_the_next_block_wraps_to_the_given_width(capsys, monkeypatch, tmp_path):
+    """The Next block is a block like the others: it wraps to the caller's width, not to COLUMNS."""
+    import ahub.home
+    from ahub import ui
+    from ahub.i18n import t as real_t
+
+    long_cmd = 'ahub task new --kind code --title "почини тест, который падает в CI" --project shop'
+    monkeypatch.chdir(tmp_path)  # no hub configured — the screen stops right after the Next block
+    monkeypatch.setattr(ahub.home, "_t", lambda k, **kw: long_cmd if k == "home.next_setup" else real_t(k, **kw))
+    out = ahub.home.text(w=40)
+    block = out.split(ui.BULLET, 1)[1].splitlines()  # the Next block: the bullet and its wrapped lines
+    assert max(len(ui.BULLET + ln) for ln in block) <= 40, block
+    assert len(block) > 3  # the long command really wraps — it is not simply shorter than the width
+    assert long_cmd[:20] in out

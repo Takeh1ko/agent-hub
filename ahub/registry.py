@@ -12,9 +12,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from ahub import paths
-from ahub.config import ConfigError, HubConfig, ProjectConfig, load_hub
+from ahub.config import ConfigError, HubConfig, ProjectConfig, load_hub, provider_lookup, set_global
 from ahub.i18n import t as _t
 from ahub.model import Role
 from ahub.providers.fake import selectable_from_env
@@ -166,6 +167,16 @@ def provider_enabled(name: str, hub: HubConfig | None = None) -> bool:
         except ConfigError:
             return True
     return hub.provider_enabled(name)
+
+
+def set_provider_enabled(name: str, enabled: bool) -> Path:
+    """The one writer of the provider switch: [providers.<name>] enabled (the rest of the table stays).
+
+    The read side is provider_enabled() above — `ahub providers enable|disable` and the setup wizard both
+    come through here, so nothing imports another command module to change the switch.
+    """
+    return set_global("enabled", enabled, section=f"providers.{name}",
+                      lookup=lambda parsed: provider_lookup(parsed, name))
 
 
 def _raw_menu(store: Store, role: Role | str) -> list[tuple[ModelEntry, bool]]:

@@ -84,3 +84,27 @@ budget_go = 1.5
     assert cfg.resources["test_lock"].lock == "/tmp/webapp_test_db.lock" and cfg.push == "origin main:claude/x"
     assert cfg.hooks.task_setup.startswith("python -m tools.task_db") and cfg.models_deny == ("deepseek",)
     assert cfg.work_branch == "main" and cfg.budget_go == 1.5
+
+
+def test_settings_json_is_never_truncated_in_place(tmp_path, monkeypatch):
+    """A write that dies on the way to the user's settings leaves the file as it was (temp + os.replace)."""
+    import os
+
+    import pytest
+
+    from ahub.commands import setup as setupecmd
+
+    root = tmp_path / "perm2"
+    settings = write(root / ".claude" / "settings.json", json.dumps({"model": "opus"}, indent=2) + "\n")
+
+    def _boom(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "replace", _boom)
+    with pytest.raises(OSError):
+        setupecmd.allow_bash(root)
+    assert settings.read_text(encoding="utf-8") == json.dumps({"model": "opus"}, indent=2) + "\n"
+    assert sorted(p.name for p in settings.parent.iterdir()) == ["settings.json"]  # no temp left behind
+    monkeypatch.undo()
+    assert "Bash(ahub:*)" in setupecmd.allow_bash(root)
+    assert json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"] == ["Bash(ahub:*)"]
