@@ -1000,8 +1000,10 @@ MESSAGES: dict[str, str] = {
     "doctor.keys_no_unit_env": "no service env to compare with (optional)",
     "doctor.keys_ok": "no problem: {keys} — the service env or opencode auth has each",
     "doctor.keys_hidden": "the service cannot see {keys} — opencode fails with a server error",
-    "doctor.keys_fix": "opencode auth login {provider}, or put {names} into the service environment "
+    "doctor.keys_fix": "opencode auth login -p {provider}, or put {names} into the service environment "
                        "(Environment= in the unit, the plist on macOS)",
+    "doctor.keys_reload_systemd": "then: systemctl --user daemon-reload && systemctl --user restart {unit}",
+    "doctor.keys_reload_launchd": "then: launchctl kickstart -k gui/$(id -u)/{label}",
     "doctor.agy_found": "found {binary}",
     "doctor.agy_missing": "not found in PATH",
     "doctor.agy_fix_login": "run agy in a terminal and sign in",

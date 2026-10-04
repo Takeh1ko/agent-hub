@@ -36,6 +36,7 @@ PROVIDER_KEYS: dict[str, str] = {
     "GEMINI_API_KEY": "google",
     "GOOGLE_API_KEY": "google",
     "DEEPSEEK_API_KEY": "deepseek",
+    "OPENCODE_API_KEY": "opencode",  # opencode's own provider, the same id its auth.json key has
 }
 # What model providers need from the env, even if it looks like a secret.
 KEEP_ENV = re.compile(rf"^({'|'.join(PROVIDER_KEYS)}|OPENCODE_.*|HTTPS?_PROXY|NO_PROXY|ALL_PROXY)$",

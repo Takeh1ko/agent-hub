@@ -113,7 +113,7 @@ def _env_dict() -> dict[str, str]:
 
 
 def _log_names(name: str) -> tuple[str, str]:
-    stem = "bot" if name == "ahub-bot.service" else "service"
+    stem = "bot" if name == UNIT_BOT else "service"
     return f"{stem}.out.log", f"{stem}.err.log"
 
 
@@ -142,9 +142,9 @@ def _want_units() -> list[str]:
     """Service always; bot only when Telegram is enabled."""
     from ahub import config
 
-    names = ["ahub.service"]
+    names = [UNIT_SERVICE]
     if config.load_hub().telegram_enabled:
-        names.append("ahub-bot.service")
+        names.append(UNIT_BOT)
     return names
 
 

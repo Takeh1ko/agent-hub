@@ -9,6 +9,7 @@ import plistlib
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import types
@@ -151,14 +152,17 @@ def test_auth_list_colors_and_free_only(monkeypatch):
     assert c.ok is False and "auth login" in c.fix
 
 
-def _fake_systemctl(tmp_path, monkeypatch, unit_env: str, manager_env: str = "") -> Path:
+def _fake_systemctl(tmp_path, monkeypatch, unit_env: str, manager_env: str = "",
+                    main_pid: str = "0") -> Path:
     """A systemctl on PATH: `show ahub.service -p Environment` answers unit_env, `show-environment`
-    answers manager_env (NAME=value lines); the marker file records every argv it was given."""
+    answers manager_env (NAME=value lines), `-p MainPID` answers main_pid; the marker file records every
+    argv it was given."""
     marker = tmp_path / "systemctl.argv"
     exe = tmp_path / "systemctl"
     exe.write_text("#!/bin/sh\n"
                    f'printf "%s\\n" "$*" >> {marker}\n'
-                   'case "$*" in\n'
+                   "case \"$*\" in\n"
+                   f'*MainPID*) printf "%s\\n" "{main_pid}" ;;\n'
                    f'*show-environment*) printf "%b\\n" "{manager_env}" ;;\n'
                    f'*) printf "%s\\n" "{unit_env}" ;;\n'
                    "esac\n", encoding="utf-8")
@@ -189,7 +193,8 @@ def test_provider_key_the_service_cannot_see_linux(tmp_path, monkeypatch):
     c = doctor.check_provider_keys()
     assert c.name == "provider_keys" and c.ok is False
     assert "openrouter: OPENROUTER_API_KEY" in c.detail and "server error" in c.detail
-    assert "opencode auth login openrouter" in c.fix and "OPENROUTER_API_KEY" in c.fix
+    assert "opencode auth login -p openrouter" in c.fix and "OPENROUTER_API_KEY" in c.fix
+    assert c.fix.endswith("then: systemctl --user daemon-reload && systemctl --user restart ahub.service")
     assert secret not in c.detail + c.fix  # the value never leaves the env
     seen = marker.read_text().splitlines()
     assert calls[0] in seen and calls[1] in seen  # the hub unit and the manager, as asked
@@ -203,6 +208,21 @@ def test_provider_key_the_service_cannot_see_linux(tmp_path, monkeypatch):
     marker.unlink()
     _fake_systemctl(tmp_path, monkeypatch, f'Environment="OPENROUTER_API_KEY={secret}" LANG=en_US.UTF-8')
     assert doctor.check_provider_keys().ok is True  # the unit carries the key
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the env of the process is read from /proc")
+def test_provider_key_in_the_running_service_process(tmp_path, monkeypatch):
+    """The env of the running process is what a turn gets — a unit without the key is not a problem when
+    the service already runs with it (the fake points MainPID at a child that has the key)."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-d")
+    with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                          env={"DEEPSEEK_API_KEY": "sk-d"}) as child:
+        _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1", main_pid=str(child.pid))
+        assert doctor.check_provider_keys().ok is True  # the unit does not carry it, the process does
 
 
 def test_provider_key_in_the_manager_env_only(tmp_path, monkeypatch):
@@ -228,9 +248,22 @@ def test_provider_keys_one_fix_per_provider(tmp_path, monkeypatch):
     _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1")
     c = doctor.check_provider_keys()
     assert c.ok is False
-    assert c.fix.count("opencode auth login google") == 1
+    assert c.fix.count("opencode auth login -p google") == 1
     assert "GEMINI_API_KEY, GOOGLE_API_KEY" in c.fix
     assert c.detail.count("google") == 1  # one entry per provider
+
+
+def test_provider_key_name_is_matched_case_insensitively(tmp_path, monkeypatch):
+    """A shell that exports `opencode_api_key` and a unit that spells it lowercase are the same key."""
+    from ahub.i18n import _reset
+    from ahub.prepare import PROVIDER_KEYS
+
+    assert PROVIDER_KEYS["OPENCODE_API_KEY"] == "opencode"  # opencode's own key is one of them
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    monkeypatch.setenv("opencode_api_key", "sk-o")
+    _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1 opencode_api_key=sk-o")
+    assert doctor.check_provider_keys().ok is True
 
 
 def test_provider_keys_nothing_to_compare(tmp_path, monkeypatch):
@@ -273,6 +306,7 @@ def test_provider_keys_macos_plist(tmp_path, monkeypatch):
     """T142: on macOS the service env is the EnvironmentVariables of the plist."""
     from ahub.commands.service import plist_dict
 
+    _english(monkeypatch)
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-y")
     monkeypatch.setattr(doctor.sys, "platform", "darwin")
     assert doctor.check_provider_keys().ok is None  # no plist — nothing to compare with
@@ -282,7 +316,8 @@ def test_provider_keys_macos_plist(tmp_path, monkeypatch):
     path = Path.home() / "Library" / "LaunchAgents" / "dev.ahub.service.plist"
     write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8"))
     c = doctor.check_provider_keys()
-    assert c.ok is False and "openrouter" in c.detail and "opencode auth login openrouter" in c.fix
+    assert c.ok is False and "openrouter" in c.detail and "opencode auth login -p openrouter" in c.fix
+    assert c.fix.endswith("then: launchctl kickstart -k gui/$(id -u)/dev.ahub.service")
 
     data["EnvironmentVariables"]["OPENROUTER_API_KEY"] = "sk-y"
     write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8"))
@@ -290,6 +325,12 @@ def test_provider_keys_macos_plist(tmp_path, monkeypatch):
 
     # a plist cut in the middle of a write: XML that does not parse is "cannot read", not a red check
     write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8")[:120])
+    assert doctor.check_provider_keys().ok is None
+
+    # a hand-written plist without EnvironmentVariables cannot say what the service runs with — the same
+    # "no data" Linux gives for a unit it does not know, not a warning about every key of the env
+    data.pop("EnvironmentVariables")
+    write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8"))
     assert doctor.check_provider_keys().ok is None
 
 
