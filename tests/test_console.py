@@ -143,11 +143,22 @@ async def test_follow_opens_and_esc_returns(tmp_path: Path, store: Store):
         f.write(_json.dumps({"sessionID": "s", "type": "text", "text": "hello"}) + "\n")
     store.add_session(task_id=tid, provider="fake", role="executor", model="fake",
                       external_id="s", log_path=str(log))
+    from ahub.pulse import Pulse
+
+    fake_pulse = Pulse(task_id=tid, state="working", reason="reading")
     app = ConsoleApp(store=store, all_projects=True)
+    app.pulses = lambda: {tid: fake_pulse}
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
         app.run_command(f"/follow T{tid}")
         await pilot.pause(0.4)
+        assert app.screen.__class__.__name__ == "Transcript"
+        assert app.screen._pulses() == {tid: fake_pulse}
+        await pilot.press("p")
+        await pilot.pause(0.3)
+        assert app.screen.__class__.__name__ == "Prompt"
+        await pilot.press("escape")
+        await pilot.pause(0.3)
         assert app.screen.__class__.__name__ == "Transcript"
         await pilot.press("escape")
         await pilot.pause(0.3)

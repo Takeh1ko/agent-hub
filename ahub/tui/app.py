@@ -150,7 +150,7 @@ class Transcript(Screen[None]):
 
     def _pulses(self) -> dict:
         app = self.app
-        return app.pulses() if isinstance(app, TopApp) else {}
+        return app.pulses() if hasattr(app, "pulses") else {}
 
     def _paint(self, changed: bool) -> None:
         box = self.query_one("#live-box", VerticalScroll)

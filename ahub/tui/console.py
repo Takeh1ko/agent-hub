@@ -758,9 +758,9 @@ if _HAS_TEXTUAL:
         ]
 
         def _on_main(self) -> bool:
-            """False while the Transcript screen is on top: its keys win."""
+            """False while another screen is on top (Transcript, Prompt, modals): its keys win."""
             try:
-                return self.screen.__class__.__name__ != "Transcript"
+                return len(self.screen_stack) <= 1
             except Exception:
                 return True
 
