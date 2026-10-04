@@ -431,7 +431,7 @@ def load_project_file(path: str | Path) -> ProjectConfig:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(str(p), [_t("config.bad_toml", err=e)]) from e
     except (UnicodeDecodeError, OSError) as e:
-        raise ConfigError(str(p), [str(e)]) from e
+        raise ConfigError(str(p), [_t("config.bad_encoding", err=e)]) from e
     return parse_project(data, p.parent, str(p))
 
 
@@ -541,7 +541,7 @@ def load_hub(path: str | Path | None = None) -> HubConfig:
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(str(p), [_t("config.bad_toml", err=e)]) from e
         except (UnicodeDecodeError, OSError) as e:
-            raise ConfigError(str(p), [str(e)]) from e
+            raise ConfigError(str(p), [_t("config.bad_encoding", err=e)]) from e
         return _parse_hub_data(data, str(p))
     return _parse_hub_data({}, "")
 

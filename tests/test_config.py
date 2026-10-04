@@ -392,13 +392,18 @@ def test_python_bin_explicit_venv_or_path(tmp_path):
     assert fixed.python_bin() == "/opt/py"
 
 
-def test_hub_non_utf8_raises_config_error(tmp_path):
+def test_hub_non_utf8_raises_config_error(tmp_path, monkeypatch):
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
     p = paths.global_config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes("# русский комментарий в cp1251\nlang = 'ru'\n".encode("cp1251"))
     with pytest.raises(config.ConfigError) as ei:
         config.load_hub()
-    assert str(p) in str(ei.value)
+    assert str(p) in str(ei.value)  # the file, not a traceback out of a command
+    assert "cp1251" in str(ei.value)
 
 
 def test_project_non_utf8_raises_config_error(tmp_path):

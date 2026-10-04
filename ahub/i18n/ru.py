@@ -725,6 +725,7 @@ MESSAGES: dict[str, str] = {
     "config.need_name": "name: обязательное поле",
     "config.no_test_resource": "test_resource: нет ресурса {name!r} в [resources]",
     "config.bad_toml": "TOML: {err}",
+    "config.bad_encoding": "не текст UTF-8 ({err}) — редактор с Windows сохранил в cp1251?",
     "config.no_project_file": "нет {file} выше {start}",
     "config.bad_root": "root: нет каталога {root}",
     "config.bad_python": "python: не исполняемый файл {path}",

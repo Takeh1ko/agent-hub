@@ -725,6 +725,7 @@ MESSAGES: dict[str, str] = {
     "config.need_name": "name: required field",
     "config.no_test_resource": "test_resource: no resource {name!r} in [resources]",
     "config.bad_toml": "TOML: {err}",
+    "config.bad_encoding": "not UTF-8 text ({err}) — a Windows editor saved it in cp1251?",
     "config.no_project_file": "no {file} above {start}",
     "config.bad_root": "root: no directory {root}",
     "config.bad_python": "python: not an executable file {path}",
