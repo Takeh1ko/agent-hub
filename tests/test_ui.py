@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 
 import pytest
 
@@ -55,6 +56,35 @@ def test_pipe_gets_no_ansi(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "")  # presence alone is the convention
     assert ui.styled("hello", "bold") == "hello"
     monkeypatch.delenv("NO_COLOR")
+
+
+def test_plain_is_per_thread(monkeypatch):
+    """The observer and the TG launcher build their prompts on their own threads.
+
+    While such a thread is inside `plain()`, the terminal output of the main thread still belongs to a
+    human — a process-global flag muted it (and the whole ui suite with it, in whatever order it ran).
+    """
+    monkeypatch.setattr(ui.sys, "stdout", _Stream(tty=True))
+    inside = threading.Event()
+    release = threading.Event()
+
+    def _worker():
+        with ui.plain():
+            assert ui.styled("prompt", "bold") == "prompt"  # its own thread: plain
+            inside.set()
+            release.wait(5)
+
+    th = threading.Thread(target=_worker, daemon=True)
+    th.start()
+    try:
+        assert inside.wait(5)
+        assert ui.styled("terminal", "bold") == "\033[1mterminal\033[0m"  # this thread: colour
+    finally:
+        release.set()
+        th.join(timeout=5)
+    with ui.plain():
+        assert ui.styled("here", "bold") == "here"  # and plain() still works in this thread
+    assert ui.styled("terminal", "bold") == "\033[1mterminal\033[0m"
 
 
 def test_kv_aligns_a_block():
