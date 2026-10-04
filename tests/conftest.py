@@ -62,7 +62,8 @@ def _real_db_untouched():
 
         con = sqlite3.connect(f"file:{real}?mode=ro", uri=True, timeout=5)
         try:
-            leaked = con.execute("SELECT COUNT(*) FROM task WHERE project='P'").fetchone()[0]
+            leaked = con.execute("SELECT COUNT(*) FROM task WHERE project='P' AND id > ?",
+                                 (before[0],)).fetchone()[0]
         finally:
             con.close()
         assert leaked == 0, "тесты записали задачи в боевую базу хаба"
