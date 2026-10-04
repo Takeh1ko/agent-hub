@@ -139,10 +139,11 @@ def test_auth_list_colors_and_free_only(monkeypatch):
 
 
 def _fake_systemctl(tmp_path, monkeypatch, environment: str) -> Path:
-    """A systemctl on PATH that answers `show -p Environment`; the marker says it really ran."""
-    marker = tmp_path / "systemctl.ran"
+    """A systemctl on PATH that answers `show -p Environment` and records its argv (the marker file)."""
+    marker = tmp_path / "systemctl.argv"
     exe = tmp_path / "systemctl"
-    exe.write_text(f'#!/bin/sh\nprintf "%s\\n" "{environment}"\ntouch {marker}\n', encoding="utf-8")
+    exe.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {marker}\nprintf "%s\\n" "{environment}"\n',
+                   encoding="utf-8")
     exe.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     return marker
@@ -153,6 +154,7 @@ def test_provider_key_the_service_cannot_see_linux(tmp_path, monkeypatch):
     from ahub.i18n import _reset
 
     secret = "sk-SECRET-4242"
+    argv = "--user show ahub.service -p Environment"
     monkeypatch.setenv("AHUB_LANG", "en")
     _reset()
     monkeypatch.setenv("OPENROUTER_API_KEY", secret)
@@ -163,7 +165,7 @@ def test_provider_key_the_service_cannot_see_linux(tmp_path, monkeypatch):
     assert "OPENROUTER_API_KEY (openrouter)" in c.detail and "server error" in c.detail
     assert "opencode auth login openrouter" in c.fix and "OPENROUTER_API_KEY" in c.fix
     assert secret not in c.detail + c.fix  # the value never leaves the env
-    assert marker.exists()  # the unit env was really asked for
+    assert marker.read_text().strip() == argv  # the unit env of the hub unit was really asked for
 
     marker.unlink()
     _write_auth({"openrouter": {"apiKey": secret}})  # opencode knows the provider — nothing to fix
@@ -171,9 +173,10 @@ def test_provider_key_the_service_cannot_see_linux(tmp_path, monkeypatch):
     assert c.ok is True and "OPENROUTER_API_KEY" in c.detail and not c.fix
 
     doctor.auth_file_path().unlink()
+    marker.unlink()
     _fake_systemctl(tmp_path, monkeypatch, f'Environment="OPENROUTER_API_KEY={secret}" LANG=en_US.UTF-8')
     c = doctor.check_provider_keys()
-    assert c.ok is True and marker.exists()  # the unit carries the key
+    assert c.ok is True and marker.read_text().strip() == argv  # the unit carries the key
 
 
 def test_provider_keys_nothing_to_compare(tmp_path, monkeypatch):
