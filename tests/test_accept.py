@@ -350,17 +350,41 @@ def test_accept_refuses_branch_already_merged_without_acceptance(store, project,
         accept.accept(store, project, t.id)
 
 
-def test_rollback_preserves_untracked_files(store, project, monkeypatch):
-    """Rollback uses reset --keep: untracked files in the root survive."""
+def test_accept_refuses_a_hand_merge_with_the_own_parents(store, project, monkeypatch):
+    """A hand `--no-ff` merge of the same branch — the parents of accept's merge, another subject.
+
+    Only accept's own merge commit (`merge T<n>: …`) is the state of an interrupted accept: a foreign one is
+    refused, so the orchestrator finishes it by hand.
+    """
     from ahub import gates as g
     t, _, _ = done_code(store, project)
-    monkeypatch.setattr(g, "run_acceptance", lambda *a, **kw: (False, "FAILED", "pytest"))
-    untracked = Path(project.root) / "untracked.txt"
-    untracked.write_text("precious dirt\n")
+    git(project.root, "merge", "--no-ff", "-m", "слил руками", t.branch)  # the same parents accept would write
+    monkeypatch.setattr(g, "check", lambda *a, **kw: g.GateResult(base="b", head="h"))
+    with pytest.raises(accept.DecisionError, match="уже слита в main без приёмки"):
+        accept.accept(store, project, t.id)
+    assert '"already_merged"' in store.get_task(t.id).state_reason
+
+
+def test_rollback_keeps_a_local_edit(store, project, monkeypatch):
+    """Rollback uses `reset --keep`, not `--hard`: a tracked file the merge did not touch keeps its edit.
+
+    An untracked file survives both, so it cannot tell the two apart — this edit can.
+    """
+    from ahub import gates as g
+    t, _, _ = done_code(store, project)
+    before = git_out(project.root, "rev-parse", "HEAD").strip()
+    edited = Path(project.root) / "core" / "a.py"  # the task touches core/b.py, this file the merge does not
+
+    def red_with_a_local_edit(project_, cwd, nodes, **kw):
+        edited.write_text(edited.read_text() + "# правка человека во время приёмки\n")
+        return False, "FAILED", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", red_with_a_local_edit)
     with pytest.raises(accept.DecisionError, match="приёмка красная — слияние откачено"):
         accept.accept(store, project, t.id)
-    assert untracked.exists()
-    assert untracked.read_text() == "precious dirt\n"
+    assert git_out(project.root, "rev-parse", "HEAD").strip() == before  # the merge is gone
+    assert edited.read_text() == "X = 1\n# правка человека во время приёмки\n"  # the edit is not thrown away
+    assert not (Path(project.root) / "core" / "b.py").exists()  # only the merge is rolled back
 
 
 def test_rollback_refuses_to_destroy_a_local_edit(store, project, monkeypatch):
@@ -392,6 +416,22 @@ def test_not_merged_still_needs_the_copy(store, project):
     shutil.rmtree(t.worktree)
     with pytest.raises(accept.DecisionError, match="нет копии задачи"):
         accept.accept(store, project, t.id)
+
+
+def test_a_copy_that_is_not_a_git_worktree(store, project, tmp_path):
+    """Something that is not a worktree took the place of the copy: one line, not a git traceback.
+
+    The copy is read when the branch carries accept's own merge — then it must still be the branch tip.
+    """
+    import shutil
+
+    t, _, _ = done_code(store, project)
+    interrupted_accept(store, project, tmp_path, t.id)
+    shutil.rmtree(t.worktree)
+    Path(t.worktree).mkdir()
+    with pytest.raises(accept.DecisionError, match="нет копии задачи"):
+        accept.accept(store, project, t.id)
+    assert store.get_task(t.id).state is State.NEEDS_DECISION  # refused before the transition — task untouched
 
 
 def test_accept_renews_the_lease_during_acceptance(store, project, monkeypatch):

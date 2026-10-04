@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from ahub import providers, registry, tasks, transcript, transitions
-from ahub.engine import Engine
+from ahub.engine import STOP_POLL_S, Engine
 from ahub.model import Kind, Phase, State
 from ahub.providers.agy import AgyProvider
 from ahub.providers.base import Act, Activity
@@ -580,10 +581,12 @@ def test_stop_during_a_nudge_turn_settles_stopped(store, project):
             time.sleep(0.02)
         transitions.request_nudge(store, t.id, text="nudge 1", by="human")
         for _ in range(300):
-            if len(store.list_sessions(t.id)) >= 2:
+            if len(fake.calls) >= 2:  # the turn with the message has started (the session row is reused)
                 break
             time.sleep(0.02)
-        time.sleep(0.1)
+        # taking the message back cleared the poll cache of the owner — a stop inside that window is read
+        # only STOP_POLL_S later, so the run would last as long as the cache phase happens to be
+        time.sleep(STOP_POLL_S + 0.2)
         transitions.request_stop(store, t.id, by="human")
 
     th = threading.Thread(target=_sequence, daemon=True)
@@ -641,24 +644,38 @@ def test_two_nudges_in_one_step(store, project):
     t = code_task(store, project)
     fake = ScriptedFake([slow(), slow(session="ses_nudge1"), work(session="ses_nudge2", text="Y = 3\n")])
     providers.register("fake", fake)
+    failed = []
+
+    def _nudge(text):
+        """`ahub nudge` from another process: the owner writes the task row as its turn starts, so the
+        request can lose the lock — retry, and hand the test the reason instead of a prompt that never comes."""
+        err = ""
+        for _ in range(5):
+            try:
+                transitions.request_nudge(store, t.id, text=text, by="human")
+                return
+            except (sqlite3.OperationalError, transitions.TransitionError) as e:
+                err = str(e)
+                time.sleep(0.05)
+        failed.append(err)
 
     def _send_nudges():
         for _ in range(200):
             if any(s.external_id for s in store.list_sessions(t.id)):
                 break
             time.sleep(0.02)
-        transitions.request_nudge(store, t.id, text="первый nudge", by="human")
+        _nudge("первый nudge")
         for _ in range(200):
-            active = [s for s in store.list_sessions(t.id) if s.external_id]
-            if len(active) >= 2:
+            if len(fake.calls) >= 2:  # the turn with the first message has started
                 break
             time.sleep(0.02)
-        transitions.request_nudge(store, t.id, text="второй nudge", by="human")
+        _nudge("второй nudge")
 
     th = threading.Thread(target=_send_nudges, daemon=True)
     th.start()
     res = run(store, project, t.id)
     th.join(timeout=10)
+    assert not failed, failed  # no message was lost on the way to the task row
     assert res.state is State.DONE
     assert len(fake.calls) == 3
     assert "первый nudge" in fake.calls[1]["prompt"]
