@@ -91,9 +91,9 @@ def test_stop_continue_reject(env, capsys):
 def test_budget_lowers_the_real_money_budget(env, capsys):
     store, _ = env
     install_fake(store, [])
-    ahub(capsys, "task", "new", "--kind", "scout", "--title", "x", "--model", "fake")
+    ahub(capsys, "task", "new", "--kind", "scout", "--title", "x", "--model", "fake", "--budget-usd", "0.5")
     rc, out, err = ahub(capsys, "budget", "T1", "--set-usd", "0.02")
-    assert rc == 0 and "реальные $0 → $0.02" in out, err
+    assert rc == 0 and "реальные $0.5 → $0.02" in out, err
     assert store.get_task(1).budget_usd == 0.02
 
 
