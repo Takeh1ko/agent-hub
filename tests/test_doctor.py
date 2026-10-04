@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import plistlib
 import shutil
 import socket
 import subprocess
@@ -134,6 +136,90 @@ def test_auth_list_colors_and_free_only(monkeypatch):
         p.unlink()
     c = doctor.check_opencode_auth()
     assert c.ok is False and "auth login" in c.fix
+
+
+def _fake_systemctl(tmp_path, monkeypatch, environment: str) -> Path:
+    """A systemctl on PATH that answers `show -p Environment`; the marker says it really ran."""
+    marker = tmp_path / "systemctl.ran"
+    exe = tmp_path / "systemctl"
+    exe.write_text(f'#!/bin/sh\nprintf "%s\\n" "{environment}"\ntouch {marker}\n', encoding="utf-8")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    return marker
+
+
+def test_provider_key_the_service_cannot_see_linux(tmp_path, monkeypatch):
+    """T142: a key exported only in the shell profile — the unit env has it, or the auth store the provider."""
+    from ahub.i18n import _reset
+
+    secret = "sk-SECRET-4242"
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    monkeypatch.setenv("OPENROUTER_API_KEY", secret)
+    marker = _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1 LANG=en_US.UTF-8")
+
+    c = doctor.check_provider_keys()
+    assert c.name == "provider_keys" and c.ok is False
+    assert "OPENROUTER_API_KEY (openrouter)" in c.detail and "server error" in c.detail
+    assert "opencode auth login openrouter" in c.fix and "OPENROUTER_API_KEY" in c.fix
+    assert secret not in c.detail + c.fix  # the value never leaves the env
+    assert marker.exists()  # the unit env was really asked for
+
+    marker.unlink()
+    _write_auth({"openrouter": {"apiKey": secret}})  # opencode knows the provider — nothing to fix
+    c = doctor.check_provider_keys()
+    assert c.ok is True and "OPENROUTER_API_KEY" in c.detail and not c.fix
+
+    doctor.auth_file_path().unlink()
+    _fake_systemctl(tmp_path, monkeypatch, f'Environment="OPENROUTER_API_KEY={secret}" LANG=en_US.UTF-8')
+    c = doctor.check_provider_keys()
+    assert c.ok is True and marker.exists()  # the unit carries the key
+
+
+def test_provider_keys_nothing_to_compare(tmp_path, monkeypatch):
+    """No key in this env — no data, and systemctl is not even asked; an unreadable unit env — no data."""
+    from ahub.prepare import PROVIDER_KEYS
+
+    marker = _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1")
+    for name in PROVIDER_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    c = doctor.check_provider_keys()
+    assert c.ok is None and not c.fix and not marker.exists()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
+    monkeypatch.setattr(shutil, "which", lambda name: None)  # no systemctl at all
+    assert doctor.check_provider_keys().ok is None
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/systemctl")
+
+    def _no_bus(cmd, **kw):
+        raise OSError("no bus")
+    monkeypatch.setattr(subprocess, "run", _no_bus)
+    assert doctor.check_provider_keys().ok is None
+
+    def _no_unit(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Unit ahub.service could not be found.")
+    monkeypatch.setattr(subprocess, "run", _no_unit)
+    assert doctor.check_provider_keys().ok is None
+
+
+def test_provider_keys_macos_plist(tmp_path, monkeypatch):
+    """T142: on macOS the service env is the EnvironmentVariables of the plist."""
+    from ahub.commands.service import plist_dict
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-y")
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
+    assert doctor.check_provider_keys().ok is None  # no plist — nothing to compare with
+
+    data = plist_dict("ahub.service")
+    assert "OPENROUTER_API_KEY" not in data["EnvironmentVariables"]  # `ahub service install` keeps it out
+    path = Path.home() / "Library" / "LaunchAgents" / "dev.ahub.service.plist"
+    write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8"))
+    c = doctor.check_provider_keys()
+    assert c.ok is False and "openrouter" in c.detail and "opencode auth login openrouter" in c.fix
+
+    data["EnvironmentVariables"]["OPENROUTER_API_KEY"] = "sk-y"
+    write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8"))
+    assert doctor.check_provider_keys().ok is True
 
 
 def test_agy_health_and_missing(monkeypatch, tmp_path):
@@ -564,7 +650,7 @@ def test_run_all_never_raises(monkeypatch):
         raise RuntimeError("boom")
     monkeypatch.setattr(doctor, "check_git", _boom)
     checks = doctor.run_all()
-    assert len(checks) == 14
+    assert len(checks) == 15
     git = next(c for c in checks if c.name == "git")
     assert git.ok is False and "boom" in git.detail
 
@@ -575,7 +661,7 @@ def test_cli_codes_and_json(capsys, monkeypatch):
     assert cli.main(["--json", "doctor"]) in (0, 1)
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert isinstance(data["checks"], list) and len(data["checks"]) == 14
+    assert isinstance(data["checks"], list) and len(data["checks"]) == 15
     assert secret not in out
     for c in data["checks"]:
         assert set(c) == {"name", "ok", "detail", "fix"}

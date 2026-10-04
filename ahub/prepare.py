@@ -27,9 +27,19 @@ _PROXY_URL_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")  # what a proxy URL
 _NO_PROXY_VARS = ("NO_PROXY",)
 _SECRET_ENV = re.compile(r"(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|TELEGRAM|BOT_|API_KEY|_KEY$)",
                          re.IGNORECASE)
+# The provider API keys the hub keeps, each with the provider id opencode knows it by (`ahub doctor`
+# checks that a key of this env reaches the service).
+PROVIDER_KEYS: dict[str, str] = {
+    "OPENROUTER_API_KEY": "openrouter",
+    "OPENAI_API_KEY": "openai",
+    "ANTHROPIC_API_KEY": "anthropic",
+    "GEMINI_API_KEY": "google",
+    "GOOGLE_API_KEY": "google",
+    "DEEPSEEK_API_KEY": "deepseek",
+}
 # What model providers need from the env, even if it looks like a secret.
-KEEP_ENV = re.compile(r"^(OPENROUTER_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|"
-                      r"DEEPSEEK_API_KEY|OPENCODE_.*|HTTPS?_PROXY|NO_PROXY|ALL_PROXY)$", re.IGNORECASE)
+KEEP_ENV = re.compile(rf"^({'|'.join(PROVIDER_KEYS)}|OPENCODE_.*|HTTPS?_PROXY|NO_PROXY|ALL_PROXY)$",
+                      re.IGNORECASE)
 
 
 class PrepareError(RuntimeError):

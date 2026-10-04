@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -35,6 +36,8 @@ PROBE_WORKERS = 4  # how many models the wizard probes at the same time
 BASH_RULE = "Bash(ahub:*)"  # the Claude Code permission rule `ahub setup --claude` writes
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+UNIT_NAME = "ahub.service"  # the systemd unit / launchd label of the hub service itself
+PLIST_NAME = "dev.ahub.service.plist"  # its macOS plist
 
 
 @dataclass
@@ -92,10 +95,10 @@ def check_config() -> Check:
 
 def _service_unit() -> str:
     home = Path.home()
-    sys_unit = home / ".config" / "systemd" / "user" / "ahub.service"
+    sys_unit = home / ".config" / "systemd" / "user" / UNIT_NAME
     if sys_unit.is_file():
         return str(sys_unit)
-    plist = home / "Library" / "LaunchAgents" / "dev.ahub.service.plist"
+    plist = home / "Library" / "LaunchAgents" / PLIST_NAME
     if plist.is_file():
         return str(plist)
     return ""
@@ -233,6 +236,64 @@ def _auth_check(providers: list[str]) -> Check:
 
 def check_opencode_auth() -> Check:
     return _auth_check(auth_providers())
+
+
+def _systemd_env_names() -> set[str] | None:
+    """Env var names systemd hands the hub unit, None when systemctl cannot say (no unit, no bus)."""
+    exe = shutil.which("systemctl")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run([exe, "--user", "show", UNIT_NAME, "-p", "Environment"],
+                           capture_output=True, text=True, timeout=TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    names = set()
+    for token in (r.stdout or "").strip().removeprefix("Environment=").split():
+        names.add(token.strip('"').split("=", 1)[0])  # a value is never kept, let alone shown
+    return names
+
+
+def service_env() -> set[str] | None:
+    """Env var names the hub service runs with, None when they cannot be read.
+
+    Linux — what systemd gives the unit (a drop-in counts); macOS — the EnvironmentVariables of the
+    plist. The service does not read the shell profile: a key exported there only is invisible to it.
+    """
+    if not sys.platform.startswith("darwin"):
+        return _systemd_env_names()
+    plist = Path.home() / "Library" / "LaunchAgents" / PLIST_NAME
+    try:
+        data = plistlib.loads(plist.read_bytes())
+    except (OSError, ValueError):
+        return None
+    env = data.get("EnvironmentVariables") if isinstance(data, dict) else None
+    return {str(k) for k in env} if isinstance(env, dict) else set()
+
+
+def check_provider_keys() -> Check:
+    """A provider key of this env that the service cannot see: exported in the shell profile, in neither
+    the unit env nor the opencode auth store — opencode then fails with a generic server error.
+
+    No key of the env, or no unit env to compare with — no data (None). Values are never read.
+    """
+    from ahub.prepare import PROVIDER_KEYS
+
+    mine = [name for name in PROVIDER_KEYS if os.environ.get(name)]
+    if not mine:
+        return Check("provider_keys", None, _t("doctor.keys_none"), "")
+    service = service_env()
+    if service is None:
+        return Check("provider_keys", None, _t("doctor.keys_no_unit_env"), "")
+    auth = _providers_from_auth_file()
+    hidden = [name for name in mine if name not in service and PROVIDER_KEYS[name] not in auth]
+    if not hidden:
+        return Check("provider_keys", True, _t("doctor.keys_ok", keys=", ".join(mine)), "")
+    keys = ", ".join(f"{name} ({PROVIDER_KEYS[name]})" for name in hidden)
+    fix = "; ".join(_t("doctor.keys_fix", provider=PROVIDER_KEYS[n], name=n) for n in hidden)
+    return Check("provider_keys", False, _t("doctor.keys_hidden", keys=keys), fix)
 
 
 def check_agy() -> Check:
@@ -668,7 +729,7 @@ def _safe(name: str, fn) -> Check:
 
 
 # the checks that call a binary (the slow ones): `ahub doctor` shows one live line while they run
-_SLOW = frozenset({"opencode_health", "agy", "codex", "network"})
+_SLOW = frozenset({"opencode_health", "agy", "codex", "network", "provider_keys"})
 
 
 def run_all(root: Path | None = None, step: Callable[[], None] | None = None) -> list[Check]:
@@ -688,6 +749,7 @@ def run_all(root: Path | None = None, step: Callable[[], None] | None = None) ->
         ("opencode", check_opencode),
         ("opencode_health", check_opencode_health),
         ("opencode_auth", lambda: _auth_check(providers)),
+        ("provider_keys", check_provider_keys),
         ("agy", check_agy),
         ("codex", check_codex),
         ("models", lambda: check_models(providers)),
@@ -710,6 +772,7 @@ __all__ = ["Check", "ProviderState", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_WIZA
            "probe_detail",
            "provider_states", "provider_state", "provider_line", "install_hint",
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
-           "check_opencode_health", "check_opencode_auth", "check_agy", "check_codex", "check_models",
-           "check_network", "check_claude", "check_claude_skill", "check_telegram", "provider_proxy_detail",
+           "check_opencode_health", "check_opencode_auth", "check_provider_keys", "check_agy", "check_codex",
+           "check_models", "check_network", "check_claude", "check_claude_skill", "check_telegram",
+           "provider_proxy_detail", "service_env",
            "skill_path", "settings_path", "bash_allowed", "apparmor_blocks_userns", "codex_sandbox_fix"]
