@@ -70,24 +70,12 @@ def _header(task: Task) -> str:
     return "\n\n".join(parts)
 
 
-SCOUT_DELIVERY = f"""## How to submit (required; overrides project rules about commits and reports)
-1. Change and commit nothing in the project — this is reconnaissance. Create files only in `.ahub/`.
-2. Report — `.ahub/report.md` (<= {REPORT_LIMIT_KB} KB). First section — `## Summary`: at most 10 lines, the key
-   points needed for a decision. Then details with `file:line` paths.
-3. Result — `.ahub/result.json`:
-   {{"summary": "1-3 sentences", "status": "done", "questions": ["what is still unclear"], "notes": "what was not checked"}}
-   If you cannot continue (no access, contradiction in the task) — "status": "blocked" and the reason in summary.
-4. Write the report and all human-readable fields in English.
-5. Last message — one line: "done" or "blocked: reason".
-"""
-
-
 def scout_delivery() -> str:
     head = report_heading()
     return f"""## How to submit (required; overrides project rules about commits and reports)
 1. Change and commit nothing in the project — this is reconnaissance. Create files only in `.ahub/`.
 2. Report — `.ahub/report.md` (<= {REPORT_LIMIT_KB} KB). First section — `{head}`: at most 10 lines, the key
-   points needed for a decision. Then details with `file:line` paths.
+   points needed for a decision. Cite `file:line` for every claim; say what you did not check.
 3. Result — `.ahub/result.json`:
    {{"summary": "1-3 sentences", "status": "done", "questions": ["what is still unclear"], "notes": "what was not checked"}}
    If you cannot continue (no access, contradiction in the task) — "status": "blocked" and the reason in summary.
@@ -139,6 +127,14 @@ Need more — do not change, write it in the result notes.
 
 ## Acceptance (must be green)
 {tests}
+
+## Quality bar
+- Smallest diff that does the task; match surrounding code (naming, comment density, idioms).
+- No dead code, commented-out code, or duplicated helpers.
+- No broad `except Exception` — catch what you expect.
+- Every behaviour change gets a test that fails without it.
+- Run the project's linter (ruff for Python) and the acceptance before the last commit.
+- No new dependencies.
 
 ## How to submit (required)
 1. Commit as you go: `git add <paths>` by name (never `-A`/`.`), commit message in {commit_lang}. No uncommitted changes at the end.

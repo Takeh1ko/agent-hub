@@ -46,7 +46,6 @@ def _collect(lang: str, tmp_path) -> list[str]:
     gate = gates.GateResult(base="b", head="h", diffstat="1 file")
     out = [
         prompts.DEFAULT_RULES,
-        prompts.SCOUT_DELIVERY,
         prompts.CONTINUE_PROMPT,
         prompts.STOP_PROMPT,
         prompts.scout_delivery(),
@@ -150,3 +149,69 @@ def test_verdict_codes_english():
     from ahub import review
 
     assert set(review.VERDICTS) == {"approve", "changes", "dispute"}
+
+
+def test_quality_bar_in_code_not_scout(tmp_path, monkeypatch):
+    """Code/routine prompts carry the quality bar; scout prompts do not."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+
+    _reset()
+    from ahub import prompts
+    from ahub.store import Store
+    from tests.enginekit import make_project
+
+    store = Store()
+    project = make_project(tmp_path)
+    scout_tid = store.create_task(project="P", kind="scout", title="find leak")
+    code_tid = store.create_task(project="P", kind="code", title="fix")
+    store.update_task(code_tid, limits={"paths": ["core/**"], "accept": ["tests/test_a.py::test_x"]})
+    routine_tid = store.create_task(project="P", kind="routine", title="tidy")
+    store.update_task(routine_tid, limits={"paths": ["docs/**"], "accept": []})
+    scout = prompts.scout_prompt(project, store.get_task(scout_tid))
+    code = prompts.code_prompt(project, store.get_task(code_tid))
+    routine = prompts.code_prompt(project, store.get_task(routine_tid))
+    for text in (code, routine):
+        assert "## Quality bar" in text
+        assert "Smallest diff" in text
+        assert "dead code" in text
+        assert "except Exception" in text
+        assert "fails without it" in text
+        assert "ruff" in text
+        assert "No new dependencies" in text
+    assert "## Quality bar" not in scout
+    assert "## Quality bar" not in prompts.scout_delivery()
+
+
+def test_scout_delivery_cites_sources(tmp_path, monkeypatch):
+    """Scout reports cite file:line for every claim and note what was not checked."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+
+    _reset()
+    from ahub import prompts
+
+    delivery = prompts.scout_delivery()
+    assert "file:line" in delivery
+    assert "what you did not check" in delivery
+
+
+def test_reviewer_checks_quality_bar(tmp_path, monkeypatch):
+    """The code reviewer prompt covers dead code, broad excepts and stub tests."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+
+    _reset()
+    from ahub import gates, review
+    from ahub.store import Store
+    from tests.enginekit import make_project
+
+    store = Store()
+    project = make_project(tmp_path)
+    tid = store.create_task(project="P", kind="code", title="fix")
+    task = store.get_task(tid)
+    gate = gates.GateResult(base="b", head="h", diffstat="1 file")
+    prompt = review.review_prompt(project, task, "diff", gate, 1, "m")
+    assert "dead code" in prompt
+    assert "except Exception" in prompt
+    assert "stub test" in prompt.lower()

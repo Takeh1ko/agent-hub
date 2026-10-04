@@ -110,7 +110,8 @@ def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResul
     else:
         check = ("## What to check\nMatch to the task and acceptance; stub tests (pass on broken logic — "
                  "check by breaking the logic locally and reverting via git checkout); races; resource leaks; "
-                 "blocking calls in async; changes outside allowed files. Style/taste — low only.")
+                 "blocking calls in async; changes outside allowed files; dead code, commented-out code, "
+                 "duplicated helpers; broad `except Exception`. Style/taste — low only.")
     sections += [
         check,
         f"## How to submit\nWrite `{out}`:\n{verdict_format()}\n"
