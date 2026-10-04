@@ -65,7 +65,6 @@ def cmd_prompts(args) -> int:
     project = resolve_project(args)
     roles_data = {}
     rows = []
-    empty_roles = []
 
     for r in prompts.ROLES:
         # Check global
@@ -98,15 +97,12 @@ def cmd_prompts(args) -> int:
         l_cell = f"{_short_path(l_path)} ({_format_size(l_size)})" if l_exists else "—"
 
         is_empty = not (g_exists or p_exists or l_exists)
-        if is_empty:
-            empty_roles.append(r)
-
         rows.append((r, [r, g_cell, p_cell, l_cell], is_empty))
 
     head = [t("prompts.col_role"), t("prompts.col_global"), t("prompts.col_project"), t("prompts.col_local")]
     table_lines = ui.table(head, [cells for _, cells, _ in rows], indent=2).splitlines()
     out = [table_lines[0]]  # header
-    for i, (r, _cells, is_empty) in enumerate(rows, start=1):
+    for i, (r, _, is_empty) in enumerate(rows, start=1):
         out.append(table_lines[i])
         if is_empty:
             hint_str = t("prompts.hint_empty", role=r)
@@ -118,25 +114,22 @@ def cmd_prompts(args) -> int:
 
 def cmd_show(args) -> int:
     role = args.role
-    if role not in prompts.ROLES:
-        raise CliError(t("err.unknown_role", role=role, known=", ".join(prompts.ROLES)))
-
     project = resolve_project(args)
-    task = _dummy_task(project.name, role)
 
-    if role == "scout":
-        prompt_text = prompts.scout_prompt(project, task)
+    if role == "all":
+        sections, summary, layers = prompts.assemble_guidance(project, "all")
+        prompt_text = "\n\n".join(sections)
+    elif role == "scout":
+        task = _dummy_task(project.name, role)
+        prompt_text, summary, layers = prompts.scout_prompt(project, task)
     elif role in ("code", "routine"):
-        prompt_text = prompts.code_prompt(project, task)
+        task = _dummy_task(project.name, role)
+        prompt_text, summary, layers = prompts.code_prompt(project, task)
     elif role == "review":
+        task = _dummy_task(project.name, role)
         dummy_gate = gates.GateResult(base="base", head="head", diffstat="1 file changed")
         dummy_diff = "diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n"
-        prompt_text = review.review_prompt(project, task, dummy_diff, dummy_gate, 1, "reviewer")
-    else:  # "all"
-        sections, _, _ = prompts.assemble_guidance(project, "all")
-        prompt_text = "\n\n".join([*sections, prompts._header(task), prompts.code_delivery(task)])
-
-    _, summary, layers = prompts.assemble_guidance(project, role)
+        prompt_text, summary, layers = review.review_prompt(project, task, dummy_diff, dummy_gate, 1, "reviewer")
 
     data = {
         "role": role,
@@ -178,8 +171,6 @@ def _edit_template(role: str, scope_name: str) -> str:
 
 def cmd_edit(args) -> int:
     role = args.role
-    if role not in prompts.ROLES:
-        raise CliError(t("err.unknown_role", role=role, known=", ".join(prompts.ROLES)))
 
     if args.is_global:
         scope_name = "global"

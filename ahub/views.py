@@ -352,8 +352,7 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
 
     prompts_line = t.limits.get("prompts")
     if prompts_line:
-        line = prompts_line if prompts_line.startswith("prompts:") else f"prompts: {prompts_line}"
-        out.append(ui.styled(line, "dim"))
+        out.append(ui.styled(_t("views.lbl_prompts", summary=prompts_line), "dim"))
 
     rj, rp = _result_paths(t)
     if rj is not None and rj.exists():

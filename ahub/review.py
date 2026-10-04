@@ -17,7 +17,7 @@ from ahub import reasons, workspace
 from ahub.config import ProjectConfig
 from ahub.gates import GateResult
 from ahub.model import Kind
-from ahub.prompts import assemble_guidance, orchestrator_heading, reply_language_line
+from ahub.prompts import PromptLayer, assemble_guidance, orchestrator_heading, reply_language_line
 from ahub.store import Task
 
 VERDICTS = ("approve", "changes", "dispute")
@@ -82,16 +82,14 @@ def verdict_repair_prompt(round_no: int, model: str) -> str:
 
 
 def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResult, round_no: int,
-                  model: str, *, notes: str = "") -> str:
+                  model: str, *, notes: str = "") -> tuple[str, str, list[PromptLayer]]:
     """The prompt of one reviewer.
 
     A review task has no allowed files, no acceptance and no gates — its input is what is under review, so
     those sections are replaced by the input itself (`gate` is then an empty result).
     """
     out = review_path(".", round_no, model).as_posix().removeprefix("./")
-    guidance_sections, summary, _ = assemble_guidance(project, "review")
-    if task.kind is Kind.REVIEW or "prompts" not in task.limits:
-        task.limits["prompts"] = summary
+    guidance_sections, summary, layers = assemble_guidance(project, "review")
     sections = [*guidance_sections,
                 f"# Review of {task.label}: {task.title}\nYou are a reviewer in a fresh session; you have not seen "
                 "the worker's work. Stay in the copy (git worktree); never touch real data, other databases, "
@@ -124,7 +122,7 @@ def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResul
         f"Each finding needs file, line, and a concrete fix. {reply_language_line()} "
         'Last message — one line: "done".',
     ]
-    return "\n\n".join(sections)
+    return "\n\n".join(sections), summary, layers
 
 
 def parse(path: Path, model: str) -> Review | None:

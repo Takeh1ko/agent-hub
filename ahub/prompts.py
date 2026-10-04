@@ -49,51 +49,56 @@ def resolve_project_all_file(project: ProjectConfig) -> tuple[Path | None, bool]
 def assemble_guidance(project: ProjectConfig, role: str) -> tuple[list[str], str, list[PromptLayer]]:
     """Assemble user guidance for a session role:
     Order:
-      1. global all.md
-      2. project all.md (or legacy rules)
-      3. local all.md
-      4. global <role>.md (if role != 'all')
-      5. project <role>.md (if role != 'all')
-      6. local <role>.md (if role != 'all')
+      1. global all.md, then global <role>.md
+      2. project all.md (or legacy rules), then project <role>.md
+      3. local all.md, then local <role>.md
     Returns:
       (sections, summary_line, layers)
-    where each section has heading '## Global guidance', '## Project guidance', or '## Local guidance'.
+    where each non-empty scope has one heading: '## Global guidance', '## Project guidance', or '## Local guidance'.
     """
-    candidates: list[tuple[str, str, Path, str]] = []
-    # all.md of a, b, c
-    candidates.append(("global", "all", paths.global_prompts_dir() / "all.md", "Global guidance"))
     p_all_path, _ = resolve_project_all_file(project)
     p_all_target = p_all_path if p_all_path is not None else paths.project_prompts_dir(project.root) / "all.md"
-    candidates.append(("project", "all", p_all_target, "Project guidance"))
-    candidates.append(("local", "all", paths.local_prompts_dir(project.name) / "all.md", "Local guidance"))
 
-    # role.md of a, b, c
-    if role != "all":
-        candidates.append(("global", role, paths.global_prompts_dir() / f"{role}.md", "Global guidance"))
-        candidates.append(("project", role, paths.project_prompts_dir(project.root) / f"{role}.md", "Project guidance"))
-        candidates.append(("local", role, paths.local_prompts_dir(project.name) / f"{role}.md", "Local guidance"))
+    scopes = [
+        ("global", "Global guidance", [
+            ("all", paths.global_prompts_dir() / "all.md"),
+            *( [(role, paths.global_prompts_dir() / f"{role}.md")] if role != "all" else [] ),
+        ]),
+        ("project", "Project guidance", [
+            ("all", p_all_target),
+            *( [(role, paths.project_prompts_dir(project.root) / f"{role}.md")] if role != "all" else [] ),
+        ]),
+        ("local", "Local guidance", [
+            ("all", paths.local_prompts_dir(project.name) / "all.md"),
+            *( [(role, paths.local_prompts_dir(project.name) / f"{role}.md")] if role != "all" else [] ),
+        ]),
+    ]
 
     sections: list[str] = []
     layers: list[PromptLayer] = []
     used_by_scope: dict[str, list[str]] = {"global": [], "project": [], "local": []}
 
-    for scope, r, path, heading_name in candidates:
-        content = ""
-        exists = False
-        if path.is_file():
-            try:
-                if path.stat().st_size <= REFUSE_BYTES:
-                    content = path.read_text(encoding="utf-8")
-                    exists = True
-            except (OSError, UnicodeDecodeError):
-                pass
+    for scope, heading_name, scope_candidates in scopes:
         heading = f"## {heading_name}"
-        layer = PromptLayer(scope=scope, role=r, path=path, content=content, exists=exists, heading=heading)
-        layers.append(layer)
-        if content.strip():
-            sections.append(f"{heading}\n{content.strip()}")
-            if r not in used_by_scope[scope]:
-                used_by_scope[scope].append(r)
+        scope_texts: list[str] = []
+        for r, path in scope_candidates:
+            content = ""
+            exists = False
+            if path.is_file():
+                try:
+                    if path.stat().st_size <= REFUSE_BYTES:
+                        content = path.read_text(encoding="utf-8")
+                        exists = True
+                except (OSError, UnicodeDecodeError):
+                    pass
+            layer = PromptLayer(scope=scope, role=r, path=path, content=content, exists=exists, heading=heading)
+            layers.append(layer)
+            if content.strip():
+                scope_texts.append(content.strip())
+                if r not in used_by_scope[scope]:
+                    used_by_scope[scope].append(r)
+        if scope_texts:
+            sections.append(f"{heading}\n" + "\n\n".join(scope_texts))
 
     # Form summary: e.g. "built-in + global(code) + project(all, code)"
     parts = ["built-in"]
@@ -174,10 +179,9 @@ def scout_delivery() -> str:
 """
 
 
-def scout_prompt(project: ProjectConfig, task: Task) -> str:
-    sections, summary, _ = assemble_guidance(project, "scout")
-    task.limits["prompts"] = summary
-    return "\n\n".join([*sections, _header(task), scout_delivery()])
+def scout_prompt(project: ProjectConfig, task: Task) -> tuple[str, str, list[PromptLayer]]:
+    sections, summary, layers = assemble_guidance(project, "scout")
+    return "\n\n".join([*sections, _header(task), scout_delivery()]), summary, layers
 
 
 def repair_prompt(problem: str) -> str:
@@ -231,11 +235,10 @@ Need more — do not change, write it in the result notes.
 """
 
 
-def code_prompt(project: ProjectConfig, task: Task) -> str:
+def code_prompt(project: ProjectConfig, task: Task) -> tuple[str, str, list[PromptLayer]]:
     role = "routine" if task.kind is Kind.ROUTINE else "code"
-    sections, summary, _ = assemble_guidance(project, role)
-    task.limits["prompts"] = summary
-    return "\n\n".join([*sections, _header(task), code_delivery(task)])
+    sections, summary, layers = assemble_guidance(project, role)
+    return "\n\n".join([*sections, _header(task), code_delivery(task)]), summary, layers
 
 
 @dataclass(frozen=True)
@@ -280,11 +283,23 @@ def check_prompts_for_project(project: ProjectConfig | None = None) -> list[Prom
                     fix=_t("prompts.fix_decode"),
                 ))
                 continue
-            except OSError:
+            except OSError as e:
+                issues.append(PromptCheckIssue(
+                    path=entry,
+                    severity="error",
+                    message=_t("prompts.err_unreadable", path=str(entry), err=str(e)),
+                    fix=_t("prompts.fix_unreadable"),
+                ))
                 continue
             try:
                 size = entry.stat().st_size
-            except OSError:
+            except OSError as e:
+                issues.append(PromptCheckIssue(
+                    path=entry,
+                    severity="error",
+                    message=_t("prompts.err_unreadable", path=str(entry), err=str(e)),
+                    fix=_t("prompts.fix_unreadable"),
+                ))
                 continue
             if size > REFUSE_BYTES:
                 issues.append(PromptCheckIssue(

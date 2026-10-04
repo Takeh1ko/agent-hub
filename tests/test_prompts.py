@@ -52,15 +52,15 @@ def _collect(lang: str, tmp_path) -> list[str]:
         prompts.repair_prompt("no result"),
         prompts.stop_prompt(),
         prompts.code_delivery(code_task),
-        prompts.scout_prompt(project, task),
-        prompts.code_prompt(project, code_task),
+        prompts.scout_prompt(project, task)[0],
+        prompts.code_prompt(project, code_task)[0],
         prompts.reply_language_line(),
         prompts.report_heading(),
         prompts.arbiter_heading(),
         prompts.orchestrator_heading(),
         prompts.orchestrator_heading(rework=True),
         prompts.final_line(),
-        review.review_prompt(project, task, "diff", gate, 1, "m"),
+        review.review_prompt(project, task, "diff", gate, 1, "m")[0],
         review.fix_prompt([], notes="note"),
         drafts.PROMPT.format(text="want button", allowed="core/**", errors=""),
         drafts.PROMPT.format(text="x", allowed="a",
@@ -95,7 +95,7 @@ def test_scout_report_language_ru(tmp_path, monkeypatch):
     store = Store()
     project = make_project(tmp_path)
     tid = store.create_task(project="P", kind="scout", title="где утечка")
-    prompt = prompts.scout_prompt(project, store.get_task(tid))
+    prompt, _, _ = prompts.scout_prompt(project, store.get_task(tid))
     assert "in Russian" in prompt and "## Суть" in prompt and "## Summary" not in prompt
 
 
@@ -111,7 +111,7 @@ def test_scout_report_language_en(tmp_path, monkeypatch):
     store = Store()
     project = make_project(tmp_path)
     tid = store.create_task(project="P", kind="code", title="leak")
-    prompt = prompts.scout_prompt(project, store.get_task(tid))
+    prompt, _, _ = prompts.scout_prompt(project, store.get_task(tid))
     assert "in English" in prompt and "## Summary" in prompt and "Суть" not in prompt
 
 
@@ -166,7 +166,7 @@ def test_quality_bar_in_template_not_builtin(tmp_path, monkeypatch):
     project = make_project(tmp_path)
     code_tid = store.create_task(project="P", kind="code", title="fix")
     store.update_task(code_tid, limits={"paths": ["core/**"], "accept": ["tests/test_a.py::test_x"]})
-    code = prompts.code_prompt(project, store.get_task(code_tid))
+    code, _, _ = prompts.code_prompt(project, store.get_task(code_tid))
 
     # Built-in prompt has no quality bar
     assert "## Quality bar" not in code
@@ -212,7 +212,7 @@ def test_reviewer_checks_quality_bar(tmp_path, monkeypatch):
     tid = store.create_task(project="P", kind="code", title="fix")
     task = store.get_task(tid)
     gate = gates.GateResult(base="b", head="h", diffstat="1 file")
-    prompt = review.review_prompt(project, task, "diff", gate, 1, "m")
+    prompt, _, _ = review.review_prompt(project, task, "diff", gate, 1, "m")
     assert "dead code" in prompt
     assert "except Exception" in prompt
     assert "stub test" in prompt.lower()
@@ -246,7 +246,7 @@ def test_assembly_order_and_headings(tmp_path, monkeypatch):
     write(paths.local_prompts_dir(project.name) / "all.md", "LOCAL_ALL_RULE")
     write(paths.local_prompts_dir(project.name) / "code.md", "LOCAL_CODE_RULE")
 
-    prompt = prompts.code_prompt(project, task)
+    prompt, summary, layers = prompts.code_prompt(project, task)
 
     lines = prompt.splitlines()
     assert "## Global guidance" in lines
@@ -256,29 +256,31 @@ def test_assembly_order_and_headings(tmp_path, monkeypatch):
     assert "## Acceptance (must be green)" in lines
     assert "## How to submit (required)" in lines
 
+    # One heading per scope
+    assert prompt.count("## Global guidance") == 1
+    assert prompt.count("## Project guidance") == 1
+    assert prompt.count("## Local guidance") == 1
+
     # Check headings and content
-    assert "## Global guidance\nGLOBAL_ALL_RULE" in prompt
-    assert "## Project guidance\nPROJECT_ALL_RULE" in prompt
-    assert "## Local guidance\nLOCAL_ALL_RULE" in prompt
-    assert "## Global guidance\nGLOBAL_CODE_RULE" in prompt
-    assert "## Project guidance\nPROJECT_CODE_RULE" in prompt
-    assert "## Local guidance\nLOCAL_CODE_RULE" in prompt
+    assert "## Global guidance\nGLOBAL_ALL_RULE\n\nGLOBAL_CODE_RULE" in prompt
+    assert "## Project guidance\nPROJECT_ALL_RULE\n\nPROJECT_CODE_RULE" in prompt
+    assert "## Local guidance\nLOCAL_ALL_RULE\n\nLOCAL_CODE_RULE" in prompt
 
     # Verify exact order
     i_g_all = prompt.index("GLOBAL_ALL_RULE")
-    i_p_all = prompt.index("PROJECT_ALL_RULE")
-    i_l_all = prompt.index("LOCAL_ALL_RULE")
     i_g_code = prompt.index("GLOBAL_CODE_RULE")
+    i_p_all = prompt.index("PROJECT_ALL_RULE")
     i_p_code = prompt.index("PROJECT_CODE_RULE")
+    i_l_all = prompt.index("LOCAL_ALL_RULE")
     i_l_code = prompt.index("LOCAL_CODE_RULE")
     i_spec = prompt.index("Spec for T1")
     i_builtin = prompt.index("## Allowed files")
     i_submit = prompt.index("## How to submit")
 
-    assert i_g_all < i_p_all < i_l_all < i_g_code < i_p_code < i_l_code < i_spec < i_builtin < i_submit
+    assert i_g_all < i_g_code < i_p_all < i_p_code < i_l_all < i_l_code < i_spec < i_builtin < i_submit
 
-    # Task limits recorded summary
-    assert task.limits.get("prompts") == "built-in + global(all, code) + project(all, code) + local(all, code)"
+    # Returned summary
+    assert summary == "built-in + global(all, code) + project(all, code) + local(all, code)"
 
 
 def test_missing_files(tmp_path, monkeypatch):
@@ -296,22 +298,22 @@ def test_missing_files(tmp_path, monkeypatch):
     task = store.get_task(tid)
 
     # All files missing
-    prompt = prompts.code_prompt(project, task)
+    prompt, summary, _ = prompts.code_prompt(project, task)
     assert "## Global guidance" not in prompt
     assert "## Project guidance" not in prompt
     assert "## Local guidance" not in prompt
     assert prompt.startswith(f"# Task {task.label} (code): implement feature")
     assert "## How to submit" in prompt
-    assert task.limits.get("prompts") == "built-in"
+    assert summary == "built-in"
 
     # Only one file present (e.g. project code.md)
     write(paths.project_prompts_dir(project.root) / "code.md", "ONLY_CODE_RULE")
-    prompt2 = prompts.code_prompt(project, task)
+    prompt2, summary2, _ = prompts.code_prompt(project, task)
     assert "## Global guidance" not in prompt2
     assert "## Local guidance" not in prompt2
     assert prompt2.count("## Project guidance") == 1
     assert "ONLY_CODE_RULE" in prompt2
-    assert task.limits.get("prompts") == "built-in + project(code)"
+    assert summary2 == "built-in + project(code)"
 
 
 def test_legacy_rules(tmp_path, monkeypatch):
@@ -371,26 +373,26 @@ def test_review_role_used_for_code_review_and_review_kind(tmp_path, monkeypatch)
     code_tid = store.create_task(project="P", kind="code", title="fix issue")
     code_task = store.get_task(code_tid)
     gate = gates.GateResult(base="b", head="h", diffstat="1 file")
-    code_prompt = review.review_prompt(project, code_task, "diff text", gate, 1, "model")
+    code_prompt, summary, _ = review.review_prompt(project, code_task, "diff text", gate, 1, "model")
 
     assert "PROJECT_REVIEW_RULE" in code_prompt
     assert "PROJECT_CODE_RULE" not in code_prompt
     assert "Stay in the copy (git worktree); never touch real data" in code_prompt
     assert "secrets (.env, keys, /etc)" in code_prompt
-    assert code_task.limits.get("prompts") == "built-in + project(all, review)"
+    assert summary == "built-in + project(all, review)"
     # Built-in submission instructions are at the end
     assert code_prompt.rfind("verdict") > code_prompt.find("PROJECT_REVIEW_RULE")
 
     # 2. Review task kind
     rev_tid = store.create_task(project="P", kind="review", title="review branch", limits={"input": "feature"})
     rev_task = store.get_task(rev_tid)
-    rev_prompt = review.review_prompt(project, rev_task, "diff text", gate, 1, "model")
+    rev_prompt, rev_summary, _ = review.review_prompt(project, rev_task, "diff text", gate, 1, "model")
 
     assert "PROJECT_REVIEW_RULE" in rev_prompt
     assert "PROJECT_CODE_RULE" not in rev_prompt
     assert "Stay in the copy (git worktree); never touch real data" in rev_prompt
     assert "secrets (.env, keys, /etc)" in rev_prompt
-    assert rev_task.limits.get("prompts") == "built-in + project(all, review)"
+    assert rev_summary == "built-in + project(all, review)"
 
 
 def test_check_thresholds(tmp_path, monkeypatch, capsys):
@@ -588,6 +590,15 @@ def test_cli_prompts_and_show(tmp_path, monkeypatch, capsys):
     assert any(g["scope"] == "project" and "CUSTOM_CODE_GUIDANCE" in g["content"] for g in data["guidance"])
     assert "CUSTOM_CODE_GUIDANCE" in data["prompt"]
 
+    # ahub prompts show all shows only guidance
+    write(paths.project_prompts_dir(project.root) / "all.md", "CUSTOM_ALL_GUIDANCE")
+    assert cli.main(["prompts", "show", "all"]) == 0
+    out_all = capsys.readouterr().out
+    assert "CUSTOM_ALL_GUIDANCE" in out_all
+    assert "## Project guidance" in out_all
+    assert "## Allowed files" not in out_all
+    assert "## How to submit" not in out_all
+
     # Unknown role
     import pytest
     with pytest.raises(SystemExit) as exc:
@@ -630,8 +641,12 @@ def test_cli_project_flag_before_subcommand(tmp_path, monkeypatch, capsys):
     assert cli.main(["prompts", "--project", "non_existent_project_xyz", "check"]) == 2
 
 
-def test_end_to_end_code_task_records_prompts(tmp_path):
+def test_end_to_end_code_task_records_prompts(tmp_path, monkeypatch):
     """An end-to-end code task with the fake provider records prompts in limits and views."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
     from ahub import paths, tasks, views
     from ahub.engine import Engine
     from ahub.model import Kind
@@ -678,8 +693,12 @@ def test_end_to_end_code_task_records_prompts(tmp_path):
     assert "prompts: built-in + project(code)" in card
 
 
-def test_end_to_end_review_task_records_prompts(tmp_path):
+def test_end_to_end_review_task_records_prompts(tmp_path, monkeypatch):
     """An end-to-end review task with the fake provider records prompts in limits and views."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
     import json
     import subprocess
     from pathlib import Path
@@ -814,9 +833,9 @@ def test_non_utf8_guidance_handled(tmp_path, monkeypatch, capsys):
     bad_file.write_bytes(b"\xcf\xf0\xe8\xe2\xe5\xf2")  # cp1251 "Привет", invalid UTF-8
 
     # 1. code_prompt does not crash; file is ignored
-    prompt = prompts.code_prompt(project, task)
+    prompt, summary, _ = prompts.code_prompt(project, task)
     assert "## Project guidance" not in prompt
-    assert task.limits.get("prompts") == "built-in"
+    assert summary == "built-in"
 
     # 2. rules_text does not crash
     assert prompts.rules_text(project) == prompts.DEFAULT_RULES
@@ -859,10 +878,10 @@ def test_routine_task_uses_routine_guidance(tmp_path, monkeypatch):
     store.update_task(tid, limits={"paths": ["core/**"], "accept": []})
     task = store.get_task(tid)
 
-    prompt = prompts.code_prompt(project, task)
+    prompt, summary, _ = prompts.code_prompt(project, task)
     assert "ROUTINE_SPECIFIC_RULE" in prompt
     assert "CODE_SPECIFIC_RULE" not in prompt
-    assert task.limits.get("prompts") == "built-in + project(routine)"
+    assert summary == "built-in + project(routine)"
 
 
 def test_check_prompts_scans_local_prompts_dir(tmp_path, monkeypatch):
@@ -888,6 +907,88 @@ def test_check_prompts_scans_local_prompts_dir(tmp_path, monkeypatch):
     assert size_issue.severity == "error"
 
 
+def test_check_prompts_scans_global_prompts_dir(tmp_path):
+    """check_prompts_for_project scans global prompts dir for unknown files and size limits."""
+    from ahub import paths, prompts
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    global_dir = paths.global_prompts_dir()
+
+    write(global_dir / "unknown_global.txt", "some notes")
+    write(global_dir / "code.md", "x" * 16385)
+
+    issues = prompts.check_prompts_for_project(project)
+    global_issues = [i for i in issues if str(global_dir) in str(i.path)]
+    assert len(global_issues) == 2
+
+    unknown_issue = next(i for i in global_issues if "unknown_global.txt" in str(i.path))
+    assert unknown_issue.severity == "warning"
+
+    size_issue = next(i for i in global_issues if "code.md" in str(i.path))
+    assert size_issue.severity == "error"
+
+    # Also checks global dir when project is None
+    issues_no_proj = prompts.check_prompts_for_project(None)
+    global_no_proj = [i for i in issues_no_proj if str(global_dir) in str(i.path)]
+    assert len(global_no_proj) == 2
+
+
+def test_local_prompts_dir_hostile_name():
+    """local_prompts_dir sanitises hostile project names preventing path traversal."""
+    from ahub import paths
+
+    # Hostile name with path traversal
+    hostile = "../../etc/passwd"
+    p = paths.local_prompts_dir(hostile)
+    assert ".." not in p.parts
+    # Resolves strictly inside config_dir() / "projects"
+    assert p.is_relative_to(paths.config_dir() / "projects")
+
+    # Name is just ".."
+    p_dotdot = paths.local_prompts_dir("..")
+    assert ".." not in p_dotdot.parts
+    assert p_dotdot.is_relative_to(paths.config_dir() / "projects")
+
+    # Accept lock path also uses same safe name
+    lp = paths.accept_lock_path(hostile)
+    assert ".." not in lp.name
+    assert "/" not in lp.name
+
+
+def test_check_prompts_reports_unreadable_file(tmp_path, monkeypatch):
+    """check_prompts_for_project reports unreadable file with error severity."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from ahub import paths, prompts
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    file_path = paths.project_prompts_dir(project.root) / "code.md"
+    write(file_path, "code guidance")
+
+    orig_read_text = Path.read_text
+
+    def failing_read_text(self, *args, **kwargs):
+        if self == file_path:
+            raise PermissionError("Permission denied")
+        return orig_read_text(self, *args, **kwargs)
+
+    with patch.object(Path, "read_text", failing_read_text):
+        issues = prompts.check_prompts_for_project(project)
+        errs = [i for i in issues if i.severity == "error" and str(file_path) in str(i.path)]
+        assert len(errs) == 1
+        assert "cannot read file" in errs[0].message
+        assert "check file permissions" in errs[0].fix
+
+
 def test_refuse_bytes_assemble_guidance(tmp_path):
     """Guidance files > 16 KB are refused and treated as missing in assemble_guidance."""
     from ahub import paths, prompts
@@ -903,8 +1004,8 @@ def test_refuse_bytes_assemble_guidance(tmp_path):
     store.update_task(tid, limits={"paths": ["core/**"], "accept": []})
     task = store.get_task(tid)
 
-    prompt = prompts.code_prompt(project, task)
+    prompt, summary, _ = prompts.code_prompt(project, task)
     assert "## Project guidance" not in prompt
-    assert task.limits.get("prompts") == "built-in"
+    assert summary == "built-in"
 
 

@@ -663,9 +663,11 @@ class Engine:
         prev = [s for s in self.store.list_sessions(t.id) if s.role == Role.SCOUT.value and s.external_id]
         resume_sid = prev[-1].external_id if prev and not t.limits.get("fresh_session") else None  # resume
         self._clear_fresh(t)
-        prompt = prompts.CONTINUE_PROMPT if resume_sid else prompts.scout_prompt(self.project, t)
-        if not resume_sid:
-            self._record_prompts(t)
+        if resume_sid:
+            prompt = prompts.CONTINUE_PROMPT
+        else:
+            prompt, summary, _ = prompts.scout_prompt(self.project, t)
+            self._record_prompts(t, summary)
         r, final = self._step_with_continue(Role.SCOUT, t.executor, prompt, session_id=resume_sid,
                                             log_name="scout",
                                             prompt_kind="continue" if resume_sid else "start")
@@ -837,8 +839,9 @@ class Engine:
             lim.pop("rework_notes", None)
             self.store.update_task(t.id, limits=lim)
         if fresh:  # new session (different model/brief, or no session before): full brief + instructions
-            prompt, kind = prompts.code_prompt(self.project, t), "start"
-            self._record_prompts(t)
+            prompt, summary, _ = prompts.code_prompt(self.project, t)
+            self._record_prompts(t, summary)
+            kind = "start"
             if notes:
                 prompt += f"\n\n{prompts.orchestrator_heading(rework=True)}\n" + notes
                 kind = "rework"
@@ -908,11 +911,11 @@ class Engine:
             t = self.move(State.FIXING, reason, fields={"round": round_no})
             prompt, kind = review.fix_prompt(findings), "rework"
 
-    def _record_prompts(self, t: Task) -> None:
-        if "prompts" in t.limits:
-            lim = dict(self.task().limits)
-            lim["prompts"] = t.limits["prompts"]
-            self.store.update_task(t.id, limits=lim)
+    def _record_prompts(self, t: Task, summary: str) -> None:
+        lim = dict(self.task().limits)
+        lim["prompts"] = summary
+        t.limits["prompts"] = summary
+        self.store.update_task(t.id, limits=lim)
 
     def _clear_fresh(self, t: Task) -> None:
         if t.limits.get("fresh_session"):
@@ -949,7 +952,7 @@ class Engine:
             review.review_path(t.worktree, round_no, m).unlink(missing_ok=True)
 
         def one(m: str):
-            prompt = review.review_prompt(self.project, t, diff, g, round_no, m, notes=notes)
+            prompt, _, _ = review.review_prompt(self.project, t, diff, g, round_no, m, notes=notes)
             # a reviewer is not interrupted by a nudge: the message waits for the executor's next turn
             return self.session(Role.REVIEWER, m, prompt, keep_session_on_retry=False,
                                 log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review",
@@ -957,8 +960,9 @@ class Engine:
 
         with ThreadPoolExecutor(max_workers=len(models)) as ex:
             results = list(ex.map(one, models))
-        if t.kind is Kind.REVIEW and "prompts" in t.limits:
-            self._record_prompts(t)
+        if t.kind is Kind.REVIEW:
+            _, summary, _ = prompts.assemble_guidance(self.project, "review")
+            self._record_prompts(t, summary)
         if (stop := self._review_interrupted(results)) is not None:
             return stop
         self._revert_reviewer(t)

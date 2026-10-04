@@ -58,10 +58,16 @@ def service_pid_path() -> Path:
     return data_dir() / "service.pid"
 
 
+def _safe_name(name: str) -> str:
+    safe = re.sub(r"[^\w\-.]", "_", name)
+    while ".." in safe:
+        safe = safe.replace("..", "_")
+    return safe or "_"
+
+
 def accept_lock_path(project_name: str) -> Path:
     """Per-project accept lock file (serializes merges and acceptance within a project)."""
-    safe = re.sub(r"[^\w\-.]", "_", project_name)
-    return data_dir() / f"accept-{safe}.lock"
+    return data_dir() / f"accept-{_safe_name(project_name)}.lock"
 
 
 def global_prompts_dir() -> Path:
@@ -76,4 +82,4 @@ def project_prompts_dir(project_root: str | Path) -> Path:
 
 def local_prompts_dir(project_name: str) -> Path:
     """Local project prompts directory: ~/.config/ahub/projects/<project-name>/prompts."""
-    return config_dir() / "projects" / project_name / "prompts"
+    return config_dir() / "projects" / _safe_name(project_name) / "prompts"
