@@ -404,6 +404,7 @@ MESSAGES: dict[str, str] = {
     "reason.accept_gates": "ворота на текущем HEAD: {problems}",
     "reason.accepted": "принята",
     "reason.accepting": "принятие",
+    "reason.already_merged": "{label} уже слита в {branch} без приёмки — завершите вручную",
     "reason.blocked": "работник заблокирован: {summary}",
     "reason.budget_before": "бюджет исчерпан до начала хода",
     "reason.budget_extended": "бюджет продлён",
@@ -449,9 +450,10 @@ MESSAGES: dict[str, str] = {
     "reason.review_missing": "ревьюер(ы) не сдали вердикт: {items}",
     "reason.review_round": "ревью, круг {round}",
     "reason.review_stopped": "остановлено во время ревью",
+    "reason.rollback_failed": "после слияния приёмка красная, но откат не удался: {err} — откатите слияние вручную",
     "reason.rework": "доработка",
     "reason.root_moved": "после слияния приёмка красная, а корень уехал ({now} ≠ {merged}) — откатите слияние вручную",
-    # scout result problems (the repair prompt says the same through engine.*)
+    # scout result problems (the repair prompt takes the same text through gates.problem)
     "reason.scout_commits": "разведка сделала коммиты",
     "reason.scout_files": "разведка изменила файлы проекта: {files}",
     "reason.no_result": "нет .ahub/result.json",

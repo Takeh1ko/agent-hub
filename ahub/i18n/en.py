@@ -404,6 +404,7 @@ MESSAGES: dict[str, str] = {
     "reason.accept_gates": "gates on the current HEAD: {problems}",
     "reason.accepted": "accepted",
     "reason.accepting": "accepting",
+    "reason.already_merged": "{label} is already merged into {branch} without acceptance — finish it by hand",
     "reason.blocked": "worker is blocked: {summary}",
     "reason.budget_before": "budget exhausted before the run",
     "reason.budget_extended": "budget extended",
@@ -449,9 +450,10 @@ MESSAGES: dict[str, str] = {
     "reason.review_missing": "reviewer(s) did not submit a verdict: {items}",
     "reason.review_round": "review, round {round}",
     "reason.review_stopped": "stopped during review",
+    "reason.rollback_failed": "acceptance is red, but the rollback failed: {err} — revert the merge by hand",
     "reason.rework": "rework",
     "reason.root_moved": "acceptance is red after the merge, but the root moved ({now} != {merged}) — revert the merge manually",
-    # scout result problems (the repair prompt says the same through engine.*)
+    # scout result problems (the repair prompt takes the same text through gates.problem)
     "reason.scout_commits": "scout made commits",
     "reason.scout_files": "scout changed project files: {files}",
     "reason.no_result": "no .ahub/result.json",

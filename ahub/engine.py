@@ -508,7 +508,8 @@ class Engine:
             r = self.session(role, alias, prompts.nudge_prompt(text), session_id=r.session_id or session_id,
                              log_name=log_name, prompt_kind="nudge")
             if r.outcome is Outcome.KILLED and not self.stop_requested() and self.pending_nudge():
-                continue
+                continue  # the turn was cut short by the next message — it is delivered right here
+            # a turn that ended badly settles the task — the message that arrived meanwhile does not paper over it
             if self._outcome_to_state(r) is not None:
                 return r
         return r

@@ -171,7 +171,7 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *
         head_after = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
         if head_after == head_before:
             raise DecisionError(_t("accept.already_merged", branch=project.work_branch, label=t.label),
-                                reasons.dump("already_merged", branch=project.work_branch))
+                                reasons.dump("already_merged", branch=project.work_branch, label=t.label))
         merged = head_after
     else:
         _log.info("T%d is already merged into %s (%s) — acceptance on HEAD", t.id, project.work_branch, merged[:10])
