@@ -178,3 +178,61 @@ def test_unsupported_kind_is_decision(store, project):
     t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.ROUTINE, title="x", paths=["core/**"],
                                            review_level=0, model="fake"), project, collect=False)
     assert run(store, project, t.id).state is State.NEEDS_DECISION
+
+
+def test_scout_report_dir_is_needs_decision(store, project):
+    """A scout that leaves `.ahub/report.md/` a directory: the report is not there — a decision, not an error."""
+    fake_step = {
+        "session": "ses_dir",
+        "steps": [
+            {"write": {
+                "path": ".ahub/result.json",
+                "text": json.dumps({"summary": "scout done", "status": "done"}),
+            }},
+            {"write": {"path": ".ahub/report.md/file", "text": "bad"}},
+        ],
+    }
+    install_fake(store, [fake_step, {"session": "ses_dir", "steps": []}])
+    t = new_scout(store, project)
+    res = run(store, project, t.id)
+    assert res.state is State.NEEDS_DECISION
+    assert "нет .ahub/report.md" in res.reason
+
+
+def test_scout_report_that_cannot_be_read_is_a_problem(store, project):
+    """The report exists but cannot be read: `no_report` is a problem, not a crash of the owner."""
+    from ahub import workspace
+    install_fake(store, [])
+    t = new_scout(store, project)
+    ws = workspace.ensure(project, t.id)
+    store.update_task(t.id, worktree=ws.path, branch=ws.branch, base_sha=ws.base_sha)
+    base = Path(ws.path) / ".ahub"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "result.json").write_text(json.dumps({"summary": "нашёл", "status": "done"}), encoding="utf-8")
+    report = base / "report.md"
+    report.write_text("## Суть\nутечка\n", encoding="utf-8")
+    eng = Engine(store, project, t.id)
+    assert eng._check_scout(store.get_task(t.id)) == []
+    report.chmod(0o000)  # there, but not readable
+    try:
+        assert [p.code for p in eng._check_scout(store.get_task(t.id))] == ["no_report"]
+    finally:
+        report.chmod(0o644)
+
+
+def test_scout_report_that_disappears_after_the_check(store, project, monkeypatch):
+    """The report is stat-ed again before the task is done: a file that is gone is `no_report`, not ERROR."""
+    install_fake(store, [scout_ok()])
+    t = new_scout(store, project)
+    real = Engine._check_scout
+
+    def _check_and_lose(self, task):
+        problems = real(self, task)
+        if not problems:  # the check before the settle — the report vanishes right after it
+            (Path(task.worktree) / ".ahub" / "report.md").unlink(missing_ok=True)
+        return problems
+
+    monkeypatch.setattr(Engine, "_check_scout", _check_and_lose)
+    res = run(store, project, t.id)
+    assert res.state is State.NEEDS_DECISION
+    assert "нет .ahub/report.md" in res.reason

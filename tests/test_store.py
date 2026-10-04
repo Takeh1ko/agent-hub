@@ -162,3 +162,21 @@ def test_parse_task_id():
     assert parse_task_id("T12") == parse_task_id("t12") == parse_task_id("12") == parse_task_id(12) == 12
     with pytest.raises(ValueError):
         parse_task_id("X1")
+
+
+def test_list_tasks_projects_filter_and_task_projects(store):
+    """The project filter of the task list and the projects it knows — the owner's scope view."""
+    store.create_task(project="alpha", kind=Kind.CODE, title="a1")
+    store.create_task(project="beta", kind=Kind.CODE, title="b1")
+    store.create_task(project="gamma", kind=Kind.CODE, title="g1")
+
+    assert store.task_projects() == ["alpha", "beta", "gamma"]
+
+    tasks_ab = store.list_tasks(projects=("alpha", "beta"))
+    assert sorted(t.project for t in tasks_ab) == ["alpha", "beta"]
+
+    tasks_g = store.list_tasks(projects=("gamma",))
+    assert [t.project for t in tasks_g] == ["gamma"]
+
+    tasks_none = store.list_tasks(projects=("delta",))
+    assert tasks_none == []
