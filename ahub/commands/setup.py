@@ -24,7 +24,8 @@ from pathlib import Path
 
 from ahub import config, paths, ui
 from ahub.cliutil import CliError, emit
-from ahub.config import set_global, toml_str as _toml_str
+from ahub.config import set_global
+from ahub.config import toml_str as _toml_str
 
 MARK_BEGIN = "<!-- ahub:begin -->"
 MARK_END = "<!-- ahub:end -->"

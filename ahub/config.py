@@ -603,7 +603,6 @@ def provider_lookup(parsed: dict, name: str):
 
 def _replace_section_key(text: str, section: str, key: str, value, lookup=None) -> str:
     """Key inside [section]; section missing — append; rest (comments, other sections) stays."""
-    gp = paths.global_config_path()
     rendered = f"{key} = {toml_str(value)}\n"
     head = re.compile(rf"^\[{re.escape(section)}\][^\n]*\n?", re.MULTILINE)
     m = head.search(text)

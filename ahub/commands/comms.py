@@ -90,7 +90,7 @@ def cmd_wait(args) -> int:
         try:
             got = events.wait(store, timeout_s=left, scope=sc, who=args.who)
             break
-        except (sqlite3.Error, OSError) as e:  # a broken poll must not kill the wait — until the cap says it is hopeless
+        except (sqlite3.Error, OSError) as e:  # a broken poll must not kill the wait; the cap decides
             line = fails.note(e)
             if line:
                 print(line, file=sys.stderr, flush=True)
