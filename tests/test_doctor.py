@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import shutil
 import socket
 import subprocess
+import threading
+import time
 import types
 from pathlib import Path
 
 from ahub import cli, doctor, paths
+from ahub.commands import doctor as doctor_cmd
 from ahub.providers.base import Health
 from ahub.providers.fake import FakeProvider
 from ahub.service import HEARTBEAT_KEY
@@ -98,6 +102,14 @@ def _write_auth(data: dict) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data), encoding="utf-8")
     return p
+
+
+def _english(monkeypatch):
+    """The suite runs in Russian; these checks read the English wording."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
 
 
 def test_auth_providers_only_keys_no_values(monkeypatch, tmp_path):
@@ -288,6 +300,22 @@ def test_models_fix_commands_execute(capsys):
     assert doctor.check_models([]).ok is True
 
 
+def test_models_all_providers_off_is_a_failure(monkeypatch):
+    """T107/12: every role menu empty (all providers disabled) — a green doctor would be a lie."""
+
+    def _config(text: str, stamp: int) -> None:
+        p = write(paths.global_config_path(), text)
+        os.utime(p, ns=(stamp * 10**9, stamp * 10**9))  # the provider switch is cached by mtime
+
+    _english(monkeypatch)
+    _config("[providers.opencode]\nenabled = false\n[providers.agy]\nenabled = false\n"
+            "[providers.codex]\nenabled = false\n", 1)
+    c = doctor.check_models(["opencode", "opencode-go"])
+    assert c.ok is False and "empty" in c.detail and "ahub providers enable" in c.fix
+    _config("projects = []\n", 2)
+    assert doctor.check_models(["opencode", "opencode-go"]).ok is True
+
+
 class _Scenario(FakeProvider):
     """Fake provider playing one fixed scenario: the probe sends a prompt of its own."""
 
@@ -351,6 +379,16 @@ def test_pick_free_probes_candidates_then_warns(monkeypatch):
     assert doctor._free_alias(store) == "spark-free"
 
 
+def test_probe_none_warning_says_which_models(monkeypatch):
+    """T107/6: the wizard probes paid models too — its warning must not claim they were free ones."""
+    _english(monkeypatch)
+    paid = doctor.probe_none_warning(["codex", "codex-fast"])
+    assert "no free model" not in paid and "codex, codex-fast" in paid
+    assert "ahub doctor" in paid
+    free = doctor.probe_none_warning(["spark-free", "bunny"], free=True)
+    assert "no free model" in free and "spark-free, bunny" in free
+
+
 def test_provider_states_from_the_checks(monkeypatch, tmp_path):
     """T50: every provider gets found / logged in / a note / an install hint from the same checks."""
     from ahub import providers
@@ -396,29 +434,122 @@ def test_provider_states_from_the_checks(monkeypatch, tmp_path):
     assert doctor.provider_state("no-such").found is False
 
 
+def _opencode_bin(monkeypatch, tmp_path) -> Path:
+    binary = tmp_path / "bin" / "opencode"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda name: str(binary) if name == "opencode" else None)
+    return binary
+
+
+def test_opencode_login_is_an_ahub_login(monkeypatch, tmp_path):
+    """T107/3: a foreign key in auth.json (anthropic) is no opencode login — "logged in · free only" lied."""
+    from ahub import providers
+
+    _english(monkeypatch)
+    _opencode_bin(monkeypatch, tmp_path)
+    monkeypatch.setattr(providers, "get",
+                        lambda name: types.SimpleNamespace(health=lambda: Health(True, (), {"version": "1.2.3"})))
+
+    _write_auth({"anthropic": {"apiKey": "sk-ant-1"}})
+    st = doctor.provider_state("opencode")
+    assert st.found and not st.logged_in  # nothing of ahub's here
+    assert "free models only" in st.note
+    assert doctor.has_any_login() is False and doctor.has_go_login() is False
+    assert "auth login" in st.hint
+    assert doctor.provider_line(st).startswith("! opencode")
+
+    _write_auth({"opencode": {"k": "v"}})  # the free models answer — a login of its own
+    st = doctor.provider_state("opencode")
+    assert st.logged_in and st.hint == "" and "free models only" in st.note
+    assert doctor.has_any_login() is True
+
+    _write_auth({"opencode-go": {"apiKey": "S3CRET"}})
+    st = doctor.provider_state("opencode")
+    assert st.logged_in and "opencode-go" in st.note
+    assert "S3CRET" not in f"{st.detail} {st.note} {st.hint}"
+
+
+def test_opencode_health_problem_is_not_reported_healthy(monkeypatch, tmp_path):
+    """T107/3: a broken opencode.db is not hidden — provider_state runs the same health check ahub doctor does."""
+    from ahub import providers
+
+    _opencode_bin(monkeypatch, tmp_path)
+    monkeypatch.setattr(providers, "get",
+                        lambda name: types.SimpleNamespace(
+                            health=lambda: Health(False, ("opencode.db: no such table",), {})))
+    _write_auth({"opencode-go": {"apiKey": "S3CRET"}})
+    st = doctor.provider_state("opencode")
+    assert "no such table" in st.detail  # the state says it instead of calling opencode healthy
+    assert st.logged_in  # the models still answer — a missing db is the health check's business
+    assert "opencode-go" in st.note
+
+
+def test_one_broken_provider_does_not_take_the_list_down(monkeypatch):
+    """T107/15: provider_states catches a provider that raises, so the wizard still shows the rest."""
+    def _state(name, auth=None):
+        if name == "agy":
+            raise RuntimeError("agy exploded")
+        return doctor.ProviderState(name, True, True, detail="d", note="n", hint="")
+
+    monkeypatch.setattr(doctor, "provider_state", _state)
+    states = {s.name: s for s in doctor.provider_states(["opencode-go"])}
+    assert list(states) == ["opencode", "agy", "codex"]
+    assert states["opencode"].found and states["codex"].found
+    assert "RuntimeError" in states["agy"].detail and states["agy"].found is False
+
+
 def test_probe_models_runs_at_once_and_recommends(monkeypatch):
-    """T50: several models are probed together; the recommendation prefers a paid answerer."""
+    """T50: several models of one provider are probed together; the recommendation prefers a paid answerer."""
     from ahub import registry
 
     store = Store()
     tried: list[str] = []
+    live = threading.Barrier(3, timeout=10)  # all three probes must be inside at the same time
 
     def _probe(entry, timeout_s=doctor.PROBE_TIMEOUT_S):
         tried.append(entry.alias)
+        live.wait()  # sequential probing would break the barrier
         return entry.alias in {"bunny", "spark"}, f"{entry.alias}: ok"
 
     monkeypatch.setattr(doctor, "probing_enabled", lambda: True)
     monkeypatch.setattr(doctor, "probe_model", _probe)
     entries = [registry.get(store, a) for a in ("bunny", "spark", "spark-free")]
-    results = doctor.probe_models(entries)
+    steps: list[str] = []
+    results = doctor.probe_models(entries, step=lambda: steps.append("x"))
     assert set(tried) == {"bunny", "spark", "spark-free"}  # all three at once
+    assert len(steps) == len(entries)  # the line moves per finished probe, not once at the end
     assert results["bunny"][0] and results["spark"][0] and not results["spark-free"][0]
     assert doctor.recommend_model(entries, results) == "spark"  # paid before free
     assert doctor.recommend_model(entries, {a: (False, "") for a in tried}) == ""
-    assert "ahub doctor" in doctor.probe_none_warning(["spark-free", "bunny"])
     # probing off — no request at all, the caller keeps its own fallback
     monkeypatch.setattr(doctor, "probing_enabled", lambda: False)
     assert doctor.probe_models(entries) == {}
+
+
+def test_probe_models_one_provider_at_a_time(monkeypatch):
+    """T107/7: two accounts in a row — a second provider's turn would hit the first one's quota."""
+    from ahub import registry
+
+    store = Store()
+    events: list[str] = []
+
+    def _probe(entry, timeout_s=doctor.PROBE_TIMEOUT_S):
+        events.append(f"start {entry.alias}")
+        if entry.provider == "opencode":
+            time.sleep(0.05)  # a real turn takes seconds
+        events.append(f"end {entry.alias}")
+        return True, f"{entry.alias}: ok"
+
+    monkeypatch.setattr(doctor, "probing_enabled", lambda: True)
+    monkeypatch.setattr(doctor, "probe_model", _probe)
+    entries = [registry.get(store, a) for a in ("bunny", "spark")] + [
+        registry.ModelEntry("gemini", "agy", "gemini-3.8-flash-high")]
+    results = doctor.probe_models(entries)
+    assert len(results) == 3
+    started = events.index("start gemini")
+    assert started > max(events.index(f"end {a.alias}") for a in entries[:2])  # agy went after opencode
 
 
 def test_probing_can_be_switched_off(monkeypatch):
@@ -500,6 +631,13 @@ def test_provider_own_proxy_on_the_line(monkeypatch, tmp_path):
     assert "none" in _opencode_line(monkeypatch, tmp_path, '[providers.opencode]\nproxy = ""\n')
 
 
+def test_the_wizard_and_the_doctor_share_the_bash_rule():
+    """T107/8: one constant — the rule `ahub setup --claude` writes is the rule the doctor looks for."""
+    from ahub.commands import setup
+
+    assert setup.BASH_RULE == doctor.BASH_RULE == "Bash(ahub:*)"
+
+
 def test_claude_and_skill(monkeypatch, tmp_path):
     from ahub.tg import launcher
 
@@ -517,22 +655,40 @@ def test_claude_and_skill(monkeypatch, tmp_path):
     p = doctor.skill_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("# skill\n", encoding="utf-8")
-    # T51: the skill alone is not enough — without Bash(ahub:*) Claude Code asks on every command
+    assert doctor.check_claude_skill().ok is True
+    # T51: without Bash(ahub:*) Claude Code asks on every command — a hint, not a failure
     root = tmp_path / "proj"
     c = doctor.check_claude_skill(root)
-    assert c.ok is False and "Bash(ahub:*)" in c.detail and c.fix == "ahub setup --claude"
+    assert c.ok is True and not c.fix
+    c = doctor.check_claude_rule(root)
+    assert c.ok is None and "Bash(ahub:*)" in c.detail and c.fix == "ahub setup --claude"
     write(root / ".claude" / "settings.json", '{"permissions": {"allow": ["Bash(git:*)"]}}\n')
     assert doctor.bash_allowed(root) is False
-    c = doctor.check_claude_skill(root)
-    assert c.ok is False and "Bash(ahub:*)" in c.detail
+    assert doctor.check_claude_rule(root).ok is None
     write(root / ".claude" / "settings.json", '{"permissions": {"allow": ["Bash(ahub:*)"]}}\n')
     assert doctor.bash_allowed(root) is True
-    c = doctor.check_claude_skill(root)
+    c = doctor.check_claude_rule(root)
     assert c.ok is True and "Bash(ahub:*)" in c.detail and not c.fix
     # a settings.json that is not JSON is not a permission
     write(root / ".claude" / "settings.json", "{ nope\n")
     assert doctor.bash_allowed(root) is False
-    assert doctor.check_claude_skill(root).ok is False
+    assert doctor.check_claude_rule(root).ok is None
+
+
+def test_the_missing_bash_rule_does_not_fail_the_doctor(monkeypatch, tmp_path, capsys):
+    """T107/4: a correct install without the optional project rule must exit 0, not 1."""
+    p = doctor.skill_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# skill\n", encoding="utf-8")
+    _english(monkeypatch)
+    checks = doctor.run_all(root=tmp_path / "empty-project")
+    skill = next(c for c in checks if c.name == "claude_skill")
+    rule = next(c for c in checks if c.name == "claude_rule")
+    assert skill.ok is True and rule.ok is None  # the rule is only a hint
+    monkeypatch.setattr(doctor, "run_all", lambda *a, **k: [doctor.Check("python", True, "3.12", ""), skill, rule])
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "no Bash(ahub:*)" in out and "\u2713 claude skill" in out and "ahub setup --claude" in out
 
 
 def test_claude_config_override_needs_file_and_exec(tmp_path):
@@ -559,14 +715,39 @@ def test_telegram_off_configured(monkeypatch):
     assert c.ok is False and "ahub[telegram]" in c.fix
 
 
-def test_run_all_never_raises(monkeypatch):
+def test_run_all_never_raises(monkeypatch, tmp_path):
     def _boom():
         raise RuntimeError("boom")
     monkeypatch.setattr(doctor, "check_git", _boom)
-    checks = doctor.run_all()
-    assert len(checks) == 14
+    checks = doctor.run_all(root=tmp_path)  # the root, not the cwd of the test run
+    listed = {n for _a, group in doctor_cmd._AREAS for n in group}
+    assert {c.name for c in checks} == listed  # every check has its own area, none lands in "other"
+    assert len(checks) == len(listed)
     git = next(c for c in checks if c.name == "git")
     assert git.ok is False and "boom" in git.detail
+
+
+def test_the_live_line_moves_only_on_the_slow_checks(monkeypatch):
+    """T107/15: `models` is slow (six role menus), `network` is not (no binary) — the line must match."""
+    ran: list[str] = []
+
+    def _fast(name):
+        return lambda *a, **kw: doctor.Check(name, True)
+
+    def _slow(name):
+        def _run(*a, **kw):
+            ran.append(name)
+            return doctor.Check(name, True)
+        return _run
+
+    for name in ("python", "git", "config", "service", "opencode", "network", "claude", "claude_skill",
+                 "claude_rule", "telegram"):
+        monkeypatch.setattr(doctor, f"check_{name}", _fast(name))
+    for name in ("opencode_health", "agy", "codex", "models"):
+        monkeypatch.setattr(doctor, f"check_{name}", _slow(name))
+    steps: list[str] = []
+    doctor.run_all(step=lambda: steps.append(ran[-1]))
+    assert steps == ["opencode_health", "agy", "codex", "models"]  # the role menus, not the proxy
 
 
 def test_cli_codes_and_json(capsys, monkeypatch):
@@ -575,7 +756,7 @@ def test_cli_codes_and_json(capsys, monkeypatch):
     assert cli.main(["--json", "doctor"]) in (0, 1)
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert isinstance(data["checks"], list) and len(data["checks"]) == 14
+    assert isinstance(data["checks"], list) and len(data["checks"]) == 15
     assert secret not in out
     for c in data["checks"]:
         assert set(c) == {"name", "ok", "detail", "fix"}
