@@ -580,7 +580,7 @@ def test_stop_during_a_nudge_turn_settles_stopped(store, project):
             time.sleep(0.02)
         transitions.request_nudge(store, t.id, text="nudge 1", by="human")
         for _ in range(300):
-            if len(store.list_sessions(t.id)) >= 2:
+            if len(fake.calls) >= 2:  # the turn with the message has started (the session row is reused)
                 break
             time.sleep(0.02)
         time.sleep(0.1)
@@ -649,8 +649,7 @@ def test_two_nudges_in_one_step(store, project):
             time.sleep(0.02)
         transitions.request_nudge(store, t.id, text="первый nudge", by="human")
         for _ in range(200):
-            active = [s for s in store.list_sessions(t.id) if s.external_id]
-            if len(active) >= 2:
+            if len(fake.calls) >= 2:  # the turn with the first message has started
                 break
             time.sleep(0.02)
         transitions.request_nudge(store, t.id, text="второй nudge", by="human")

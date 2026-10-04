@@ -674,7 +674,7 @@ class Engine:
         report = Path(t.worktree) / workspace.AHUB_DIR / "report.md"
         try:
             st_size = report.stat().st_size
-        except OSError:  # the report is a directory or is gone between the check and now
+        except OSError:  # the report is gone between the check and now (a directory is caught by _check_scout)
             return self._settle(State.NEEDS_DECISION,
                                 reasons.dump("scout_bad", problems=[reasons.part("no_report")]))
         return self._settle(State.DONE, reasons.dump("report_ready"),
