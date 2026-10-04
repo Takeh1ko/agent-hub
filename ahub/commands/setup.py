@@ -471,14 +471,20 @@ def _provider_step(states, ask: bool, out: Steps) -> dict[str, bool]:
 
 
 def _set_role_default(store, role, alias: str) -> None:
-    """Make the alias the role default via the registry (into the menu first); never raises."""
+    """Make the alias the role default via the registry (into the menu first).
+
+    An alias the registry refuses (unknown, denied, a switched-off provider) leaves the role as it was —
+    a defect in the code is not one of those and reaches the wizard console.
+    """
+    import sqlite3
+
     from ahub import registry
 
     try:
         if alias not in [e.alias for e, _ in registry.menu(store, role)]:
             registry.add_to_role(store, role, alias)
         registry.set_default(store, role, alias)
-    except Exception:
+    except (registry.RegistryError, CliError, sqlite3.Error, OSError):
         pass
 
 
@@ -692,7 +698,7 @@ def _service_step(args, out: Steps, *, interactive: bool) -> None:
     except CliError as e:  # the service refused (its own message is the one to show)
         out.line(str(e))
         out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
-    except Exception as e:  # an unwritable home, a missing systemctl — nothing of that stops setup
+    except OSError as e:  # an unwritable home, a missing systemctl — nothing of that stops setup
         out.line(t("setup.wizard_service_enable_fail", cmd="install", err=f"{type(e).__name__}: {e}"[:300]))
         out.note(t("setup.step_service"), t("setup.sum_service", state=t("setup.sum_none")))
 
@@ -809,7 +815,11 @@ def _telegram_step(out: Steps) -> None:
 
 
 def _cmd_noninteractive(args) -> int:
+    import sqlite3
+
+    from ahub.config import ConfigError
     from ahub.i18n import set_lang, t
+    from ahub.registry import RegistryError
 
     setup_lang = getattr(args, "setup_lang", None)
     if setup_lang:
@@ -851,7 +861,7 @@ def _cmd_noninteractive(args) -> int:
         chosen = _provider_step(states, ask=False, out=out)
         out.section("setup.step_models")
         role_models = _model_step(Store(), states, ask=False, out=out)
-    except Exception as e:
+    except (CliError, ConfigError, RegistryError, sqlite3.Error, OSError) as e:
         out.line(t("setup.wizard_models_skip"))
         out.line(f"! {e}")
     out.section("setup.step_claude")

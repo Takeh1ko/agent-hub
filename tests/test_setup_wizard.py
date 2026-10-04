@@ -617,3 +617,74 @@ def test_the_wizard_starts_the_service_inside_its_step(tmp_path, monkeypatch, ca
     out = capsys.readouterr().out
     assert "\n    сервис запущен, pid 4242" in out  # indented into the step, wrapped by out.line
     assert out.count("Next  ") == 1  # its own Next is not repeated: the report has one, at the end
+
+
+def _boom_with(exc):
+    def _raise(*a, **k):
+        raise exc
+    return _raise
+
+
+def test_a_defect_of_the_role_default_reaches_the_console(monkeypatch):
+    """_set_role_default keeps the role as it was when the registry refuses — a TypeError is not a refusal."""
+    import pytest
+
+    from ahub.commands import setup as setupecmd
+
+    monkeypatch.setattr(registry, "menu", _boom_with(TypeError("menu bug")))
+    with pytest.raises(TypeError, match="menu bug"):
+        setupecmd._set_role_default(Store(), Role.EXECUTOR, "spark")
+
+
+def test_a_defect_of_the_models_step_reaches_the_console(tmp_path, monkeypatch):
+    """--yes: a defect in the models step is not "models skipped" — the traceback is the report."""
+    import pytest
+
+    from ahub.commands import setup as setupecmd
+
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)
+    monkeypatch.setattr(setupecmd, "_model_step", _boom_with(TypeError("models bug")))
+    root = tmp_path / "modelsbug"
+    make_repo(root)
+    with pytest.raises(TypeError, match="models bug"):
+        cli.main(["setup", str(root), "--yes"])
+
+
+def test_a_defect_of_the_service_step_reaches_the_console(tmp_path, monkeypatch):
+    """--yes: a defect in the service step is not an OSError either — it reaches the wizard console."""
+    import pytest
+
+    from ahub.commands import service as svccmd
+
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(svccmd, "install_service_files", _boom_with(TypeError("install bug")))
+    root = tmp_path / "svcbug"
+    make_repo(root)
+    with pytest.raises(TypeError, match="install bug"):
+        cli.main(["setup", str(root), "--yes"])
+
+
+def test_setup_reports_the_failures_it_survives(tmp_path, monkeypatch, capsys):
+    """A role default the registry refuses, an unwritable home — a line of the report, not a crash."""
+    from ahub.commands import service as svccmd
+
+    _tty(monkeypatch, True)
+    _no_go(monkeypatch)
+    _fake_providers(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")
+    from ahub.commands import setup as setupecmd
+
+    monkeypatch.setattr(registry, "set_default", _boom_with(registry.RegistryError("no such alias")))
+    setupecmd._set_role_default(Store(), Role.EXECUTOR, "no-such-alias")  # the role stays as it was
+    monkeypatch.setattr(svccmd, "install_service_files", _boom_with(PermissionError("home is read-only")))
+    root = tmp_path / "env"
+    make_repo(root)
+    assert cli.main(["setup", str(root), "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "PermissionError" in out and "home is read-only" in out  # the service step says what failed
+    assert "2." in out and "3." in out  # the report still numbers its steps
