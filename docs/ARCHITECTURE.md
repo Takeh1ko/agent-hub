@@ -29,8 +29,8 @@ worker.py → engine.py (task owner, lease):
   (`ahub follow T12` — transcript.py reads both)
 events.py: codes DONE/DECISION/ERROR/OWNER/ANSWER/ALARM (ALARM! — critical) → Claude is woken by `ahub watch`
   (Monitor) / `ahub wait`
-accept.py: ahub accept (scout — accept; code — merge --no-ff into the work branch, acceptance, roll back if red, push,
-  copy cleanup, archive; the branch is already in the work branch — an interrupted accept: the gates and the merge are
+accept.py: ahub accept (scout — accept; code — the whole merge → acceptance → rollback-or-push under a per-project flock (a lock file in the hub data dir, `paths.accept_lock_path`; a second accept of the project waits and names the first — one line on a TTY): merge --no-ff into the work branch, acceptance,
+  roll back if red, push, copy cleanup, archive; the branch is already in the work branch — an interrupted accept: the gates and the merge are
   skipped, acceptance runs on HEAD, then the same tail), rework / reject / continue / task edit (a new brief, and — before the review has started — the review panel and the executor: `accept.review_started()` reads the state history) / extend / budget / model
 `ahub nudge` (MCP tool `nudge`, `ahub top` key `m`): only a task whose process runs the worker (a live lease, a known
   session id) — otherwise one line, code 2; the event `nudge` is a journal entry, not a wake-up for Claude
