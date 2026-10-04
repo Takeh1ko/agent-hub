@@ -186,6 +186,7 @@ def run(provider: Provider, spec: RunSpec, *,
     out_f = open(log_path, "ab")
     err_f = open(err_path, "ab")
     start_off = out_f.tell()
+    err_off = err_f.tell()  # the stderr of earlier runs (another provider, an older turn) is not this run's
     try:
         proc = subprocess.Popen(cmd, cwd=spec.cwd, stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL,
                                 env=env, start_new_session=True)
@@ -346,7 +347,7 @@ def run(provider: Provider, spec: RunSpec, *,
     try:
         with open(err_path, "rb") as ef:
             ef.seek(0, 2)
-            ef.seek(max(0, ef.tell() - 4000))
+            ef.seek(max(err_off, ef.tell() - 4000))
             tail = ef.read().decode("utf-8", "replace")[-2000:]
     except OSError:
         tail = ""
