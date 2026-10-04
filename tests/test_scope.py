@@ -148,8 +148,9 @@ def test_inbox_reads_only_its_scope(two_projects, capsys):
     store, _root_a, _root_b = two_projects
     _talk(store)
     assert "дело B" not in ahub(capsys, "inbox")[1]
-    assert len(comms.inbox(store, mark=False, scope=OWNER)) == 1  # B's message is still unread
-    assert len(comms.inbox(store, mark=False, scope=OWNER)) == 1  # and the hub-wide one was read
+    assert {m["text"] for m in comms.inbox(store, mark=False, scope=OWNER)} == {"дело B", "для всех"}
+    # The hub-wide owner_message event must remain unacked after project A's inbox
+    assert any(e.kind == Ev.OWNER_MESSAGE.value and e.project == "" for e in events.unacked(store))
 
 
 def test_a_row_of_another_project_is_refused(two_projects, capsys):

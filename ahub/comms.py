@@ -39,11 +39,21 @@ def inbox(store: Store, *, mark: bool = True, scope: Scope | None = None, now: i
         if cond:
             sql += " AND " + cond
         rows = [dict(r) for r in c.execute(sql + " ORDER BY id", args)]
-        if mark and rows:
-            c.execute(f"UPDATE message SET delivered_at=? WHERE id IN ({','.join('?' * len(rows))})",
-                      (ts, *[r["id"] for r in rows]))
-    if mark and rows:
-        events.ack(store, kinds=(Ev.OWNER_MESSAGE.value,), scope=scope)
+        to_mark = [r for r in rows if r["project"] != ""] if (scope and not scope.all) else rows
+        if mark and to_mark:
+            c.execute(f"UPDATE message SET delivered_at=? WHERE id IN ({','.join('?' * len(to_mark))})",
+                      (ts, *[r["id"] for r in to_mark]))
+    if mark and to_mark:
+        if scope and not scope.all:
+            with store.tx() as c:
+                marks = ",".join("?" * len(scope.projects))
+                c.execute(
+                    f"UPDATE event SET acked_at=?, delivered_at=COALESCE(delivered_at, ?)"
+                    f" WHERE needs_reaction=1 AND acked_at IS NULL AND kind=? AND project IN ({marks})",
+                    (ts, ts, Ev.OWNER_MESSAGE.value, *scope.projects),
+                )
+        else:
+            events.ack(store, kinds=(Ev.OWNER_MESSAGE.value,), scope=scope, now=ts)
     return rows
 
 
