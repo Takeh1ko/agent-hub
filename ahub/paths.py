@@ -6,6 +6,7 @@ Names differ from v1 (AGENT_HUB_HOME, ~/.local/share/agent-hub) so v2 never touc
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 ENV_HOME = "AHUB_HOME"  # all hub state in one dir (tests, worker isolation)
@@ -55,3 +56,9 @@ def global_config_path() -> Path:
 def service_pid_path() -> Path:
     """Pid file of background `service start` (launch without an OS service)."""
     return data_dir() / "service.pid"
+
+
+def accept_lock_path(project_name: str) -> Path:
+    """Per-project accept lock file (serializes merges and acceptance within a project)."""
+    safe = re.sub(r"[^\w\-.]", "_", project_name)
+    return data_dir() / f"accept-{safe}.lock"

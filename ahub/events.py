@@ -120,8 +120,8 @@ def unacked(store: Store, scope: Scope | None = None) -> list[Event]:
 
 def _watch_mark_key(who: str, scope: Scope | None) -> str:
     """Where the watch summary stands — per consumer and per scope (a project does not re-announce another's)."""
-    name = (scope or Scope()).name
-    return f"watch_summary:{who}:{name}"
+    names = ",".join(sorted((scope or Scope()).projects))
+    return f"watch_summary:{who}:{names}"
 
 
 def watch_start_summary(store: Store, *, who: str = DEFAULT_WHO,
@@ -238,7 +238,8 @@ LEGACY_SQL = ("INSERT INTO presence(who, project, last_seen, session_id, via) VA
 
 def touch(store: Store, who: str = DEFAULT_WHO, *, project: str = "", via: str = "", session_id: str = "",
           now: int | None = None) -> None:
-    """Stamp presence of one project, in both tables, in one transaction."""
+    """Stamp the presence of one project — the legacy one-project entry point (`touch_scope` is the
+    general one: a scope, the owner's names, both tables)."""
     touch_scope(store, Scope((project,)), who, via=via, session_id=session_id, now=now)
 
 
@@ -259,16 +260,24 @@ def presence_projects(scope: Scope | None = None) -> list[str]:
 
 def touch_scope(store: Store, scope: Scope | None = None, who: str = DEFAULT_WHO, *, via: str = "",
                 session_id: str = "", names: list[str] | None = None, now: int | None = None) -> None:
-    """Presence for the scope's projects (or the given names), in one transaction.
+    """Presence for the scope's projects (or the given names).
 
+    Legacy row is stamped in its own transaction first so that if presence_project is missing
+    (e.g. pre-006 schema during migration), the legacy write succeeds.
     Never raises: a presence stamp must not kill a stream (`ahub watch`) — a failure goes to the log.
     """
     ts = now if now is not None else now_ms()
+    target_names = presence_projects(scope) if names is None else names
     try:
         with store.tx() as c:
-            for name in (presence_projects(scope) if names is None else names):
-                c.execute(NEW_SQL, (who, name, ts, session_id, via))
+            for name in target_names:
                 c.execute(LEGACY_SQL, (who, name, ts, session_id, via))
+    except sqlite3.Error as e:
+        _log.warning("legacy presence touch failed: %s", e)
+    try:
+        with store.tx() as c:
+            for name in target_names:
+                c.execute(NEW_SQL, (who, name, ts, session_id, via))
     except sqlite3.Error as e:
         _log.warning("presence touch failed: %s", e)
 
@@ -276,8 +285,7 @@ def touch_scope(store: Store, scope: Scope | None = None, who: str = DEFAULT_WHO
 def presence(store: Store, who: str = DEFAULT_WHO, project: str | None = None) -> dict | None:
     """The presence row of one project; project=None — the freshest of any project.
 
-    presence_project first, then the old table (a process on the previous code writes only it); a database
-    without presence_project yet (a migration under a live process) falls back to the old one. Its row with
+    Reads both presence_project and the old table and takes the freshest last_seen. Its row with
     project='' is that code's owner-mode stream — it counts for every project.
     """
     sql = "SELECT * FROM presence_project WHERE who=?"
@@ -287,11 +295,14 @@ def presence(store: Store, who: str = DEFAULT_WHO, project: str | None = None) -
         args.append(project)
     with store.read() as c:
         try:
-            row = c.execute(sql + " ORDER BY last_seen DESC, project LIMIT 1", args).fetchone()
+            p_row = c.execute(sql + " ORDER BY last_seen DESC, project LIMIT 1", args).fetchone()
         except sqlite3.Error:
-            row = None
-        if row is None:
-            row = _legacy_presence(c, who, project)
+            p_row = None
+        leg_row = _legacy_presence(c, who, project)
+        if p_row is not None and leg_row is not None:
+            row = p_row if p_row["last_seen"] >= leg_row["last_seen"] else leg_row
+        else:
+            row = p_row if p_row is not None else leg_row
     return dict(row) if row else None
 
 

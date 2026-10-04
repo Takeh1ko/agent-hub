@@ -185,28 +185,28 @@ CHECKS = [
 
 DOCTOR = """\
 System
-  ✓ python                                  Python 3.12.3
-  ✓ git                                     git 2.43.0
+  ✓ python            Python 3.12.3
+  ✓ git               git 2.43.0
 The hub
-  ✓ config                                  config ok ({tmp}/.config/ahub/config.toml)
-  ✗ service                                 not running (no OS service)
+  ✓ config            config ok ({tmp}/.config/ahub/config.toml)
+  ✗ service           not running (no OS service)
     → ahub service install
-  ✓ models                                  role defaults fit the login
-  ✓ network                                 no system proxy
+  ✓ models            role defaults fit the login
+  ✓ network           no system proxy
 Providers
-  ✓ opencode                                found /usr/bin/opencode
-  ✓ opencode answers                        answers (1.2.3)
-  ✓ opencode login                          login: opencode-go (opencode-go available)
-  ✗ agy                                     no login data
+  ✓ opencode          found /usr/bin/opencode
+  ✓ opencode answers  answers (1.2.3)
+  ✓ opencode login    login: opencode-go (opencode-go available)
+  ✗ agy               no login data
     → run agy in a terminal and sign in
-  – codex                                   not found in PATH
+  – codex             not found in PATH
 Claude Code
-  ✓ claude                                  found /usr/bin/claude
-  ✗ claude skill                            skill {tmp}/.claude/skills/ahub/SKILL.md, no Bash(ahub:*)
+  ✓ claude            found /usr/bin/claude
+  ✗ claude skill      skill {tmp}/.claude/skills/ahub/SKILL.md, no Bash(ahub:*)
                       ({tmp}/.claude/settings.json)
     → ahub setup --claude
 Optional
-  – telegram                                not configured (optional)
+  – telegram          not configured (optional)
 3 problems — the fix is under each check
 """
 
@@ -218,6 +218,23 @@ def test_doctor_sections_aligned_marks_and_the_fix_under_them(capsys, monkeypatc
     assert rc == 1
     assert snap(out, home) == DOCTOR
     assert "\033[" not in out  # plain into a pipe
+
+
+def test_doctor_name_column_is_the_longest_name_and_the_detail_wraps_under_itself():
+    """The name column is as wide as the longest name and nothing more; a long detail wraps under itself."""
+    from ahub.commands import doctor as cmd_doctor
+
+    checks = [doctor.Check("python", True, "Python 3.12.3", ""),
+              doctor.Check("opencode_health", True, "answers (1.2.3)", ""),
+              doctor.Check("claude_skill", False,
+                           "skill /root/.claude/skills/ahub/SKILL.md, no Bash(ahub:*) (/root/.claude/settings.json)",
+                           "ahub setup --claude")]
+    lines = cmd_doctor._lines(checks, 60)
+    at = {name: [ln for ln in lines if name in ln][0] for name in ("Python 3.12.3", "answers (1.2.3)")}
+    assert at["Python 3.12.3"].index("Python 3.12.3") == 22  # "  ✓ " + "opencode answers" + 2
+    assert at["answers (1.2.3)"].index("answers (1.2.3)") == 22
+    wrapped = [ln for ln in lines if "settings.json" in ln][0]
+    assert wrapped.strip() == "(/root/.claude/settings.json)" and wrapped.index("(") == 22  # under its first line
 
 
 def test_doctor_all_green_says_so(capsys, monkeypatch):
@@ -980,9 +997,9 @@ def test_the_root_scope_flags_survive_a_subcommand(capsys, monkeypatch, tmp_path
     from ahub.model import Kind, State
 
     monkeypatch.setattr("ahub.views.now_ms", lambda: NOW)
-    write(paths.global_config_path(), "projects = []\n")
     for name in ("A", "B"):
         write(tmp_path / name / ".hub.toml", f'schema_version = 2\nname = "{name}"\n')
+    write(paths.global_config_path(), f'projects = ["{tmp_path / "A"}", "{tmp_path / "B"}"]\n')
     monkeypatch.chdir(tmp_path / "A")
     store = Store()
     mine = store.get_task(store.create_task(project="A", kind=Kind.CODE, title="задача A", now=NOW))

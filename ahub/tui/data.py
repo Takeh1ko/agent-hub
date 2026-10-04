@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ahub import archive, comms, config, cost, events, pulse, reasons, ui, views
+from ahub import log as hublog
 from ahub.i18n import Words
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION, Ev, State
@@ -19,6 +20,8 @@ from ahub.scope import Scope
 from ahub.service import HEARTBEAT_KEY, PAUSE_KEY, live_workers
 from ahub.store import Store, Task
 from ahub.time import fmt_local, now_ms, to_local
+
+_log = hublog.get("tui")
 
 _UNSET: object = object()  # marker "limit not passed — take from config"
 PHASE = views.PHASE_WORDS
@@ -74,7 +77,7 @@ def _go_limit(hub_limit: float | None | object) -> float | None:
         return None
 
 
-def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | None | object = _UNSET,
+def header(store: Store, now: int, *, go_limit: float | None | object = _UNSET,
            history: bool = False, only: str = "") -> str:
     """The header line: what is going on and what the machine has spent.
 
@@ -108,7 +111,8 @@ def header(store: Store, live: dict[int, int], now: int, *, go_limit: float | No
                 money += _t("tui.money_over")
         if today.cost_usd or month.cost_usd:
             money += _t("tui.money_real", usd=f"{month.cost_usd or 0:.2f}")
-    except Exception:
+    except Exception as e:  # the screen shows "unknown", the log says why — otherwise it is invisible
+        _log.warning("opencode totals are unknown: %s", e)
         money = _t("tui.money_none")
     parts = [_t("tui.view_history") if history else _t("tui.view_current"),
              svc, claude, _t("tui.working", n=len(active)), _t("tui.waiting", n=len(waiting)),
@@ -145,7 +149,7 @@ def _group_row(project: str, items: list[Row]) -> Row:
                f"{go + usd:.3f}", project, header=True, go=go, usd=usd)
 
 
-def rows(store: Store, live: dict[int, int], pulses: dict, now: int, recent: int = 10, *,
+def rows(store: Store, pulses: dict, now: int, recent: int = 10, *,
          history: bool = False, only: str = "") -> list[Row]:
     """The table: by default the current work (active, waiting for a decision, queued); with history
     — the recent finished tasks as well (what the screen showed before the key `h`).
@@ -169,12 +173,14 @@ def rows(store: Store, live: dict[int, int], pulses: dict, now: int, recent: int
     return out
 
 
-def feed(store: Store, limit: int = 12) -> list[str]:
+def feed(store: Store, limit: int = 12, *, scope: Scope | None = None) -> list[str]:
+    """The recent events under the table, as one line each; scope — the rows of that project only
+    (hub-wide ones are in every scope), so a narrowed screen is one scope end to end."""
     evs = store.events(after_id=max(0, store.last_event_id() - 80))
     out = []
     cache: dict[int, Task | None] = {}
     for e in evs:
-        if e.kind in ("phase", "session"):
+        if e.kind in ("phase", "session") or (scope is not None and e.project not in scope):
             continue
         t = None
         if e.task_id:
@@ -200,25 +206,26 @@ def detail(store: Store, task_id: int, live: dict[int, int], pulses: dict) -> st
         return ""
     pl = pulses.get(t.id)
     head = f"{pl.mark} {pl.reason or _t('tui.working_now')}\n" if pl else ""
-    return head + views.task_text(store, t, live=live)
+    return head + views.task_text(store, t, live=live, pulses=pulses)
 
 
 def snapshot(store: Store, projects: list[config.ProjectConfig] | None = None, *,
              history: bool = False, only: str = "") -> tuple[Screen, dict, dict]:
     """The whole screen: the header, the rows (grouped by project, `only` — one of them), the feed.
 
-    The filter goes down into header() and rows() as the SQL condition of the task list, so a filtered
-    screen is one scope: the counts of the header and the rows agree (a history of one project is not
-    cut by the newer tasks of another). `Screen.projects` is every project that has tasks — the `o` key
-    of the screen cycles it; it comes from the task table, not from the rows, so a filtered screen keeps
-    the whole list.
+    The filter goes down into header(), rows() and feed() as the SQL condition of the task list and the
+    project test of the events, so a filtered screen is one scope: the counts of the header, the rows and
+    the feed agree (a history of one project is not cut by the newer tasks of another).
+    `Screen.projects` is every project that has tasks — the `o` key of the screen cycles it; it comes
+    from the task table, not from the rows, so a filtered screen keeps the whole list.
     """
     now = now_ms()
     live = live_workers()
     if projects is None:
         projects, _ = config.load_projects()
     pulses = pulse.all_pulses(store, live=live, projects=projects, now=now)
-    screen = Screen(header(store, live, now, history=history, only=only),
-                    rows(store, live, pulses, now, history=history, only=only),
-                    feed(store), store.task_projects())
+    sc = Scope((only,)) if only else None
+    screen = Screen(header(store, now, history=history, only=only),
+                    rows(store, pulses, now, history=history, only=only),
+                    feed(store, scope=sc), store.task_projects())
     return screen, live, pulses

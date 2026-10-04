@@ -17,6 +17,7 @@ import json
 import re
 import shutil
 import sys
+from codecs import getincrementaldecoder
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
@@ -24,6 +25,7 @@ from typing import TextIO
 from ahub.i18n import t as _t
 from ahub.providers.base import Act, Activity, Provider, Usage
 from ahub.time import now_ms, to_local
+from ahub.ui import clip
 
 PROMPT_SUFFIX = ".prompts.jsonl"
 PROMPT_KINDS = ("start", "continue", "repair", "rework", "stop", "review", "nudge")
@@ -48,6 +50,14 @@ _QUERY_KEYS = ("query", "pattern", "q", "regex", "url", "glob", "description", "
 _OK_STATUS = ("", "completed", "done", "success", "ok")
 _BAD_STATUS = ("error", "failed", "failure", "denied", "rejected")
 _BASH_WRAP = re.compile(r"^/bin/(?:ba)?sh -lc ['\"](.*)['\"]$", re.DOTALL)  # codex wraps every command
+
+# Model text and tool output are content the worker did not write: a `cat` of a hostile file, a fetched page.
+# OSC 52 (clipboard), OSC 0 (window title) and the rest of the terminal language must not reach the owner's
+# terminal from it — what a line says is printed, the sequences are dropped (ahub/transcript.py `safe`).
+_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")  # OSC … BEL|ST
+_CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")  # CSI … final byte (colours, cursor moves)
+_ESC = re.compile(r"\x1b[@-Z\\-_]")  # the two-byte escapes
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # C0 (tab and newline stay) and DEL
 
 _RESET = "\x1b[0m"
 _DIM = "\x1b[2m"
@@ -185,7 +195,7 @@ def _args_line(is_command: bool, text: str) -> str:
     wrapped = _BASH_WRAP.match(text)  # codex: `/bin/bash -lc '…'` — the shell is noise
     if is_command and wrapped:
         text = wrapped.group(1)
-    return text[:ARGS_COLS]
+    return clip(text, ARGS_COLS)
 
 
 def result_output(data: dict) -> str:
@@ -223,6 +233,11 @@ def _usage_line(it: "Item") -> str:
                cost=_t("follow.money", cost=_money(cost)) if cost else "")
 
 
+def safe(text: str) -> str:
+    """Text of a model or a tool without the control sequences a terminal would act on."""
+    return _CONTROL.sub("", _ESC.sub("", _CSI.sub("", _OSC.sub("", text or ""))))
+
+
 def paint(text: str, code: str, color: bool) -> str:
     """ANSI code around a fragment — only when the transcript goes to a terminal."""
     return f"{code}{text}{_RESET}" if color and text else text
@@ -233,12 +248,17 @@ def dim(text: str, color: bool = False) -> str:
 
 
 class _Tail:
-    """A file that only grows: complete lines since the previous read, a partial tail waits."""
+    """A file that only grows: complete lines since the previous read, a partial tail waits.
+
+    Decoding is incremental: a multi-byte character split across two reads is one character, not a
+    replacement sign and a lost half.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._off = 0
         self._buf = ""
+        self._dec = getincrementaldecoder("utf-8")("replace")
 
     def lines(self) -> list[str]:
         try:
@@ -247,6 +267,7 @@ class _Tail:
             return []
         if size < self._off:  # the file was replaced — read it from the start
             self._off, self._buf = 0, ""
+            self._dec.reset()
         if size == self._off:
             return []
         try:
@@ -256,7 +277,7 @@ class _Tail:
         except OSError:
             return []
         self._off += len(data)
-        parts = (self._buf + data.decode("utf-8", "replace")).split("\n")
+        parts = (self._buf + self._dec.decode(data)).split("\n")
         self._buf = parts.pop()
         return [ln.rstrip("\r") for ln in parts if ln.strip()]
 
@@ -317,7 +338,7 @@ class Reader:
             elif a.kind is Act.TOOL_END:
                 key = (a.tool, compact_args(a.tool, data))
                 if key in started:
-                    started.remove(key)
+                    del started[started.index(key)]  # the oldest call of this kind ended — the FIFO pair
                 else:  # the provider reported only the finished call (opencode)
                     out.append(Item("tool", a.ts, turn, tool=a.tool, args=key[1]))
                 out.append(Item("result", a.ts, turn, tool=a.tool, args=key[1],
@@ -395,7 +416,7 @@ class Writer:
             self._line("")
         at = to_local(p.ts).strftime("%H:%M") if p.ts else "—"
         self._line(self._paint(f"── Turn {p.turn} · {p.kind or '?'} · {at} ──", _BOLD))
-        lines = p.text.rstrip().splitlines()
+        lines = safe(p.text).rstrip().splitlines()
         shown = lines if self.full else lines[:PROMPT_LINES]
         for ln in shown:
             self._line(self._paint(f"  {ln}", _DIM))
@@ -407,13 +428,13 @@ class Writer:
         if it.kind == "text":
             self._text(it)
         elif it.kind == "reasoning":
-            self._line(self._paint(_t("follow.reasoning", text=it.text), _DIM))
+            self._line(self._paint(_t("follow.reasoning", text=safe(it.text)), _DIM))
         elif it.kind == "tool":
-            self._line(f"{tool_icon(it.tool)} {it.tool}{'  ' + it.args if it.args else ''}".rstrip())
+            self._line(safe(f"{tool_icon(it.tool)} {it.tool}{'  ' + it.args if it.args else ''}".rstrip()))
         elif it.kind == "result":
             self._result(it)
         elif it.kind == "error":
-            for i, ln in enumerate(it.text.splitlines() or [""]):
+            for i, ln in enumerate(safe(it.text).splitlines() or [""]):
                 self._line(self._paint(f"{'✖ ' if i == 0 else '  '}{ln}", _RED))
         elif it.kind == "usage" and it.usage is not None:
             self._line(self._paint(_usage_line(it), _DIM))
@@ -424,16 +445,16 @@ class Writer:
         growing = turn == it.turn and bool(shown) and it.text.startswith(shown)
         text = it.text[len(shown):].lstrip("\n") if growing else it.text
         self._tail = (it.turn, it.text)
-        for ln in text.splitlines():
+        for ln in safe(text).splitlines():
             self._line(ln)
 
     def _result(self, it: Item) -> None:
-        status = it.status.strip().lower()
+        status = safe(it.status).strip().lower()
         mark = "✔" if status in _OK_STATUS else "✖" if status in _BAD_STATUS else "·"
         code = _GREEN if mark == "✔" else _RED if mark == "✖" else _DIM
         self._line(self._paint(f"  {mark} {status or '—'}", code))
-        lines = _clipped(it.output, max(20, min(RESULT_COLS, self.width - 4)))
+        lines = _clipped(safe(it.output), max(20, min(RESULT_COLS, self.width - 4)))
         for ln in lines[:RESULT_LINES]:
             self._line(self._paint(f"    {ln}", _DIM))
-        if len(lines) > RESULT_LINES:
-            self._line(self._paint("    " + _t("follow.more", n=len(lines) - RESULT_LINES), _DIM))
+        if len(lines) > RESULT_LINES:  # a result is cut at RESULT_LINES in any case — --full does not change it
+            self._line(self._paint("    " + _t("follow.result_more", n=len(lines) - RESULT_LINES), _DIM))

@@ -93,9 +93,9 @@ def text(*, w: int | None = None, all_projects: bool = False, project: str | Non
     waiting_shown, waiting_rest = waiting[:MAX_TASKS], max(0, len(waiting) - MAX_TASKS)
 
     if items:
-        for task in shown:  # the task is the item line: the id and the title, the tail right-aligned
-            out.append(ui.item(f"{task.label}  {task.title}", [views._pulse_detail(pulses.get(task.id))],
-                               tail=views._item_tail(task, now), w=w))
+        for task in shown:  # the task is the item line: the id and the title, the details under it
+            out.append(ui.item(f"{task.label}  {task.title}",
+                               [views._item_details(task, now), views._pulse_detail(pulses.get(task.id))], w=w))
         if rest:  # the screen is a glance — what does not fit is counted, not dropped
             out.append(ui.hint(_t("home.more_tasks", n=rest), w=w))
         if not shown:

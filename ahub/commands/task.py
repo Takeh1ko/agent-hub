@@ -107,9 +107,11 @@ def cmd_status(args) -> int:
 
 def cmd_result(args) -> int:
     store = Store()
+    live = live_workers()
     t = _task(store, args.task, args)
     events.ack_task(store, t.id)
-    emit(args, {"task": asdict(t)}, views.result_text(store, t, full=args.full, max_bytes=args.max_bytes))
+    emit(args, {"task": asdict(t)},
+         views.result_text(store, t, full=args.full, max_bytes=args.max_bytes, live=live))
     return 0
 
 

@@ -165,10 +165,10 @@ unread events 1"""
 DETAIL_TTY = """\
 \x1b[38;5;208m⏺\x1b[0m T3  code  Setup wizard: choose providers and per-role models
 \x1b[2m──────────────────────────────────────────────────────────────\x1b[0m
-\x1b[2mState  done · gates passed, acceptance is green · process alive\x1b[0m
-\x1b[2mModel  bunny  Review  spark ×2  Round  3\x1b[0m
-\x1b[2mCost   $0.046 Go of $1.50 budget\x1b[0m
-\x1b[2mAge    4 h 0 min  After  T2\x1b[0m
+\x1b[2mState\x1b[0m  done · gates passed, acceptance is green · process alive
+\x1b[2mModel\x1b[0m  bunny  \x1b[2mReview\x1b[0m  spark ×2  \x1b[2mRound\x1b[0m  3
+\x1b[2mCost\x1b[0m   $0.046 Go of $1.50 budget
+\x1b[2mAge\x1b[0m    4 h 0 min  \x1b[2mAfter\x1b[0m  T2
 \x1b[1mSummary\x1b[0m
   The wizard asks for every provider and probes its models once. The answer is stored in the hub
   config.
@@ -181,9 +181,8 @@ DETAIL_TTY = """\
 
 OVERVIEW_TTY = (
     "\x1b[1mall projects · 1 active · 1 waiting · 2 queued\x1b[0m\n"
-    "\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers                                "
-    "\x1b[2mwriting · bunny · 2 min · $0.046\x1b[0m\n"
-    "  \x1b[2m⎿\x1b[0m \x1b[32m🟢 running pytest\x1b[0m\n"
+    "\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers\n"
+    "  \x1b[2m⎿\x1b[0m \x1b[2mwriting · bunny · 2 min · $0.046\x1b[0m\n"
     "\x1b[38;5;208m⏺\x1b[0m T3  done · gates passed, acceptance is green\n"
     '  \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub accept T3 · ahub rework T3 --notes "…" · ahub reject T3\x1b[0m\n'
     "\x1b[38;5;208m⏺\x1b[0m T2  queued\n"
@@ -272,6 +271,39 @@ def test_status_overview_tty_snapshot(tmp_path, monkeypatch):
     pulses = {ids["active"]: pulse.Pulse(ids["active"], "working", pid=42, reason="running pytest")}
     text = views.status_text(store, live=live, now=NOW + 2 * 60_000, pulses=pulses, w=W)
     assert text == OVERVIEW_TTY
+
+
+def test_status_overview_non_green_pulse_tty(tmp_path, monkeypatch):
+    from ahub import pulse
+
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    store = Store()
+    ids = _fill(store, tmp_path)
+    live = {ids["active"]: 42}
+    pulses = {ids["active"]: pulse.Pulse(ids["active"], "waiting", pid=42,
+                                         reason="child processes running (python -m pytest)")}
+    text = views.status_text(store, live=live, now=NOW + 2 * 60_000, pulses=pulses, w=W)
+    lines = text.splitlines()
+    assert lines[1] == "\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers"
+    assert lines[2] == "  \x1b[2m⎿\x1b[0m \x1b[2mwriting · bunny · 2 min · $0.046\x1b[0m"
+    assert lines[3] == "  \x1b[2m⎿\x1b[0m \x1b[33m🟡 child processes running (python -m pytest)\x1b[0m"
+
+
+def test_status_detail_active_task_keeps_pulse_colour_tty(tmp_path, monkeypatch):
+    from ahub import pulse
+
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    store = Store()
+    ids = _fill(store, tmp_path)
+    pulses = {ids["active"]: pulse.Pulse(ids["active"], "working", pid=42)}
+    text = views.task_text(store, store.get_task(ids["active"]), live={ids["active"]: 42}, pulses=pulses,
+                           now=NOW + 2 * 60_000, w=W)
+    lines = text.splitlines()
+    assert lines[0] == "\x1b[38;5;208m⏺\x1b[0m T1  code  Setup wizard: choose providers"
+    assert lines[2] == "\x1b[2mState\x1b[0m  \x1b[32mworking · writing · process alive\x1b[0m"
+    assert lines[3] == "\x1b[2mModel\x1b[0m  bunny  \x1b[2mReview\x1b[0m  spark ×2  \x1b[2mRound\x1b[0m  3"
+    assert lines[4] == "\x1b[2mCost\x1b[0m   $0.046 Go of $1.50 budget"
+    assert lines[5] == "\x1b[2mAge\x1b[0m    2 min"
 
 
 def test_history_snapshot(tmp_path):
@@ -425,6 +457,43 @@ def test_table_measures_coloured_cells_by_what_is_seen():
     assert "…" in cut and "\033" not in cut  # a cut cell drops its colour instead of a broken code
 
 
+def test_item_details_never_move_onto_the_title_line(monkeypatch):
+    """One rhythm for every item: the details are on their own ⎿ line, whatever the width leaves free."""
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    head, detail = "T1  Setup wizard", "writing · bunny · 2 min · $0.046"
+    for w in (40, 100, 200):
+        lines = ui.item(head, [detail], w=w).split("\n")
+        assert len(lines) == 2, f"w={w}: the title line keeps nothing else"
+        assert lines[0] == f"\x1b[38;5;208m⏺\x1b[0m {head}"
+        assert lines[1] == f"  \x1b[2m⎿\x1b[0m \x1b[2m{detail}\x1b[0m"
+    assert ui.item(head, [], w=200) == f"\x1b[38;5;208m⏺\x1b[0m {head}"  # no details, no empty spine line
+
+
+def test_a_green_pulse_takes_no_line_of_its_own(monkeypatch):
+    """A green pulse is what the details line already says — only a pulse that is not green gets a line."""
+    from ahub import pulse
+
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    assert views._pulse_detail(pulse.Pulse(1, "working")) == ""
+    assert views._pulse_detail(pulse.Pulse(1, "working", reason="quiet for 3 min")) == ""  # green, no line
+    assert views._pulse_detail(None) == ""
+    waiting = views._pulse_detail(pulse.Pulse(1, "waiting", reason="child processes running (python -m pytest)"))
+    assert waiting == "\033[33m🟡 child processes running (python -m pytest)\033[0m"
+
+
+def test_kv_labels_are_dim_and_the_values_keep_their_weight(monkeypatch):
+    monkeypatch.setattr(ui, "colour_on", lambda: True)
+    block = ui.kv([("State", ui.styled("working", "green")), ("Model", ["bunny", ("Review", "spark")])], dim=True)
+    assert block.split("\n") == ["\x1b[2mState\x1b[0m  \x1b[32mworking\x1b[0m",
+                                  "\x1b[2mModel\x1b[0m  bunny    \x1b[2mReview\x1b[0m  spark"]
+    # a coloured value is measured by what is seen, so the columns after it still line up
+    rows = ui.kv([("a", [ui.styled("long value", "green"), ("b", "x")]), ("bb", "y")], dim=True)
+    lines = rows.split("\n")
+    assert lines[0].endswith("\x1b[2mb\x1b[0m  x")
+    assert ui.plain_len(lines[0][:lines[0].index("x")]) == 4 + 10 + 2 + 3
+    assert ui.kv([("State", "working")]) == "State  working"  # a pipe — nothing is dim
+
+
 def test_home_screen_tty_snapshot(tmp_path, monkeypatch):
     import ahub
     from ahub import home, paths
@@ -497,11 +566,8 @@ def test_home_screen_configured_tty_snapshot(tmp_path, monkeypatch):
         "\x1b[2m╭───────────────────────────────────────╮\x1b[0m",
         f"│ \x1b[38;5;208m✻ ahub\x1b[0m \x1b[2m{ahub.__version__} · demo · service running\x1b[0m │",
         "\x1b[2m╰───────────────────────────────────────╯\x1b[0m",
-        (
-            "\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers"
-            "                                         \x1b[2mwriting · spark · 0 min\x1b[0m"
-        ),
-        "  \x1b[2m⎿\x1b[0m \x1b[32m🟢 running pytest\x1b[0m",
+        "\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers",
+        "  \x1b[2m⎿\x1b[0m \x1b[2mwriting · spark · 0 min\x1b[0m",
         "\x1b[38;5;208m⏺\x1b[0m Waiting for you",
         '  \x1b[2m⎿\x1b[0m \x1b[2mahub accept T2 · ahub rework T2 --notes "…" · ahub reject T2\x1b[0m',
         '\x1b[2mahub status · ahub top · ahub doctor · ahub task new --kind scout --title "…"\x1b[0m',

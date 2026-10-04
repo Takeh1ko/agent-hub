@@ -224,6 +224,14 @@ def test_model_error_and_crash(fake, tmp_path):
     assert n.outcome is Outcome.CRASH and "нет id" in n.error  # the id was neither caught nor found — honest
 
 
+def test_stderr_of_an_earlier_run_does_not_decide_this_one(fake, tmp_path):
+    """The log is reused by the next turn (even on another provider): its old stderr is not this run's error."""
+    (tmp_path / "run.log.stderr").write_text("error: Individual quota reached (an older run)\n")
+    r = run(fake, spec(tmp_path, {"session": "s", "steps": [{"event": {"type": "text", "text": "ok"}}]}))
+    assert r.ok and "quota" not in (r.error or "")
+    c = run(fake, spec(tmp_path, {"session": "s", "steps": [{"stderr": "segfault"}, {"crash": True}]}))
+    assert c.outcome is Outcome.CRASH and "segfault" in c.error and "quota" not in c.error
+
 def test_not_started(tmp_path):
     class Broken(FakeProvider):
         def build_command(self, spec):

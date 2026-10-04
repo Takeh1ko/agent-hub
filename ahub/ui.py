@@ -188,21 +188,16 @@ def hint(text: Any, *, indent: int = 2, w: int | None = None) -> str:
     return "\n".join(pad + styled(ln, "dim") for ln in lines)
 
 
-def item(head: str, details: Iterable[Any] = (), *, tail: str = "", indent: int = 0, w: int | None = None) -> str:
-    """One item the way a person reads it: ⏺ <head> (the mark alone is accent), the dim `tail` right-aligned
-    on the same line while it fits, and the details on their own lines under "  ⎿ ".
+def item(head: str, details: Iterable[Any] = (), *, indent: int = 0, w: int | None = None) -> str:
+    """One item the way a person reads it: ⏺ <head> (the mark alone is accent) and the details on their own
+    lines under "  ⎿ ".
+
+    The details never move onto the title line to use the space that is left — the rhythm is the same for
+    every item, whatever the width and whatever the item is about.
     """
-    line = " " * indent + styled(MARK, "accent") + " " + head
-    out = [line]
-    rest = [d for d in details if str(d or "").strip()]
-    if tail:
-        gap = width(w) - plain_len(line) - plain_len(tail)
-        if gap >= GAP:
-            out[0] = line + " " * gap + styled(tail, "dim")
-        else:  # the tail does not fit on the line — it becomes the first detail
-            rest.insert(0, styled(tail, "dim"))
-    out += [hint(d, indent=indent + 2, w=w) for d in rest]
-    return "\n".join(out)
+    lines = [" " * indent + styled(MARK, "accent") + " " + head]
+    lines += [hint(d, indent=indent + 2, w=w) for d in details if str(d or "").strip()]
+    return "\n".join(lines)
 
 
 def failed(what: str, way_out: str = "") -> str:
@@ -239,36 +234,42 @@ def _chunks(rows: Sequence[tuple[str, Value]]) -> list[list[tuple[str, str]]]:
     return out
 
 
+def _label(text: str, n: int, dim: bool) -> str:
+    """A kv label in a column of n columns — dim on a terminal, the values beside it keep their own weight."""
+    plain = text.rstrip()
+    return (styled(plain, "dim") + " " * (n - len(plain))) if dim else text.ljust(n)
+
+
 def kv(rows: Sequence[tuple[str, Value]], *, indent: int = 0, gap: int = GAP, w: int | None = None,
        dim: bool = False) -> str:
     """An aligned "label  value" block. The value may be the chunks of the line — the first is the value of
     the label, the rest are their own label/value pairs, so a block reads as a table without a header.
-    The last cell wraps under its label. dim — the whole block is secondary text (grey on a terminal)."""
+    The last cell wraps under its label. dim — the labels are dim, the values normal weight."""
     cells = _chunks(rows)
     if not cells:
         return ""
     ncols = max(len(c) for c in cells)
     lw = [max(len(c[i][0]) for c in cells if len(c) > i) for i in range(ncols)]
-    vw = [max(len(c[i][1]) for c in cells if len(c) > i) for i in range(ncols)]
+    vw = [max(plain_len(c[i][1]) for c in cells if len(c) > i) for i in range(ncols)]
     pad = " " * indent
     out: list[str] = []
     for c in cells:
         head = pad
         for i, (label, value) in enumerate(c[:-1]):
             if label:
-                head += label.ljust(lw[i]) + " " * gap
-            head += value.ljust(vw[i]) + " " * gap
+                head += _label(label, lw[i], dim) + " " * gap
+            head += _cell(value, vw[i]) + " " * gap
         label, value = c[-1]
         if label:
-            head += label.ljust(lw[len(c) - 1]) + " " * gap
+            head += _label(label, lw[len(c) - 1], dim) + " " * gap
         if not value:
             out.append(head.rstrip())
             continue
-        lines = para(value, indent=len(head), w=w).split("\n")
-        out.append(head + lines[0][len(head):])
+        body_indent = plain_len(head)
+        lines = para(value, indent=body_indent, w=w).split("\n")
+        out.append(head + lines[0][body_indent:])
         out.extend(lines[1:])
-    block = "\n".join(ln.rstrip() for ln in out)
-    return styled(block, "dim") if dim else block
+    return "\n".join(ln.rstrip() for ln in out)
 
 
 def table(head: Sequence[str] | None, rows: Sequence[Sequence[Any]], *, max_width: Sequence[int | None] | None = None,
