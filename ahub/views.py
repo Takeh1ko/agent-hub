@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ahub import archive, events, reasons, ui, workspace
+from ahub import archive, events, pulse, reasons, ui, workspace
 from ahub.i18n import Words, plural
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, FINAL, WAITING_DECISION, State
@@ -108,16 +108,18 @@ def _state_cell(t: Task) -> str:
     return state_word(t.state)
 
 
-def _pulse_detail(pl) -> str:
+def _pulse_detail(pl: pulse.Pulse | None) -> str:
     """What a task is doing under its ⏺ line: the tool it runs, why it waits, or that it went quiet.
-    The pulse brings its own colour (green/yellow/red) — the mark and the words together."""
-    if pl is None or not pl.reason:
+    The pulse brings its own colour (green/yellow/red). A green pulse is what the details line already
+    says, so it takes no line of its own."""
+    if pl is None or not pl.reason or pl.state == "working":
         return ""
     return ui.badge(pl.mark, pl.reason, pl.state)
 
 
-def _item_tail(t: Task, ts: int, cost: str = "") -> str:
-    """The dim right-aligned tail of an item: what it is doing · model · idle · cost."""
+def _item_details(t: Task, ts: int, cost: str = "") -> str:
+    """The details line of a task item: what it is doing · model · idle · cost. It is always this line and
+    never a right-aligned tail on the title line — the item has one rhythm, whatever the width is."""
     return " · ".join([x for x in (_state_cell(t), t.executor or "—", _age(t.updated_at, ts), cost) if x])
 
 
@@ -150,12 +152,13 @@ def _active_table(store: Store, active: list[Task], live: dict[int, int], pulses
 
 
 def _active_items(store: Store, active: list[Task], pulses: dict, ts: int, w: int | None) -> list[str]:
-    """The active tasks as items: the mark, the id and the title, the tail right-aligned, the pulse under it."""
+    """The active tasks as items: the mark, the id and the title, then the details line and — only when the
+    pulse is not green — the pulse line under it."""
     out = []
     for t in active:
         go, usd = archive.task_cost(store, t.id)
-        out.append(ui.item(f"{t.label}  {t.title}", [_pulse_detail(pulses.get(t.id))],
-                           tail=_item_tail(t, ts, f"${go + usd:.3f}"), w=w))
+        details = [_item_details(t, ts, f"${go + usd:.3f}"), _pulse_detail(pulses.get(t.id))]
+        out.append(ui.item(f"{t.label}  {t.title}", details, w=w))
     return out
 
 
@@ -313,8 +316,13 @@ def _point(text: str, indent: int, w: int | None) -> str:
 
 
 def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now: int | None = None,
-              w: int | None = None) -> str:
-    """L2: the whole task, but brief — a header, the facts, the worker result. ≤ 4000 bytes."""
+              pulses: dict | None = None, w: int | None = None) -> str:
+    """L2: the whole task, but brief — a header, the facts, the worker result. ≤ 4000 bytes.
+
+    The state of an active task carries the colour of its pulse. `live` — the workers the caller sees;
+    without it there is no pulse to show (a task nobody watches is not a dead one), and `pulses` — the
+    pulses the caller has already computed — are used instead of asking again.
+    """
     ts = now if now is not None else now_ms()
     go, usd = archive.task_cost(store, t.id)
     head_text = f"{t.label}  {t.kind.value}  {t.title}"
@@ -329,6 +337,9 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
         state += " · " + PHASE_WORDS.get(t.phase, t.phase)
     if live and t.id in live:
         state += " · " + _t("views.alive")
+    if t.state in ACTIVE and live:
+        pl = (pulses or {}).get(t.id) or pulse.task_pulse(store, t, live=live, now=ts)
+        state = ui.styled(state, ui.PULSE_STYLE.get(pl.state, ""))
     groups: list[list[tuple[str, Value]]] = [[(_t("views.lbl_state"), state)]]
     model: list[Any] = [t.executor or "—"]
     if t.review.get("models"):
@@ -378,8 +389,7 @@ def _facts(groups: list[list[tuple[str, Value]]], w: int | None) -> list[str]:
     Age/After), and a long value (the state, the cost) does not push the pair columns of another line.
 
     Every group is its own kv block — that is what keeps its columns local — and every label is padded to
-    the width of the widest one, so the block has a single label column. On a terminal the whole card is
-    secondary text (grey).
+    the width of the widest one, so the block has a single label column. Labels are dim, values normal weight.
     """
     lw = max(len(label) for group in groups for label, _ in group)
     out = []
@@ -404,10 +414,11 @@ def next_line(key: str, label: str = "", w: int | None = None) -> str:
 
 
 def result_text(store: Store, t: Task, *, full: bool = False, max_bytes: int = L3_DEFAULT,
-                w: int | None = None) -> str:
-    """L2 (default) or L3 (--full): whole report, paged by limit."""
+                live: dict[int, int] | None = None, w: int | None = None) -> str:
+    """L2 (default) or L3 (--full): whole report, paged by limit. The L2 default is the same card
+    `ahub status T12` draws, so it takes the same live workers."""
     if not full:
-        return task_text(store, t, w=w)
+        return task_text(store, t, live=live, w=w)
     rj, rp = _result_paths(t)
     parts = []
     if rj is not None and rj.exists():
