@@ -8,15 +8,14 @@ import sys
 import pytest
 
 from ahub import comms, mcp
-from ahub.scope import OWNER
 from ahub.store import Store
+from tests.conftest import write
 
 
 @pytest.fixture(autouse=True)
-def _owner_scope(monkeypatch, tmp_path):
+def _outside_every_project(monkeypatch, tmp_path):
     """These tests are not about the scope: the server is one started outside every project (the owner).
     The CLI re-resolves the scope from the directory, so the tools run there too."""
-    monkeypatch.setattr(mcp, "_server_scope", OWNER)
     monkeypatch.chdir(tmp_path)
 
 
@@ -85,3 +84,32 @@ def test_stdio_process():
     p = subprocess.run([sys.executable, "-m", "ahub", "mcp"], input=json.dumps(
         {"jsonrpc": "2.0", "id": 1, "method": "ping"}) + "\n", capture_output=True, text=True, timeout=60)
     assert json.loads(p.stdout.splitlines()[0])["result"] == {}
+
+
+def test_every_tool_takes_the_scope_of_the_directory_of_the_server(tmp_path, monkeypatch):
+    """No list of scoped commands in the server: every tool is the CLI command, and the CLI resolves the
+    scope from the directory the server runs in. A new tool is scoped from its first day."""
+    root = tmp_path / "A"
+    write(root / ".hub.toml", 'schema_version = 2\nname = "A"\n')
+    monkeypatch.chdir(root)
+    store = Store()
+    comms.owner_message(store, "дело A", project="A")
+    comms.owner_message(store, "дело B", project="B")
+    comms.say(store, "сказано из A", project="A")
+    b_task = store.create_task(project="B", kind="code", title="работа B")
+
+    # the tools that read a scope
+    inbox = call("inbox", {})["content"][0]["text"]
+    assert "дело A" in inbox and "дело B" not in inbox
+    assert f"T{b_task}" not in call("status", {})["content"][0]["text"]  # B's task is not A's
+    assert "нет задачи T99" in call("result", {"task": "T99"})["content"][0]["text"]
+    # and the one that writes into it
+    call("say", {"text": "ещё одно"})
+    assert [m["project"] for m in comms.outbox(store)] == ["A", "A"]
+
+
+def call(name, args):
+    out = io.StringIO()
+    req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}
+    mcp.serve(io.StringIO(json.dumps(req) + "\n"), out)
+    return json.loads(out.getvalue())["result"]

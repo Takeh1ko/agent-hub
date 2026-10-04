@@ -15,7 +15,7 @@ import json
 from ahub import events
 from ahub.model import Ev
 from ahub.scope import Scope, where
-from ahub.store import Store
+from ahub.store import Event, Store
 from ahub.time import now_ms
 
 
@@ -39,11 +39,21 @@ def inbox(store: Store, *, mark: bool = True, scope: Scope | None = None, now: i
         if cond:
             sql += " AND " + cond
         rows = [dict(r) for r in c.execute(sql + " ORDER BY id", args)]
-        if mark and rows:
-            c.execute(f"UPDATE message SET delivered_at=? WHERE id IN ({','.join('?' * len(rows))})",
-                      (ts, *[r["id"] for r in rows]))
-    if mark and rows:
-        events.ack(store, kinds=(Ev.OWNER_MESSAGE.value,), scope=scope)
+        to_mark = [r for r in rows if r["project"] != ""] if (scope and not scope.all) else rows
+        if mark and to_mark:
+            c.execute(f"UPDATE message SET delivered_at=? WHERE id IN ({','.join('?' * len(to_mark))})",
+                      (ts, *[r["id"] for r in to_mark]))
+    if mark and to_mark:
+        if scope and not scope.all:
+            with store.tx() as c:
+                marks = ",".join("?" * len(scope.projects))
+                c.execute(
+                    f"UPDATE event SET acked_at=?, delivered_at=COALESCE(delivered_at, ?)"
+                    f" WHERE needs_reaction=1 AND acked_at IS NULL AND kind=? AND project IN ({marks})",
+                    (ts, ts, Ev.OWNER_MESSAGE.value, *scope.projects),
+                )
+        else:
+            events.ack(store, kinds=(Ev.OWNER_MESSAGE.value,), scope=scope, now=ts)
     return rows
 
 
@@ -144,13 +154,14 @@ def alarms(store: Store, *, unacked_only: bool = True, scope: Scope | None = Non
 ESCALATE_MS = 15 * 60_000
 
 
-def alarms_for_tg(store: Store, *, now: int | None = None, escalate_ms: int = ESCALATE_MS) -> list:
+def alarms_for_tg(store: Store, *, now: int | None = None, escalate_ms: int = ESCALATE_MS) -> list[Event]:
     """Alarms due for the human: critical — at once; plain — unacked past escalate_ms."""
     ts = now if now is not None else now_ms()
+    sql = "SELECT * FROM event WHERE kind=? AND tg_sent_at IS NULL ORDER BY id"
+    with store.read() as c:
+        rows = [Event.from_row(r) for r in c.execute(sql, (Ev.ALARM.value,))]
     out = []
-    for e in store.events(needs_reaction=True):
-        if e.kind != Ev.ALARM.value or e.tg_sent_at is not None:
-            continue
+    for e in rows:
         if e.critical or (e.acked_at is None and ts - e.ts >= escalate_ms):
             out.append(e)
     return out

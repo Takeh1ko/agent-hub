@@ -369,7 +369,8 @@ def test_watch_summary_once_new_and_ack(env, capsys, monkeypatch):
 
     store, _ = env
     monkeypatch.setattr(time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
-    comms.owner_message(store, "первое")
+    comms.owner_message(store, "первое", project="P")  # the messages of this project (a hub-wide one
+    # belongs to the owner's inbox only — `inbox` in a project scope does not consume it)
     batch = events.ready_batch(store)
     events.mark_delivered(store, [e.id for e in batch])
     rc, out, _ = ahub(capsys, "watch", "--poll", "0")
@@ -379,7 +380,7 @@ def test_watch_summary_once_new_and_ack(env, capsys, monkeypatch):
     assert len(events.unacked(store)) == 1  # old stays unread
     rc, out, _ = ahub(capsys, "status")
     assert "непрочитано событий 1" in out
-    comms.owner_message(store, "второе")
+    comms.owner_message(store, "второе", project="P")
     batch = events.ready_batch(store)
     assert len(batch) == 1 and "второе" in batch[0].payload.get("text", "")
     events.mark_delivered(store, [e.id for e in batch])
