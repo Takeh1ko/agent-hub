@@ -221,9 +221,18 @@ def test_end_to_end_real_worker(store, tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
     install_fake(store, [])  # the "fake" model in the shared registry
     t = scout(store, project)
-    s = service.Service(store)
-    r = s.tick()
-    assert r.spawned == [t.id]
+    (tmp_path / "proc").mkdir()
+    # its own /proc: the task processes of this machine (another hub, another suite) are not its business —
+    # a live `ahub.worker T1` of somebody else would look like this task already running
+    s = service.Service(store, proc_root=tmp_path / "proc")
+    spawned: list[int] = []
+    for _ in range(25):  # a spawn can fail under load (fork) — the service retries it on the next tick
+        r = s.tick()
+        spawned = r.spawned
+        if spawned:
+            break
+        time.sleep(0.2)
+    assert spawned == [t.id], f"nothing was spawned: {r.waiting}"
     for _ in range(200):
         if store.get_task(t.id).state in (State.DONE, State.ERROR, State.NEEDS_DECISION):
             break
@@ -299,6 +308,18 @@ def test_accepting_with_a_live_owner_process_is_not_an_orphan(store, tmp_path):
     s.tick()
     assert store.get_task(tid).state is State.ACCEPTING and rec.spawned == []
     assert "orphan" not in [e.kind for e in store.events(task_id=tid)]
+
+
+def test_accepting_with_recycled_pid_is_orphan(store, tmp_path):
+    """The accept process died, its lease expired, and the OS recycled the PID: reap as orphan."""
+    project = make_project(tmp_path)
+    install_fake(store, [])
+    tid = _orphan_task(store, project, state=State.ACCEPTING, owner_pid=os.getpid())
+    s, rec = svc(store, project, tmp_path)
+    fake_proc(tmp_path / "proc", os.getpid(), ["/bin/bash"])
+    s.tick()
+    assert store.get_task(tid).state is State.NEEDS_DECISION
+    assert "orphan" in [e.kind for e in store.events(task_id=tid)]
 
 
 def test_code_fingerprint_and_health(tmp_path):

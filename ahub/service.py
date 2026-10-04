@@ -72,6 +72,27 @@ def _worker_task(args: list[str]) -> int | None:
     return None
 
 
+def _accept_task(args: list[str]) -> int | None:
+    """Task id of an `ahub accept T<n>` command line; None — anything else.
+
+    As with `_worker_task`, the marks are arguments of their own: another process that merely mentions
+    `accept` and a task number is not this task's acceptance, and its pid must not hide a dead task forever.
+    """
+    for i, a in enumerate(args):
+        if a != "accept":
+            continue
+        for rest in args[i + 1:]:
+            m = _TASK_ARG.match(rest)
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def accepting_task(pid: int, task_id: int, proc_root: str | Path = "/proc") -> bool:
+    """True if pid runs the acceptance of this task (acceptance is long — its lease may look stale)."""
+    return _accept_task(procs.cmdline(pid, proc_root)) == task_id
+
+
 def live_workers(proc_root: str | Path = "/proc") -> dict[int, int]:
     """task_id → pid of live task processes on this machine."""
     out: dict[int, int] = {}
@@ -257,8 +278,9 @@ class Service:
         for t in self.store.list_tasks(states=ACTIVE):
             if t.id in busy or t.id in live:
                 continue
-            if t.state is State.ACCEPTING and t.owner_pid and procs.alive(t.owner_pid, self.proc_root):
-                continue  # an `ahub accept` in progress: acceptance is long, its lease is renewed — never an orphan
+            if t.state is State.ACCEPTING and t.owner_pid and procs.alive(t.owner_pid, self.proc_root) \
+                    and accepting_task(t.owner_pid, t.id, self.proc_root):
+                continue  # an `ahub accept` in progress — this pid is this task's accept (a live lease below)
             if t.owner and t.lease_until and t.lease_until + ORPHAN_GRACE_MS > now:
                 continue  # lease (or its grace) still alive — the owner may be outside the task process (CLI)
             if not t.owner and now - t.updated_at < ORPHAN_GRACE_MS:

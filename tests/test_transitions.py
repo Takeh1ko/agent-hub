@@ -157,11 +157,18 @@ def test_request_nudge_refused(store):
     tr.acquire(store, a, "own", pid=5, now=100)
     with pytest.raises(tr.TransitionError, match="сессии ещё нет"):
         tr.request_nudge(store, a, text="почини", now=110)
-
     store.add_session(task_id=a, provider="fake", role="executor", model="fake", external_id="ses_x")
     assert tr.request_stop(store, a, now=110) == "requested"
     with pytest.raises(tr.TransitionError, match="остановка уже запрошена"):
         tr.request_nudge(store, a, text="почини", now=111)
+
+    b = _task(store)
+    tr.move(store, b, State.PREPARING)
+    tr.acquire(store, b, "own", pid=6, now=100)
+    store.add_session(task_id=b, provider="fake", role="executor", model="fake", external_id="ses_pending", now=100)
+    assert tr.request_nudge(store, b, text="первое", now=110) == "requested"
+    with pytest.raises(tr.TransitionError, match="сообщение уже ожидает"):
+        tr.request_nudge(store, b, text="второе", now=111)
 
     d = _task(store)
     tr.move(store, d, State.PREPARING)
@@ -235,3 +242,20 @@ def test_acquire_race_one_winner(store):
         p.join(20)
     wins = [q.get(timeout=5) for _ in procs]
     assert wins.count(True) == 1
+
+
+def test_keep_lease_renews_and_reports_loss(store):
+    import time
+    t = _task(store)
+    tr.move(store, t, State.PREPARING)
+    assert tr.acquire(store, t, "own", pid=1, lease_ms=500)
+    lost = []
+    with tr.keep_lease(store, t, "own", lease_ms=500, interval_s=0.05, on_lost=lambda: lost.append(True)):
+        first = store.get_task(t).lease_until
+        time.sleep(0.15)
+        second = store.get_task(t).lease_until
+        assert second > first
+        with store.tx() as c:
+            c.execute("UPDATE task SET owner='other' WHERE id=?", (t,))
+        time.sleep(0.15)
+        assert lost == [True]

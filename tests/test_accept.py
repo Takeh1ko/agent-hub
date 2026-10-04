@@ -202,6 +202,24 @@ def test_edit_spec_new_session(store, project):
     assert fake.calls[1]["session_id"] is None and "совсем другое" in fake.calls[1]["prompt"]
 
 
+def test_edit_refusals(store, project):
+    """Refuse bad edit parameters: rounds out of bounds, an empty panel, an unknown model alias."""
+    install_fake(store, [])
+    t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.CODE, title="x", model="fake",
+                                           paths=["core/**"], accept=["tests/test_a.py::test_x"],
+                                           review_models=["fake"], review_rounds=1), project, collect=False)
+    with pytest.raises(accept.DecisionError, match="круги 99: допустимо 1-"):
+        accept.edit(store, project, t.id, rounds=99)
+    with pytest.raises(accept.DecisionError, match="круги 0: допустимо 1-"):
+        accept.edit(store, project, t.id, rounds=0)
+    with pytest.raises(accept.DecisionError, match="--review хотя бы с одной моделью"):
+        accept.edit(store, project, t.id, review=[])
+    with pytest.raises(accept.DecisionError, match="нет модели 'nonexistent_model'"):
+        accept.edit(store, project, t.id, review=["nonexistent_model"])
+    with pytest.raises(accept.DecisionError, match="нет модели 'nonexistent_model'"):
+        accept.edit(store, project, t.id, model="nonexistent_model")
+
+
 def test_usd_budget_extend(store, project):
     t, _, _ = done_code(store, project)
     from ahub import transitions
@@ -215,6 +233,17 @@ def test_usd_budget_extend(store, project):
     assert store.get_task(t.id).budget_usd == 0.5
     with pytest.raises(accept.DecisionError):
         accept.extend_budget(store, t.id)
+
+
+def test_usd_budget_lowered_but_not_below_the_spend(store, project):
+    sc = work()
+    sc["steps"][0]["event"]["usd"] = 0.04  # real money of the run
+    t, _, _ = done_code(store, project, scenarios=[sc], budget_usd=0.5)
+    msg = accept.extend_budget(store, t.id, set_usd=0.05)  # lowering is allowed
+    assert "реальные $0.5 → $0.05" in msg and store.get_task(t.id).budget_usd == 0.05
+    with pytest.raises(accept.DecisionError, match=r"ниже потраченных \$0\.040"):
+        accept.extend_budget(store, t.id, set_usd=0.01)
+    assert store.get_task(t.id).budget_usd == 0.05  # the refusal writes nothing
 
 
 def test_red_after_merge_root_moved_not_reset(store, project, monkeypatch):
@@ -274,6 +303,85 @@ def test_resumed_accept_rolls_back_a_red_merge(store, project, tmp_path):
         accept.accept(store, project, t.id)
     assert git_out(project.root, "rev-parse", "HEAD").strip() == foreign  # the merge is gone
     assert store.get_task(t.id).state is State.NEEDS_DECISION
+
+
+def test_resumed_accept_refuses_foreign_commit_on_top(store, project, tmp_path):
+    """Foreign commit on top of the merge — accept refuses and does not rollback foreign commit."""
+    t, _, _ = done_code(store, project)
+    interrupted_accept(store, project, tmp_path, t.id)
+    (Path(project.root) / "core" / "c.py").write_text("Z = 1\n")
+    git(project.root, "add", "-A")
+    git(project.root, "commit", "-q", "-m", "чужой коммит поверх слияния")
+    foreign_head = git_out(project.root, "rev-parse", "HEAD").strip()
+    with pytest.raises(accept.DecisionError):
+        accept.accept(store, project, t.id)
+    assert git_out(project.root, "rev-parse", "HEAD").strip() == foreign_head
+
+
+def test_resumed_accept_refuses_a_copy_that_moved(store, project, tmp_path):
+    """The copy is not on the task branch tip any more — accept refuses instead of skipping the gates.
+
+    The work branch still carries accept's merge commit, but the copy has its own commit on top: what the
+    gates would have checked is not what is in the branch.
+    """
+    t, _, _ = done_code(store, project)
+    interrupted_accept(store, project, tmp_path, t.id)
+    merged = git_out(project.root, "rev-parse", "HEAD").strip()
+    copy = Path(t.worktree)
+    git(copy, "commit", "--allow-empty", "-q", "-m", "правка в копии после слияния")
+    moved = git_out(copy, "rev-parse", "HEAD").strip()
+    git(copy, "checkout", "-q", "--detach")  # the copy is left on its own commit
+    git(project.root, "update-ref", f"refs/heads/{t.branch}", f"{moved}~1")  # the branch stays where it was
+    with pytest.raises(accept.DecisionError, match="уже слита в main без приёмки"):
+        accept.accept(store, project, t.id)
+    assert git_out(project.root, "rev-parse", "HEAD").strip() == merged  # nothing moved in the work branch
+    after = store.get_task(t.id)
+    assert after.state is State.NEEDS_DECISION and '"already_merged"' in after.state_reason
+
+
+def test_accept_refuses_branch_already_merged_without_acceptance(store, project, monkeypatch):
+    """Orchestrator hand-merges the task branch into main: accept refuses already_merged."""
+    from ahub import gates as g
+    t, _, _ = done_code(store, project)
+    git(project.root, "merge", "--ff-only", t.branch)  # fast-forward merge (not accept's merge commit)
+    monkeypatch.setattr(g, "check", lambda *a, **kw: g.GateResult(base="b", head="h"))
+    with pytest.raises(accept.DecisionError, match="уже слита в main без приёмки"):
+        accept.accept(store, project, t.id)
+
+
+def test_rollback_preserves_untracked_files(store, project, monkeypatch):
+    """Rollback uses reset --keep: untracked files in the root survive."""
+    from ahub import gates as g
+    t, _, _ = done_code(store, project)
+    monkeypatch.setattr(g, "run_acceptance", lambda *a, **kw: (False, "FAILED", "pytest"))
+    untracked = Path(project.root) / "untracked.txt"
+    untracked.write_text("precious dirt\n")
+    with pytest.raises(accept.DecisionError, match="приёмка красная — слияние откачено"):
+        accept.accept(store, project, t.id)
+    assert untracked.exists()
+    assert untracked.read_text() == "precious dirt\n"
+
+
+def test_rollback_refuses_to_destroy_a_local_edit(store, project, monkeypatch):
+    """`reset --keep` refuses when a tracked file the merge touched is edited locally.
+
+    Accept must say the rollback failed: `--hard` would have thrown the edit away and claimed a rollback.
+    """
+    from ahub import gates as g
+    t, _, _ = done_code(store, project, [work(path="core/a.py", text="Y = 9\n")])
+    tracked = Path(project.root) / "core" / "a.py"
+
+    def red_with_a_local_edit(project_, cwd, nodes, **kw):
+        tracked.write_text(tracked.read_text() + "# правка человека во время приёмки\n")
+        return False, "FAILED", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", red_with_a_local_edit)
+    with pytest.raises(accept.DecisionError, match="откат не удался"):
+        accept.accept(store, project, t.id)
+    assert "# правка человека" in tracked.read_text()  # the edit is untouched
+    assert len(git_out(project.root, "log", "-1", "--format=%P", "HEAD").split()) == 2  # the merge is still in place
+    t2 = store.get_task(t.id)
+    assert t2.state is State.NEEDS_DECISION and '"rollback_failed"' in t2.state_reason
 
 
 def test_not_merged_still_needs_the_copy(store, project):

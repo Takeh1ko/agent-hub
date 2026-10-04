@@ -13,14 +13,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
+from ahub import log as hublog
 from ahub import reasons
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, FINAL, NUDGEABLE, STATE_EVENT, WAITING_DECISION, Ev, State, can_move
 from ahub.store import Store, Task, _dumps
 from ahub.time import now_ms
+
+_log = hublog.get("transitions")
 
 DEFAULT_LEASE_MS = 90_000  # the owner renews more often (roughly every 30 s)
 
@@ -100,10 +105,8 @@ def _cascade(store: Store, c: sqlite3.Connection, task: Task, dst: State, ts: in
     """Dependents not yet started → "Needs decision": their base will never be accepted."""
     for (dep_id,) in c.execute("SELECT task_id FROM task_dep WHERE after_id=?", (task.id,)).fetchall():
         dep = store.get_task(dep_id, con=c)
-        if dep is None or dep.state not in (State.QUEUED, State.DRAFT):
+        if dep is None or dep.state is not State.QUEUED:
             continue
-        if dep.state is State.DRAFT:
-            continue  # still a draft — a human decides at launch
         code = "dep_rejected" if dst is State.REJECTED else "dep_error"
         move(store, dep_id, State.NEEDS_DECISION, reason=reasons.dump(code, task=task.label), by="hub",
              now=ts, con=c)
@@ -143,6 +146,36 @@ def release(store: Store, task_id: int, owner: str) -> bool:
         cur = c.execute("UPDATE task SET owner='', owner_pid=NULL, lease_until=NULL WHERE id=? AND owner=?",
                         (int(task_id), owner))
         return cur.rowcount == 1
+
+
+@contextmanager
+def keep_lease(store: Store, task_id: int, owner: str, *, lease_ms: int = DEFAULT_LEASE_MS,
+               interval_s: float | None = None, on_lost: Callable[[], None] | None = None,
+               name: str = "") -> Iterator[None]:
+    """Renew the lease in a background thread while the block runs."""
+    done = threading.Event()
+    interval = interval_s if interval_s is not None else max(1.0, lease_ms / 3000)
+
+    def _renew() -> None:
+        while not done.wait(interval):
+            try:
+                ok = renew(store, task_id, owner, lease_ms=lease_ms)
+            except sqlite3.Error:
+                _log.exception("lease renewal failed")
+                continue
+            if not ok:
+                _log.warning("lease lost T%d", task_id)
+                if on_lost is not None:
+                    on_lost()
+                return
+
+    keeper = threading.Thread(target=_renew, name=name or f"lease-T{task_id}", daemon=True)
+    keeper.start()
+    try:
+        yield
+    finally:
+        done.set()
+        keeper.join(timeout=5)
 
 
 def is_orphan(task: Task, now: int) -> bool:
@@ -193,6 +226,8 @@ def request_nudge(store: Store, task_id: int, *, text: str, by: str = "",
             raise TransitionError(_t("trans.no_task", id=task_id))
         if task.request == "stop":
             raise TransitionError(_t("trans.nudge_stopping", label=task.label))
+        if task.request == "nudge":
+            raise TransitionError(_t("trans.nudge_pending", label=task.label))
         if task.state not in NUDGEABLE:
             raise TransitionError(_t("trans.nudge_not_running", label=task.label, state=task.state.value))
         if not _lease_alive(task, ts):

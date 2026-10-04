@@ -301,7 +301,7 @@ def _findings_lines(t: Task, w: int | None) -> list[str]:
         used += size
     if more:
         out.append(_point(plural(more, "views.findings_more_one", "views.findings_more_few",
-                                 "views.findings_more", label=t.label), 2, w))
+                                 "views.findings_more_many", label=t.label), 2, w))
     return out
 
 
