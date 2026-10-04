@@ -125,6 +125,7 @@ MESSAGES: dict[str, str] = {
     "follow.log": "log: {path}",
     "follow.money": " · ${cost}",
     "follow.more": "… +{n} lines (--full for all)",
+    "follow.result_more": "… +{n} lines",
     "follow.no_log": "{label}: the session log is gone",
     "follow.no_sessions": "{label}: no sessions yet (nothing to follow)",
     "follow.reasoning": "reasoning: {text}",

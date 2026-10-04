@@ -7,6 +7,7 @@ import io
 import json
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,95 @@ def test_codex_tool_output_is_shown(tmp_path, codex):
     assert "  ✖ failed" in text
     assert "    3 failed" in text
     assert "ещё 5 строк" in text  # the tail of a long output is cut
+    # --full does not change a result (it is cut at RESULT_LINES in any case) — the hint promises nothing
+    assert "(--full" not in text
+    assert render(codex(), log, full=True).count("detail line") == text.count("detail line") == 5
+
+
+def test_control_sequences_of_the_content_never_reach_the_terminal(tmp_path, codex):
+    """A worker `cat`s a hostile file: OSC 52 (clipboard) and OSC 0 (window title) in model text or in a
+    tool result must not be written to the owner's terminal as sequences (finding 4)."""
+    hostile = "\x1b]52;c;cHDEyOnRtcmlldCB2cHVibGlzaA==\x07\x1b]0;PWNED\x07\x1b[31m\x00\x07"
+    log = tmp_path / "executor.log"
+    log.write_text(
+        json.dumps({"type": "item.completed", "item": {
+            "id": "item_1", "type": "command_execution", "command": "/bin/bash -lc 'cat hostile'",
+            "aggregated_output": f"before {hostile} after", "exit_code": 0, "status": "completed"}}) + "\n"
+        + json.dumps({"type": "item.completed", "item": {
+            "id": "item_2", "type": "agent_message", "text": f"прочитал {hostile} файл"}}) + "\n"
+        + json.dumps({"type": "item.completed", "item": {
+            "id": "item_3", "type": "reasoning", "text": f"думаю {hostile}"}}) + "\n",
+        encoding="utf-8")
+    text = render(codex(), log, color=True)
+    assert transcript.safe(hostile) == ""  # every sequence of it is dropped
+    body = "".join(ln for ln in text.splitlines() if "\x1b" not in ln)  # the lines of the transcript itself
+    assert "\x1b]" not in body and "\x00" not in body and "PWNED" not in body
+    assert "before" in text and "after" in text and "прочитал" in text and "файл" in text  # the words stay
+    assert "\x1b[2m" in text  # the transcript's own colours are still there
+
+
+def test_tool_arguments_are_clipped_not_cut(tmp_path, codex):
+    """A long command is shown short with an ellipsis — a bare cut looks like the whole command."""
+    long_cmd = "pytest -q " + " ".join(f"tests/test_{i}.py" for i in range(40))
+    log = tmp_path / "executor.log"
+    log.write_text(json.dumps({"type": "item.completed", "item": {
+        "id": "item_1", "type": "command_execution", "command": long_cmd, "aggregated_output": "ok",
+        "exit_code": 0, "status": "completed"}}) + "\n", encoding="utf-8")
+    text = render(codex(), log)
+    line = next(ln for ln in text.splitlines() if ln.startswith("▶ "))
+    args = line.split("  ", 1)[1]
+    assert len(args) <= transcript.ARGS_COLS and args.endswith("…")
+    assert "test_39.py" not in line
+
+
+def test_tail_decodes_a_character_split_across_two_reads(tmp_path, codex):
+    """The log is read as it grows: a multi-byte character cut between two reads is one character."""
+    log = tmp_path / "executor.log"
+    log.write_bytes(b"")
+    tail = transcript._Tail(log)
+    word = "привет".encode()
+    with log.open("ab") as f:
+        f.write(word[:5])  # the first half of a character
+    assert tail.lines() == []
+    with log.open("ab") as f:
+        f.write(word[5:] + b"\nsecond\n")
+    assert tail.lines() == ["привет", "second"]  # no replacement sign, nothing lost
+
+
+def test_two_identical_tool_calls_pair_up(tmp_path, codex):
+    """Two calls of one tool with the same arguments: each end goes with its own start."""
+    log = tmp_path / "executor.log"
+    log.write_text(
+        json.dumps({"type": "item.started", "item": {
+            "id": "i1", "type": "command_execution", "command": "pytest -q"}}) + "\n"
+        + json.dumps({"type": "item.started", "item": {
+            "id": "i2", "type": "command_execution", "command": "pytest -q"}}) + "\n"
+        + json.dumps({"type": "item.completed", "item": {
+            "id": "i2", "type": "command_execution", "command": "pytest -q", "status": "completed",
+            "aggregated_output": "first"}}) + "\n"
+        + json.dumps({"type": "item.completed", "item": {
+            "id": "i1", "type": "command_execution", "command": "pytest -q", "status": "completed",
+            "aggregated_output": "second"}}) + "\n",
+        encoding="utf-8")
+    items = items_of(codex(), log)
+    assert [(i.kind, i.args) for i in items] == [("tool", "pytest -q"), ("tool", "pytest -q"),
+                                                 ("result", "pytest -q"), ("result", "pytest -q")]
+    text = render(codex(), log)
+    assert text.count("▶ command_execution  pytest -q") == 2
+    assert "    first" in text and "    second" in text
+
+
+def test_a_result_line_is_not_repeated(tmp_path, oc):
+    """One rendered line per item — a duplicated write would double a result line or the usage line."""
+    log = copy_sample("opencode/session.ndjson", tmp_path, [
+        {"ts": 1790776503000, "turn": 1, "kind": "start", "text": "Почини округление суммы."},
+    ])
+    kinds = Counter(i.kind for i in transcript.Reader(oc(), log).read().items)
+    text = render(oc(), log)
+    lines = text.splitlines()
+    assert text.count("  ✔ completed") + text.count("  ✖ error") == kinds["result"] == 5
+    assert sum(1 for ln in lines if ln.startswith(("▶ ", "✎ ", "👁 ", "🔎 "))) == kinds["tool"]
+    assert text.count("расход:") == kinds["usage"] == 4
 
 
 def test_prompt_cut_unless_full(tmp_path, codex):

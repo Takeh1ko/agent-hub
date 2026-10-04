@@ -125,6 +125,7 @@ MESSAGES: dict[str, str] = {
     "follow.log": "лог: {path}",
     "follow.money": " · ${cost}",
     "follow.more": "… ещё {n} строк (--full — все)",
+    "follow.result_more": "… ещё {n} строк",
     "follow.no_log": "{label}: лог сессии не найден",
     "follow.no_sessions": "{label}: сессий пока нет (смотреть нечего)",
     "follow.reasoning": "размышление: {text}",
