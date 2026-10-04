@@ -189,7 +189,8 @@ def test_tail_decodes_a_character_split_across_two_reads(tmp_path, codex):
 
 
 def test_two_identical_tool_calls_pair_up(tmp_path, codex):
-    """Two calls of one tool with the same arguments: each end goes with its own start."""
+    """Two calls of one tool with the same arguments: each end goes with its own start (FIFO), not with
+    the newest one — the transcript must show each call once."""
     log = tmp_path / "executor.log"
     log.write_text(
         json.dumps({"type": "item.started", "item": {

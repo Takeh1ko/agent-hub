@@ -338,7 +338,7 @@ class Reader:
             elif a.kind is Act.TOOL_END:
                 key = (a.tool, compact_args(a.tool, data))
                 if key in started:
-                    started.remove(key)
+                    del started[started.index(key)]  # the oldest call of this kind ended — the FIFO pair
                 else:  # the provider reported only the finished call (opencode)
                     out.append(Item("tool", a.ts, turn, tool=a.tool, args=key[1]))
                 out.append(Item("result", a.ts, turn, tool=a.tool, args=key[1],
