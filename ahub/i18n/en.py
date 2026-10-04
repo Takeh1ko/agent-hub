@@ -829,6 +829,7 @@ MESSAGES: dict[str, str] = {
     "accept.accepted_msg": "{label} accepted",
     "accept.no_worktree": "{label}: no task worktree ({wt})",
     "accept.busy": "{label}: already being accepted by another process",
+    "accept.waiting": "waiting for the accept of {label}…",
     "accept.fail": "accept failed: {err}",
     "accept.gates_head": "gates on the current HEAD: {problems}",
     "accept.conflict": "merge conflict: {info}",

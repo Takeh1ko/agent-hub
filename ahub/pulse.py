@@ -71,7 +71,14 @@ def lock_holder(path: str, proc_root: str | Path = "/proc") -> int | None:
 
 def _describe(pid: int, proc_root) -> str:
     args = procs.cmdline(pid, proc_root)
-    return " ".join(args)[:60] if args else f"pid {pid}"
+    if not args:
+        return f"pid {pid}"
+    prog = Path(args[0]).name
+    if len(args) == 1:
+        return prog
+    if args[1] == "-m" and len(args) > 2:
+        return f"{prog} -m {args[2]}"
+    return f"{prog} {args[1]}"
 
 
 def task_pulse(store: Store, t: Task, *, live: dict[int, int], project: ProjectConfig | None = None,

@@ -829,6 +829,7 @@ MESSAGES: dict[str, str] = {
     "accept.accepted_msg": "{label} принята",
     "accept.no_worktree": "{label}: нет копии задачи ({wt})",
     "accept.busy": "{label}: уже принимается другим процессом",
+    "accept.waiting": "ожидание принятия {label}…",
     "accept.fail": "сбой принятия: {err}",
     "accept.gates_head": "ворота на текущем HEAD: {problems}",
     "accept.conflict": "конфликт слияния: {info}",

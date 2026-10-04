@@ -200,7 +200,7 @@ def detail(store: Store, task_id: int, live: dict[int, int], pulses: dict) -> st
         return ""
     pl = pulses.get(t.id)
     head = f"{pl.mark} {pl.reason or _t('tui.working_now')}\n" if pl else ""
-    return head + views.task_text(store, t, live=live)
+    return head + views.task_text(store, t, live=live, pulses=pulses)
 
 
 def snapshot(store: Store, projects: list[config.ProjectConfig] | None = None, *,
