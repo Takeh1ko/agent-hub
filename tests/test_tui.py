@@ -151,6 +151,7 @@ async def test_app_view_mode_blocks_actions(store):
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
         assert "ПРОСМОТР" in str(app.query_one("#mode").render())
+        await rows_ready(app, pilot, want=2)  # the first refresh runs in a thread — a pause is not a wait
         assert len(app._ids) == 2
         await pilot.press("s")  # in view mode it does nothing
         await pilot.pause(0.2)
