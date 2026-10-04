@@ -165,7 +165,30 @@ async def test_follow_opens_and_esc_returns(tmp_path: Path, store: Store):
         assert app.screen.query_one("#input")
 
 
-async def test_status_history_help_quit_read_only(store: Store):
+async def test_tasks_focus_selects_and_enter_follows(store: Store):
+    from ahub import transitions
+
+    ids = []
+    for i in range(3):
+        tid = _task(store, "P", f"task {i}")
+        transitions.move(store, tid, State.PREPARING)
+        ids.append(tid)
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        await pilot.press("tab")
+        await pilot.pause(0.2)
+        assert app.focus_mode == "tasks"
+        await pilot.press("down")
+        await pilot.pause(0.2)
+        assert app._selected == 1
+        await pilot.press("enter")
+        await pilot.pause(0.4)
+        assert app.screen.__class__.__name__ == "Transcript"
+        assert app.screen.view.task_id == ids[1]
+
+
+async def test_status_history_help_read_only(store: Store):
     _task(store, "P", "read me")
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test() as pilot:
@@ -175,6 +198,58 @@ async def test_status_history_help_quit_read_only(store: Store):
         app.run_command("/help")
         await pilot.pause(0.2)
         assert len(app._transcript) >= 3
+
+
+async def test_quit_exits_the_console(store: Store):
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        app.run_command("/quit")
+        await pilot.pause(0.3)
+        assert not app.is_running
+
+
+async def test_input_history_up_and_down(store: Store):
+    from textual.widgets import Input
+
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        inp = app.query_one("#input", Input)
+        inp.focus()
+        await pilot.press(*"/status", "enter")
+        await pilot.pause(0.3)
+        await pilot.press("up")
+        await pilot.pause(0.2)
+        assert app.query_one("#input", Input).value == "/status"
+        await pilot.press("down")
+        await pilot.pause(0.2)
+        assert app.query_one("#input", Input).value == ""
+
+
+async def test_transcript_capped_with_earlier_line(store: Store):
+    from textual.widgets import Static
+
+    from ahub.i18n import t
+
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        app._say([f"line {i}" for i in range(con.TRANSCRIPT_CAP + 20)])
+        assert len(app._transcript) == con.TRANSCRIPT_CAP
+        assert app._transcript[-1] == f"line {con.TRANSCRIPT_CAP + 19}"
+        text = str(app.query_one("#transcript-inner", Static).render())
+        assert t("console.transcript_earlier") in text
+
+
+async def test_only_the_console_footer_is_rendered(store: Store):
+    from textual.widgets import Footer
+
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        assert len(app.query("#footer")) == 1
+        assert not app.query(Footer)
 
 
 def test_pipe_and_json_byte_identical(capsys, monkeypatch, tmp_path):

@@ -40,6 +40,14 @@ def _elapsed_inner(ms: int) -> str:
     return ui.elapsed(ms)[1:-1]
 
 
+def _safe(widget: str, fn) -> str:
+    """Render one widget; a failure shows "✗ <widget>: <hint>" in place and the console keeps running."""
+    try:
+        return fn()
+    except Exception as e:
+        return _t("console.widget_error", widget=widget, hint=str(e)[:100])
+
+
 def status_of(task: Task) -> str:
     """Console status bucket for the ⏺ colour: working/success/waiting/error."""
     if task.state is State.ERROR:
@@ -229,8 +237,8 @@ def snapshot(store: Store, sc: scope.Scope, width: int, now: int, frame: int = 0
              stale_s: int = 0) -> Snapshot:
     """Whole console data except the append-only transcript (pure, testable)."""
     snap = Snapshot()
-    snap.welcome = welcome_box(store, sc, now, width)
-    snap.alerts = alert_text(store, sc, width)
+    snap.welcome = _safe("welcome", lambda: welcome_box(store, sc, now, width))
+    snap.alerts = _safe("alerts", lambda: alert_text(store, sc, width))
     try:
         live = live_workers()
     except Exception:
@@ -262,23 +270,14 @@ def snapshot(store: Store, sc: scope.Scope, width: int, now: int, frame: int = 0
             blocks.append((f"head:{proj}", ui.styled(proj or "—", "dim")))
         for t in items:
             task_ids.append(t.id)
-            try:
-                lines = task_lines(t, pulses.get(t.id), now, width)
-            except Exception as e:
-                lines = [_t("console.widget_error", widget=f"T{t.id}", hint=str(e)[:80])]
+            lines = _safe(f"T{t.id}", lambda t=t: task_lines(t, pulses.get(t.id), now, width))
             blocks.append((f"T{t.id}", "\n".join(lines)))
     if not tasks:
         blocks.append(("empty", ui.styled(_t("console.no_tasks"), "dim")))
     snap.blocks = blocks
     snap.task_ids = task_ids
-    try:
-        snap.live = live_text(store, sc, live, pulses, now, width, frame)
-    except Exception as e:
-        snap.live = _t("console.widget_error", widget="live", hint=str(e)[:80])
-    try:
-        snap.footer = footer_text(store, sc, now, width, stale_s)
-    except Exception as e:
-        snap.footer = _t("console.widget_error", widget="footer", hint=str(e)[:80])
+    snap.live = _safe("live", lambda: live_text(store, sc, live, pulses, now, width, frame))
+    snap.footer = _safe("footer", lambda: footer_text(store, sc, now, width, stale_s))
     return snap
 
 
@@ -300,7 +299,7 @@ try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import VerticalScroll
-    from textual.widgets import Footer, Input, Static
+    from textual.widgets import Input, Static
 
     _HAS_TEXTUAL = True
 except Exception:  # pragma: no cover - textual is a hard dep, this is only for safety
@@ -318,14 +317,19 @@ if _HAS_TEXTUAL:
         """Input widget: '?' on empty input toggles shortcuts without inserting '?'; Up/Down history."""
 
         async def _on_key(self, event) -> None:
-            is_qm = event.key == "question_mark" or getattr(event, "character", None) == "?"
-            if is_qm and not (self.value or "").strip():
-                event.prevent_default()
-                event.stop()
-                app = self.app
-                if isinstance(app, ConsoleApp):
+            app = self.app
+            if isinstance(app, ConsoleApp):
+                if event.key in ("up", "down"):
+                    event.prevent_default()
+                    event.stop()
+                    app.action_history_step(-1 if event.key == "up" else 1)
+                    return
+                is_qm = event.key == "question_mark" or getattr(event, "character", None) == "?"
+                if is_qm and not (self.value or "").strip():
+                    event.prevent_default()
+                    event.stop()
                     app.action_toggle_shortcuts()
-                return
+                    return
             await super()._on_key(event)
 
     class ConsoleApp(App):
@@ -400,8 +404,7 @@ if _HAS_TEXTUAL:
             yield Static("", id="live")
             yield Static("", id="shortcuts")
             yield ConsoleInput(placeholder=_t("console.input_placeholder"), id="input")
-            yield Static("", id="footer")
-            yield Footer()
+            yield Static("", id="footer")  # the dim console footer — the only one, no textual bar
 
         def on_mount(self) -> None:
             try:
@@ -421,12 +424,6 @@ if _HAS_TEXTUAL:
             except Exception:
                 w = 0
             return max(40, w or ui.width())
-
-        def _safe(self, widget: str, fn) -> str:
-            try:
-                return fn()
-            except Exception as e:
-                return _t("console.widget_error", widget=widget, hint=str(e)[:100])
 
         @work(thread=True, exclusive=True, group="console")
         def refresh_data(self) -> None:
@@ -617,6 +614,17 @@ if _HAS_TEXTUAL:
             self._blocks, self._order = {}, []
             self.refresh_data()
 
+        def action_history_step(self, delta: int) -> None:
+            """Up/Down in the input: walk the input history, past the end it clears the line."""
+            if not self._history:
+                return
+            self._hist_at = max(0, min(len(self._history), self._hist_at + delta))
+            try:
+                inp = self.query_one("#input", Input)
+            except Exception:
+                return
+            inp.value = self._history[self._hist_at] if self._hist_at < len(self._history) else ""
+
         def action_quit_twice(self) -> None:
             now = time.monotonic()
             if now - self._quit_at < QUIT_GAP_S:
@@ -779,26 +787,7 @@ if _HAS_TEXTUAL:
                 self.action_focus_tasks()
                 ev.prevent_default()
                 return
-            if self.focus_mode == "input":
-                inp = None
-                try:
-                    inp = self.query_one("#input", Input)
-                except Exception:
-                    inp = None
-                if key == "up" and inp is not None and inp.has_focus:
-                    if self._history:
-                        self._hist_at = max(0, self._hist_at - 1)
-                        inp.value = self._history[self._hist_at]
-                    ev.prevent_default()
-                elif key == "down" and inp is not None and inp.has_focus:
-                    if self._history:
-                        self._hist_at = min(len(self._history), self._hist_at + 1)
-                        inp.value = self._history[self._hist_at] if self._hist_at < len(self._history) else ""
-                    ev.prevent_default()
-                elif key == "question_mark" and (inp is None or not (inp.value or "").strip()):
-                    self.action_toggle_shortcuts()
-                    ev.prevent_default()
-            else:
+            if self.focus_mode == "tasks":
                 if key == "up":
                     self._selected = max(0, self._selected - 1)
                     ev.prevent_default()
