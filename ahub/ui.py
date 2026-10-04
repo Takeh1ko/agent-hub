@@ -243,15 +243,25 @@ def clip_width(text: Any, w: int) -> str:
             out.append(word)
             used += add
             continue
-        if not out:  # one long word — cut it by display width
+        if not out:  # one long word — cut it by display width (skipping ANSI sequences)
             cur, acc = "", 0
-            for ch in word:
+            pos = 0
+            while pos < len(word):
+                m = _ANSI.match(word, pos)
+                if m:
+                    cur += m.group(0)
+                    pos = m.end()
+                    continue
+                ch = word[pos]
                 cw = _columns(ch)
                 if acc + cw > budget:
                     break
                 cur += ch
                 acc += cw
-            return (cur or ELLIPSIS[:0]) + ELLIPSIS if cur else ELLIPSIS
+                pos += len(ch)
+            if not acc:
+                return ELLIPSIS[:w]
+            return cur + ELLIPSIS
         break
     return " ".join(out).rstrip(" ,;:-·—") + ELLIPSIS
 

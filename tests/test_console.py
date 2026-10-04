@@ -206,3 +206,84 @@ def test_top_opens_console(monkeypatch):
     monkeypatch.setattr("ahub.tui.console.main", _fake)
     assert cli.main(["top"]) == 0
     assert called.get("ok") is True
+
+
+def test_snapshot_task_ids_follow_project_order(store: Store):
+    from ahub import transitions
+
+    z = _task(store, "Z_proj", "task in Z")
+    a = _task(store, "A_proj", "task in A")
+    transitions.move(store, z, State.PREPARING)
+    transitions.move(store, a, State.PREPARING)
+    now = now_ms()
+    snap = con.snapshot(store, scope.Scope(), 80, now)
+    assert snap.task_ids == [a, z]
+    block_keys = [k for k, _ in snap.blocks]
+    assert block_keys == ["head:A_proj", f"T{a}", "head:Z_proj", f"T{z}"]
+
+
+def test_console_app_css_has_transcript_and_prompt_rules():
+    css = ConsoleApp.CSS
+    for selector in ("#live-head", "#live-box", "#live-log", "#prompt-box", "#prompt-text", "Prompt", "Transcript"):
+        assert selector in css
+
+
+async def test_snapshot_deadline_timeout_enforced(store: Store, monkeypatch):
+    import time
+
+    def _slow_snapshot(*args, **kwargs):
+        time.sleep(0.3)
+        return con.Snapshot(welcome="SLOW")
+
+    monkeypatch.setattr(con, "SNAPSHOT_DEADLINE_S", 0.05)
+    monkeypatch.setattr(con, "snapshot", _slow_snapshot)
+
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        assert app._stale_s > 0
+        welcome_text = str(app.query_one("#welcome").render())
+        assert "SLOW" not in welcome_text
+
+
+async def test_question_mark_toggles_shortcuts_without_inserting(store: Store):
+    from textual.widgets import Static
+
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        inp = app.query_one("#input", con.ConsoleInput)
+        inp.focus()
+        await pilot.pause(0.1)
+
+        # Empty input: '?' toggles shortcuts on
+        assert not app._show_shortcuts
+        await pilot.press("question_mark")
+        await pilot.pause(0.2)
+        assert app._show_shortcuts is True
+        assert app.query_one("#shortcuts", Static).display is True
+        assert inp.value == ""
+
+        # Press again: toggles off
+        await pilot.press("question_mark")
+        await pilot.pause(0.2)
+        assert app._show_shortcuts is False
+        assert app.query_one("#shortcuts", Static).display is False
+        assert inp.value == ""
+
+        # Non-empty input: '?' is inserted into the input
+        inp.value = "/help"
+        await pilot.press("question_mark")
+        await pilot.pause(0.2)
+        assert inp.value == "/help?"
+        assert app._show_shortcuts is False
+
+
+def test_clip_width_never_cuts_inside_ansi():
+    colored = "\033[38;5;208mSupercalifragilistic\033[0m"
+    for w in (2, 3, 5, 8):
+        clipped = ui.clip_width(colored, w)
+        assert "\033[38;5;208m" in clipped
+        assert clipped.endswith(ui.ELLIPSIS)
+        assert not clipped.endswith("\033")
+        assert ui.plain_len(clipped) <= w

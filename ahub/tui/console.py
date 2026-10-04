@@ -13,6 +13,8 @@ marks the footer stale. Every widget renders through _safe() so one failure show
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -252,12 +254,14 @@ def snapshot(store: Store, sc: scope.Scope, width: int, now: int, frame: int = 0
     for t in tasks:
         by_proj.setdefault(t.project, []).append(t)
     blocks: list[tuple[str, str]] = []
+    task_ids: list[int] = []
     multi = sc.all and len(by_proj) > 1
     for proj in sorted(by_proj):
         items = sorted(by_proj[proj], key=lambda t: t.id)
         if multi:
             blocks.append((f"head:{proj}", ui.styled(proj or "—", "dim")))
         for t in items:
+            task_ids.append(t.id)
             try:
                 lines = task_lines(t, pulses.get(t.id), now, width)
             except Exception as e:
@@ -266,7 +270,7 @@ def snapshot(store: Store, sc: scope.Scope, width: int, now: int, frame: int = 0
     if not tasks:
         blocks.append(("empty", ui.styled(_t("console.no_tasks"), "dim")))
     snap.blocks = blocks
-    snap.task_ids = [t.id for t in tasks]
+    snap.task_ids = task_ids
     try:
         snap.live = live_text(store, sc, live, pulses, now, width, frame)
     except Exception as e:
@@ -310,6 +314,20 @@ def _plain(text: str):
 
 
 if _HAS_TEXTUAL:
+    class ConsoleInput(Input):
+        """Input widget: '?' on empty input toggles shortcuts without inserting '?'; Up/Down history."""
+
+        async def _on_key(self, event) -> None:
+            is_qm = event.key == "question_mark" or getattr(event, "character", None) == "?"
+            if is_qm and not (self.value or "").strip():
+                event.prevent_default()
+                event.stop()
+                app = self.app
+                if isinstance(app, ConsoleApp):
+                    app.action_toggle_shortcuts()
+                return
+            await super()._on_key(event)
+
     class ConsoleApp(App):
         """Bare-TTY console: the same app for `ahub` with no args and `ahub top`."""
 
@@ -322,6 +340,15 @@ if _HAS_TEXTUAL:
         #input { margin: 0 1; }
         #footer { height: 1; margin: 0 1; }
         #shortcuts { height: auto; margin: 0 1; }
+        #dialog { width: 80; height: auto; border: thick $primary; background: $surface; padding: 1 2; }
+        #live-head { height: 1; background: $boost; }
+        #live-box { height: 1fr; border: round $primary; }
+        #live-log { width: 100%; }
+        #prompt-box { width: 90%; height: 80%; border: thick $primary; background: $surface; padding: 1 2; }
+        #prompt-text { width: 100%; }
+        Confirm, Ask, Help { align: center middle; }
+        Prompt { align: center middle; }
+        Transcript { align: center middle; }
         """
 
         def __init__(self, store: Store | None = None, all_projects: bool = False,
@@ -351,6 +378,13 @@ if _HAS_TEXTUAL:
             self._show_shortcuts = False
             self._quit_at = 0.0
             self._busy = False
+            self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="console-snap")
+
+        def on_unmount(self) -> None:
+            try:
+                self._executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
 
         def pulses(self) -> dict:
             """Pulses of the last refresh (the Transcript screen reads them)."""
@@ -365,7 +399,7 @@ if _HAS_TEXTUAL:
                 yield Static("", id="transcript-inner", markup=False)
             yield Static("", id="live")
             yield Static("", id="shortcuts")
-            yield Input(placeholder=_t("console.input_placeholder"), id="input")
+            yield ConsoleInput(placeholder=_t("console.input_placeholder"), id="input")
             yield Static("", id="footer")
             yield Footer()
 
@@ -403,13 +437,15 @@ if _HAS_TEXTUAL:
             try:
                 w = self._width()
                 now = now_ms()
-                snap = snapshot(self.store, self.scope, w, now, self._frame)
-                took = time.monotonic() - started
-                if took > SNAPSHOT_DEADLINE_S:
-                    self._stale_s = int(took)
-                    snap.footer = footer_text(self.store, self.scope, now, w, self._stale_s)
-                else:
-                    self._stale_s = 0
+                future = self._executor.submit(snapshot, self.store, self.scope, w, now, self._frame)
+                try:
+                    snap = future.result(timeout=SNAPSHOT_DEADLINE_S)
+                except (TimeoutError, FutureTimeoutError):
+                    took = time.monotonic() - started
+                    self._stale_s = max(1, int(took))
+                    self.call_from_thread(self._apply_stale, self._stale_s)
+                    return
+                self._stale_s = 0
                 try:
                     new_lines = self._feed_lines(w)
                 except Exception:
@@ -420,6 +456,19 @@ if _HAS_TEXTUAL:
                 self.call_from_thread(self._apply_error, err)
             finally:
                 self._busy = False
+
+        def _apply_stale(self, stale_s: int) -> None:
+            """Keep the existing view on snapshot deadline timeout, updating only the footer."""
+            try:
+                w = self._width()
+                now = now_ms()
+                footer = footer_text(self.store, self.scope, now, w, stale_s=stale_s)
+            except Exception:
+                footer = ui.styled(_t("console.stale", n=stale_s), "dim")
+            try:
+                self.query_one("#footer", Static).update(_plain(footer))
+            except Exception:
+                pass
 
         def _feed_lines(self, width: int) -> list[str]:
             """New DONE/DECISION/ERROR/ANSWER/OWNER lines since the last refresh."""
@@ -607,9 +656,8 @@ if _HAS_TEXTUAL:
                 self.exit()
                 return
             if cmd == "help":
-                self._show_shortcuts = not self._show_shortcuts
+                self.action_toggle_shortcuts()
                 self._say([_t("console.help")])
-                self._apply_shortcuts()
                 return
             if cmd == "follow":
                 self.cmd_follow(args)
@@ -624,6 +672,11 @@ if _HAS_TEXTUAL:
                 self.cmd_project(cmd, args)
                 return
             self._say([_t("console.unknown", cmd="/" + cmd)])
+
+        def action_toggle_shortcuts(self) -> None:
+            """Toggle the shortcuts pane."""
+            self._show_shortcuts = not self._show_shortcuts
+            self._apply_shortcuts()
 
         def _apply_shortcuts(self) -> None:
             try:
@@ -743,8 +796,8 @@ if _HAS_TEXTUAL:
                         inp.value = self._history[self._hist_at] if self._hist_at < len(self._history) else ""
                     ev.prevent_default()
                 elif key == "question_mark" and (inp is None or not (inp.value or "").strip()):
-                    self._show_shortcuts = not self._show_shortcuts
-                    self._apply_shortcuts()
+                    self.action_toggle_shortcuts()
+                    ev.prevent_default()
             else:
                 if key == "up":
                     self._selected = max(0, self._selected - 1)
