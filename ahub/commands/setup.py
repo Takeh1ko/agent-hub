@@ -687,9 +687,9 @@ def run_wizard(args) -> int:
     _telegram_step(out)
     # 8) final check
     out.section("setup.step_check")
-    from ahub.commands.doctor import text as _doctor_text
+    from ahub.commands import doctor as doctorcmd
 
-    for line in _doctor_text(doctor.run_all(root)).split("\n"):  # the project from step 2, not the cwd
+    for line in doctorcmd.text(doctor.run_all(root)).split("\n"):  # the project from step 2, not the cwd
         out.write(line)
     out.finish(t("setup.next"))
     return 0

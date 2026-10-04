@@ -335,22 +335,22 @@ SETUP = """\
     providers off: codex
 3. Models
     roles executor, reviewer, scout, routine, observer, drafter now default to spark-free
-4. Claude Code
+4. Service
+    service files written: {tmp}/.config/systemd/user/ahub.service
+    next  systemctl --user daemon-reload && systemctl --user enable --now ahub.service
+5. Claude Code
     Claude skill: {tmp}/.claude/skills/ahub/SKILL.md
     CLAUDE.md: block added
     permission Bash(ahub:*) allowed ({tmp}/shop/.claude/settings.json)
     for other agents (Codex, Cursor): claude mcp add ahub -- ahub mcp
-5. Service
-    service files written: {tmp}/.config/systemd/user/ahub.service
-    next  systemctl --user daemon-reload && systemctl --user enable --now ahub.service
 Summary
   Project      shop · {tmp}/shop
   Config       config {tmp}/d/config/config.toml
   Providers    opencode, agy
   Models       executor=spark-free, reviewer=spark-free, scout=spark-free, routine=spark-free,
                observer=spark-free, drafter=spark-free
-  Claude Code  skill + CLAUDE.md + Bash(ahub:*)
   Service      —
+  Claude Code  skill + CLAUDE.md + Bash(ahub:*)
   Next  ahub task new --kind scout --title "…" · ahub doctor
 """
 
@@ -377,19 +377,19 @@ SETUP_YES_NO_CLAUDE = """\
     providers off: codex
 3. Models
     roles executor, reviewer, scout, routine, observer, drafter now default to spark-free
-4. Claude Code
-    skipped — later: ahub setup --claude
-5. Service
+4. Service
     service files written: {tmp}/.config/systemd/user/ahub.service
     next  systemctl --user daemon-reload && systemctl --user enable --now ahub.service
+5. Claude Code
+    skipped — later: ahub setup --claude
 Summary
   Project      shop · {tmp}/shop
   Config       config {tmp}/d/config/config.toml
   Providers    opencode, agy
   Models       executor=spark-free, reviewer=spark-free, scout=spark-free, routine=spark-free,
                observer=spark-free, drafter=spark-free
-  Claude Code  —
   Service      —
+  Claude Code  —
   Next  ahub task new --kind scout --title "…" · ahub doctor
 """
 
