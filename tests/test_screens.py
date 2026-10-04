@@ -948,9 +948,9 @@ def test_the_root_scope_flags_survive_a_subcommand(capsys, monkeypatch, tmp_path
     from ahub.model import Kind, State
 
     monkeypatch.setattr("ahub.views.now_ms", lambda: NOW)
-    write(paths.global_config_path(), "projects = []\n")
     for name in ("A", "B"):
         write(tmp_path / name / ".hub.toml", f'schema_version = 2\nname = "{name}"\n')
+    write(paths.global_config_path(), f'projects = ["{tmp_path / "A"}", "{tmp_path / "B"}"]\n')
     monkeypatch.chdir(tmp_path / "A")
     store = Store()
     mine = store.get_task(store.create_task(project="A", kind=Kind.CODE, title="задача A", now=NOW))

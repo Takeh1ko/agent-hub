@@ -3,8 +3,9 @@
 A Claude session works in one repository and sees and touches only that project; the owner sees everything.
 `resolve(args)` is the one place the scope of a command comes from: `--all` — every project (the owner),
 `--project X` — X, otherwise the project of the current directory (`.hub.toml` searched upward); outside every
-project — every project. Rows with project = '' (hub-wide: observer alarms, service events) belong to everyone,
-so `where()` adds `project IN (…) OR project=''`.
+project — every project. `--project X` is checked against the hub (`checked`): an unknown name is a refusal with
+the way out, never a silent empty scope. Rows with project = '' (hub-wide: observer alarms, service events) belong
+to everyone, so `where()` adds `project IN (…) OR project=''`.
 """
 
 from __future__ import annotations
@@ -45,12 +46,13 @@ def foreign(sc: Scope, project: str) -> bool:
     return not sc.all and project not in sc
 
 
-def where(scope: Scope | None, column: str = "project") -> tuple[str, list[str]]:
-    """The scope as a SQL condition: `column IN (…) OR column=''`; the owner (or None) — no condition."""
+def where(scope: Scope | None) -> tuple[str, list[str]]:
+    """The scope as a SQL condition on the `project` column: `project IN (…) OR project=''`;
+    the owner (or None) — no condition."""
     if scope is None or scope.all:
         return "", []
     marks = ",".join("?" * len(scope.projects))
-    return f"({column} IN ({marks}) OR {column}='')", list(scope.projects)
+    return f"(project IN ({marks}) OR project='')", list(scope.projects)
 
 
 def resolve(args: Any = None, cwd: str | Path | None = None) -> Scope:
@@ -59,7 +61,7 @@ def resolve(args: Any = None, cwd: str | Path | None = None) -> Scope:
         return Scope()
     want = getattr(args, "project", None)
     if want:
-        return Scope((name_of(want),))
+        return Scope((checked(want),))
     return of_dir(Path(cwd) if cwd is not None else Path.cwd())
 
 
@@ -84,3 +86,39 @@ def name_of(want: str) -> str:
         except (FileNotFoundError, config.ConfigError):
             pass
     return want
+
+
+def hub_names() -> list[str] | None:
+    """The projects of the hub config; None — there is no config to ask (a broken one: a read command
+    must still work, and `ahub projects` reports the file)."""
+    try:
+        projects, _errors = config.load_projects()
+    except (config.ConfigError, OSError):
+        return None
+    return [p.name for p in projects]
+
+
+def checked(want: str) -> str:
+    """`--project X`: the name of a project of this hub. An unknown one is a refusal, not a silent empty
+    scope — the rows a command writes would carry that name and no handle would ever read them again."""
+    name = name_of(want)
+    names = hub_names()
+    if names is None or name in names or _is_repo(want):
+        return name
+    from ahub.cliutil import CliError
+    from ahub.i18n import t
+
+    raise CliError(t("err.unknown_project", want=name, projects=", ".join(names) or "—"),
+                   hint=t("hint.projects"))
+
+
+def _is_repo(want: str) -> bool:
+    """A path that leads to a repository of its own — such a project is named by its .hub.toml."""
+    p = Path(config.expand(want))
+    if not p.is_dir():
+        return False
+    try:
+        config.load_project(p)
+    except (FileNotFoundError, config.ConfigError):
+        return False
+    return True

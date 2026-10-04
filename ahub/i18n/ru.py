@@ -118,6 +118,7 @@ MESSAGES: dict[str, str] = {
     "err.setup_global": "не удалось обновить {path} — поправьте файл вручную",
     "err.spec_file": "--spec-file: {err}",
     "err.task_invalid": "задача не создана: {errors}",
+    "err.unknown_project": "нет проекта {want!r} — в хабе: {projects}",
     "events.real": "${usd} реальных",
     "events.report": "отчёт {kb} КБ",
     "follow.archived": "{label}: копии задачи уже нет; архив — {path}",

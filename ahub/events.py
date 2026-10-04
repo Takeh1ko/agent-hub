@@ -238,7 +238,8 @@ LEGACY_SQL = ("INSERT INTO presence(who, project, last_seen, session_id, via) VA
 
 def touch(store: Store, who: str = DEFAULT_WHO, *, project: str = "", via: str = "", session_id: str = "",
           now: int | None = None) -> None:
-    """Stamp presence of one project, in both tables, in one transaction."""
+    """Stamp the presence of one project — the legacy one-project entry point (`touch_scope` is the
+    general one: a scope, the owner's names, both tables)."""
     touch_scope(store, Scope((project,)), who, via=via, session_id=session_id, now=now)
 
 

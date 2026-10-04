@@ -118,6 +118,7 @@ MESSAGES: dict[str, str] = {
     "err.setup_global": "could not update {path} — fix the file manually",
     "err.spec_file": "--spec-file: {err}",
     "err.task_invalid": "task not created: {errors}",
+    "err.unknown_project": "no such project {want!r} — the hub has: {projects}",
     "events.real": "${usd} real",
     "events.report": "report {kb} KB",
     "follow.archived": "{label}: the worktree copy is gone; the archive is at {path}",
