@@ -206,11 +206,66 @@ def failed(what: str, way_out: str = "") -> str:
     return f"{out}\n{hint(way_out)}" if way_out else out
 
 
-def box(lines: Sequence[str], *, w: int | None = None) -> str:
+STATUS_STYLE = {"working": "", "success": "green", "waiting": "yellow", "error": "red"}
+ACCENT_USES = ("live-mark", "box-border", "product-name")  # the only three accent uses in the console
+
+
+def elapsed(ms: int) -> str:
+    """Elapsed time as one parenthesised chunk: (5s), (2m 13s), (3h 4m)."""
+    s = max(0, int(ms) // 1000)
+    if s < 60:
+        return f"({s}s)"
+    m, sec = divmod(s, 60)
+    if m < 60:
+        return f"({m}m {sec}s)"
+    h, rem = divmod(m, 60)
+    return f"({h}h {rem}m)"
+
+
+def clip_width(text: Any, w: int) -> str:
+    """One visual line clipped at word boundaries by display width, with an ellipsis.
+
+    Narrow terminals show one visual line per row: words that fit stay whole, the rest is cut
+    with …. A single long word is cut by display width (never inside an ANSI escape).
+    """
+    s = " ".join(str(text or "").split())
+    if not s or plain_len(s) <= w:
+        return s
+    if w <= 1:
+        return ELLIPSIS[:w]
+    budget = w - 1  # room for the ellipsis
+    words = s.split(" ")
+    out: list[str] = []
+    used = 0
+    for word in words:
+        add = plain_len(word) + (1 if out else 0)
+        if used + add <= budget:
+            out.append(word)
+            used += add
+            continue
+        if not out:  # one long word — cut it by display width
+            cur, acc = "", 0
+            for ch in word:
+                cw = _columns(ch)
+                if acc + cw > budget:
+                    break
+                cur += ch
+                acc += cw
+            return (cur or ELLIPSIS[:0]) + ELLIPSIS if cur else ELLIPSIS
+        break
+    return " ".join(out).rstrip(" ,;:-·—") + ELLIPSIS
+
+
+def status_mark(mark: str, status: str) -> str:
+    """A console item mark in its status colour (white working, green success, yellow waiting, red error)."""
+    return styled(mark, STATUS_STYLE.get(status, ""))
+
+
+def box(lines: Sequence[str], *, w: int | None = None, border: str = "dim") -> str:
     """The lines inside a rounded box (╭ ─ ╮ │ ╰ ╯) — the header of the home screen."""
     rows = [str(ln or "") for ln in lines]
     n = min(width(w), max((plain_len(ln) for ln in rows), default=0) + 2)
-    top, bottom = styled("╭" + "─" * n + "╮", "dim"), styled("╰" + "─" * n + "╯", "dim")
+    top, bottom = styled("╭" + "─" * n + "╮", border), styled("╰" + "─" * n + "╯", border)
     out = [top]
     for ln in rows:
         out.append("│ " + _cell(ln, n - 1) + "│")

@@ -18,6 +18,7 @@ from ahub.store import Session, Store
 from ahub.tui.data import PHASE
 
 WIDTH = 120  # width the transcript is rendered for (a result line is clipped to it)
+MAX_LINES = 2000  # the live transcript never grows past this: old lines are dropped
 
 
 class _Sink:
@@ -52,11 +53,13 @@ class Feed:
         self.lines: list[str] = []
 
     def update(self) -> list[str]:
-        """New lines since the previous call."""
+        """New lines since the previous call (capped: the tail stays, the head is dropped)."""
         self.sink.take()  # a writer that failed halfway must not be repeated
         self.writer.write(self.reader.read())
         new = self.sink.take()
         self.lines.extend(new)
+        if len(self.lines) > MAX_LINES:
+            self.lines = self.lines[-MAX_LINES:]
         return new
 
     def prompt(self) -> str:
