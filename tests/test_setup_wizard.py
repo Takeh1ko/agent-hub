@@ -447,7 +447,7 @@ def test_no_free_model_answers_warns_and_keeps_the_old_default(tmp_path, monkeyp
 
 
 def test_set_global_keeps_comments_and_sections(tmp_path, monkeypatch):
-    from ahub.commands.setup import set_global
+    from ahub.config import set_global
 
     monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
     monkeypatch.delenv("AHUB_TG_CHAT", raising=False)

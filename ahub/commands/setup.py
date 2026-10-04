@@ -24,6 +24,7 @@ from pathlib import Path
 
 from ahub import config, paths, ui
 from ahub.cliutil import CliError, emit
+from ahub.config import set_global, toml_str as _toml_str
 
 MARK_BEGIN = "<!-- ahub:begin -->"
 MARK_END = "<!-- ahub:end -->"
@@ -35,16 +36,6 @@ Tasks for worker models go through `ahub` (skill `ahub`). At session start — M
 by event lines: `ahub status T<id>` → `ahub accept|rework|reject`. Summary — `ahub status`.
 {MARK_END}
 """
-
-
-def _toml_str(v) -> str:
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, (int, float)):
-        return repr(v)
-    if isinstance(v, list):
-        return "[" + ", ".join(_toml_str(x) for x in v) + "]"
-    return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def render_v2(cfg: config.ProjectConfig, *, raw_root: str = "") -> str:
@@ -114,106 +105,6 @@ def ensure_project_file(root: Path, *, name: str | None = None, deny: list[str] 
     cfg = config.parse_project(data, root)
     f.write_text(render_v2(cfg), encoding="utf-8")
     return t("setup.created"), f
-
-
-def _render_projects(items: list[str]) -> str:
-    """Single projects line for the global config."""
-    return "projects = [" + ", ".join(_toml_str(p) for p in items) + "]"
-
-
-_PROJECTS_KEY = re.compile(r"^projects\s*=\s*\[[^\]]*\][^\n]*\n?", re.MULTILINE)
-
-
-def _replace_top_key(text: str, key: str, value) -> str:
-    """Top-level key replace, rest (sections, comments) stays; no key — insert first."""
-    from ahub.i18n import t
-
-    if key == "projects":
-        line = _render_projects(list(value)) + "\n"
-        pat = _PROJECTS_KEY
-    else:
-        line = f"{key} = {_toml_str(value)}\n"
-        pat = re.compile(rf"^{re.escape(key)}\s*=.*\n?", re.MULTILINE)
-    m = pat.search(text)
-    new = text[:m.start()] + line + text[m.end():] if m else line + text
-    try:
-        parsed = tomllib.loads(new)
-    except tomllib.TOMLDecodeError:
-        raise CliError(t("err.setup_global", path=paths.global_config_path())) from None
-    if key == "projects":
-        if tuple(parsed.get("projects", ())) != tuple(value):
-            raise CliError(t("err.setup_projects", path=paths.global_config_path()))
-    elif parsed.get(key) != value:
-        raise CliError(t("err.setup_global", path=paths.global_config_path()))
-    return new
-
-
-def _provider_lookup(parsed: dict, name: str):
-    """`enabled` from [providers.<name>] — the nested table key, not a dotted path."""
-    table = parsed.get("providers")
-    spec = table.get(name) if isinstance(table, dict) else None
-    return spec.get("enabled") if isinstance(spec, dict) else None
-
-
-def _replace_section_key(text: str, section: str, key: str, value, lookup=None) -> str:
-    """Key inside [section]; section missing — append; rest (comments, other sections) stays."""
-    from ahub.i18n import t
-
-    gp = paths.global_config_path()
-    rendered = f"{key} = {_toml_str(value)}\n"
-    head = re.compile(rf"^\[{re.escape(section)}\][^\n]*\n?", re.MULTILINE)
-    m = head.search(text)
-    if m is None:
-        if text and not text.endswith("\n"):
-            text += "\n"
-        new = text + f"[{section}]\n{rendered}"
-    else:
-        nxt = re.compile(r"^\[.*\][^\n]*\n?", re.MULTILINE)
-        nm = nxt.search(text, m.end())
-        end = nm.start() if nm else len(text)
-        body = text[m.end():end]
-        kpat = re.compile(rf"^{re.escape(key)}\s*=.*\n?", re.MULTILINE)
-        km = kpat.search(body)
-        if km:
-            body = body[:km.start()] + rendered + body[km.end():]
-        else:
-            if body and not body.endswith("\n"):
-                body += "\n"
-            body = body + rendered
-        new = text[:m.end()] + body + text[end:]
-    try:
-        parsed = tomllib.loads(new)
-    except tomllib.TOMLDecodeError:
-        raise CliError(t("err.setup_global", path=gp)) from None
-    try:
-        got = lookup(parsed) if lookup else parsed.get(section, {}).get(key)
-    except AttributeError:
-        got = None
-    if got != value:
-        raise CliError(t("err.setup_global", path=gp))
-    return new
-
-
-def set_global(key: str, value, *, section: str | None = None, lookup=None) -> Path:
-    """Single global-config writer: top-level key or [section] key, rest of file stays."""
-    gp = paths.global_config_path()
-    gp.parent.mkdir(parents=True, exist_ok=True)
-    text = gp.read_text(encoding="utf-8") if gp.exists() else ""
-    new = (_replace_section_key(text, section, key, value, lookup) if section
-           else _replace_top_key(text, key, value))
-    gp.write_text(new, encoding="utf-8")
-    return gp
-
-
-def set_provider_enabled(name: str, enabled: bool) -> Path:
-    """The one writer of the provider switch: [providers.<name>] enabled (the rest of the table stays)."""
-    return set_global("enabled", enabled, section=f"providers.{name}",
-                      lookup=lambda parsed: _provider_lookup(parsed, name))
-
-
-def _replace_projects_line(text: str, items: list[str]) -> str:
-    """Replace the projects key, keep the rest (sections, comments) as is; no key — insert first."""
-    return _replace_top_key(text, "projects", list(items))
 
 
 def register_project(root: Path) -> bool:
@@ -451,9 +342,10 @@ def _roles_needing_free(store) -> list[str]:
 def _provider_step(states, ask: bool, out: Steps) -> dict[str, bool]:
     """Every provider ahub knows, then which to enable (default: found and logged in).
 
-    Writes [providers.<name>] enabled for each — the single place the switch lives. Returns name → on.
+    Writes [providers.<name>] enabled for each — the single place the switch lives
+    (registry.set_provider_enabled, the same one `ahub providers enable` uses). Returns name → on.
     """
-    from ahub import doctor
+    from ahub import doctor, registry
     from ahub.i18n import t
 
     names = [st.name for st in states]
@@ -476,7 +368,7 @@ def _provider_step(states, ask: bool, out: Steps) -> dict[str, bool]:
     enabled = {st.name: st.name in picked and st.found for st in states}
     for name, on in enabled.items():
         try:
-            set_provider_enabled(name, on)
+            registry.set_provider_enabled(name, on)
         except CliError as e:
             out.line(str(e))
     on_names = ", ".join(n for n, on in enabled.items() if on) or "—"

@@ -523,11 +523,10 @@ def test_an_error_is_one_line_and_names_the_command(capsys, monkeypatch, tmp_pat
     assert err.splitlines()[1] == "  hint: ahub status"  # what to do
     # a provider that is off: the refusal itself already names the command
     from ahub import tasks
-    from ahub.commands.setup import set_provider_enabled
     from tests.enginekit import make_project
 
     project = make_project(tmp_path / "proj")
-    set_provider_enabled("codex", False)
+    registry.set_provider_enabled("codex", False)
     with pytest.raises(registry.RegistryError) as ei:
         registry.check(Store(), "codex", None)
     assert command_hint(str(ei.value)) == "ahub providers enable codex"

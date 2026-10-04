@@ -209,3 +209,18 @@ def test_hub_config_reads_the_switch(capsys, monkeypatch):
     assert cli.main(["providers"]) == 0
     out = capsys.readouterr().out
     assert "выключен" in out and "включён" in out
+
+
+def test_the_provider_switch_lives_in_the_registry_not_in_a_command(tmp_path):
+    """`ahub providers enable` and the setup wizard write the switch through one place — no command import."""
+    from ahub import config, registry
+    from ahub.commands import setup as setupecmd
+
+    assert not hasattr(setupecmd, "set_provider_enabled")  # the switch is not the setup command's
+    registry.set_provider_enabled("codex", False)
+    assert "codex" in registry.disabled_providers()
+    registry.set_provider_enabled("codex", True)
+    assert "codex" not in registry.disabled_providers()
+    # the same [providers.<name>] enabled key the wizard writes, the rest of the file untouched
+    hub = config.load_hub()
+    assert hub.provider_enabled("codex") is True

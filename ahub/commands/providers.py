@@ -53,14 +53,13 @@ def cmd_providers(args) -> int:
 
 def cmd_switch(args, on: bool) -> int:
     from ahub import providers as provider_mod
-    from ahub.commands.setup import set_provider_enabled
     from ahub.i18n import t
 
     name = args.name
     known = provider_mod.names()
     if name not in known:
         raise CliError(t("err.providers_unknown", name=name, known=", ".join(known)))
-    set_provider_enabled(name, on)
+    registry.set_provider_enabled(name, on)
     state = t("providers.enabled_on") if on else t("providers.enabled_off")
     nxt = t("hint.models") if on else t("hint.status")
     emit(args, {"ok": True, "name": name, "enabled": on},
