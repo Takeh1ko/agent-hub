@@ -307,6 +307,27 @@ def test_resumed_accept_refuses_foreign_commit_on_top(store, project, tmp_path):
     assert git_out(project.root, "rev-parse", "HEAD").strip() == foreign_head
 
 
+def test_resumed_accept_refuses_a_copy_that_moved(store, project, tmp_path):
+    """The copy is not on the task branch tip any more — accept refuses instead of skipping the gates.
+
+    The work branch still carries accept's merge commit, but the copy has its own commit on top: what the
+    gates would have checked is not what is in the branch.
+    """
+    t, _, _ = done_code(store, project)
+    interrupted_accept(store, project, tmp_path, t.id)
+    merged = git_out(project.root, "rev-parse", "HEAD").strip()
+    copy = Path(t.worktree)
+    git(copy, "commit", "--allow-empty", "-q", "-m", "правка в копии после слияния")
+    moved = git_out(copy, "rev-parse", "HEAD").strip()
+    git(copy, "checkout", "-q", "--detach")  # the copy is left on its own commit
+    git(project.root, "update-ref", f"refs/heads/{t.branch}", f"{moved}~1")  # the branch stays where it was
+    with pytest.raises(accept.DecisionError, match="уже слита в main без приёмки"):
+        accept.accept(store, project, t.id)
+    assert git_out(project.root, "rev-parse", "HEAD").strip() == merged  # nothing moved in the work branch
+    after = store.get_task(t.id)
+    assert after.state is State.NEEDS_DECISION and '"already_merged"' in after.state_reason
+
+
 def test_accept_refuses_branch_already_merged_without_acceptance(store, project, monkeypatch):
     """Orchestrator hand-merges the task branch into main: accept refuses already_merged."""
     from ahub import gates as g

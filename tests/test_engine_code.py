@@ -404,29 +404,44 @@ class NudgeWhileWorking(ScriptedFake):
 
 
 class TwoNudges(ScriptedFake):
-    """The first message interrupts the first turn, the second one arrives as the turn with the first
-    message starts (`ahub nudge` twice from `ahub top` — the row is free again once the first is taken)."""
+    """`ahub nudge` twice from another process: the first interrupts the first turn, the second arrives
+    `delay_s` after the turn with the first message starts (the row is free again once the first is taken).
 
-    def __init__(self, store: Store, task_id: int, scenarios: list[dict], texts: list[str]) -> None:
+    Each message is asked for on its own thread with a budget of its own: `asked` is set when the request
+    was made (or refused, in `failure`), so a test fails with that instead of on a missing call.
+    """
+
+    def __init__(self, store: Store, task_id: int, scenarios: list[dict], texts: list[str], *,
+                 delay_s: float = 0.0) -> None:
         super().__init__(scenarios)
         self.store = store
         self.task_id = task_id
         self.texts = texts
+        self.delay_s = delay_s
         self.asked = threading.Event()
+        self.failure = ""
 
     def build_command(self, spec) -> list[str]:
         cmd = super().build_command(spec)
-        if len(self.calls) <= len(self.texts):
-            threading.Thread(target=self._ask, args=(self.texts[len(self.calls) - 1],), daemon=True).start()
+        turn = len(self.calls)
+        if turn <= len(self.texts):
+            delay = self.delay_s if turn > 1 else 0.0
+            threading.Thread(target=self._ask, args=(self.texts[turn - 1], delay), daemon=True).start()
         return cmd
 
-    def _ask(self, text: str) -> None:
-        for _ in range(300):  # the session id appears when the fake prints it
+    def _ask(self, text: str, delay: float) -> None:
+        if delay:
+            time.sleep(delay)
+        for _ in range(600):  # the session id appears when the fake prints it
             if any(s.external_id for s in self.store.list_sessions(self.task_id)):
-                transitions.request_nudge(self.store, self.task_id, text=text, by="human")
+                try:
+                    transitions.request_nudge(self.store, self.task_id, text=text, by="human")
+                except transitions.TransitionError as e:
+                    self.failure = str(e)
                 self.asked.set()
                 return
             time.sleep(0.05)
+        self.failure = "the session id never appeared"
 
 
 def test_nudge_interrupts_the_turn_and_continues_the_same_session(store, project):
@@ -489,6 +504,44 @@ def test_nudge_does_not_kill_a_reviewer_turn(store, project):
     assert t.request == "" and t.request_text == ""  # the task finished, the row is clean
 
 
+class NudgeAfterEvent(ScriptedFake):
+    """`ahub nudge` from another process as soon as the engine writes an event (the pause between retries
+    is over before any turn starts, so a human is the only one who can put a message in there).
+
+    The request runs on its own thread with a budget of its own: `asked` is set when it was made (or
+    refused — `failure` says why), so a test that misses the moment fails with that, not with an index.
+    """
+
+    def __init__(self, store: Store, task_id: int, scenarios: list[dict], text: str, after: str = "retry",
+                 timeout_s: float = 30.0) -> None:
+        super().__init__(scenarios)
+        self.store = store
+        self.task_id = task_id
+        self.text = text
+        self.after = after
+        self.timeout_s = timeout_s
+        self.asked = threading.Event()
+        self.failure = ""
+
+    def ask_in_background(self) -> threading.Thread:
+        th = threading.Thread(target=self._ask, daemon=True)
+        th.start()
+        return th
+
+    def _ask(self) -> None:
+        end = time.monotonic() + self.timeout_s
+        while time.monotonic() < end:
+            if any(e.kind == self.after for e in self.store.events(task_id=self.task_id)):
+                try:
+                    transitions.request_nudge(self.store, self.task_id, text=self.text, by="human")
+                except transitions.TransitionError as e:
+                    self.failure = str(e)
+                self.asked.set()
+                return
+            time.sleep(0.01)
+        self.failure = f"no {self.after} event in {self.timeout_s:g}s"
+
+
 def test_nudge_during_retry_pause_does_not_cancel_the_retry(store, project):
     """A message is not a stop: it does not cut the pause between retries short.
 
@@ -501,25 +554,16 @@ def test_nudge_during_retry_pause_does_not_cancel_the_retry(store, project):
     t = code_task(store, project)
     transient_err = {"session": "ses_retry", "exit": 1,
                      "steps": [{"event": {"type": "error", "message": "cannot connect"}}]}
-    fake = ScriptedFake([transient_err, work(session="ses_retry", text="Y = 2\n"),
-                         work(session="ses_retry", text="Z = 3\n")])
+    fake = NudgeAfterEvent(store, t.id, [transient_err, work(session="ses_retry", text="Y = 2\n"),
+                                         work(session="ses_retry", text="Z = 3\n")], "сообщение во время паузы")
     providers.register("fake", fake)
-
-    def _nudge_during_pause():
-        for _ in range(400):
-            if any(e.kind == "retry" for e in store.events(task_id=t.id)):
-                transitions.request_nudge(store, t.id, text="сообщение во время паузы", by="human")
-                return
-            time.sleep(0.01)
-
-    th = threading.Thread(target=_nudge_during_pause, daemon=True)
-    th.start()
+    fake.ask_in_background()
     res = run(store, project, t.id)
-    th.join(timeout=5)
+    assert fake.asked.wait(1.0), fake.failure
     assert res.state is State.DONE
+    assert len(fake.calls) == 3, [c["prompt"][:40] for c in fake.calls]
     assert fake.calls[1]["prompt"] == fake.calls[0]["prompt"]  # the retry of the interrupted turn ran
     assert "сообщение во время паузы" in fake.calls[2]["prompt"]  # and only then the message
-    assert any(e.kind == "retry" for e in store.events(task_id=t.id))
 
 
 def test_stop_during_a_nudge_turn_settles_stopped(store, project):
@@ -548,6 +592,28 @@ def test_stop_during_a_nudge_turn_settles_stopped(store, project):
     th.join(timeout=10)
     assert res.state is State.STOPPED
     assert len(fake.calls) == 2  # the turn after the nudge was not started
+
+
+def test_a_message_kills_the_previous_turn_and_goes_on(store, project):
+    """The second message interrupts the turn of the first one and is delivered in the next turn.
+
+    A turn carries a message: the turn of message 1 is killed, the message that killed it must not be lost
+    (the audit's STOPPED-with-the-message-unread case).
+    """
+    registry.add_model(store, "fake", "fake", "fake/model")
+    t = code_task(store, project)
+    # 1 — the start turn, interrupted by the first message; 2 — the turn of the first message (a child for
+    # 30 s, so the silence watchdog stays quiet); 3 — the turn of the second message does the work
+    long_nudge = {"session": "ses_nudge1", "steps": [{"child": 30}]}
+    fake = TwoNudges(store, t.id, [slow(), long_nudge, work(session="ses_nudge2", text="Y = 3\n")],
+                     ["первое сообщение", "второе сообщение"], delay_s=4.0)  # after STOP_POLL_S
+    providers.register("fake", fake)
+    res = run(store, project, t.id)
+    assert fake.asked.wait(1.0), f"the second message was never asked for ({fake.failure})"
+    assert res.state is State.DONE
+    assert len(fake.calls) == 3, [c["prompt"][:40] for c in fake.calls]
+    assert "первое сообщение" in fake.calls[1]["prompt"]
+    assert "второе сообщение" in fake.calls[2]["prompt"]
 
 
 def test_a_failed_nudge_turn_is_not_masked_by_the_next_message(store, project):
