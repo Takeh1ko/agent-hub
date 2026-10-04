@@ -103,10 +103,10 @@ def captured() -> Iterator[list[str]]:
         _captured = prev
 
 
-def add_project_arg(parser) -> None:
+def add_project_arg(parser, default: Any = None) -> None:
     from ahub.i18n import t
 
-    parser.add_argument("--project", "-P", default=None, help=t("cli.help_project"))
+    parser.add_argument("--project", "-P", default=default, help=t("cli.help_project"))
 
 
 def add_scope_args(parser) -> None:

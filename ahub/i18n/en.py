@@ -313,7 +313,7 @@ MESSAGES: dict[str, str] = {
     "prompts.col_project": "project",
     "prompts.col_role": "role",
     "prompts.err_size": "{path} ({kb:.1f} KB): refusal-level size over 16 KB (tokens are money)",
-    "prompts.err_unknown_file": "{path}: unknown file in prompts directory (expected {known})",
+    "prompts.warn_unknown_file": "{path}: unknown file in prompts directory (expected {known})",
     "prompts.hint_empty": "no guidance for {role} (ahub prompts edit {role})",
     "prompts.legacy_rules_hint": "rules = '{rules}' in .hub.toml is legacy; move to .hub/prompts/all.md",
     "prompts.legacy_rules_ignored": "rules = '{rules}' in .hub.toml is ignored (.hub/prompts/all.md exists)",

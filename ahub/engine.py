@@ -665,7 +665,7 @@ class Engine:
         self._clear_fresh(t)
         prompt = prompts.CONTINUE_PROMPT if resume_sid else prompts.scout_prompt(self.project, t)
         if not resume_sid:
-            self.store.update_task(t.id, limits=t.limits)
+            self._record_prompts(t)
         r, final = self._step_with_continue(Role.SCOUT, t.executor, prompt, session_id=resume_sid,
                                             log_name="scout",
                                             prompt_kind="continue" if resume_sid else "start")
@@ -749,7 +749,8 @@ class Engine:
         round_no = max(1, t.round)
         rework_notes = str(t.limits.get("rework_notes") or "")
         if rework_notes:
-            lim = dict(t.limits)
+            t.limits.pop("rework_notes", None)
+            lim = dict(self.task().limits)
             lim.pop("rework_notes", None)
             self.store.update_task(t.id, limits=lim)
         self.set_phase(Phase.STUDYING)
@@ -831,12 +832,13 @@ class Engine:
         notes = str(t.limits.get("rework_notes") or "")
         fresh = bool(t.limits.get("fresh_session")) or not sid
         if notes:
-            lim = dict(t.limits)
+            t.limits.pop("rework_notes", None)
+            lim = dict(self.task().limits)
             lim.pop("rework_notes", None)
             self.store.update_task(t.id, limits=lim)
         if fresh:  # new session (different model/brief, or no session before): full brief + instructions
             prompt, kind = prompts.code_prompt(self.project, t), "start"
-            self.store.update_task(t.id, limits=t.limits)
+            self._record_prompts(t)
             if notes:
                 prompt += f"\n\n{prompts.orchestrator_heading(rework=True)}\n" + notes
                 kind = "rework"
@@ -906,8 +908,15 @@ class Engine:
             t = self.move(State.FIXING, reason, fields={"round": round_no})
             prompt, kind = review.fix_prompt(findings), "rework"
 
+    def _record_prompts(self, t: Task) -> None:
+        if "prompts" in t.limits:
+            lim = dict(self.task().limits)
+            lim["prompts"] = t.limits["prompts"]
+            self.store.update_task(t.id, limits=lim)
+
     def _clear_fresh(self, t: Task) -> None:
         if t.limits.get("fresh_session"):
+            t.limits.pop("fresh_session", None)
             lim = dict(self.task().limits)
             lim.pop("fresh_session", None)
             self.store.update_task(t.id, limits=lim)
@@ -949,7 +958,7 @@ class Engine:
         with ThreadPoolExecutor(max_workers=len(models)) as ex:
             results = list(ex.map(one, models))
         if t.kind is Kind.REVIEW and "prompts" in t.limits:
-            self.store.update_task(t.id, limits=t.limits)
+            self._record_prompts(t)
         if (stop := self._review_interrupted(results)) is not None:
             return stop
         self._revert_reviewer(t)

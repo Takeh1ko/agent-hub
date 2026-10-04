@@ -151,37 +151,37 @@ def test_verdict_codes_english():
     assert set(review.VERDICTS) == {"approve", "changes", "dispute"}
 
 
-def test_quality_bar_in_code_not_scout(tmp_path, monkeypatch):
-    """Code/routine prompts carry the quality bar; scout prompts do not."""
+def test_quality_bar_in_template_not_builtin(tmp_path, monkeypatch):
+    """Built-in hub layer carries only submission contract, no taste; Quality bar is in edit template."""
     monkeypatch.setenv("AHUB_LANG", "en")
     from ahub.i18n import _reset
 
     _reset()
     from ahub import prompts
+    from ahub.commands.prompts import _edit_template
     from ahub.store import Store
     from tests.enginekit import make_project
 
     store = Store()
     project = make_project(tmp_path)
-    scout_tid = store.create_task(project="P", kind="scout", title="find leak")
     code_tid = store.create_task(project="P", kind="code", title="fix")
     store.update_task(code_tid, limits={"paths": ["core/**"], "accept": ["tests/test_a.py::test_x"]})
-    routine_tid = store.create_task(project="P", kind="routine", title="tidy")
-    store.update_task(routine_tid, limits={"paths": ["docs/**"], "accept": []})
-    scout = prompts.scout_prompt(project, store.get_task(scout_tid))
     code = prompts.code_prompt(project, store.get_task(code_tid))
-    routine = prompts.code_prompt(project, store.get_task(routine_tid))
-    for text in (code, routine):
-        assert "## Quality bar" in text
-        assert "Smallest diff" in text
-        assert "dead code" in text
-        assert "except Exception" in text
-        assert "fails without it" in text
-        assert "linter, if it has one" in text
-        assert "ruff" not in text
-        assert "No new dependencies" in text
-    assert "## Quality bar" not in scout
-    assert "## Quality bar" not in prompts.scout_delivery()
+
+    # Built-in prompt has no quality bar
+    assert "## Quality bar" not in code
+    assert "## How to submit" in code
+    assert "## Allowed files" in code
+    assert "## Acceptance" in code
+
+    # Template for code has quality bar
+    tmpl = _edit_template("code", "project")
+    assert "## Quality bar" in tmpl
+    assert "Smallest diff" in tmpl
+    assert "dead code" in tmpl
+    assert "except Exception" in tmpl
+    assert "fails without it" in tmpl
+    assert "No new dependencies" in tmpl
 
 
 def test_scout_delivery_cites_sources(tmp_path, monkeypatch):
@@ -368,6 +368,7 @@ def test_review_role_used_for_code_review_and_review_kind(tmp_path, monkeypatch)
     assert "PROJECT_REVIEW_RULE" in code_prompt
     assert "PROJECT_CODE_RULE" not in code_prompt
     assert "PROJECT_ALL_RULE" in code_prompt
+    assert "Stay in the copy (git worktree); never touch real data or secrets" in code_prompt
     assert code_task.limits.get("prompts") == "built-in + project(all, review)"
     # Built-in submission instructions are at the end
     assert code_prompt.rfind("verdict") > code_prompt.find("PROJECT_REVIEW_RULE")
@@ -379,6 +380,7 @@ def test_review_role_used_for_code_review_and_review_kind(tmp_path, monkeypatch)
 
     assert "PROJECT_REVIEW_RULE" in rev_prompt
     assert "PROJECT_CODE_RULE" not in rev_prompt
+    assert "Stay in the copy (git worktree); never touch real data or secrets" in rev_prompt
     assert rev_task.limits.get("prompts") == "built-in + project(all, review)"
 
 
@@ -412,23 +414,31 @@ def test_check_thresholds(tmp_path, monkeypatch):
     assert issues_err[0].severity == "error"
     assert "16.0 KB" in issues_err[0].message
 
-    # 4. Unknown file in prompts directory
+    # 4. Unknown file in prompts directory -> warning (not refusal error)
     write(paths.project_prompts_dir(project.root) / "code.md", "short")
     write(paths.project_prompts_dir(project.root) / "unknown.txt", "notes")
     issues_unknown = prompts.check_prompts_for_project(project)
-    assert any(i.severity == "error" and "unknown.txt" in str(i.path) for i in issues_unknown)
+    assert any(i.severity == "warning" and "unknown.txt" in str(i.path) for i in issues_unknown)
 
-    # Doctor check includes prompts
+    # Doctor check includes prompts: warning does not fail doctor
     doctor_res = doctor.check_prompts(Path(project.root))
-    assert not doctor_res.ok
+    assert doctor_res.ok
     assert "unknown.txt" in doctor_res.detail
 
-    # CLI check returns 1 on error
+    # CLI check returns 0 for warnings
     monkeypatch.chdir(project.root)
-    assert cli.main(["prompts", "check"]) == 1
+    assert cli.main(["prompts", "check"]) == 0
 
-    # Remove unknown file -> returns 0
+    # 5. Size > 16 KB is error: CLI returns 1, doctor fails with ahub prompts check fix
+    write(paths.project_prompts_dir(project.root) / "code.md", "x" * 16385)
+    assert cli.main(["prompts", "check"]) == 1
+    doctor_err = doctor.check_prompts(Path(project.root))
+    assert not doctor_err.ok
+    assert doctor_err.fix == "ahub prompts check"
+
+    # Clean up -> returns 0
     (paths.project_prompts_dir(project.root) / "unknown.txt").unlink()
+    write(paths.project_prompts_dir(project.root) / "code.md", "short")
     assert cli.main(["prompts", "check"]) == 0
 
 
@@ -458,6 +468,8 @@ def test_edit_creates_template(tmp_path, monkeypatch, capsys):
     assert code_path.is_file()
     content = code_path.read_text(encoding="utf-8")
     assert "<!-- Guidance for code (project) -->" in content
+    assert "## Quality bar" in content
+    assert "Smallest diff" in content
 
     # Global scope
     global_path = paths.global_prompts_dir() / "scout.md"
@@ -568,4 +580,73 @@ def test_cli_prompts_and_show(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main(["prompts", "show", "invalid_role"])
     assert exc.value.code == 2
+
+
+def test_cli_project_flag_before_subcommand(tmp_path, monkeypatch, capsys):
+    """ahub prompts --project P show code and ahub prompts --project P check work when --project precedes subcmd."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+
+    _reset()
+    from pathlib import Path
+
+    from ahub import cli, paths
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    write(Path(project.root) / ".hub.toml", 'schema_version = 2\nname = "P"\n')
+    write(paths.project_prompts_dir(project.root) / "code.md", "P_CODE_GUIDANCE")
+
+    # Run from another directory
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+
+    # 1. ahub prompts --project <path> show code
+    assert cli.main(["prompts", "--project", str(project.root), "show", "code"]) == 0
+    out_show = capsys.readouterr().out
+    assert "P_CODE_GUIDANCE" in out_show
+
+    # 2. ahub prompts --project <path> check
+    assert cli.main(["prompts", "--project", str(project.root), "check"]) == 0
+    out_check = capsys.readouterr().out
+    assert "all prompt guidance files ok" in out_check
+
+    # 3. Non-existent project returns 2 (CliError caught by cli.main)
+    assert cli.main(["prompts", "--project", "non_existent_project_xyz", "check"]) == 2
+
+
+def test_rework_fresh_task_keeps_no_rework_notes(tmp_path):
+    """A reworked task in a fresh session pops rework_notes and does not restore it on prompt recording."""
+    from ahub import prompts
+    from ahub.engine import Engine
+    from ahub.store import Store
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    store = Store()
+    tid = store.create_task(project="P", kind="code", title="rework feature")
+    store.update_task(tid, limits={"paths": ["src/**"], "rework_notes": "PLEASE FIX BUG", "fresh_session": True})
+    task = store.get_task(tid)
+
+    engine = Engine(store, project, tid)
+    notes = str(task.limits.get("rework_notes") or "")
+    fresh = bool(task.limits.get("fresh_session"))
+    assert notes == "PLEASE FIX BUG"
+    assert fresh is True
+
+    # Simulate clearing rework notes and fresh session as in engine._code
+    task.limits.pop("rework_notes", None)
+    lim = dict(engine.task().limits)
+    lim.pop("rework_notes", None)
+    store.update_task(task.id, limits=lim)
+
+    prompts.code_prompt(project, task)
+    engine._record_prompts(task)
+
+    updated = store.get_task(tid)
+    assert "rework_notes" not in updated.limits
+    assert "prompts" in updated.limits
+    assert updated.limits["prompts"] == "built-in"
 

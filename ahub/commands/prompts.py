@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import shlex
 import subprocess
@@ -151,6 +152,30 @@ def cmd_show(args) -> int:
     return 0
 
 
+def _edit_template(role: str, scope_name: str) -> str:
+    base = (
+        f"<!-- Guidance for {role} ({scope_name}) -->\n"
+        "<!-- Rules here are loaded before the task spec and the built-in hub layer. -->\n"
+    )
+    if role == "code":
+        return base + (
+            "\n## Quality bar\n"
+            "- Smallest diff that does the task; match surrounding code (naming, comment density, idioms).\n"
+            "- No dead code, commented-out code, or duplicated helpers.\n"
+            "- No broad `except Exception` — catch what you expect.\n"
+            "- Every behaviour change gets a test that fails without it.\n"
+            "- Run the project's linter, if it has one, and the acceptance before the last commit.\n"
+            "- No new dependencies.\n"
+        )
+    if role == "review":
+        return base + (
+            "\n- blocker: any SQL built with string formatting; require parameterization.\n"
+            "- blocker: broad `except Exception` without logging or re-raising.\n"
+            "- taste / nit: prefer descriptive variable names over single letters.\n"
+        )
+    return base
+
+
 def cmd_edit(args) -> int:
     role = args.role
     if role not in prompts.ROLES:
@@ -170,11 +195,7 @@ def cmd_edit(args) -> int:
 
     if not target.is_file():
         target.parent.mkdir(parents=True, exist_ok=True)
-        template = (
-            f"<!-- Guidance for {role} ({scope_name}) -->\n"
-            "<!-- Rules here are loaded before the task spec and the built-in hub layer. -->\n"
-        )
-        target.write_text(template, encoding="utf-8")
+        target.write_text(_edit_template(role, scope_name), encoding="utf-8")
 
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if editor:
@@ -192,8 +213,9 @@ def cmd_check(args) -> int:
     project = None
     try:
         project = resolve_project(args)
-    except Exception:
-        pass
+    except CliError:
+        if getattr(args, "project", None):
+            raise
 
     issues = prompts.check_prompts_for_project(project)
     has_errors = any(i.severity == "error" for i in issues)
@@ -233,7 +255,7 @@ def register(subparsers) -> None:
     # show
     s = sub.add_parser("show", help=t("help.prompts_show"))
     s.add_argument("role", choices=prompts.ROLES, help=t("help.prompts_role"))
-    add_project_arg(s)
+    add_project_arg(s, default=argparse.SUPPRESS)
     s.set_defaults(func=cmd_show)
 
     # edit
@@ -242,10 +264,10 @@ def register(subparsers) -> None:
     grp = e.add_mutually_exclusive_group()
     grp.add_argument("--global", dest="is_global", action="store_true", help=t("help.prompts_global"))
     grp.add_argument("--local", dest="is_local", action="store_true", help=t("help.prompts_local"))
-    add_project_arg(e)
+    add_project_arg(e, default=argparse.SUPPRESS)
     e.set_defaults(func=cmd_edit)
 
     # check
     c = sub.add_parser("check", help=t("help.prompts_check"))
-    add_project_arg(c)
+    add_project_arg(c, default=argparse.SUPPRESS)
     c.set_defaults(func=cmd_check)

@@ -219,14 +219,6 @@ Need more — do not change, write it in the result notes.
 ## Acceptance (must be green)
 {tests}
 
-## Quality bar
-- Smallest diff that does the task; match surrounding code (naming, comment density, idioms).
-- No dead code, commented-out code, or duplicated helpers.
-- No broad `except Exception` — catch what you expect.
-- Every behaviour change gets a test that fails without it.
-- Run the project's linter, if it has one, and the acceptance before the last commit.
-- No new dependencies.
-
 ## How to submit (required)
 1. Stay in the copy (git worktree); never touch real data or secrets. Commit as you go: `git add <paths>` by name (never `-A`/`.`), commit message in {commit_lang}. No uncommitted changes at the end.
 2. Result — `.ahub/result.json`:
@@ -269,19 +261,11 @@ def check_prompts_for_project(project: ProjectConfig | None = None) -> list[Prom
         except OSError:
             continue
         for entry in entries:
-            if not entry.is_file():
+            if not entry.is_file() or entry.name not in {f"{r}.md" for r in ROLES}:
                 issues.append(PromptCheckIssue(
                     path=entry,
-                    severity="error",
-                    message=_t("prompts.err_unknown_file", path=str(entry), known=", ".join(f"{r}.md" for r in ROLES)),
-                    fix="remove or rename",
-                ))
-                continue
-            if entry.name not in {f"{r}.md" for r in ROLES}:
-                issues.append(PromptCheckIssue(
-                    path=entry,
-                    severity="error",
-                    message=_t("prompts.err_unknown_file", path=str(entry), known=", ".join(f"{r}.md" for r in ROLES)),
+                    severity="warning",
+                    message=_t("prompts.warn_unknown_file", path=str(entry), known=", ".join(f"{r}.md" for r in ROLES)),
                     fix="remove or rename",
                 ))
                 continue

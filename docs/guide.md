@@ -137,7 +137,7 @@ Every worker or reviewer session receives guidance assembled in layers, followed
    Roles: `all` (prepended to every session), `code`, `routine`, `scout`, `review` (for reviewer panel sessions and `review` kind tasks).
    Assembly order: `all.md` of global, project, local, then `<role>.md` of global, project, local — later layers refine earlier ones. Each non-empty layer appears under its heading (`## Global guidance`, `## Project guidance`, `## Local guidance`).
 2. **The task specification** — title, description, files to read first, and expected results.
-3. **Built-in hub layer LAST** — worktree boundary isolation, secrets protection, submission contract (`.ahub/result.json`, report format, commit rules), reply language, and quality bar. User guidance cannot override these constraints.
+3. **Built-in hub layer LAST** — worktree boundary isolation, secrets protection, submission contract (`.ahub/result.json`, report format, commit rules), and reply language. User guidance cannot override these constraints.
 
 Example `<repo>/.hub/prompts/review.md`:
 

@@ -667,7 +667,7 @@ def check_prompts(root: Path | None = None) -> Check:
     warnings = [i for i in issues if i.severity != "error"]
     if errors:
         return Check("prompts", False, _t("doctor.prompts_bad", problems="; ".join(i.message for i in errors)),
-                     "; ".join(i.fix for i in errors if i.fix) or _t("doctor.prompts_fix"))
+                     _t("doctor.prompts_fix"))
     if warnings:
         return Check("prompts", True, "; ".join(i.message for i in warnings), "")
     return Check("prompts", True, _t("doctor.prompts_ok"), "")
