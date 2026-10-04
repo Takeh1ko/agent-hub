@@ -10,6 +10,7 @@ from ahub import accept, reasons, tasks, views
 from ahub.engine import Engine
 from ahub.model import Kind, State
 from ahub.store import Store
+from tests.conftest import wait_until
 from tests.enginekit import git, install_fake, make_project
 from tests.test_engine_code import work
 
@@ -395,8 +396,6 @@ def test_not_merged_still_needs_the_copy(store, project):
 
 def test_accept_renews_the_lease_during_acceptance(store, project, monkeypatch):
     """Acceptance outlives the lease — the accept keeps the lease alive (engine-style keeper)."""
-    import time as _time
-
     from ahub import gates as g
 
     t, _, _ = done_code(store, project)
@@ -404,7 +403,8 @@ def test_accept_renews_the_lease_during_acceptance(store, project, monkeypatch):
 
     def slow(project_, cwd, nodes, **kw):
         first = store.get_task(t.id).lease_until
-        _time.sleep(0.3)  # longer than the renewal interval below
+        # the keeper renews in a thread of its own — wait for the lease to move, a pause is not a promise
+        wait_until(lambda: (store.get_task(t.id).lease_until or 0) > (first or 0))
         leases.append((first, store.get_task(t.id).lease_until))
         return True, "", "pytest"
 
@@ -562,12 +562,12 @@ def test_second_accept_waits_and_names_the_holder_on_a_tty(store, project, monke
 def test_accept_waiting_for_the_lock_keeps_the_lease(store, project, monkeypatch):
     """A long wait for the project lock is not an expired lease — the service must not call the waiter an orphan."""
     import threading
-    import time
 
     from ahub import gates as g
     from ahub import transitions
     from ahub.time import now_ms
 
+    lease_ms = 200
     t1, t2 = two_done_tasks(store, project, b_text="B = 3\n", c_text="C = 3\n")
     first_in = threading.Event()
     seen = []
@@ -575,14 +575,16 @@ def test_accept_waiting_for_the_lock_keeps_the_lease(store, project, monkeypatch
     def slow_acceptance(project_, cwd, nodes, **kw):
         if kw.get("task_label") == f"T{t1.id}":
             first_in.set()
-            time.sleep(0.6)  # longer than the lease below — the waiter is queued all this time
+            claimed = wait_until(lambda: store.get_task(t2.id).lease_until)  # the waiter is queued with a lease
+            # the wait is longer than the lease below — the keeper of the waiter has to move it past that
+            wait_until(lambda: (store.get_task(t2.id).lease_until or 0) > (claimed or 0) + lease_ms)
             waiter = store.get_task(t2.id)  # the verdict is read here: the wait is over by the time the test asserts
             seen.append((waiter, transitions.is_orphan(waiter, now_ms())))
         return True, "", "pytest"
 
     monkeypatch.setattr(g, "run_acceptance", slow_acceptance)
     monkeypatch.setattr(accept, "RENEW_S", 0.05)
-    monkeypatch.setattr(accept, "ACCEPT_LEASE_MS", 200)  # without renewal it would be gone before the wait is over
+    monkeypatch.setattr(accept, "ACCEPT_LEASE_MS", lease_ms)  # without renewal it would be gone before the wait is over
     threads = [threading.Thread(target=accept.accept, args=(store, project, tid)) for tid in (t1.id, t2.id)]
     threads[0].start()
     assert first_in.wait(timeout=10)

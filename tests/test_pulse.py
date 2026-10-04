@@ -4,15 +4,15 @@ import fcntl
 import os
 import subprocess
 import sys
-import time
 
 import pytest
 
-from ahub import providers, pulse, transitions
+from ahub import procs, providers, pulse, transitions
 from ahub.model import State
 from ahub.providers.base import SessionState
 from ahub.providers.fake import FakeProvider
 from ahub.store import Store
+from tests.conftest import wait_until
 
 
 @pytest.fixture
@@ -87,7 +87,7 @@ def test_children_explain(store):
     child = subprocess.Popen([sys.executable, "-c", "import subprocess,sys,time;"
                               "subprocess.Popen([sys.executable,'-c','import time; time.sleep(5)']);time.sleep(5)"])
     try:
-        time.sleep(0.5)
+        assert wait_until(lambda: procs.has_children(child.pid)), "у процесса не появился ребёнок"
         store.add_session(task_id=tid, provider="fake", role="executor", external_id="s1", pid=child.pid)
         providers.register("fake", StatefulFake(SessionState(last_activity_ms=1)))
         p = pulse.task_pulse(store, store.get_task(tid), live={tid: 1}, now=60 * 60_000)
