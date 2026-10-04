@@ -1011,3 +1011,19 @@ def test_the_root_scope_flags_survive_a_subcommand(capsys, monkeypatch, tmp_path
 def home_lines(capsys, monkeypatch, *argv: str) -> str:
     assert cli.main(list(argv)) == 0
     return capsys.readouterr().out
+
+
+def test_the_next_block_wraps_to_the_given_width(capsys, monkeypatch, tmp_path):
+    """The Next block is a block like the others: it wraps to the caller's width, not to COLUMNS."""
+    import ahub.home
+    from ahub import ui
+    from ahub.i18n import t as real_t
+
+    long_cmd = 'ahub task new --kind code --title "почини тест, который падает в CI" --project shop'
+    monkeypatch.chdir(tmp_path)  # no hub configured — the screen stops right after the Next block
+    monkeypatch.setattr(ahub.home, "_t", lambda k, **kw: long_cmd if k == "home.next_setup" else real_t(k, **kw))
+    out = ahub.home.text(w=40)
+    block = out.split(ui.BULLET, 1)[1].splitlines()  # the Next block: the bullet and its wrapped lines
+    assert max(len(ui.BULLET + ln) for ln in block) <= 40, block
+    assert len(block) > 3  # the long command really wraps — it is not simply shorter than the width
+    assert long_cmd[:20] in out
