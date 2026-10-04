@@ -19,7 +19,7 @@ from ahub.scope import OWNER, Scope
 from ahub.store import Store
 from ahub.time import fmt_local, now_ms
 from ahub.tui import data
-from tests.conftest import write
+from tests.conftest import rows_ready, write
 
 
 @pytest.fixture
@@ -400,21 +400,22 @@ async def test_top_key_narrows_the_table_to_one_project(hub, store):
     from ahub.tui.app import TopApp
 
     tids = filled(store)
+    whole = [0, tids["a_working"], tids["a_done"], 0, tids["b_working"], tids["b_queued"]]
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot, want=whole)  # the refresh of the `o` key lands in its own time
         assert app._ids[0] == 0  # the header row of A
-        assert app._ids == [0, tids["a_working"], tids["a_done"], 0, tids["b_working"], tids["b_queued"]]
         await pilot.press("o")
-        await pilot.pause(0.4)
-        assert app.project == "A" and app._ids == [tids["a_working"], tids["a_done"]]  # A alone
+        await rows_ready(app, pilot, want=[tids["a_working"], tids["a_done"]])
+        assert app.project == "A"  # A alone
         assert "проект: A" in str(app.query_one("#mode").render())
         await pilot.press("o")
-        await pilot.pause(0.4)
-        assert app.project == "B" and app._ids == [tids["b_working"], tids["b_queued"]]
+        await rows_ready(app, pilot, want=[tids["b_working"], tids["b_queued"]])
+        assert app.project == "B"
         await pilot.press("o")
-        await pilot.pause(0.4)
-        assert app.project == "" and len(app._ids) == 6  # back to every project
+        await rows_ready(app, pilot, want=whole)
+        assert app.project == ""  # back to every project
 
 
 async def test_top_header_row_opens_nothing(hub, store):
@@ -425,6 +426,7 @@ async def test_top_header_row_opens_nothing(hub, store):
     app = TopApp(store=store, projects=[], control=True)
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot, want=6)
         assert app.query_one("#tasks").cursor_row == 0
         await pilot.press("enter")  # the transcript of... no task
         await pilot.pause(0.3)
@@ -455,7 +457,7 @@ async def test_top_project_filter_waits_for_the_refresh_in_flight(hub, store, mo
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
-        assert len(app._ids) == 6
+        await rows_ready(app, pilot, want=6)
         gate, real = threading.Event(), tdata.snapshot
         monkeypatch.setattr(tdata, "snapshot",
                             lambda *a, **kw: (gate.wait(10), real(*a, **kw))[1])
@@ -467,9 +469,8 @@ async def test_top_project_filter_waits_for_the_refresh_in_flight(hub, store, mo
         assert app.project == "A" and app._pending is True and len(app._ids) == 6
         monkeypatch.setattr(tdata, "snapshot", real)  # the kept request must not wait at the gate
         gate.set()  # the refresh in flight ends...
-        await pilot.pause(0.5)  # ...and the kept request is served right after it
+        await rows_ready(app, pilot, want=[tids["a_working"], tids["a_done"]])  # ...and the kept one is served
         assert app._pending is False
-        assert app._ids == [tids["a_working"], tids["a_done"]]
 
 
 async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
@@ -480,6 +481,7 @@ async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot, want=6)
         app.query_one("#tasks").move_cursor(row=3)  # the header row of B
         await pilot.pause(2.5)  # a refresh of the screen
         assert app.query_one("#tasks").cursor_row == 3
@@ -493,6 +495,7 @@ async def test_top_cursor_survives_a_refresh_that_empties_the_table(hub, store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot, want=6)
         app.query_one("#tasks").move_cursor(row=3)  # the header row of B
         ahead = {State.QUEUED: (State.PREPARING, State.WORKING, State.DONE, State.ACCEPTED),
                  State.WORKING: (State.DONE, State.ACCEPTED), State.DONE: (State.ACCEPTED,)}
@@ -500,7 +503,7 @@ async def test_top_cursor_survives_a_refresh_that_empties_the_table(hub, store):
             for st in ahead[store.get_task(tid).state]:
                 transitions.move(store, tid, st)
         app.refresh_data()
-        await pilot.pause(0.4)
+        await rows_ready(app, pilot, want=[])
         assert app._ids == [] and app.selected() is None
         assert app.query_one("#tasks").cursor_row == 0
         assert "нет задач" in str(app.query_one("#detail").render())

@@ -18,7 +18,7 @@ from ahub.time import now_ms
 from ahub.tui import data
 from ahub.tui.app import TopApp
 from ahub.tui.live import LiveView
-from tests.conftest import write
+from tests.conftest import rows_ready, write
 
 
 @pytest.fixture
@@ -32,19 +32,6 @@ def fill(store):
     for st in (State.PREPARING, State.WORKING, State.DONE):
         transitions.move(store, b, st, reason="ревью: все согласны")
     return a, b
-
-
-async def _table_ready(app: TopApp, pilot, want: int = 1, exact: bool = False) -> None:
-    """The rows of a refresh are built in a worker thread — wait for them instead of guessing a pause.
-
-    `exact` — for a screen whose row count changes (the `o` filter): wait until the table has exactly
-    that many rows, so the assertions read the refresh of the new filter and not the one before it.
-    """
-    for _ in range(100):
-        if len(app._ids) == want if exact else len(app._ids) >= want:
-            return
-        await pilot.pause(0.1)
-    raise AssertionError(f"the table of `ahub top` has {len(app._ids)} rows, not the {want} the test waits for")
 
 
 def accepted(store) -> int:
@@ -147,7 +134,7 @@ async def test_app_transcript_screen_uses_the_width_of_its_pane(tmp_path, store)
     app = TopApp(store=store, projects=[])
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause(0.5)
-        await _table_ready(app, pilot)
+        await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
         await pilot.pause(0.3)
@@ -177,7 +164,7 @@ async def test_app_stop_with_confirm(store):
     app = TopApp(store=store, projects=[], control=True)
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
-        await _table_ready(app, pilot)
+        await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(a))
         await pilot.press("s")
         await pilot.pause(0.2)
@@ -196,7 +183,7 @@ async def test_app_nudge_message(store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
-        await _table_ready(app, pilot)
+        await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(a))
         await pilot.press("m")  # view mode: nothing happens
         await pilot.pause(0.2)
@@ -322,7 +309,7 @@ async def test_app_transcript_screen(tmp_path, store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
-        await _table_ready(app, pilot)
+        await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
         await pilot.pause(0.3)
@@ -362,7 +349,7 @@ async def test_transcript_screen_nudges_the_worker(tmp_path, store):
     app = TopApp(store=store, projects=[], control=True)
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
-        await _table_ready(app, pilot)
+        await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
         await pilot.pause(0.3)
@@ -387,7 +374,7 @@ async def test_transcript_tail_holds_when_scrolled_up(tmp_path, store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
-        await _table_ready(app, pilot)
+        await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=0)
         await pilot.press("t")
         await pilot.pause(0.3)
@@ -496,7 +483,7 @@ async def test_a_group_header_row_shows_the_group_in_the_detail(tmp_path, store)
                                         _project_config(tmp_path / "B", "B")])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
-        await _table_ready(app, pilot)
+        await rows_ready(app, pilot)
         assert app._ids[0] == 0  # the first row opens the group of project A
         app.query_one("#tasks").move_cursor(row=0)
         await pilot.pause(0.2)
@@ -508,28 +495,29 @@ async def test_a_group_header_row_shows_the_group_in_the_detail(tmp_path, store)
 
 async def test_the_o_key_narrows_the_table_and_the_feed(tmp_path, store):
     """`o` — one project: the table, the header and the feed below it are all of that project."""
-    store.create_task(project="A", kind="scout", title="разведка A")
-    store.create_task(project="B", kind="code", title="кнопка B")
+    a = store.create_task(project="A", kind="scout", title="разведка A")
+    b = store.create_task(project="B", kind="code", title="кнопка B")
     comms.owner_message(store, "сообщение A", project="A")
     comms.owner_message(store, "сообщение B", project="B")
     comms.owner_message(store, "сообщение всем", project="")
+    # two projects — a header row opens each group; one project — the task alone
+    whole, one_a, one_b = [0, a, 0, b], [a], [b]
     app = TopApp(store=store, projects=[_project_config(tmp_path / "A", "A"),
                                         _project_config(tmp_path / "B", "B")])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
-        # two projects — a header row opens each group, so four rows; one project — the task alone
-        await _table_ready(app, pilot, want=4, exact=True)
+        await rows_ready(app, pilot, want=whole)
         assert "сообщение B" in str(app.query_one("#feed").render())  # the whole feed at first
         await pilot.press("o")
-        await _table_ready(app, pilot, want=1, exact=True)
+        await rows_ready(app, pilot, want=one_a)
         assert app.project == "A" and "проект: A" in str(app.query_one("#mode").render())
         assert {r.project for r in data.snapshot(app.store, projects=[], only=app.project)[0].rows} == {"A"}
         feed = str(app.query_one("#feed").render())
         assert "сообщение B" not in feed and "сообщение A" in feed and "сообщение всем" in feed
         await pilot.press("o")
-        await _table_ready(app, pilot, want=1, exact=True)
+        await rows_ready(app, pilot, want=one_b)
         assert app.project == "B"
         assert "сообщение A" not in str(app.query_one("#feed").render())
         await pilot.press("o")
-        await _table_ready(app, pilot, want=4, exact=True)
+        await rows_ready(app, pilot, want=whole)
         assert app.project == ""  # after the last project back to all

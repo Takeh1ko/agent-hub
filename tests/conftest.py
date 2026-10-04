@@ -75,6 +75,21 @@ def write(path, text: str):
     return path
 
 
+async def rows_ready(app, pilot, want: int | list[int] = 1) -> None:
+    """`ahub top` builds the rows of a refresh in a worker thread — wait for them, do not guess a pause.
+
+    `want` — a count (wait until the table has at least that many rows) or the exact list of row ids
+    (wait until the table shows exactly them: the refresh of the `o` filter can have the same count as
+    the one before it, and under load 0.4 s is not a promise).
+    """
+    for _ in range(100):
+        ids = list(app._ids)
+        if (ids == want) if isinstance(want, list) else (len(ids) >= want):
+            return
+        await pilot.pause(0.1)
+    raise AssertionError(f"the table of `ahub top` shows {list(app._ids)}, not {want!r}")
+
+
 @pytest.fixture(autouse=True)
 def _no_runner_stop():
     """The runner's process-wide stop flag (set by request_stop) must not leak into the next test."""
