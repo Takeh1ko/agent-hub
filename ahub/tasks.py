@@ -153,6 +153,13 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
         executor = registry.pick(store, role, project, spec.model).alias
     except registry.RegistryError as e:
         errors.append(str(e))
+    # The review kind is not reviewed itself: --review names its panel, --model one reviewer — not both,
+    # and --rounds does not apply to it: the panel of a review task reviews once.
+    if kind is Kind.REVIEW:
+        if spec.review_models and spec.model:
+            errors.append(_t("tasks.review_both"))
+        if spec.review_rounds is not None:
+            errors.append(_t("tasks.review_no_rounds"))
     level_default, time_default = KIND_DEFAULTS[kind]
     if spec.review_models is not None:
         rmodels, rounds = list(spec.review_models), spec.review_rounds or (1 if spec.review_models else 0)
@@ -167,6 +174,8 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
             rmodels, rounds = [], 0
         if spec.review_rounds is not None and rmodels:
             rounds = spec.review_rounds
+    if kind is Kind.REVIEW and rmodels:
+        rounds = 1  # the panel of a review task reviews once — the rounds of a level belong to a reworked task
     if rmodels and not 1 <= rounds <= MAX_ROUNDS:
         errors.append(_t("tasks.bad_rounds", rounds=rounds, max=MAX_ROUNDS))
     for m in rmodels:
@@ -174,8 +183,6 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
             registry.check(store, m, project)
         except registry.RegistryError as e:
             errors.append(_t("tasks.review_prefix", err=e))
-    if kind is Kind.REVIEW and rmodels:
-        errors.append(_t("tasks.review_self"))
 
     # Files and acceptance
     paths = [_norm(p) for p in spec.paths if p.strip()]

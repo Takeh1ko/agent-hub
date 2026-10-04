@@ -68,6 +68,22 @@ def test_review_levels_and_explicit(store, project):
     assert t.review == {"models": ["mimo-flash"], "rounds": 3}
 
 
+def test_review_task_panel(store, project):
+    """For a review kind --review names the panel (the task is not reviewed itself), --model one reviewer."""
+    t = tasks.create(store, spec(kind=Kind.REVIEW, title="x", review_input="main..ahub/T1",
+                                 review_models=["spark", "mimo-flash"]), project)
+    assert t.review == {"models": ["spark", "mimo-flash"], "rounds": 1}  # the panel reviews once
+    t = tasks.create(store, spec(kind=Kind.REVIEW, title="y", review_input="main", model="mimo-flash"), project)
+    assert t.review == {} and t.executor == "mimo-flash"  # one reviewer — the executor
+    t = tasks.create(store, spec(kind=Kind.REVIEW, title="w", review_input="main", review_level=4), project)
+    assert t.review == {"models": ["spark", "mimo-flash"], "rounds": 1}  # the rounds of a level are not its rounds
+    with pytest.raises(tasks.TaskInvalid, match="--review и --model вместе нельзя"):
+        tasks.resolve(store, spec(kind=Kind.REVIEW, title="z", review_input="main", model="mimo-flash",
+                                  review_models=["spark"]), project)
+    with pytest.raises(tasks.TaskInvalid, match="--rounds неприменим к задаче «ревью»"):
+        tasks.resolve(store, spec(kind=Kind.REVIEW, title="z", review_input="main", review_rounds=2), project)
+
+
 def test_all_errors_at_once(store, project):
     with pytest.raises(tasks.TaskInvalid) as ei:
         tasks.resolve(store, spec(kind=Kind.CODE, title="", model="deepseek-flash", paths=["/etc/**", "bot/**"],

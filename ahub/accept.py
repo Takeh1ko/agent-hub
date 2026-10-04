@@ -337,6 +337,14 @@ def review_started(store: Store, task_id: int) -> bool:
                for e in store.events(task_id=task_id))
 
 
+def _panel_locked(store: Store, t: Task, flag: str) -> None:
+    """A review task runs its panel (engine._review) — the executor is only the fallback reviewer, so
+    every way of naming a reviewer (`--review`, `--model`, `ahub model`) goes through this lock."""
+    if review_started(store, t.id):
+        raise DecisionError(_t("accept.review_panel_locked", label=t.label, flag=flag),
+                            hint=_t("hint.status_task", label=t.label))
+
+
 def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None = None,
          title: str | None = None, review: list[str] | None = None, rounds: int | None = None,
          model: str | None = None, input: str | None = None, by: str = "orchestrator") -> str:
@@ -344,18 +352,22 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
 
     review/rounds — before the review starts: the panel decides what the task is checked against, so it
     cannot change once a reviewer has run (`review_started()`). model — like `ahub model`, any inactive
-    task: the executor is picked for the next session, review or not.
+    task: the executor is picked for the next session, review or not; a review task has no executor turn
+    to pick, so its panel becomes the one reviewer.
     """
     t = _get(store, task_id)
     if t.state in (State.ACCEPTED, State.REJECTED) or t.state in transitions.ACTIVE:
         raise DecisionError(_t("accept.edit_state", label=t.label), hint=_t("hint.status_task", label=t.label))
+    panel = list(t.review.get("models") or []) if t.kind is Kind.REVIEW else []
+    if t.kind is Kind.REVIEW and review is not None and model:
+        raise DecisionError(_t("tasks.review_both"))
     changes: list[str] = []
     fields: dict[str, Any] = {}
     limits = dict(t.limits)
     if review is not None or rounds is not None:
-        if review_started(store, t.id):
-            raise DecisionError(_t("accept.edit_review_state", label=t.label),
-                                hint=_t("hint.status_task", label=t.label))
+        if t.kind is Kind.REVIEW and rounds is not None:
+            raise DecisionError(_t("tasks.review_no_rounds"))
+        _panel_locked(store, t, "--rounds" if review is None else "--review")
         models = list(review if review is not None else (t.review.get("models") or []))
         count = int(rounds if rounds is not None else (t.review.get("rounds") or 0))
         if not models:
@@ -371,7 +383,7 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
             except registry.RegistryError as e:
                 raise DecisionError(str(e), hint=_t("hint.models")) from e
         if t.kind is Kind.REVIEW:
-            raise DecisionError(_t("tasks.review_self"), hint=_t("help.task_new_review"))
+            count = 1  # the same one round tasks.resolve gives a review task
         fields["review"] = {"models": models, "rounds": count}
         changes.append(_t("accept.review_msg", models="+".join(models), rounds=count))
     if model:
@@ -379,7 +391,13 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
             registry.check(store, model, project)
         except registry.RegistryError as e:
             raise DecisionError(str(e), hint=_t("hint.models")) from e
-        if model != t.executor:
+        if panel:
+            # a review task with a panel runs that panel — a model here names the one reviewer of it
+            _panel_locked(store, t, "--model")
+            count = int(t.review.get("rounds") or 1)
+            fields["review"] = {"models": [model], "rounds": count}
+            changes.append(_t("accept.review_msg", models=model, rounds=count))
+        elif model != t.executor:
             changes.append(_t("accept.model_edit", old=t.executor or "—", new=model))
             fields["executor"] = model
             limits["fresh_session"] = True  # never resume another model's session
@@ -476,6 +494,15 @@ def change_model(store: Store, project: ProjectConfig, task_id: int, alias: str,
         registry.check(store, alias, project)
     except registry.RegistryError as e:
         raise DecisionError(str(e), hint=_t("hint.models")) from e
+    panel = list(t.review.get("models") or []) if t.kind is Kind.REVIEW else []
+    if panel:
+        # what reviews is the panel (engine._review) — the executor is only the fallback reviewer
+        _panel_locked(store, t, "ahub model")
+        rounds = int(t.review.get("rounds") or 1)
+        store.update_task(t.id, review={"models": [alias], "rounds": rounds})
+        store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                        payload={"from": ", ".join(panel), "to": alias, "by": by})
+        return _t("accept.model_panel", label=t.label, old=", ".join(panel), new=alias)
     lim = dict(t.limits)
     lim["fresh_session"] = True  # never resume another model's session
     store.update_task(t.id, executor=alias, limits=lim)
