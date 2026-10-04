@@ -140,7 +140,7 @@ def cmd_check(args) -> int:
             rows.append([_MARKS[ok], alias, _body(detail, alias)])
             p.step()
     ok_n = sum(1 for r in results if r["ok"])
-    key = "models.check_ok" if len(results) > 1 else "models.check_ok_one"  # "1 of 1 models" is not English
+    key = "models.check_ok_many" if len(results) > 1 else "models.check_ok_one"  # "1 of 1 models" is not English
     last = t(key, ok=ok_n, total=len(results)) if ok_n == len(results) \
         else t("models.check_bad", ok=ok_n, total=len(results))
     emit(args, {"checked": results},

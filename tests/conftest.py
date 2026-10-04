@@ -24,9 +24,13 @@ def _isolated_env(tmp_path, monkeypatch):
     from ahub.i18n import _reset
 
     _reset()  # language is picked lazily — reset it between tests
+    from ahub import registry
+
+    registry._cached_disabled = None  # the provider switch is cached by mtime — one test per file state
     log.setup()  # module loggers were built at import with the real HOME — send the log to the temp dir
     yield
     _reset()
+    registry._cached_disabled = None
 
 
 @pytest.fixture(scope="session", autouse=True)

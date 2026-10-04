@@ -467,7 +467,7 @@ def test_the_russian_count_has_three_forms(monkeypatch):
     _reset()
     try:
         set_lang("ru")
-        args = ("doctor.problem_one", "doctor.problems_few", "doctor.problems")
+        args = ("doctor.problems_one", "doctor.problems_few", "doctor.problems_many")
         assert plural(1, *args) == "1 проблема — исправление под проверкой"
         assert plural(2, *args) == "2 проблемы — исправление под каждой проверкой"
         assert plural(4, *args).startswith("4 проблемы")
@@ -477,12 +477,12 @@ def test_the_russian_count_has_three_forms(monkeypatch):
         assert plural(21, *args).startswith("21 проблема")
         assert plural(22, *args).startswith("22 проблемы")
 
-        alarms = ("alarms.acked", "alarms.acked_few", "alarms.acked_many")
+        alarms = ("alarms.acked_one", "alarms.acked_few", "alarms.acked_many")
         assert plural(1, *alarms) == "1 тревога отмечена прочитанной"
         assert plural(2, *alarms) == "2 тревоги отмечены прочитанными"
         assert plural(5, *alarms) == "5 тревог отмечено прочитанными"
 
-        found = ("views.findings_more_one", "views.findings_more_few", "views.findings_more")
+        found = ("views.findings_more_one", "views.findings_more_few", "views.findings_more_many")
         assert plural(2, *found, label="T1").startswith("ещё 2 находки")
         assert plural(5, *found, label="T1").startswith("ещё 5 находок")
     finally:
