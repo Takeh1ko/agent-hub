@@ -114,7 +114,8 @@ def test_touch_scope_of_the_owner_stamps_every_project(store, tmp_path):
 
 
 def test_a_failed_presence_stamp_is_only_a_log_line(store, caplog):
-    """A presence stamp must never raise: the Monitor is the one thing that must not die (T70)."""
+    """A presence stamp must never raise: the Monitor is the one thing that must not die (T70).
+    When presence_project is missing, legacy presence must still be stamped in its own tx."""
     with store.tx() as c:
         c.execute("DROP TABLE presence_project")  # e.g. a migration under an old process
     with caplog.at_level("WARNING", logger="events"):
@@ -122,7 +123,35 @@ def test_a_failed_presence_stamp_is_only_a_log_line(store, caplog):
         events.touch_scope(store, None, via="watch", now=1000)
     assert len(caplog.records) == 2
     assert all(r.message.startswith("presence touch failed") for r in caplog.records)
-    assert not events.presence(store, project="A")  # nothing was stamped
+    # The legacy table was stamped, so a pre-006 process sees it and presence() falls back to it
+    assert events.presence(store, project="A")["last_seen"] == 1000
+    with store.read() as c:
+        row = c.execute("SELECT * FROM presence WHERE who='claude'").fetchone()
+    assert row is not None and row["last_seen"] == 1000
+
+
+def test_fresh_legacy_row_overrides_stale_presence_project(store):
+    """If presence_project has an old row and legacy presence has a fresh owner row,
+    presence() must return the freshest last_seen (Finding 2)."""
+    with store.tx() as c:
+        c.execute("INSERT INTO presence_project(who, project, last_seen, session_id, via)"
+                  " VALUES('claude', 'A', 1000, '', 'watch')")
+        c.execute("INSERT INTO presence(who, project, last_seen, session_id, via)"
+                  " VALUES('claude', '', 5000, '', 'watch')")
+    p = events.presence(store, project="A")
+    assert p is not None and p["last_seen"] == 5000
+    assert events.present(store, project="A", now=5000) is True
+
+
+def test_watch_mark_key_distinguishes_multi_project_from_owner():
+    """Scope(('A', 'B')) and Scope() must not share watch mark keys (Finding 11)."""
+    owner_key = events._watch_mark_key("claude", Scope())
+    multi_key = events._watch_mark_key("claude", Scope(("A", "B")))
+    single_key = events._watch_mark_key("claude", Scope(("A",)))
+    assert owner_key == "watch_summary:claude:"
+    assert multi_key == "watch_summary:claude:A,B"
+    assert single_key == "watch_summary:claude:A"
+    assert owner_key != multi_key
 
 
 def test_a_legacy_row_of_an_owner_stream_is_present_everywhere(store):

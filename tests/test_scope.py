@@ -68,12 +68,67 @@ def test_scope_sql_and_membership():
     assert scope.where(OWNER) == ("", [])
     assert scope.where(None) == ("", [])
     assert scope.where(Scope(("A",))) == ("(project IN (?) OR project='')", ["A"])
-    assert scope.where(Scope(("A", "B")), "task.project")[1] == ["A", "B"]
+    assert scope.where(Scope(("A", "B")))[1] == ["A", "B"]
     assert "" in Scope(("A",)) and "A" in Scope(("A",)) and "B" not in Scope(("A",))
     assert "B" in OWNER and Scope(("A", "B")).name == ""  # several projects — nothing to write on a row
     assert scope.foreign(OWNER, "B") is False  # the owner touches every project
     assert scope.foreign(Scope(("A",)), "A") is False and scope.foreign(Scope(("A",)), "B") is True
     assert scope.foreign(Scope(("A",)), "") is False  # a hub-wide row belongs to everyone
+
+
+def test_an_unknown_project_is_refused(two_projects, tmp_path, capsys):
+    """`--project nope` is a typo, not an empty hub: the rows it writes would carry a name nobody reads."""
+    rc, out, err = ahub(capsys, "status", "--project", "nope")
+    assert rc == 2 and out == ""
+    assert err.splitlines() == ["ошибка: нет проекта 'nope' — в хабе: A, B",
+                                "  подсказка: ahub projects"]
+    # a path that is not a repository is refused too — it would be written onto new rows as a project name
+    rc, _out, err = ahub(capsys, "say", "--project", str(tmp_path / "nowhere"), "привет")
+    assert rc == 2 and "нет проекта" in err
+    assert comms.outbox(Store()) == []  # nothing was written
+    rc, _out, err = ahub(capsys, "--lang", "en", "status", "--project", "nope")
+    assert rc == 2 and "no such project 'nope' — the hub has: A, B" in err
+
+    # a repository of its own (any path with a .hub.toml) is a project — the hub config need not list it
+    other = tmp_path / "solo"
+    write(other / ".hub.toml", 'schema_version = 2\nname = "Solo"\n')
+    assert scope.resolve(SimpleNamespace(all=False, project=str(other))) == Scope(("Solo",))
+
+
+def test_project_check_without_a_hub_config(two_projects, tmp_path, monkeypatch, capsys):
+    """A hub that knows no project: every name is refused. A broken hub config: there is nothing to
+    check against, and a read command must still work (`ahub projects` is what reports the file)."""
+    write(paths.global_config_path(), "projects = []\n")
+    assert scope.hub_names() == []
+    _rc, _out, err = ahub(capsys, "status", "--project", "anything")
+    assert "в хабе: —" in err
+
+    write(paths.global_config_path(), "projects = [\n")  # a quote is missing
+    monkeypatch.chdir(tmp_path)
+    assert scope.hub_names() is None
+    assert scope.resolve(SimpleNamespace(all=False, project="anything")) == Scope(("anything",))
+
+
+def test_the_project_of_the_current_directory_is_never_a_typo(two_projects, tmp_path, monkeypatch, capsys):
+    """A hub that configures no projects (setup not run, or a repo outside the config): `--project X` from
+    inside repo X is what the same command resolves without the flag, so it works. A typo is still refused."""
+    write(paths.global_config_path(), "")  # a hub config with no `projects` key at all
+    root_a, _root_b = tmp_path / "a", tmp_path / "b"
+    monkeypatch.chdir(root_a)
+    assert scope.hub_names() == []
+    assert scope.resolve(SimpleNamespace(all=False, project="A")) == Scope(("A",))
+    assert ahub(capsys, "status", "--project", "A")[0] == 0
+
+    _rc, _out, err = ahub(capsys, "status", "--project", "AA")
+    assert "нет проекта 'AA'" in err  # a typo of the name of the directory is still a refusal
+
+    # the same in a hub that does configure projects — the repository you stand in is known by name
+    write(paths.global_config_path(), f'projects = ["{root_a}"]\n')
+    solo = tmp_path / "solo"
+    write(solo / ".hub.toml", 'schema_version = 2\nname = "Solo"\n')
+    monkeypatch.chdir(solo)
+    assert scope.resolve(SimpleNamespace(all=False, project="Solo")) == Scope(("Solo",))
+    assert ahub(capsys, "status", "--project", "Solo")[0] == 0
 
 
 def test_a_question_event_and_message_of_b_are_invisible_from_a(two_projects, capsys, monkeypatch):
@@ -148,8 +203,9 @@ def test_inbox_reads_only_its_scope(two_projects, capsys):
     store, _root_a, _root_b = two_projects
     _talk(store)
     assert "дело B" not in ahub(capsys, "inbox")[1]
-    assert len(comms.inbox(store, mark=False, scope=OWNER)) == 1  # B's message is still unread
-    assert len(comms.inbox(store, mark=False, scope=OWNER)) == 1  # and the hub-wide one was read
+    assert {m["text"] for m in comms.inbox(store, mark=False, scope=OWNER)} == {"дело B", "для всех"}
+    # The hub-wide owner_message event must remain unacked after project A's inbox
+    assert any(e.kind == Ev.OWNER_MESSAGE.value and e.project == "" for e in events.unacked(store))
 
 
 def test_a_row_of_another_project_is_refused(two_projects, capsys):
@@ -306,7 +362,6 @@ def test_a_broken_project_file_is_not_a_crash(two_projects, tmp_path, capsys, mo
 
 def test_mcp_refuses_a_task_of_another_project(two_projects, tmp_path, monkeypatch):
     store, root_a, _root_b = two_projects
-    monkeypatch.setattr(mcp, "_server_scope", None)  # the scope of the server — the directory it starts in
     tid = _b_task(store, tmp_path, state="queued")
     monkeypatch.chdir(root_a)
 
@@ -432,11 +487,10 @@ def test_presence_of_a_process_on_the_previous_code(tmp_path):
 
 
 def test_mcp_takes_the_scope_of_its_cwd(two_projects, monkeypatch):
+    """Every tool is the CLI command — the server's own cwd is the scope (ahub/scope.py)."""
     store, root_a, root_b = two_projects
     _talk(store)
-    monkeypatch.setattr(mcp, "_server_scope", None)  # resolved once, from the cwd of the server
     monkeypatch.chdir(root_a)
-    assert mcp.server_scope() == Scope(("A",))
 
     def call(name, args):
         out = io.StringIO()
@@ -448,6 +502,6 @@ def test_mcp_takes_the_scope_of_its_cwd(two_projects, monkeypatch):
     assert "дело B" in call("inbox", {"project": "B"})  # the call may ask for another project
     call("say", {"text": "привет из MCP"})
     assert [m["project"] for m in comms.outbox(store)] == ["A"]
-    monkeypatch.chdir(root_b)
-    mcp._server_scope = None
-    assert mcp.server_scope() == Scope(("B",))
+    monkeypatch.chdir(root_b)  # the same server started in another repository
+    call("say", {"text": "привет из B"})
+    assert [m["project"] for m in comms.outbox(store)] == ["A", "B"]
