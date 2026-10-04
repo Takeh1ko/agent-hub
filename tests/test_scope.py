@@ -109,6 +109,28 @@ def test_project_check_without_a_hub_config(two_projects, tmp_path, monkeypatch,
     assert scope.resolve(SimpleNamespace(all=False, project="anything")) == Scope(("anything",))
 
 
+def test_the_project_of_the_current_directory_is_never_a_typo(two_projects, tmp_path, monkeypatch, capsys):
+    """A hub that configures no projects (setup not run, or a repo outside the config): `--project X` from
+    inside repo X is what the same command resolves without the flag, so it works. A typo is still refused."""
+    write(paths.global_config_path(), "")  # a hub config with no `projects` key at all
+    root_a, _root_b = tmp_path / "a", tmp_path / "b"
+    monkeypatch.chdir(root_a)
+    assert scope.hub_names() == []
+    assert scope.resolve(SimpleNamespace(all=False, project="A")) == Scope(("A",))
+    assert ahub(capsys, "status", "--project", "A")[0] == 0
+
+    _rc, _out, err = ahub(capsys, "status", "--project", "AA")
+    assert "нет проекта 'AA'" in err  # a typo of the name of the directory is still a refusal
+
+    # the same in a hub that does configure projects — the repository you stand in is known by name
+    write(paths.global_config_path(), f'projects = ["{root_a}"]\n')
+    solo = tmp_path / "solo"
+    write(solo / ".hub.toml", 'schema_version = 2\nname = "Solo"\n')
+    monkeypatch.chdir(solo)
+    assert scope.resolve(SimpleNamespace(all=False, project="Solo")) == Scope(("Solo",))
+    assert ahub(capsys, "status", "--project", "Solo")[0] == 0
+
+
 def test_a_question_event_and_message_of_b_are_invisible_from_a(two_projects, capsys, monkeypatch):
     store, root_a, root_b = two_projects
     _talk(store)
