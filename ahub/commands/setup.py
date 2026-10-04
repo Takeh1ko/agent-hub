@@ -601,7 +601,7 @@ def _model_step(store, states, ask: bool, out: Steps) -> dict[str, str]:
     rows = []
     for entry in entries:
         ok, detail = results.get(entry.alias, (False, ""))
-        body = detail[len(entry.alias) + 2:] if detail.startswith(entry.alias + ": ") else detail
+        body = doctor.probe_detail(detail, entry.alias)
         rows.append(["✓" if ok else "✗", entry.alias, kinds[entry.alias],
                      body + (f" — {entry.note}" if entry.note else "")])
     out.table(None, rows, max_width=[1, 16, 5, None])
