@@ -24,6 +24,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 from ahub.i18n import t as _t
 
@@ -36,8 +37,6 @@ PROBE_WORKERS = 4  # how many models the wizard probes at the same time
 BASH_RULE = "Bash(ahub:*)"  # the Claude Code permission rule `ahub setup --claude` writes
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-UNIT_NAME = "ahub.service"  # the systemd unit / launchd label of the hub service itself
-PLIST_NAME = "dev.ahub.service.plist"  # its macOS plist
 
 
 @dataclass
@@ -94,11 +93,13 @@ def check_config() -> Check:
 
 
 def _service_unit() -> str:
+    from ahub.service import PLIST_FILES, UNIT_SERVICE
+
     home = Path.home()
-    sys_unit = home / ".config" / "systemd" / "user" / UNIT_NAME
+    sys_unit = home / ".config" / "systemd" / "user" / UNIT_SERVICE
     if sys_unit.is_file():
         return str(sys_unit)
-    plist = home / "Library" / "LaunchAgents" / PLIST_NAME
+    plist = home / "Library" / "LaunchAgents" / PLIST_FILES[UNIT_SERVICE]
     if plist.is_file():
         return str(plist)
     return ""
@@ -238,36 +239,54 @@ def check_opencode_auth() -> Check:
     return _auth_check(auth_providers())
 
 
-def _systemd_env_names() -> set[str] | None:
-    """Env var names systemd hands the hub unit, None when systemctl cannot say (no unit, no bus)."""
+def _systemd_show(argv: list[str]) -> str:
+    """One `systemctl --user …` answer, "" when systemctl cannot say it (no binary, no bus, no unit)."""
     exe = shutil.which("systemctl")
     if not exe:
-        return None
+        return ""
     try:
-        r = subprocess.run([exe, "--user", "show", UNIT_NAME, "-p", "Environment"],
-                           capture_output=True, text=True, timeout=TIMEOUT_S)
+        r = subprocess.run([exe, "--user", *argv], capture_output=True, text=True, timeout=TIMEOUT_S)
     except (OSError, subprocess.SubprocessError):
-        return None
-    if r.returncode != 0:
-        return None
-    names = set()
-    for token in (r.stdout or "").strip().removeprefix("Environment=").split():
-        names.add(token.strip('"').split("=", 1)[0])  # a value is never kept, let alone shown
-    return names
+        return ""
+    return (r.stdout or "") if r.returncode == 0 else ""
 
 
-def service_env() -> set[str] | None:
+def _env_names(text: str) -> set[str]:
+    """Env var names from a systemd `NAME=value` / `Environment=` listing — a value is never kept."""
+    return {token.strip('"').split("=", 1)[0] for token in text.split()}
+
+
+def _systemd_env_names() -> set[str] | None:
+    """Env var names the hub service runs with, None when systemd cannot say.
+
+    The unit's own `Environment=` (systemd folds an `EnvironmentFile=` into it) unioned with the user
+    manager's environment — a key exported in the session profile reaches the manager and the service.
+    An empty unit listing means "no unit" (systemd answers `Environment=` with rc 0 for a unit it does
+    not know), never "the service has no keys": an installed unit always carries PYTHONUNBUFFERED=1.
+    """
+    from ahub.service import UNIT_SERVICE
+
+    names = _env_names(_systemd_show(["show", UNIT_SERVICE, "-p", "Environment"])
+                       .strip().removeprefix("Environment="))
+    if not names:
+        return None
+    return names | _env_names(_systemd_show(["show-environment"]))
+
+
+def service_env_names() -> set[str] | None:
     """Env var names the hub service runs with, None when they cannot be read.
 
-    Linux — what systemd gives the unit (a drop-in counts); macOS — the EnvironmentVariables of the
+    Linux — what systemd gives the unit and its manager; macOS — the EnvironmentVariables of the
     plist. The service does not read the shell profile: a key exported there only is invisible to it.
     """
+    from ahub.service import PLIST_FILES, UNIT_SERVICE
+
     if not sys.platform.startswith("darwin"):
         return _systemd_env_names()
-    plist = Path.home() / "Library" / "LaunchAgents" / PLIST_NAME
+    plist = Path.home() / "Library" / "LaunchAgents" / PLIST_FILES[UNIT_SERVICE]
     try:
         data = plistlib.loads(plist.read_bytes())
-    except (OSError, ValueError):
+    except (OSError, ValueError, ExpatError):  # a truncated plist is an interrupted write, not a fact
         return None
     env = data.get("EnvironmentVariables") if isinstance(data, dict) else None
     return {str(k) for k in env} if isinstance(env, dict) else set()
@@ -284,15 +303,20 @@ def check_provider_keys() -> Check:
     mine = [name for name in PROVIDER_KEYS if os.environ.get(name)]
     if not mine:
         return Check("provider_keys", None, _t("doctor.keys_none"), "")
-    service = service_env()
+    service = service_env_names()
     if service is None:
         return Check("provider_keys", None, _t("doctor.keys_no_unit_env"), "")
     auth = _providers_from_auth_file()
-    hidden = [name for name in mine if name not in service and PROVIDER_KEYS[name] not in auth]
+    hidden: dict[str, list[str]] = {}
+    for name in mine:
+        provider = PROVIDER_KEYS[name]
+        if name not in service and provider not in auth:
+            hidden.setdefault(provider, []).append(name)  # one fix per provider, not per variable
     if not hidden:
         return Check("provider_keys", True, _t("doctor.keys_ok", keys=", ".join(mine)), "")
-    keys = ", ".join(f"{name} ({PROVIDER_KEYS[name]})" for name in hidden)
-    fix = "; ".join(_t("doctor.keys_fix", provider=PROVIDER_KEYS[n], name=n) for n in hidden)
+    keys = "; ".join(f"{p}: {', '.join(names)}" for p, names in hidden.items())
+    fix = "; ".join(_t("doctor.keys_fix", provider=p, names=", ".join(names))
+                     for p, names in hidden.items())
     return Check("provider_keys", False, _t("doctor.keys_hidden", keys=keys), fix)
 
 
@@ -774,5 +798,5 @@ __all__ = ["Check", "ProviderState", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_WIZA
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
            "check_opencode_health", "check_opencode_auth", "check_provider_keys", "check_agy", "check_codex",
            "check_models", "check_network", "check_claude", "check_claude_skill", "check_telegram",
-           "provider_proxy_detail", "service_env",
+           "provider_proxy_detail",
            "skill_path", "settings_path", "bash_allowed", "apparmor_blocks_userns", "codex_sandbox_fix"]

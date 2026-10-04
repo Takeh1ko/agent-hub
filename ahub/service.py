@@ -43,6 +43,13 @@ MAX_ORPHANS = 1  # one automatic pickup
 HEARTBEAT_KEY = "service_heartbeat"
 CODE_CHECK_S = 10.0  # how often to compare code (self-update)
 PAUSE_KEY = "queue_paused"
+# The OS services, named once: `ahub service install` (commands/service.py) builds its maps from these and
+# `ahub doctor` reads the environment of the hub unit through them — a name in two places would leave the
+# doctor reading a file that no install writes.
+UNIT_SERVICE = "ahub.service"  # the systemd unit of the hub service
+UNIT_BOT = "ahub-bot.service"  # the bot's unit (installed only with a [telegram] token)
+LABELS = {UNIT_SERVICE: "dev.ahub.service", UNIT_BOT: "dev.ahub.bot"}  # the launchd labels
+PLIST_FILES = {UNIT_SERVICE: "dev.ahub.service.plist", UNIT_BOT: "dev.ahub.bot.plist"}
 _TASK_ARG = re.compile(r"^[Tt]?(\d+)$")
 
 

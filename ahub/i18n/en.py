@@ -992,9 +992,9 @@ MESSAGES: dict[str, str] = {
     "doctor.auth_fix": "opencode auth login",
     "doctor.keys_none": "no provider key in this env (optional)",
     "doctor.keys_no_unit_env": "no service env to compare with (optional)",
-    "doctor.keys_ok": "the service sees {keys}",
+    "doctor.keys_ok": "no problem: {keys} — the service env or opencode auth has each",
     "doctor.keys_hidden": "the service cannot see {keys} — opencode fails with a server error",
-    "doctor.keys_fix": "opencode auth login {provider}, or put {name} into the service environment "
+    "doctor.keys_fix": "opencode auth login {provider}, or put {names} into the service environment "
                        "(Environment= in the unit, the plist on macOS)",
     "doctor.agy_found": "found {binary}",
     "doctor.agy_missing": "not found in PATH",

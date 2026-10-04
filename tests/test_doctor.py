@@ -138,12 +138,17 @@ def test_auth_list_colors_and_free_only(monkeypatch):
     assert c.ok is False and "auth login" in c.fix
 
 
-def _fake_systemctl(tmp_path, monkeypatch, environment: str) -> Path:
-    """A systemctl on PATH that answers `show -p Environment` and records its argv (the marker file)."""
+def _fake_systemctl(tmp_path, monkeypatch, unit_env: str, manager_env: str = "") -> Path:
+    """A systemctl on PATH: `show ahub.service -p Environment` answers unit_env, `show-environment`
+    answers manager_env (NAME=value lines); the marker file records every argv it was given."""
     marker = tmp_path / "systemctl.argv"
     exe = tmp_path / "systemctl"
-    exe.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {marker}\nprintf "%s\\n" "{environment}"\n',
-                   encoding="utf-8")
+    exe.write_text("#!/bin/sh\n"
+                   f'printf "%s\\n" "$*" >> {marker}\n'
+                   'case "$*" in\n'
+                   f'*show-environment*) printf "%b\\n" "{manager_env}" ;;\n'
+                   f'*) printf "%s\\n" "{unit_env}" ;;\n'
+                   "esac\n", encoding="utf-8")
     exe.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     return marker
@@ -154,29 +159,58 @@ def test_provider_key_the_service_cannot_see_linux(tmp_path, monkeypatch):
     from ahub.i18n import _reset
 
     secret = "sk-SECRET-4242"
-    argv = "--user show ahub.service -p Environment"
+    calls = ["--user show ahub.service -p Environment", "--user show-environment"]
     monkeypatch.setenv("AHUB_LANG", "en")
     _reset()
     monkeypatch.setenv("OPENROUTER_API_KEY", secret)
-    marker = _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1 LANG=en_US.UTF-8")
+    marker = _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1 LANG=en_US.UTF-8",
+                             "LANG=en_US.UTF-8\\nPATH=/usr/bin")
 
     c = doctor.check_provider_keys()
     assert c.name == "provider_keys" and c.ok is False
-    assert "OPENROUTER_API_KEY (openrouter)" in c.detail and "server error" in c.detail
+    assert "openrouter: OPENROUTER_API_KEY" in c.detail and "server error" in c.detail
     assert "opencode auth login openrouter" in c.fix and "OPENROUTER_API_KEY" in c.fix
     assert secret not in c.detail + c.fix  # the value never leaves the env
-    assert marker.read_text().strip() == argv  # the unit env of the hub unit was really asked for
+    seen = marker.read_text().splitlines()
+    assert calls[0] in seen and calls[1] in seen  # the hub unit and the manager, as asked
 
     marker.unlink()
     _write_auth({"openrouter": {"apiKey": secret}})  # opencode knows the provider — nothing to fix
     c = doctor.check_provider_keys()
-    assert c.ok is True and "OPENROUTER_API_KEY" in c.detail and not c.fix
+    assert c.ok is True and "opencode auth" in c.detail and "OPENROUTER_API_KEY" in c.detail and not c.fix
 
     doctor.auth_file_path().unlink()
     marker.unlink()
     _fake_systemctl(tmp_path, monkeypatch, f'Environment="OPENROUTER_API_KEY={secret}" LANG=en_US.UTF-8')
+    assert doctor.check_provider_keys().ok is True  # the unit carries the key
+
+
+def test_provider_key_in_the_manager_env_only(tmp_path, monkeypatch):
+    """A key exported in the session profile reaches the user manager — the service does see it."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-m")
+    _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1",
+                    "PATH=/usr/bin\\nANTHROPIC_API_KEY=sk-m")
+    assert doctor.check_provider_keys().ok is True
+
+
+def test_provider_keys_one_fix_per_provider(tmp_path, monkeypatch):
+    """GEMINI_API_KEY and GOOGLE_API_KEY are one provider (google) — one fix line, both names in it."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.setenv(name, "sk-g")
+    _fake_systemctl(tmp_path, monkeypatch, "Environment=PYTHONUNBUFFERED=1")
     c = doctor.check_provider_keys()
-    assert c.ok is True and marker.read_text().strip() == argv  # the unit carries the key
+    assert c.ok is False
+    assert c.fix.count("opencode auth login google") == 1
+    assert "GEMINI_API_KEY, GOOGLE_API_KEY" in c.fix
+    assert c.detail.count("google") == 1  # one entry per provider
 
 
 def test_provider_keys_nothing_to_compare(tmp_path, monkeypatch):
@@ -190,6 +224,7 @@ def test_provider_keys_nothing_to_compare(tmp_path, monkeypatch):
     assert c.ok is None and not c.fix and not marker.exists()
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
+    real_run, real_which = subprocess.run, shutil.which
     monkeypatch.setattr(shutil, "which", lambda name: None)  # no systemctl at all
     assert doctor.check_provider_keys().ok is None
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/systemctl")
@@ -203,6 +238,15 @@ def test_provider_keys_nothing_to_compare(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Unit ahub.service could not be found.")
     monkeypatch.setattr(subprocess, "run", _no_unit)
     assert doctor.check_provider_keys().ok is None
+
+    # no unit installed: systemd answers an empty `Environment=` with rc 0 — that is "no data", not
+    # "the service cannot see the key" (a hub-installed unit always carries PYTHONUNBUFFERED=1)
+    monkeypatch.setattr(subprocess, "run", real_run)
+    monkeypatch.setattr(shutil, "which", real_which)
+    marker = _fake_systemctl(tmp_path, monkeypatch, "Environment=")
+    c = doctor.check_provider_keys()
+    assert c.ok is None and not c.fix
+    assert "show-environment" not in marker.read_text()  # the manager is not even asked
 
 
 def test_provider_keys_macos_plist(tmp_path, monkeypatch):
@@ -223,6 +267,10 @@ def test_provider_keys_macos_plist(tmp_path, monkeypatch):
     data["EnvironmentVariables"]["OPENROUTER_API_KEY"] = "sk-y"
     write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8"))
     assert doctor.check_provider_keys().ok is True
+
+    # a plist cut in the middle of a write: XML that does not parse is "cannot read", not a red check
+    write(path, plistlib.dumps(data, fmt=plistlib.FMT_XML).decode("utf-8")[:120])
+    assert doctor.check_provider_keys().ok is None
 
 
 def test_agy_health_and_missing(monkeypatch, tmp_path):

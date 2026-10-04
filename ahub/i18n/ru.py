@@ -992,9 +992,9 @@ MESSAGES: dict[str, str] = {
     "doctor.auth_fix": "opencode auth login",
     "doctor.keys_none": "в этом окружении нет ключей поставщиков (необязательно)",
     "doctor.keys_no_unit_env": "не с чем сравнить — окружения службы нет (необязательно)",
-    "doctor.keys_ok": "служба видит {keys}",
+    "doctor.keys_ok": "всё в порядке: {keys} — у службы или во входе opencode есть каждый",
     "doctor.keys_hidden": "служба не видит {keys} — opencode ответит ошибкой сервера",
-    "doctor.keys_fix": "opencode auth login {provider} или положите {name} в окружение службы "
+    "doctor.keys_fix": "opencode auth login {provider} или положите {names} в окружение службы "
                        "(Environment= в unit, plist на macOS)",
     "doctor.agy_found": "найден {binary}",
     "doctor.agy_missing": "нет в PATH",
