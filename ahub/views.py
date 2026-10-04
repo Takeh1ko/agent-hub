@@ -60,11 +60,6 @@ def _age(ms: int, now: int) -> str:
     return _t("views.age_dh", d=m // 1440, h=(m % 1440) // 60)
 
 
-def _short(s: str, n: int) -> str:
-    """Shorten to n characters — the same word-boundary rule as a table cell (ui.clip)."""
-    return ui.clip(s, n)
-
-
 def state_word(state: State | str) -> str:
     """The state name in the current language."""
     value = state.value if isinstance(state, State) else str(state)
