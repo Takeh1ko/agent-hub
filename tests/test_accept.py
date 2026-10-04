@@ -217,6 +217,17 @@ def test_usd_budget_extend(store, project):
         accept.extend_budget(store, t.id)
 
 
+def test_usd_budget_lowered_but_not_below_the_spend(store, project):
+    sc = work()
+    sc["steps"][0]["event"]["usd"] = 0.04  # real money of the run
+    t, _, _ = done_code(store, project, scenarios=[sc], budget_usd=0.5)
+    msg = accept.extend_budget(store, t.id, set_usd=0.05)  # lowering is allowed
+    assert "реальные $0.5 → $0.05" in msg and store.get_task(t.id).budget_usd == 0.05
+    with pytest.raises(accept.DecisionError, match=r"ниже потраченных \$0\.040"):
+        accept.extend_budget(store, t.id, set_usd=0.01)
+    assert store.get_task(t.id).budget_usd == 0.05  # the refusal writes nothing
+
+
 def test_red_after_merge_root_moved_not_reset(store, project, monkeypatch):
     t, _, _ = done_code(store, project)
     (Path(project.root) / "core" / "a.py").write_text("X = 5\n")

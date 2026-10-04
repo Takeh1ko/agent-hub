@@ -56,6 +56,16 @@ def test_call_nudge_refuses_a_queued_task():
     assert store.get_task(tid).request == ""  # a refusal writes nothing
 
 
+def test_budget_tool_lowers_the_real_money_budget():
+    """The tool is the same handle as the CLI: it lowers the real budget too, and `add` is not required."""
+    store = Store()
+    tid = store.create_task(project="P", kind="code", title="починить", budget_usd=0.5)
+    r = rpc([{"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+              "params": {"name": "budget", "arguments": {"task": f"T{tid}", "set_usd": 0.25}}}])
+    assert not r[0]["result"]["isError"] and "реальные $0.5 → $0.25" in r[0]["result"]["content"][0]["text"]
+    assert store.get_task(tid).budget_usd == 0.25
+
+
 def test_inbox_tool_reads_the_messages_in_full():
     """An agent gets the whole text of every unread message — not the head a table cell holds."""
     store = Store()
