@@ -26,6 +26,7 @@ from ahub.time import now_ms
 
 _log = hublog.get("drafts")
 KIND_WORDS: Words = Words("draft.kind_", ("scout", "code", "routine", "review"))
+READY = "ready"  # the one status a draft can be launched from
 FIELDS = ("kind", "title", "spec", "result_format", "paths", "accept", "read", "review_level", "resources")
 
 PROMPT = """You help the owner (not a programmer) file a task for agent-hub worker models. Read the project code
@@ -120,8 +121,8 @@ def draft_with_model(store: Store, project: ProjectConfig, draft_id: int) -> dic
         except (tasks.TaskInvalid, ValueError) as e:
             errors = "; ".join(e.errors) if isinstance(e, tasks.TaskInvalid) else str(e)
             continue
-        _update(store, draft_id, status="ready", task_json=json.dumps(asdict(spec), ensure_ascii=False,
-                                                                    default=str), errors="")
+        _update(store, draft_id, status=READY, errors="",
+                task_json=json.dumps(asdict(spec), ensure_ascii=False, default=str))
         _cleanup(project, draft_id)
         return _row(store, draft_id) or {}
     _update(store, draft_id, status="failed", errors=errors[:2000])
@@ -160,7 +161,7 @@ def preview(store: Store, draft_id: int, limit: int = 1500) -> str:
     row = _row(store, draft_id)
     if row is None:
         return _t("draft.no_draft", id=draft_id)
-    if row["status"] != "ready":
+    if row["status"] != READY:
         text = _t("draft.not_ready", id=draft_id, status=row["status"])
         if row["errors"]:
             text += _t("draft.not_ready_reason", err=row["errors"][:500])
@@ -182,10 +183,16 @@ def preview(store: Store, draft_id: int, limit: int = 1500) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def status(store: Store, draft_id: int) -> str:
+    """The status code of a draft row (ready | failed | cancelled | started | drafting); '' — no such draft."""
+    row = _row(store, draft_id)
+    return str(row["status"]) if row else ""
+
+
 def hint(store: Store, draft_id: int) -> str:
     """What to run with this draft: start it — only a ready one can be started."""
     row = _row(store, draft_id)
-    return _t("draft.next_start", id=draft_id) if row is not None and row["status"] == "ready" else ""
+    return _t("draft.next_start", id=draft_id) if row is not None and row["status"] == READY else ""
 
 
 def start(store: Store, project: ProjectConfig, draft_id: int) -> int:
@@ -195,7 +202,7 @@ def start(store: Store, project: ProjectConfig, draft_id: int) -> int:
         raise ValueError(_t("draft.no_draft", id=draft_id))
     if row["status"] == "started" and row["task_id"]:
         return int(row["task_id"])
-    if row["status"] != "ready":
+    if row["status"] != READY:
         raise ValueError(_t("draft.start_not_ready", id=draft_id, status=row["status"]))
     d = json.loads(row["task_json"])
     spec = tasks.TaskSpec(**{**d, "kind": Kind(d["kind"])})

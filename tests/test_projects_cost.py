@@ -310,7 +310,7 @@ def test_top_group_money_is_the_true_sum_not_a_sum_of_rounded_cells(hub, store):
         working(store, "A", f"a{i}", go=0.0006)
     working(store, "A", "a4", go=0.0006, usd=0.0004)
     working(store, "B", "b", go=0.01)
-    rows = data.rows(store, {}, {}, now_ms())
+    rows = data.rows(store, {}, now_ms())
     group = {r.project: r for r in rows if r.header}["A"]
     assert group.cost == "0.003"  # 0.0030 go + 0.0004 usd, rounded once
     assert abs(group.go - 0.003) < 1e-12 and group.usd == 0.0004
@@ -335,7 +335,7 @@ def test_top_filtered_history_is_complete(hub, store):
 
 def test_top_rows_are_grouped_by_project(hub, store):
     tids = filled(store)
-    rows = data.rows(store, {}, {}, now_ms())
+    rows = data.rows(store, {}, now_ms())
     groups = [r for r in rows if r.header]
     assert [r.project for r in groups] == ["A", "B"]
     assert [r.label for r in groups] == ["A", "B"]
@@ -355,22 +355,22 @@ def test_top_group_row_is_money_of_the_shown_tasks_only(hub, store):
         transitions.move(store, done, st)
     session(store, done, "spark", 5.00)
     working(store, "B", "c", go=0.01)
-    groups = {r.project: r.cost for r in data.rows(store, {}, {}, now_ms()) if r.header}
+    groups = {r.project: r.cost for r in data.rows(store, {}, now_ms()) if r.header}
     assert groups == {"A": "0.100", "B": "0.010"}
-    old = {r.project: r.cost for r in data.rows(store, {}, {}, now_ms(), history=True) if r.header}
+    old = {r.project: r.cost for r in data.rows(store, {}, now_ms(), history=True) if r.header}
     assert old["A"] == "5.100"
 
 
 def test_top_one_project_needs_no_group_row(hub, store):
     """A single project in the table: no header row — the name would say nothing new."""
     working(store, "A", "only one")
-    rows = data.rows(store, {}, {}, now_ms())
+    rows = data.rows(store, {}, now_ms())
     assert [r.header for r in rows] == [False]
 
 
 def test_top_filters_to_one_project(hub, store):
     filled(store)
-    only_a = data.rows(store, {}, {}, now_ms(), only="A")
+    only_a = data.rows(store, {}, now_ms(), only="A")
     assert [r.project for r in only_a] == ["A", "A"]
     assert not any(r.header for r in only_a)  # one project left — no header
     screen, _live, _pulses = data.snapshot(store, projects=[], only="B")
