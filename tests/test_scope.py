@@ -340,7 +340,6 @@ def test_a_broken_project_file_is_not_a_crash(two_projects, tmp_path, capsys, mo
 
 def test_mcp_refuses_a_task_of_another_project(two_projects, tmp_path, monkeypatch):
     store, root_a, _root_b = two_projects
-    monkeypatch.setattr(mcp, "_server_scope", None)  # the scope of the server — the directory it starts in
     tid = _b_task(store, tmp_path, state="queued")
     monkeypatch.chdir(root_a)
 
@@ -466,11 +465,10 @@ def test_presence_of_a_process_on_the_previous_code(tmp_path):
 
 
 def test_mcp_takes_the_scope_of_its_cwd(two_projects, monkeypatch):
+    """Every tool is the CLI command — the server's own cwd is the scope (ahub/scope.py)."""
     store, root_a, root_b = two_projects
     _talk(store)
-    monkeypatch.setattr(mcp, "_server_scope", None)  # resolved once, from the cwd of the server
     monkeypatch.chdir(root_a)
-    assert mcp.server_scope() == Scope(("A",))
 
     def call(name, args):
         out = io.StringIO()
@@ -482,6 +480,6 @@ def test_mcp_takes_the_scope_of_its_cwd(two_projects, monkeypatch):
     assert "дело B" in call("inbox", {"project": "B"})  # the call may ask for another project
     call("say", {"text": "привет из MCP"})
     assert [m["project"] for m in comms.outbox(store)] == ["A"]
-    monkeypatch.chdir(root_b)
-    mcp._server_scope = None
-    assert mcp.server_scope() == Scope(("B",))
+    monkeypatch.chdir(root_b)  # the same server started in another repository
+    call("say", {"text": "привет из B"})
+    assert [m["project"] for m in comms.outbox(store)] == ["A", "B"]

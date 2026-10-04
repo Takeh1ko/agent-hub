@@ -167,7 +167,7 @@ def status_text(store: Store) -> str:
 
 def _task_label(t) -> str:
     st = archive.STATE_WORDS.get(t.state.value, t.state.value)
-    return f"{t.label} · {st} · {views._short(t.title, 30)}"[:60]
+    return f"{t.label} · {st} · {ui.clip(t.title, 30)}"[:60]
 
 
 def tasks_reply(store: Store) -> Reply:
