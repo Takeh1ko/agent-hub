@@ -8,7 +8,7 @@ def cmd_top(args) -> int:
     from ahub.tui.console import main
 
     sc = scope.resolve(args)
-    return main(all_projects=sc.all, project=sc.name or None)
+    return main(all_projects=sc.all, project=sc.name or None, control=bool(getattr(args, "control", False)))
 
 
 def register(subparsers) -> None:

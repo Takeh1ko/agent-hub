@@ -129,7 +129,10 @@ class Transcript(Screen[None]):
         yield Static("", id="live-head")
         with VerticalScroll(id="live-box"):
             yield Static("", markup=False, id="live-log")
-        yield Footer()
+        from ahub.tui.console import ConsoleApp
+
+        if not isinstance(self.app, ConsoleApp):
+            yield Footer()
 
     def on_mount(self) -> None:
         self.set_interval(self.POLL_S, self.refresh_live)

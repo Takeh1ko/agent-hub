@@ -207,7 +207,6 @@ def failed(what: str, way_out: str = "") -> str:
 
 
 STATUS_STYLE = {"working": "", "success": "green", "waiting": "yellow", "error": "red"}
-ACCENT_USES = ("live-mark", "box-border", "product-name")  # the only three accent uses in the console
 
 
 def elapsed(ms: int) -> str:
