@@ -34,6 +34,15 @@ def fill(store):
     return a, b
 
 
+async def _table_ready(app: TopApp, pilot, want: int = 1) -> None:
+    """The first refresh is built in a worker thread — wait for the rows instead of guessing a pause."""
+    for _ in range(100):
+        if len(app._ids) >= want:
+            return
+        await pilot.pause(0.1)
+    raise AssertionError(f"the table of `ahub top` never got {want} rows")
+
+
 def accepted(store) -> int:
     """A finished (accepted) task — hidden in the current view."""
     tid = store.create_task(project="P", kind="code", title="уже принята")
@@ -134,6 +143,7 @@ async def test_app_transcript_screen_uses_the_width_of_its_pane(tmp_path, store)
     app = TopApp(store=store, projects=[])
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause(0.5)
+        await _table_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
         await pilot.pause(0.3)
@@ -163,6 +173,7 @@ async def test_app_stop_with_confirm(store):
     app = TopApp(store=store, projects=[], control=True)
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await _table_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(a))
         await pilot.press("s")
         await pilot.pause(0.2)
@@ -181,6 +192,7 @@ async def test_app_nudge_message(store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await _table_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(a))
         await pilot.press("m")  # view mode: nothing happens
         await pilot.pause(0.2)
@@ -306,6 +318,7 @@ async def test_app_transcript_screen(tmp_path, store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await _table_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
         await pilot.pause(0.3)
@@ -345,6 +358,7 @@ async def test_transcript_screen_nudges_the_worker(tmp_path, store):
     app = TopApp(store=store, projects=[], control=True)
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await _table_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
         await pilot.pause(0.3)
@@ -369,6 +383,7 @@ async def test_transcript_tail_holds_when_scrolled_up(tmp_path, store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await _table_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=0)
         await pilot.press("t")
         await pilot.pause(0.3)
@@ -477,6 +492,7 @@ async def test_a_group_header_row_shows_the_group_in_the_detail(tmp_path, store)
                                         _project_config(tmp_path / "B", "B")])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await _table_ready(app, pilot)
         assert app._ids[0] == 0  # the first row opens the group of project A
         app.query_one("#tasks").move_cursor(row=0)
         await pilot.pause(0.2)
