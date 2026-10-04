@@ -72,11 +72,13 @@ def test_psutil_live_workers_finds_marked():
     try:
         time.sleep(0.5)
         live = service.live_workers(NOPROC)
-        assert live.get(tid) == s.pid
+        # the scan is machine-wide: another suite (or the real hub) may well have a worker claiming the
+        # same id, so ask "is my pid marked live, and under which id" — not "who owns 987654"
+        assert [k for k, v in live.items() if v == s.pid] == [tid]
     finally:
         s.kill()
         s.wait()
-    assert service.live_workers(NOPROC).get(tid) is None
+    assert s.pid not in service.live_workers(NOPROC).values()  # a dead worker leaves the map
 
 
 def test_psutil_lock_wait_without_holder(tmp_path):
