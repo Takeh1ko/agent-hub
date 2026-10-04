@@ -14,7 +14,9 @@ import sys
 from pathlib import Path
 
 CODE_CHECK_S = 10.0  # how often to compare code (self-update)
-_PROBE = "import ahub.service, ahub.engine, ahub.worker, ahub.cli; from ahub.store import Store; Store()"
+# ahub.tg.run is in the probe for the bot: a merge that breaks only the TG bot must not pass this check either
+_PROBE = ("import ahub.service, ahub.engine, ahub.worker, ahub.cli, ahub.tg.run;"
+          " from ahub.store import Store; Store()")
 
 
 def hub_env() -> dict[str, str]:

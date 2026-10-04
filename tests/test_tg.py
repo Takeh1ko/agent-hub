@@ -607,17 +607,21 @@ async def test_the_bot_stays_on_old_code_that_fails_the_check(store, monkeypatch
 
     async def sleep(s):
         sleeps.append(s)
-        raise asyncio.CancelledError
+        if len(sleeps) > 2:
+            raise asyncio.CancelledError
 
     monkeypatch.setattr(tgrun.asyncio, "sleep", sleep)
     with pytest.raises(asyncio.CancelledError):
         await tgrun.background(FakeBot(), store)
-    assert checks == [1] and sleeps == [tgrun.LOOP_S]
+    # three passes, and the new code was checked once: `code0 = code` remembered it as the code we stay on
+    assert len(sleeps) == 3 and checks == [1] and sleeps == [tgrun.LOOP_S] * 3
 
 
-async def test_the_bot_loop_crash_loop_is_reported_once_and_backs_off(store, monkeypatch):
-    """The bot's loop failed for hours in silence — the same failure in a row is told once, then retried slowly."""
+async def test_the_bot_loop_crash_loop_is_reported_once_and_backs_off(store, monkeypatch, caplog):
+    """The bot's loop failed for hours in silence — the failures are told once, in the log and to the owner
+    (by hand: the pass that delivers alarms is the one that keeps failing), then retried slowly."""
     import asyncio
+    import logging
 
     from ahub import selfupdate
     from ahub.i18n import t
@@ -626,6 +630,56 @@ async def test_the_bot_loop_crash_loop_is_reported_once_and_backs_off(store, mon
 
     # the code check is not what this test is about
     monkeypatch.setattr(selfupdate, "CODE_CHECK_S", 3600.0)
+    passes = []
+    kinds = [TypeError, ValueError]  # a loop that alternates two kinds is still a failing loop
+
+    def boom(*_a, **_kw):
+        passes.append(1)
+        raise kinds[(len(passes) - 1) % len(kinds)]("no such column: task.new_column")
+
+    monkeypatch.setattr(tgrun.comms, "outbox", boom)
+    sleeps = []
+
+    async def sleep(s):
+        sleeps.append(s)
+        if len(sleeps) > tgrun.FAIL_MAX + 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", sleep)
+    core.remember_chat(store, 7)
+    bot = FakeBot()
+    with caplog.at_level(logging.ERROR, logger="ahub.tg"), pytest.raises(asyncio.CancelledError):
+        await tgrun.background(bot, store)
+    assert passes == [1] * (tgrun.FAIL_MAX + 2)
+    assert sleeps == [tgrun.LOOP_S] * (tgrun.FAIL_MAX - 1) + [tgrun.FAIL_BACKOFF_S] * 3
+    alarms = [e for e in store.events() if e.kind == Ev.ALARM.value]
+    assert len(alarms) == 1 and alarms[0].critical
+    assert alarms[0].payload["text"] == t("tg.alarm_loop", err="TypeError: no such column: task.new_column")
+    assert [text for _, text, _ in bot.sent] == [alarms[0].payload["text"]]  # one message, straight to the chat
+    assert comms.alarms_for_tg(store) == []  # and the outbox must not send it a second time
+    once = "failed %d times in a row" % tgrun.FAIL_MAX  # told once in the log — and once to the owner
+    assert len([r for r in caplog.records if once in r.getMessage()]) == 1
+
+
+async def test_a_restart_that_cannot_start_keeps_the_loop(store, monkeypatch):
+    """An exec that cannot start (a fork limit, a busy binary) must not take the loop down: the next pass retries."""
+    import asyncio
+    import os
+
+    from ahub import selfupdate
+    from ahub.tg import run as tgrun
+
+    monkeypatch.setattr(selfupdate, "CODE_CHECK_S", 0.0)
+    prints = iter(["v1", "v2"])
+    monkeypatch.setattr(selfupdate, "code_fingerprint", lambda: next(prints, "v2"))
+    monkeypatch.setattr(selfupdate, "new_code_healthy", lambda: (True, ""))
+    starts = []
+
+    def busy(*_a):
+        starts.append(1)
+        raise OSError("text file busy")
+
+    monkeypatch.setattr(os, "execve", busy)
     passes = []
 
     def boom(*_a, **_kw):
@@ -637,17 +691,52 @@ async def test_the_bot_loop_crash_loop_is_reported_once_and_backs_off(store, mon
 
     async def sleep(s):
         sleeps.append(s)
-        if len(sleeps) > tgrun.FAIL_MAX + 1:
+        if len(sleeps) > 2:
             raise asyncio.CancelledError
 
     monkeypatch.setattr(tgrun.asyncio, "sleep", sleep)
     with pytest.raises(asyncio.CancelledError):
         await tgrun.background(FakeBot(), store)
-    assert passes == [1] * (tgrun.FAIL_MAX + 2)
-    assert sleeps == [tgrun.LOOP_S] * (tgrun.FAIL_MAX - 1) + [tgrun.FAIL_BACKOFF_S] * 3
-    alarms = [e for e in store.events() if e.kind == Ev.ALARM.value]
-    assert len(alarms) == 1 and alarms[0].critical
-    assert alarms[0].payload["text"] == t("tg.alarm_loop", err="TypeError: no such column: task.new_column")
+    assert len(passes) == 3 and len(starts) == 3  # every pass tried, and every pass failed
+
+
+async def test_a_refused_alarm_does_not_kill_the_loop(store, monkeypatch):
+    """Even the alarm write can fail (a store that is broken in a new way): the loop must keep going, and the
+    owner still gets the message in Telegram — the chats are read, not written."""
+    import asyncio
+
+    from ahub import selfupdate
+    from ahub.i18n import t
+    from ahub.tg import run as tgrun
+
+    monkeypatch.setattr(selfupdate, "CODE_CHECK_S", 3600.0)
+    passes = []
+
+    def boom(*_a, **_kw):
+        passes.append(1)
+        raise TypeError("no such column: task.new_column")
+
+    monkeypatch.setattr(tgrun.comms, "outbox", boom)
+
+    def refuse(*_a, **_kw):
+        raise RuntimeError("no such table: event")
+
+    monkeypatch.setattr(tgrun.comms, "raise_alarm", refuse)
+    sleeps = []
+
+    async def sleep(s):
+        sleeps.append(s)
+        if len(sleeps) > tgrun.FAIL_MAX:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", sleep)
+    core.remember_chat(store, 7)
+    bot = FakeBot()
+    with pytest.raises(asyncio.CancelledError):
+        await tgrun.background(bot, store)
+    assert len(passes) == tgrun.FAIL_MAX + 1  # it kept looping
+    assert [text for _, text, _ in bot.sent] == [t("tg.alarm_loop",
+                                                 err="TypeError: no such column: task.new_column")]
 
 
 def test_dispatcher_builds(store):

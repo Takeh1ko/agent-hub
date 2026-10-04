@@ -302,8 +302,11 @@ def test_accepting_with_a_live_owner_process_is_not_an_orphan(store, tmp_path):
 
 
 def test_code_fingerprint_and_health(tmp_path):
+    from ahub import selfupdate
+
     a = service.code_fingerprint()
     assert a == service.code_fingerprint()
+    assert "ahub.tg.run" in selfupdate._PROBE  # the bot restarts on this verdict too, not only the service
     ok, why = service.new_code_healthy()
     assert ok, why
 

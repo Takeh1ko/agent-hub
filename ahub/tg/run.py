@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sqlite3
 import sys
 
 from ahub import comms, config, selfupdate
@@ -66,12 +65,22 @@ async def _send(bot, store: Store, reply: core.Reply) -> list[tuple[int, int]]:
     return sent
 
 
-async def _alarm(store: Store, err: str) -> None:
-    """The owner-visible alarm of a loop that keeps failing — a broken store may refuse it, then: a log line."""
+async def _alarm(bot, store: Store, err: str) -> None:
+    """The owner-visible alarm of a loop that keeps failing: the store first (Claude, `ahub alarms`, the outbox),
+    then the chats by hand — the pass that would deliver it is the one that keeps failing. Nothing here may
+    escape: this runs inside the loop's except, and an exception from it kills the loop for good.
+    """
+    text = _t("tg.alarm_loop", err=err)
+    event = None
     try:
-        await asyncio.to_thread(comms.raise_alarm, store, _t("tg.alarm_loop", err=err), critical=True)
-    except sqlite3.Error as e:
+        event = await asyncio.to_thread(comms.raise_alarm, store, text, critical=True)
+    except Exception as e:
         _log.error("the bot cannot raise its alarm: %s", e)
+    try:
+        if await _send(bot, store, core.Reply(text)) and event is not None:
+            await asyncio.to_thread(comms.mark_tg_sent, store, [event])  # sent by hand — not again by the outbox
+    except Exception as e:
+        _log.error("the bot cannot send its alarm: %s", e)
 
 
 async def background(bot, store: Store) -> None:
@@ -79,7 +88,7 @@ async def background(bot, store: Store) -> None:
     loop = asyncio.get_running_loop()
     code0 = await asyncio.to_thread(selfupdate.code_fingerprint)
     last_code_check = loop.time()
-    fail_kind, fail_n, reported = "", 0, False
+    fail_n, reported = 0, False
     while True:
         try:
             for m in await asyncio.to_thread(comms.outbox, store):
@@ -102,32 +111,31 @@ async def background(bot, store: Store) -> None:
                     name = res.split(":", 1)[1]
                     await _send(bot, store, core.Reply(_t("tg.launch_no_dir", name=name) if name
                                                        else _t("tg.launch_no_dir_hub")))
-            fail_kind, fail_n, reported = "", 0, False
+            fail_n, reported = 0, False
         except Exception as e:
-            kind = type(e).__name__
-            if kind != fail_kind:
-                fail_kind, fail_n, reported = kind, 1, False
-            else:
-                fail_n += 1
+            fail_n += 1  # the kind is in the log and the alarm: a loop that alternates two kinds is still failing
             if fail_n < FAIL_MAX:
-                _log.exception("bot background loop crashed (%d/%d)", fail_n, FAIL_MAX)
-            elif not reported:  # the same failure for minutes: one log line, one alarm, then a slow retry
+                _log.exception("bot background loop crashed (%d/%d: %s)", fail_n, FAIL_MAX, type(e).__name__)
+            elif not reported:  # failing for minutes: one log line, one alarm, then a slow retry
                 reported = True
                 _log.exception("bot background loop failed %d times in a row (%s) — retry in %d s",
-                               fail_n, kind, FAIL_BACKOFF_S)
-                await _alarm(store, f"{kind}: {str(e)[:200]}")
+                               fail_n, type(e).__name__, FAIL_BACKOFF_S)
+                await _alarm(bot, store, f"{type(e).__name__}: {str(e)[:200]}")
         if loop.time() - last_code_check >= selfupdate.CODE_CHECK_S:
             # outside the try, like the service's: a pass that keeps failing is exactly when new code is wanted
             last_code_check = loop.time()
-            code = await asyncio.to_thread(selfupdate.code_fingerprint)
-            if code != code0:  # a merge is in — the new code runs from here, not from the next restart
-                ok, why = await asyncio.to_thread(selfupdate.new_code_healthy)
-                if ok:
-                    _log.info("hub code changed — the bot restarts on it (the messages of this pass are sent)")
-                    selfupdate.restart_self()
-                else:
-                    _log.error("hub code changed but fails check — staying on old: %s", why)
-                    code0 = code  # do not re-check every CODE_CHECK_S; the next change is checked again
+            try:
+                code = await asyncio.to_thread(selfupdate.code_fingerprint)
+                if code != code0:  # a merge is in — the new code runs from here, not from the next restart
+                    ok, why = await asyncio.to_thread(selfupdate.new_code_healthy)
+                    if ok:
+                        _log.info("hub code changed — the bot restarts on it (the messages of this pass are sent)")
+                        selfupdate.restart_self()
+                    else:
+                        _log.error("hub code changed but fails check — staying on old: %s", why)
+                        code0 = code  # do not re-check every CODE_CHECK_S; the next change is checked again
+            except Exception:
+                _log.exception("the bot's code check failed — the next pass tries again")
         await asyncio.sleep(FAIL_BACKOFF_S if reported else LOOP_S)
 
 
