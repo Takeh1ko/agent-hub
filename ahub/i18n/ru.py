@@ -701,6 +701,7 @@ MESSAGES: dict[str, str] = {
     "tg.reply_sent": "ответ на #{qid} передал Claude",
     "tg.reply_closed": "#{qid}: уже отвечено или закрыт",
     "tg.alarm_prefix": "Хаб: ",
+    "tg.alarm_loop": "фоновый цикл бота падает: {err} — повтор каждую минуту",
     "tg.err_no_token": "ошибка: нет токена Telegram — задайте [telegram] token в ~/.config/ahub/config.toml или AHUB_TG_TOKEN",
     "tasks.no_python": "питон проекта не найден: {py}",
     "tasks.pytest_start": "pytest не запустился: {err}",
