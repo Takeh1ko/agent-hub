@@ -82,9 +82,10 @@ def assemble_guidance(project: ProjectConfig, role: str) -> tuple[list[str], str
         exists = False
         if path.is_file():
             try:
-                content = path.read_text(encoding="utf-8")
-                exists = True
-            except OSError:
+                if path.stat().st_size <= REFUSE_BYTES:
+                    content = path.read_text(encoding="utf-8")
+                    exists = True
+            except (OSError, UnicodeDecodeError):
                 pass
         heading = f"## {heading_name}"
         layer = PromptLayer(scope=scope, role=r, path=path, content=content, exists=exists, heading=heading)
@@ -111,7 +112,7 @@ def rules_text(project: ProjectConfig) -> str:
     if p is not None and p.is_file():
         try:
             return p.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             pass
     return DEFAULT_RULES
 
@@ -162,7 +163,7 @@ def _header(task: Task) -> str:
 def scout_delivery() -> str:
     head = report_heading()
     return f"""## How to submit (required; overrides project rules about commits and reports)
-1. Stay in the copy (git worktree); never touch real data or secrets. Change and commit nothing in the project — this is reconnaissance. Create files only in `.ahub/`.
+1. Stay in the copy (git worktree); never touch real data, other databases, secrets (.env, keys, /etc); network only if the task explicitly requires it. Interfaces and names from the task are a contract: do not rename them. Change and commit nothing in the project — this is reconnaissance. Create files only in `.ahub/` (the hub service directory, not in git).
 2. Report — `.ahub/report.md` (<= {REPORT_LIMIT_KB} KB). First section — `{head}`: at most 10 lines, the key
    points needed for a decision. Cite `file:line` for every claim; say what you did not check.
 3. Result — `.ahub/result.json`:
@@ -220,8 +221,8 @@ Need more — do not change, write it in the result notes.
 {tests}
 
 ## How to submit (required)
-1. Stay in the copy (git worktree); never touch real data or secrets. Commit as you go: `git add <paths>` by name (never `-A`/`.`), commit message in {commit_lang}. No uncommitted changes at the end.
-2. Result — `.ahub/result.json`:
+1. Stay in the copy (git worktree); never touch real data, other databases, secrets (.env, keys, /etc); network only if the task explicitly requires it. Interfaces and names from the task are a contract: do not rename them. Commit as you go: `git add <paths>` by name (never `-A`/`.`), commit message in {commit_lang}. No uncommitted changes at the end.
+2. Result — `.ahub/result.json` (the hub service directory is `.ahub/`, not in git):
    {{"summary": "1-3 sentences", "status": "done", "commit": "<HEAD sha>", "files": ["changed files"],
     "tests": {{"cmd": "...", "ok": true, "tail": "last output lines"}}, "notes": "what is not done / open questions"}}
    If you cannot continue (contradiction in the task, no access) — "status": "blocked" and the reason in summary.
@@ -266,8 +267,20 @@ def check_prompts_for_project(project: ProjectConfig | None = None) -> list[Prom
                     path=entry,
                     severity="warning",
                     message=_t("prompts.warn_unknown_file", path=str(entry), known=", ".join(f"{r}.md" for r in ROLES)),
-                    fix="remove or rename",
+                    fix=_t("prompts.fix_unknown_file"),
                 ))
+                continue
+            try:
+                entry.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                issues.append(PromptCheckIssue(
+                    path=entry,
+                    severity="error",
+                    message=_t("prompts.err_decode", path=str(entry)),
+                    fix=_t("prompts.fix_decode"),
+                ))
+                continue
+            except OSError:
                 continue
             try:
                 size = entry.stat().st_size
@@ -278,14 +291,14 @@ def check_prompts_for_project(project: ProjectConfig | None = None) -> list[Prom
                     path=entry,
                     severity="error",
                     message=_t("prompts.err_size", path=str(entry), kb=size / 1024),
-                    fix="trim guidance under 16 KB",
+                    fix=_t("prompts.fix_trim_16kb"),
                 ))
             elif size > WARN_BYTES:
                 issues.append(PromptCheckIssue(
                     path=entry,
                     severity="warning",
                     message=_t("prompts.warn_size", path=str(entry), kb=size / 1024),
-                    fix="trim guidance under 4 KB",
+                    fix=_t("prompts.fix_trim_4kb"),
                 ))
 
     if project is not None and project.rules:
@@ -296,14 +309,14 @@ def check_prompts_for_project(project: ProjectConfig | None = None) -> list[Prom
                 path=cfg_file,
                 severity="hint",
                 message=_t("prompts.legacy_rules_ignored", rules=project.rules),
-                fix="remove rules from .hub.toml",
+                fix=_t("prompts.fix_legacy_ignored"),
             ))
         else:
             issues.append(PromptCheckIssue(
                 path=cfg_file,
                 severity="hint",
                 message=_t("prompts.legacy_rules_hint", rules=project.rules),
-                fix="move to .hub/prompts/all.md",
+                fix=_t("prompts.fix_legacy_rules"),
             ))
 
     return issues

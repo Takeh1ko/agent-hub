@@ -248,6 +248,14 @@ def test_assembly_order_and_headings(tmp_path, monkeypatch):
 
     prompt = prompts.code_prompt(project, task)
 
+    lines = prompt.splitlines()
+    assert "## Global guidance" in lines
+    assert "## Project guidance" in lines
+    assert "## Local guidance" in lines
+    assert "## Allowed files" in lines
+    assert "## Acceptance (must be green)" in lines
+    assert "## How to submit (required)" in lines
+
     # Check headings and content
     assert "## Global guidance\nGLOBAL_ALL_RULE" in prompt
     assert "## Project guidance\nPROJECT_ALL_RULE" in prompt
@@ -367,8 +375,8 @@ def test_review_role_used_for_code_review_and_review_kind(tmp_path, monkeypatch)
 
     assert "PROJECT_REVIEW_RULE" in code_prompt
     assert "PROJECT_CODE_RULE" not in code_prompt
-    assert "PROJECT_ALL_RULE" in code_prompt
-    assert "Stay in the copy (git worktree); never touch real data or secrets" in code_prompt
+    assert "Stay in the copy (git worktree); never touch real data" in code_prompt
+    assert "secrets (.env, keys, /etc)" in code_prompt
     assert code_task.limits.get("prompts") == "built-in + project(all, review)"
     # Built-in submission instructions are at the end
     assert code_prompt.rfind("verdict") > code_prompt.find("PROJECT_REVIEW_RULE")
@@ -380,11 +388,12 @@ def test_review_role_used_for_code_review_and_review_kind(tmp_path, monkeypatch)
 
     assert "PROJECT_REVIEW_RULE" in rev_prompt
     assert "PROJECT_CODE_RULE" not in rev_prompt
-    assert "Stay in the copy (git worktree); never touch real data or secrets" in rev_prompt
+    assert "Stay in the copy (git worktree); never touch real data" in rev_prompt
+    assert "secrets (.env, keys, /etc)" in rev_prompt
     assert rev_task.limits.get("prompts") == "built-in + project(all, review)"
 
 
-def test_check_thresholds(tmp_path, monkeypatch):
+def test_check_thresholds(tmp_path, monkeypatch, capsys):
     """ahub prompts check: warning >4 KB, refusal error >16 KB, unknown file names."""
     monkeypatch.setenv("AHUB_LANG", "en")
     from pathlib import Path
@@ -406,6 +415,7 @@ def test_check_thresholds(tmp_path, monkeypatch):
     assert len(issues_warn) == 1
     assert issues_warn[0].severity == "warning"
     assert "4.0 KB" in issues_warn[0].message
+    assert "trim guidance under 4 KB" in issues_warn[0].fix
 
     # 3. Size > 16 KB error (refusal level)
     write(paths.project_prompts_dir(project.root) / "code.md", "x" * 16385)
@@ -413,6 +423,7 @@ def test_check_thresholds(tmp_path, monkeypatch):
     assert len(issues_err) == 1
     assert issues_err[0].severity == "error"
     assert "16.0 KB" in issues_err[0].message
+    assert "trim guidance under 16 KB" in issues_err[0].fix
 
     # 4. Unknown file in prompts directory -> warning (not refusal error)
     write(paths.project_prompts_dir(project.root) / "code.md", "short")
@@ -432,6 +443,8 @@ def test_check_thresholds(tmp_path, monkeypatch):
     # 5. Size > 16 KB is error: CLI returns 1, doctor fails with ahub prompts check fix
     write(paths.project_prompts_dir(project.root) / "code.md", "x" * 16385)
     assert cli.main(["prompts", "check"]) == 1
+    out_err = capsys.readouterr().out
+    assert "trim guidance under 16 KB" in out_err
     doctor_err = doctor.check_prompts(Path(project.root))
     assert not doctor_err.ok
     assert doctor_err.fix == "ahub prompts check"
@@ -617,36 +630,281 @@ def test_cli_project_flag_before_subcommand(tmp_path, monkeypatch, capsys):
     assert cli.main(["prompts", "--project", "non_existent_project_xyz", "check"]) == 2
 
 
-def test_rework_fresh_task_keeps_no_rework_notes(tmp_path):
-    """A reworked task in a fresh session pops rework_notes and does not restore it on prompt recording."""
-    from ahub import prompts
+def test_end_to_end_code_task_records_prompts(tmp_path):
+    """An end-to-end code task with the fake provider records prompts in limits and views."""
+    from ahub import paths, tasks, views
     from ahub.engine import Engine
+    from ahub.model import Kind
     from ahub.store import Store
+    from tests.conftest import write
+    from tests.enginekit import install_fake, make_project
+
+    store = Store()
+    project = make_project(tmp_path)
+    write(paths.project_prompts_dir(project.root) / "code.md", "CODE_STYLE_GUIDANCE")
+
+    def work_step(session="ses_code"):
+        return {
+            "session": session,
+            "steps": [
+                {"write": {"path": "core/b.py", "text": "Y = 2\n"}},
+                {"git_commit": "feat: feature"},
+                {"result": {"summary": "implemented", "files": ["core/b.py"]}},
+                {"event": {"type": "text", "text": "готово"}},
+            ],
+        }
+
+    install_fake(store, [work_step()])
+    t = tasks.create(
+        store,
+        tasks.TaskSpec(
+            project="P",
+            kind=Kind.CODE,
+            title="implement feature",
+            model="fake",
+            paths=["core/**"],
+            accept=["tests/test_a.py::test_x"],
+            review_level=0,
+        ),
+        project,
+        collect=False,
+    )
+
+    Engine(store, project, t.id, sleep=lambda s: None).run()
+
+    task = store.get_task(t.id)
+    assert task.limits.get("prompts") == "built-in + project(code)"
+    card = views.task_text(store, task)
+    assert "prompts: built-in + project(code)" in card
+
+
+def test_end_to_end_review_task_records_prompts(tmp_path):
+    """An end-to-end review task with the fake provider records prompts in limits and views."""
+    import json
+    import subprocess
+    from pathlib import Path
+
+    from ahub import paths, tasks, views
+    from ahub.engine import Engine
+    from ahub.model import Kind
+    from ahub.store import Store
+    from tests.conftest import write
+    from tests.enginekit import git, install_fake, make_project
+
+    def git_out(cwd, *args):
+        return subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True).stdout.strip()
+
+    store = Store()
+    project = make_project(tmp_path)
+    root = project.root
+
+    # Prepare branch with commit to review
+    git(root, "checkout", "-q", "-b", "feature")
+    (Path(root) / "core" / "b.py").write_text("Y = 2\n", encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "фича")
+    sha = git_out(root, "rev-parse", "HEAD")
+    git(root, "checkout", "-q", project.work_branch)
+
+    write(paths.project_prompts_dir(project.root) / "review.md", "REVIEW_GUIDANCE")
+
+    verdict_body = {"verdict": "approve", "summary": "looks good", "findings": []}
+    review_step = {
+        "session": "ses_rev",
+        "steps": [
+            {"write": {"path": ".ahub/review_r1_fake.json", "text": json.dumps(verdict_body)}},
+            {"event": {"type": "text", "text": "готово"}},
+        ],
+    }
+
+    install_fake(store, [review_step])
+    t = tasks.create(
+        store,
+        tasks.TaskSpec(
+            project="P",
+            kind=Kind.REVIEW,
+            title="review feature branch",
+            model="fake",
+            review_input=sha,
+        ),
+        project,
+        collect=False,
+    )
+
+    Engine(store, project, t.id, sleep=lambda s: None).run()
+
+    task = store.get_task(t.id)
+    assert task.limits.get("prompts") == "built-in + project(review)"
+    card = views.task_text(store, task)
+    assert "prompts: built-in + project(review)" in card
+
+
+def test_end_to_end_rework_fresh_task_keeps_no_rework_notes(tmp_path):
+    """An end-to-end rework with fresh_session pops rework_notes and does not restore it."""
+    from ahub import tasks
+    from ahub.engine import Engine
+    from ahub.model import Kind
+    from ahub.store import Store
+    from tests.enginekit import install_fake, make_project
+
+    store = Store()
+    project = make_project(tmp_path)
+
+    def work_step(session="ses_rework"):
+        return {
+            "session": session,
+            "steps": [
+                {"write": {"path": "core/b.py", "text": "Y = 2\n"}},
+                {"git_commit": "feat: rework fix"},
+                {"result": {"summary": "fixed", "files": ["core/b.py"]}},
+                {"event": {"type": "text", "text": "готово"}},
+            ],
+        }
+
+    install_fake(store, [work_step()])
+    t = tasks.create(
+        store,
+        tasks.TaskSpec(
+            project="P",
+            kind=Kind.CODE,
+            title="rework task",
+            model="fake",
+            paths=["core/**"],
+            accept=["tests/test_a.py::test_x"],
+            review_level=0,
+        ),
+        project,
+        collect=False,
+    )
+    lim = dict(store.get_task(t.id).limits)
+    lim["rework_notes"] = "PLEASE FIX BUG"
+    lim["fresh_session"] = True
+    store.update_task(t.id, limits=lim)
+
+    Engine(store, project, t.id, sleep=lambda s: None).run()
+
+    task = store.get_task(t.id)
+    assert "rework_notes" not in task.limits
+    assert "fresh_session" not in task.limits
+    assert task.limits.get("prompts") == "built-in"
+
+
+def test_non_utf8_guidance_handled(tmp_path, monkeypatch, capsys):
+    """Non-UTF-8 guidance file is skipped in assembly, reported as error in check and doctor."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
+    from pathlib import Path
+
+    from ahub import cli, doctor, paths, prompts
+    from ahub.store import Store
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    write(Path(project.root) / ".hub.toml", 'schema_version = 2\nname = "P"\n')
+    store = Store()
+    tid = store.create_task(project="P", kind="code", title="task")
+    store.update_task(tid, limits={"paths": ["core/**"], "accept": []})
+    task = store.get_task(tid)
+
+    bad_file = paths.project_prompts_dir(project.root) / "code.md"
+    bad_file.parent.mkdir(parents=True, exist_ok=True)
+    bad_file.write_bytes(b"\xcf\xf0\xe8\xe2\xe5\xf2")  # cp1251 "Привет", invalid UTF-8
+
+    # 1. code_prompt does not crash; file is ignored
+    prompt = prompts.code_prompt(project, task)
+    assert "## Project guidance" not in prompt
+    assert task.limits.get("prompts") == "built-in"
+
+    # 2. rules_text does not crash
+    assert prompts.rules_text(project) == prompts.DEFAULT_RULES
+
+    # 3. check_prompts_for_project flags it as error
+    issues = prompts.check_prompts_for_project(project)
+    errors = [i for i in issues if i.severity == "error"]
+    assert len(errors) == 1
+    assert "code.md" in str(errors[0].path)
+    assert "UTF-8" in errors[0].message
+    assert "save file as UTF-8" in errors[0].fix
+
+    # 4. ahub prompts check returns 1 and prints fix
+    monkeypatch.chdir(project.root)
+    assert cli.main(["prompts", "check"]) == 1
+    out = capsys.readouterr().out
+    assert "save file as UTF-8" in out
+
+    # 5. ahub doctor check_prompts fails
+    doc_check = doctor.check_prompts(Path(project.root))
+    assert not doc_check.ok
+    assert "code.md" in doc_check.detail
+
+
+def test_routine_task_uses_routine_guidance(tmp_path, monkeypatch):
+    """A routine kind task loads routine.md guidance, not code.md, and records project(routine)."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub import paths, prompts
+    from ahub.model import Kind
+    from ahub.store import Store
+    from tests.conftest import write
     from tests.enginekit import make_project
 
     project = make_project(tmp_path)
     store = Store()
-    tid = store.create_task(project="P", kind="code", title="rework feature")
-    store.update_task(tid, limits={"paths": ["src/**"], "rework_notes": "PLEASE FIX BUG", "fresh_session": True})
+    write(paths.project_prompts_dir(project.root) / "routine.md", "ROUTINE_SPECIFIC_RULE")
+    write(paths.project_prompts_dir(project.root) / "code.md", "CODE_SPECIFIC_RULE")
+
+    tid = store.create_task(project="P", kind=Kind.ROUTINE, title="routine task")
+    store.update_task(tid, limits={"paths": ["core/**"], "accept": []})
     task = store.get_task(tid)
 
-    engine = Engine(store, project, tid)
-    notes = str(task.limits.get("rework_notes") or "")
-    fresh = bool(task.limits.get("fresh_session"))
-    assert notes == "PLEASE FIX BUG"
-    assert fresh is True
+    prompt = prompts.code_prompt(project, task)
+    assert "ROUTINE_SPECIFIC_RULE" in prompt
+    assert "CODE_SPECIFIC_RULE" not in prompt
+    assert task.limits.get("prompts") == "built-in + project(routine)"
 
-    # Simulate clearing rework notes and fresh session as in engine._code
-    task.limits.pop("rework_notes", None)
-    lim = dict(engine.task().limits)
-    lim.pop("rework_notes", None)
-    store.update_task(task.id, limits=lim)
 
-    prompts.code_prompt(project, task)
-    engine._record_prompts(task)
+def test_check_prompts_scans_local_prompts_dir(tmp_path, monkeypatch):
+    """check_prompts_for_project scans local prompts dir for unknown files and size limits."""
+    from ahub import paths, prompts
+    from tests.conftest import write
+    from tests.enginekit import make_project
 
-    updated = store.get_task(tid)
-    assert "rework_notes" not in updated.limits
-    assert "prompts" in updated.limits
-    assert updated.limits["prompts"] == "built-in"
+    project = make_project(tmp_path)
+    local_dir = paths.local_prompts_dir(project.name)
+
+    write(local_dir / "unknown.txt", "some notes")
+    write(local_dir / "all.md", "x" * 16385)
+
+    issues = prompts.check_prompts_for_project(project)
+    local_issues = [i for i in issues if str(local_dir) in str(i.path)]
+    assert len(local_issues) == 2
+
+    unknown_issue = next(i for i in local_issues if "unknown.txt" in str(i.path))
+    assert unknown_issue.severity == "warning"
+
+    size_issue = next(i for i in local_issues if "all.md" in str(i.path))
+    assert size_issue.severity == "error"
+
+
+def test_refuse_bytes_assemble_guidance(tmp_path):
+    """Guidance files > 16 KB are refused and treated as missing in assemble_guidance."""
+    from ahub import paths, prompts
+    from ahub.store import Store
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    store = Store()
+    write(paths.project_prompts_dir(project.root) / "code.md", "x" * 16385)
+
+    tid = store.create_task(project="P", kind="code", title="task")
+    store.update_task(tid, limits={"paths": ["core/**"], "accept": []})
+    task = store.get_task(tid)
+
+    prompt = prompts.code_prompt(project, task)
+    assert "## Project guidance" not in prompt
+    assert task.limits.get("prompts") == "built-in"
+
 

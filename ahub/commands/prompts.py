@@ -228,17 +228,17 @@ def cmd_check(args) -> int:
         for i in issues:
             if i.severity == "error":
                 mark = ui.styled("✗", "red")
-                out.append(f"  {mark} {i.message}")
             elif i.severity == "warning":
                 mark = ui.styled("!", "yellow")
-                out.append(f"  {mark} {i.message}")
             else:
                 mark = ui.styled("→", "dim")
-                out.append(f"  {mark} {i.message}")
+            out.append(f"  {mark} {i.message}")
+            if i.fix:
+                out.append(ui.hint(i.fix, indent=4) if ui.colour_on() else f"    → {i.fix}")
 
     data = {
         "ok": not has_errors,
-        "issues": [{"path": str(i.path) if i.path else None, "severity": i.severity, "message": i.message}
+        "issues": [{"path": str(i.path) if i.path else None, "severity": i.severity, "message": i.message, "fix": i.fix}
                    for i in issues],
     }
     emit(args, data, "\n".join(out))

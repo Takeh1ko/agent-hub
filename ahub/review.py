@@ -94,7 +94,8 @@ def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResul
         task.limits["prompts"] = summary
     sections = [*guidance_sections,
                 f"# Review of {task.label}: {task.title}\nYou are a reviewer in a fresh session; you have not seen "
-                "the worker's work. Stay in the copy (git worktree); never touch real data or secrets. "
+                "the worker's work. Stay in the copy (git worktree); never touch real data, other databases, "
+                "secrets (.env, keys, /etc); network only if the task explicitly requires it. "
                 "Do not change or commit project files.",
                 "## Task\n" + strip_arbiter(task.spec.strip() or "(empty description)")]
     if task.kind is Kind.REVIEW:

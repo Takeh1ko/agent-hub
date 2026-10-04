@@ -660,8 +660,11 @@ def check_prompts(root: Path | None = None) -> Check:
     project = None
     try:
         project = config.load_project(root or Path.cwd())
-    except Exception:
+    except FileNotFoundError:
         pass
+    except config.ConfigError as e:
+        src = e.source or str((root or Path.cwd()) / config.PROJECT_FILE)
+        return Check("prompts", False, str(e), _t("doctor.config_fix", source=src))
     issues = prompts.check_prompts_for_project(project)
     errors = [i for i in issues if i.severity == "error"]
     warnings = [i for i in issues if i.severity != "error"]

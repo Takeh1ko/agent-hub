@@ -54,6 +54,15 @@ def test_config_ok_and_bad():
     assert c.ok is False and c.detail and c.fix
 
 
+def test_check_prompts_broken_hub_toml(tmp_path):
+    write(tmp_path / ".hub.toml", "this is not valid toml = [[{\n")
+    c = doctor.check_prompts(tmp_path)
+    assert c.name == "prompts"
+    assert c.ok is False
+    assert c.fix
+    assert ".hub.toml" in c.fix
+
+
 def test_service_alive_dead_unit(monkeypatch):
     c = doctor.check_service()
     assert c.ok is False and "install" in c.fix  # no heartbeat, no unit in tmp HOME
