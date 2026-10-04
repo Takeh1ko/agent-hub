@@ -44,7 +44,7 @@ def cmd_status(args) -> int:
             rows.append([f"T{tid}", str(pid), views.state_word(tsk.state)])
     if rows:
         out.append(ui.section(t("service.sec_tasks")))
-        out.append(ui.table([t("views.col_id"), "pid", t("views.col_state")], rows,
+        out.append(ui.table([t("views.col_id"), t("service.col_pid"), t("views.col_state")], rows,
                             max_width=[6, 7, 16], indent=2))
     if queued:
         out.append(ui.section(t("service.sec_queue")))
@@ -368,7 +368,7 @@ def cmd_stop(args) -> int:
     while procs.alive(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
     if procs.alive(pid):
-        raise CliError(t("err.service_not_stopped", pid=pid), hint=t("service.next_down"))
+        raise CliError(t("err.service_not_stopped", pid=pid), hint=t("hint.kill_pid", pid=pid))
     pf.unlink(missing_ok=True)
     emit(args, {"pid": pid, "stopped": True},
          t("service.stopped", pid=pid) + "\n"

@@ -58,10 +58,10 @@ def _scope(*, all_projects: bool, project: str | None) -> scope.Scope:
     return scope.of_dir(Path.cwd())
 
 
-def _suggestions(*keys: str) -> str:
+def _suggestions(*keys: str, w: int | None = None) -> str:
     """The 'Next' block: three or four commands — one dim line on a terminal, one bullet each in a pipe."""
     words = [_t(k) for k in keys]
-    return ui.styled(" · ".join(words), "dim") if ui.colour_on() else ui.bullets(words, indent=2)
+    return ui.styled(" · ".join(words), "dim") if ui.colour_on() else ui.bullets(words, indent=2, w=w)
 
 
 def text(*, w: int | None = None, all_projects: bool = False, project: str | None = None) -> str:
@@ -79,9 +79,9 @@ def text(*, w: int | None = None, all_projects: bool = False, project: str | Non
     items = ui.colour_on()
     out = [_head(_project_here(), alive, w)] if items else [_line_head(_project_here(), alive)]
     if not _configured():
-        out.append(ui.item(_t("home.unconfigured"), [_t("home.setup_hint")]) if items
-                   else ui.para(_t("home.unconfigured") + " — " + _t("home.setup_hint"), indent=2, w=w))
-        out.append(_suggestions("home.next_setup", "home.next_doctor", "home.next_models"))
+        out.append(ui.item(_t("home.unconfigured")) if items
+                   else ui.para(_t("home.unconfigured"), indent=2, w=w))
+        out.append(_suggestions("home.next_setup", "home.next_doctor", "home.next_models", w=w))
         return "\n".join(out)
 
     live = live_workers()
@@ -127,7 +127,7 @@ def text(*, w: int | None = None, all_projects: bool = False, project: str | Non
                              indent=2, w=w))  # the same "Next" line as ahub status T<id>
     if not items:
         out.append(ui.section(_t("home.sec_next")))
-    out.append(_suggestions(*_next_keys(alive, waiting)))
+    out.append(_suggestions(*_next_keys(alive, waiting), w=w))
     return "\n".join(out)
 
 
@@ -175,15 +175,9 @@ def _task_rows(tasks: list, live: dict[int, int], pulses: dict, now: int) -> lis
     for task in tasks:
         pl = pulses.get(task.id)
         mark = ui.badge(pl.mark, "", pl.state) if pl else ("⚫" if task.id not in live else "")
-        rows.append([mark, task.label, task.kind.value, task.title, _state_cell(task),
-                     task.executor or "—", views._age(task.updated_at, now)])
+        rows.append([mark, task.label, task.kind.value, task.title, views.state_cell(task),
+                     task.executor or "—", views.age(task.updated_at, now)])
     return rows
-
-
-def _state_cell(task) -> str:
-    if task.state in ACTIVE and task.phase:
-        return views.PHASE_WORDS.get(task.phase, task.phase)
-    return views.state_word(task.state)
 
 
 def _next_keys(alive: bool, waiting: list) -> tuple[str, ...]:

@@ -13,12 +13,13 @@ MAX_POLL_FAILURES failures in a row the stream gives up with one line and exit c
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass
 
 from ahub import comms, events, log, scope, ui, views
-from ahub.cliutil import CliError, add_scope_args, emit
+from ahub.cliutil import CliError, add_project_arg, add_scope_args, emit
 from ahub.store import Store
 from ahub.time import now_ms
 from ahub.time import parse_duration as _parse_duration
@@ -89,7 +90,7 @@ def cmd_wait(args) -> int:
         try:
             got = events.wait(store, timeout_s=left, scope=sc, who=args.who)
             break
-        except Exception as e:  # a broken poll must not kill the wait — until the cap says it is hopeless
+        except (sqlite3.Error, OSError) as e:  # a broken poll must not kill the wait; the cap decides
             line = fails.note(e)
             if line:
                 print(line, file=sys.stderr, flush=True)
@@ -131,7 +132,7 @@ def cmd_watch(args) -> int:
             time.sleep(args.poll)
         except (KeyboardInterrupt, BrokenPipeError):
             return 0
-        except Exception as e:  # the Monitor must survive a broken turn, not die with it
+        except (sqlite3.Error, OSError) as e:  # the Monitor must survive a broken turn, not die with it
             line = fails.note(e)
             if line:
                 print(line, file=sys.stderr, flush=True)
@@ -195,6 +196,8 @@ def cmd_inbox(args) -> int:
 def cmd_say(args) -> int:
     from ahub.i18n import t
 
+    if getattr(args, "all", False):
+        raise CliError(t("err.scope_all_say"), hint=t("hint.say_project"))
     sc = scope.resolve(args)
     mid = comms.say(Store(), args.text, project=sc.name)
     emit(args, {"id": mid, "project": sc.name}, t("comms.sent") if mid else "")
@@ -204,6 +207,8 @@ def cmd_say(args) -> int:
 def cmd_ask(args) -> int:
     from ahub.i18n import t
 
+    if getattr(args, "all", False):
+        raise CliError(t("err.scope_all_ask"), hint=t("hint.ask_project"))
     opts = [o.strip() for o in (args.options or "").split(",") if o.strip()]
     tid = None
     if args.task:
@@ -240,7 +245,7 @@ def cmd_alarms(args) -> int:
         return 0
     now = now_ms()
     head = [t("alarms.col_id"), t("alarms.col_age"), t("alarms.col_what")]
-    body = [[f"#{e.id}", views._age(e.ts, now), line] for e, line in zip(al, events.lines(store, al), strict=True)]
+    body = [[f"#{e.id}", views.age(e.ts, now), line] for e, line in zip(al, events.lines(store, al), strict=True)]
     out = [ui.table(head, body, max_width=[6, 8, None], indent=2)]
     if args.ack:  # the result of the command, not a suggestion for the next one
         events.ack(store, [e.id for e in al], scope=sc)
@@ -276,13 +281,13 @@ def register(subparsers) -> None:
     i.set_defaults(func=cmd_inbox)
     s = subparsers.add_parser("say", help=t("help.say"))
     s.add_argument("text")
-    add_scope_args(s)
+    add_project_arg(s)
     s.set_defaults(func=cmd_say)
     q = subparsers.add_parser("ask", help=t("help.ask"))
     q.add_argument("text")
     q.add_argument("--options")
     q.add_argument("--task")
-    add_scope_args(q)
+    add_project_arg(q)
     q.set_defaults(func=cmd_ask)
     qs = subparsers.add_parser("questions", help=t("help.questions"))
     qs.add_argument("id", nargs="?", help=t("help.row_id"))

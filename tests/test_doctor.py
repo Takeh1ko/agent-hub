@@ -592,3 +592,27 @@ def test_cli_codes_and_json(capsys, monkeypatch):
     assert cli.main(["doctor"]) == 1
     out = capsys.readouterr().out
     assert "\u2717" in out and "\u2192" in out and "fix it" in out
+
+
+def test_every_check_lands_in_an_area(monkeypatch):
+    """A new check in run_all must be named in _AREAS — otherwise it drops into the plain "Other" block."""
+    from ahub.commands import doctor as doctorcmd
+    from ahub.i18n import t
+
+    monkeypatch.setattr(doctor, "check_git", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    named = {name for _title, names in doctorcmd._AREAS for name in names}
+    checks = doctor.run_all()
+    assert {c.name for c in checks} == named  # no check is unnamed, no area names a check that is gone
+    # and the fallback block stays empty on a real screen
+    assert t("doctor.area_other") not in doctorcmd.text(checks)
+
+
+def test_probe_detail_strips_the_alias_prefix(monkeypatch):
+    """One rule for both probe screens (models check, the setup wizard): the cell has the alias already."""
+    from ahub.commands import models as modelscmd
+
+    assert doctor.probe_detail("spark: ответил за 2 с", "spark") == "ответил за 2 с"
+    assert doctor.probe_detail("нет ответа", "spark") == "нет ответа"
+    assert doctor.probe_detail("", "spark") == ""
+    monkeypatch.setattr(doctor, "probe_detail", lambda detail, alias: "MARK")
+    assert modelscmd._body("spark: ответил", "spark") == "MARK"  # `ahub models check` uses that one function

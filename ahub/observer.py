@@ -34,6 +34,10 @@ WATCHDOG_MS = 15 * 60_000
 QUEUE_STUCK_MS = 10 * 60_000
 UNACKED_MS = 20 * 60_000
 HEARTBEAT_STALE_MS = 60_000
+# the verdict vocabulary of the model's answer (TRIAGE_PROMPT asks for exactly these words) and the two
+# of them that raise an alarm event — a wire protocol with the model, not text to translate
+VERDICTS: tuple[str, ...] = ("ok", "false_alarm", "alarm", "critical")
+ALARMING: frozenset[str] = frozenset({"alarm", "critical"})
 LAST_QUICK = "observer_last_quick"
 LAST_DEEP = "observer_last_deep"
 SEEN_PREFIX = "observer_seen:"
@@ -291,7 +295,7 @@ def triage(store: Store, sus: list[Suspicion], *, deep: bool = False, now: int |
     data = extract_json(r.final_text) or {}
     cost = (r.usage.cost_go or 0.0) if r.usage else 0.0
     verdict = str(data.get("verdict", "")).strip()
-    if not r.ok or verdict not in ("ok", "false_alarm", "alarm", "critical"):
+    if not r.ok or verdict not in VERDICTS:
         return {"verdict": "unknown", "summary": _t("observer.bad_model", outcome=r.outcome.value,
                                                                           err=r.error[:100]),
                 "action": "", "cost_go": cost}
@@ -333,7 +337,7 @@ def cycle(store: Store, *, now: int | None = None, deep_due: bool | None = None,
     kind = "deep" if deep else "triage"
     _report(store, kind, res["verdict"], res["summary"], {"suspicions": [s.text for s in fresh],
                                                           "action": res["action"]}, res["cost_go"], ts)
-    if res["verdict"] in ("alarm", "critical"):
+    if res["verdict"] in ALARMING:
         text = res["summary"] + (f" → {res['action']}" if res["action"] else "")
         comms.raise_alarm(store, text[:400], critical=res["verdict"] == "critical",
                           details={"suspicions": [s.text for s in fresh][:5]})

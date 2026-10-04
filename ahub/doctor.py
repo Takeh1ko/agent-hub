@@ -476,6 +476,12 @@ def probe_none_warning(aliases) -> str:
     return _t("doctor.probe_none", tried=", ".join(aliases), fix=_t("doctor.probe_fix"))
 
 
+def probe_detail(detail, alias: str) -> str:
+    """The probe detail without the alias it repeats in its own cell ("spark: …" → "…")."""
+    text = str(detail or "")
+    return text[len(alias) + 2:] if text.startswith(f"{alias}: ") else text
+
+
 def _free_alias(store) -> str:
     """The free alias to offer (the first candidate) — no live request: hints and questions."""
     cands = free_candidates(store)
@@ -701,6 +707,7 @@ def run_all(root: Path | None = None, step: Callable[[], None] | None = None) ->
 __all__ = ["Check", "ProviderState", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_WIZARD_S", "PROBE_PROMPT",
            "auth_providers", "auth_file_path", "has_go_login", "run_all", "probe_model", "probing_enabled",
            "pick_free", "free_candidates", "probe_models", "recommend_model", "probe_none_warning",
+           "probe_detail",
            "provider_states", "provider_state", "provider_line", "install_hint",
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
            "check_opencode_health", "check_opencode_auth", "check_agy", "check_codex", "check_models",

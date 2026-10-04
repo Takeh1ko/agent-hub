@@ -31,7 +31,7 @@ def cmd_providers(args) -> int:
     for state in doctor.provider_states():
         aliases = [e.alias for e in registry.models(store) if e.provider == state.name]
         rows.append((_cells(state, state.name not in off), state, aliases))
-    head = t("providers.head").split()
+    head = [t(f"providers.col_{c}") for c in ("name", "found", "login", "enabled")]
     table = ui.table(head, [cells for cells, _s, _a in rows], max_width=None).split("\n")
     # the table is a table; the models of a provider, its note and its install/login hint are text under
     # its row — all of them, wrapped (a cell would be clipped at the end of a long list)
@@ -53,14 +53,13 @@ def cmd_providers(args) -> int:
 
 def cmd_switch(args, on: bool) -> int:
     from ahub import providers as provider_mod
-    from ahub.commands.setup import set_provider_enabled
     from ahub.i18n import t
 
     name = args.name
     known = provider_mod.names()
     if name not in known:
         raise CliError(t("err.providers_unknown", name=name, known=", ".join(known)))
-    set_provider_enabled(name, on)
+    registry.set_provider_enabled(name, on)
     state = t("providers.enabled_on") if on else t("providers.enabled_off")
     nxt = t("hint.models") if on else t("hint.status")
     emit(args, {"ok": True, "name": name, "enabled": on},

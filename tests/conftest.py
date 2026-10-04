@@ -52,21 +52,28 @@ def _real_db_untouched():
         finally:
             con.close()
 
+    def leaked_p(after_id: int) -> int:
+        """Test rows of the fake project 'P' written to the live hub while we ran (0 — cannot read it)."""
+        if not real.exists():
+            return 0
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{real}?mode=ro", uri=True, timeout=5)
+        try:
+            return con.execute("SELECT COUNT(*) FROM task WHERE project='P' AND id > ?",
+                               (after_id,)).fetchone()[0]
+        except sqlite3.Error:  # a locked live database is doctor/speak, not a failed guard
+            return 0
+        finally:
+            con.close()
+
     before = counts()
     yield
     after = counts()
     if before is not None and after is not None:
         # the live hub may have added rows of its own while we ran — tests only write to tmp; make sure
         # no test row leaked out (fake project "P")
-        import sqlite3
-
-        con = sqlite3.connect(f"file:{real}?mode=ro", uri=True, timeout=5)
-        try:
-            leaked = con.execute("SELECT COUNT(*) FROM task WHERE project='P' AND id > ?",
-                                 (before[0],)).fetchone()[0]
-        finally:
-            con.close()
-        assert leaked == 0, "тесты записали задачи в боевую базу хаба"
+        assert leaked_p(before[0]) == 0, "тесты записали задачи в боевую базу хаба"
 
 
 def write(path, text: str):

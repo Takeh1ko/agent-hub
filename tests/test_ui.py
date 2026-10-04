@@ -98,6 +98,16 @@ def test_table_ellipsis_only_in_a_cell():
     assert all(len(ln) <= 30 for ln in out.split("\n"))
 
 
+def test_table_tolerates_short_head():
+    """A head with fewer columns than the rows does not raise IndexError."""
+    head = ["col1", "col2"]
+    rows = [["a", "b", "c", "d"]]
+    out = ui.table(head, rows)
+    lines = out.split("\n")
+    assert lines[0].startswith("col1  col2")
+    assert lines[1] == "a     b     c  d"
+
+
 def test_fit_cuts_at_a_sentence_and_points_to_the_rest():
     first = "The wizard now asks for every provider and probes its models once before saving anything."
     text = first + " " + "filler words here and there " * 20
@@ -496,9 +506,8 @@ def test_home_screen_tty_snapshot(tmp_path, monkeypatch):
     assert lines[0] == "\x1b[2m╭───────────────────────────────────────╮\x1b[0m"
     assert lines[1] == f"│ \x1b[38;5;208m✻ ahub\x1b[0m \x1b[2m{ahub.__version__} · demo · service stopped\x1b[0m │"
     assert lines[2] == "\x1b[2m╰───────────────────────────────────────╯\x1b[0m"
-    assert lines[3] == "\x1b[38;5;208m⏺\x1b[0m the hub is not configured yet"
-    assert lines[4] == "  \x1b[2m⎿\x1b[0m \x1b[2mRun `ahub setup` to get started\x1b[0m"
-    assert lines[5] == "\x1b[2mahub setup · ahub doctor · ahub models\x1b[0m"
+    assert lines[3] == "\x1b[38;5;208m⏺\x1b[0m the hub is not configured yet — run `ahub setup` to get started"
+    assert lines[4] == "\x1b[2mahub setup · ahub doctor · ahub models\x1b[0m"
 
 
 def test_action_result_and_error_tty(monkeypatch):

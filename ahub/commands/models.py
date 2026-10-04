@@ -150,8 +150,9 @@ def cmd_check(args) -> int:
 
 def _body(detail: str, alias: str) -> str:
     """The probe detail without the alias it repeats in its own cell."""
-    text = str(detail or "")
-    return text[len(alias) + 2:] if text.startswith(f"{alias}: ") else text
+    from ahub import doctor
+
+    return doctor.probe_detail(detail, alias)
 
 
 def cmd_enable(args, on: bool) -> int:

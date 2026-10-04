@@ -255,6 +255,23 @@ def test_watch_counts_failures_again_after_a_working_poll(env, capsys, monkeypat
         "watch: OperationalError: database is locked"] * 2  # one line per streak, not per poll
 
 
+def test_wait_and_watch_do_not_catch_programmer_defects(env, monkeypatch):
+    """TypeError/AttributeError in poll is a code defect, not a transient DB error — raises immediately."""
+    def fake_wait(*a, **kw):
+        raise TypeError("internal bug")
+
+    monkeypatch.setattr(events, "wait", fake_wait)
+    with pytest.raises(TypeError, match="internal bug"):
+        cli.main(["wait", "--timeout", "1s"])
+
+    def fake_watch(*a, **kw):
+        raise AttributeError("another bug")
+
+    monkeypatch.setattr(events, "ready_batch", fake_watch)
+    with pytest.raises(AttributeError, match="another bug"):
+        cli.main(["watch", "--poll", "0"])
+
+
 def test_say_ask_answer_alarms(env, capsys):
     store, _ = env
     assert ahub(capsys, "say", "T12 готова, смотрю")[1] == "отправлено владельцу"
@@ -284,6 +301,7 @@ def test_say_ask_answer_alarms(env, capsys):
     rc, out, _ = ahub(capsys, "alarms", "--ack")
     assert rc == 0 and out.splitlines()[-1] == "2 тревоги отмечены прочитанными"
     assert ahub(capsys, "alarms")[1] == "тревог нет"
+    assert "codex отвечает медленно" in ahub(capsys, "alarms", "--acked")[1]
 
 
 LONG_OWNER = ("Я тебе ставил конкретные цели на прошлой неделе, а ты сделал вид, что ничего не было, и я хочу "

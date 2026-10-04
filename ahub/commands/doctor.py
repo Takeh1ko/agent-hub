@@ -2,7 +2,7 @@
 
 The checks live in ahub/doctor.py; this module draws them: one section per area, the ✓/✗/– marks
 in a column of their own, and the fix of a failed check indented right under it. `ahub setup` prints the
-same list as its last step (_text).
+same list as its last step (text).
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def _lines(checks: list[doctor.Check], w: int | None) -> list[str]:
     return out
 
 
-def _text(checks: list[doctor.Check], w: int | None = None) -> str:
+def text(checks: list[doctor.Check], w: int | None = None) -> str:
     return "\n".join(_lines(checks, w))
 
 
@@ -73,7 +73,7 @@ def cmd_doctor(args) -> int:
     with ui.Live(t("doctor.checking")) as p:
         checks = doctor.run_all(step=p.step)
     data = [asdict(c) for c in checks]
-    emit(args, {"checks": data}, _text(checks))
+    emit(args, {"checks": data}, text(checks))
     return 1 if any(c.ok is False for c in checks) else 0
 
 
