@@ -82,36 +82,109 @@ def _safe(widget: str, fn) -> str:
 
 
 def status_of(task: Task) -> str:
-    """Console status bucket for the ⏺ colour: working/success/waiting/error."""
+    """Console status bucket for the ⏺ colour: working/queued/waiting/error/stopped.
+
+    White (no style) for active work, dim for queued/stopped, yellow for waiting-for-you,
+    red for error/dead. Green is only for a just-finished success line in the event
+    transcript, never for a task block.
+    """
     if task.state is State.ERROR:
         return "error"
+    if task.state is State.STOPPED:
+        return "stopped"
+    if task.state is State.QUEUED:
+        return "queued"
     if task.state in WAITING_DECISION:
         return "waiting"
-    if task.state in ACTIVE or task.state is State.QUEUED:
-        return "working"
-    return "success"
+    return "working"
 
 
-def task_lines(task: Task, pl, now: int, width: int) -> list[str]:
+def _stage_word(task: Task) -> str:
+    """The stage in plain words for the ⎿ line: never a raw tool/phase name like "bash"."""
+    if task.state is State.ERROR:
+        return _t("console.stage_error")
+    if task.state is State.STOPPED:
+        return _t("console.stage_stopped")
+    if task.state is State.QUEUED:
+        base = _t("console.stage_queued")
+        try:
+            reason = reasons.text(task.state_reason)
+        except Exception:
+            reason = ""
+        return f"{base} · {reason}" if reason else base
+    if task.state in WAITING_DECISION:
+        return _t("console.stage_waiting")
+    # active: writing code / studying / running tests / in review, else the state word
+    if task.state is State.REVIEWING:
+        return _t("console.stage_review")
+    phase = task.phase or ""
+    if phase == "writing":
+        return _t("console.stage_writing")
+    if phase == "testing":
+        return _t("console.stage_testing")
+    if phase == "studying":
+        return _t("console.stage_studying")
+    if phase == "waiting":
+        try:
+            reason = reasons.text(task.state_reason)
+        except Exception:
+            reason = ""
+        return reason or _t("console.stage_working")
+    if task.state is State.PREPARING:
+        return _t("console.stage_preparing")
+    if task.state is State.CHECKING:
+        return _t("console.stage_checking")
+    if task.state is State.FIXING:
+        return _t("console.stage_fixing")
+    if task.state is State.ACCEPTING:
+        return _t("console.stage_accepting")
+    return _t("console.stage_working")
+
+
+def _bucket(task: Task) -> int:
+    """Sort order: active first, then waiting for you, then error/stopped, then queued."""
+    if task.state in ACTIVE:
+        return 0
+    if task.state in (State.DONE, State.NEEDS_DECISION):
+        return 1
+    if task.state is State.ERROR:
+        return 2
+    if task.state is State.STOPPED:
+        return 3
+    return 4
+
+
+def task_lines(task: Task, pl, now: int, width: int, frame: int = 0) -> list[str]:
     """One task block as one-line rows, each clipped by display width.
 
     width is the pane content width (see _pane_w). ⏺ line: id + title; first ⎿:
-    phase/tool · model · elapsed; second ⎿ only when the pulse is not green;
-    waiting tasks add the exact Next line (views source).
+    stage words · model · elapsed; second ⎿ only when the pulse is not green;
+    waiting tasks add the exact Next line (views source). The mark follows the
+    palette: ⏺ white + spinner for active, ◦ dim queued, ⏺ yellow waiting,
+    ✗ red error/dead, ⏸ dim stopped.
     """
     width = max(20, width)
     body_w = width - 4
-    if task.state is State.ERROR:
+    dead = pl is not None and getattr(pl, "state", "") == "dead" and task.state in ACTIVE
+    if task.state is State.ERROR or dead:
         mark = ui.styled("✗", "red")
-    else:
-        mark = ui.status_mark("⏺", status_of(task))
+        stage = _t("console.stage_dead") if dead else _t("console.stage_error")
+    elif task.state is State.STOPPED:
+        mark = ui.styled("⏸", "dim")
+        stage = _stage_word(task)
+    elif task.state is State.QUEUED:
+        mark = ui.styled("◦", "dim")
+        stage = _stage_word(task)
+    elif task.state in WAITING_DECISION:
+        mark = ui.status_mark("⏺", "waiting")
+        stage = _stage_word(task)
+    else:  # active: white ⏺ with the spinner frame next to it
+        spin = ui.SPINNER[frame % len(ui.SPINNER)]
+        mark = f"{ui.status_mark('⏺', 'working')} {ui.styled(spin, 'accent')}"
+        stage = _stage_word(task)
     head = ui.clip_width(f"{task.label}  {task.title}", body_w)
     out = [f"{mark} {head}"]
-    tool = (pl.active_tool if pl is not None else "") or ""
-    phase = tool or (views.PHASE_WORDS.get(task.phase, task.phase) if task.phase else "")
-    if not phase and task.state in ACTIVE:
-        phase = views.state_word(task.state)
-    detail = " · ".join(x for x in (phase, task.executor or "—",
+    detail = " · ".join(x for x in (stage, task.executor or "—",
                                     _elapsed_inner(max(0, now - task.updated_at))) if x)
     if detail:
         out.append(f"  {ui.styled('⎿', 'dim')} {ui.styled(ui.clip_width(detail, body_w), 'dim')}")
@@ -123,10 +196,44 @@ def task_lines(task: Task, pl, now: int, width: int) -> list[str]:
     return [ln for ln in out if ln]
 
 
+def _go_month_line() -> str:
+    """Machine-wide Go month line for the welcome box: only what it shows.
+
+    The old code read the whole tui.data.header() every 2 s (tasks, alarms, presence,
+    quota); this reads the opencode.db totals and the limit only.
+    """
+    try:
+        from ahub import cost as _cost
+        from ahub.providers import opencode_db as _odb
+        from ahub.time import to_local as _to_local
+
+        now = now_ms()
+        lt = _to_local(now)
+        day0 = int(lt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        month0 = _cost.month_start(now)
+        today = _odb.totals(day0)
+        month = _odb.totals(month0)
+        go_m = month.cost_go or 0.0
+        day_go = today.cost_go or 0.0
+        try:
+            limit = config.load_hub().go_month_limit
+        except Exception:
+            limit = None
+        if limit is None:
+            return _t("tui.money", day=f"{day_go:.2f}", month=f"{go_m:.2f}")
+        out = _t("tui.money_limit", day=f"{day_go:.2f}", month=f"{go_m:.2f}",
+                 limit=f"{limit:.0f}", pct=f"{go_m / limit * 100:.0f}" if limit else "0")
+        if go_m > limit:
+            out += _t("tui.money_over")
+        if today.cost_usd or month.cost_usd:
+            out += _t("tui.money_real", usd=f"{month.cost_usd or 0:.2f}")
+        return out
+    except Exception:
+        return ""
+
+
 def welcome_box(store: Store, sc: scope.Scope, now: int, width: int) -> str:
     """Rounded welcome box with accent borders: title, project, service, Go month line."""
-    from ahub.tui import data as topdata
-
     try:
         projects, _ = config.load_projects()
         by_name = {p.name: p for p in projects}
@@ -146,10 +253,7 @@ def welcome_box(store: Store, sc: scope.Scope, now: int, width: int) -> str:
         age = 0
     state = _t("console.svc_running") if alive else _t("console.svc_stopped")
     svc_line = _t("console.svc_tick", state=state, age=age)
-    try:
-        money = topdata.header(store, now).split("\n")[-1]
-    except Exception:
-        money = ""
+    money = _go_month_line()
     title = f"{ui.styled('✻', 'accent')} {ui.styled(f'ahub {ahub.__version__}', 'accent')}"
     clip = max(20, width - 6)  # the #welcome pane: margin 0 1, no border
     lines = [title, ui.styled(ui.clip_width(proj_line, clip), "dim"),
@@ -164,6 +268,7 @@ def alert_text(store: Store, sc: scope.Scope | None, width: int) -> str:
 
     Store failures propagate: snapshot() wraps this in _safe() so the strip
     renders "✗ alerts: <hint>" in place instead of silently vanishing.
+    At 40 cols the "— latest: …" tail survives: the counts text shrinks first.
     """
     alarms = comms.alarms(store, scope=sc)
     questions = comms.open_questions(store, scope=sc)
@@ -177,9 +282,22 @@ def alert_text(store: Store, sc: scope.Scope | None, width: int) -> str:
             latest = str(questions[-1].get("text") or "")[:120]
     except Exception:
         latest = ""
-    line = _t("console.alerts", alarms=len(alarms), questions=len(questions),
-              latest=ui.clip_width(latest or "—", max(10, width - 40)))
-    return ui.styled(ui.clip_width(line, max(20, width - 2)), "dim")
+    avail = max(20, width - 2)
+    # reserve the tail first: "— latest: <latest>" must survive at 40 cols
+    tail_latest = ui.clip_width(latest or "—", max(4, avail - 24))
+    # counts in full, then compact when the line does not fit
+    line = _t("console.alerts", alarms=len(alarms), questions=len(questions), latest=tail_latest)
+    if ui.plain_len(line) <= avail:
+        return ui.styled(line, "dim")
+    compact = f"🚨{len(alarms)} · ❓{len(questions)} — {tail_latest}"
+    # the em-dash tail is the part that stays: shrink the head, never the tail
+    if "—" in compact:
+        head, tail = compact.split("—", 1)
+        tail = "—" + tail
+        head_budget = max(4, avail - ui.plain_len(tail) - 1)
+        head = ui.clip_width(head.strip(), head_budget)
+        compact = f"{head} {tail}" if head else tail.strip()
+    return ui.styled(ui.clip_width(compact, avail), "dim")
 
 
 def live_text(store: Store, sc: scope.Scope | None, now: int,
@@ -291,6 +409,7 @@ class Snapshot:
     footer: str = ""
     task_ids: list[int] = field(default_factory=list)
     pulses: dict = field(default_factory=dict)
+    tasks: dict[int, Task] = field(default_factory=dict)  # cache for _resolve_task (no UI-thread reads)
 
 
 def snapshot(store: Store, sc: scope.Scope, width: int, now: int, frame: int = 0) -> Snapshot:
@@ -316,7 +435,8 @@ def snapshot(store: Store, sc: scope.Scope, width: int, now: int, frame: int = 0
         tasks = store.list_tasks(states=CURRENT, projects=projs)
     except Exception:
         tasks = []
-    # scope order: project heading groups in /all mode
+    snap.tasks = {t.id: t for t in tasks}
+    # scope order: project heading groups in /all mode; active first, waiting, then queued
     by_proj: dict[str, list[Task]] = {}
     for t in tasks:
         by_proj.setdefault(t.project, []).append(t)
@@ -325,12 +445,12 @@ def snapshot(store: Store, sc: scope.Scope, width: int, now: int, frame: int = 0
     multi = sc.all and len(by_proj) > 1
     pw = _pane_w(width)
     for proj in sorted(by_proj):
-        items = sorted(by_proj[proj], key=lambda t: t.id)
+        items = sorted(by_proj[proj], key=lambda t: (_bucket(t), t.id))
         if multi:
             blocks.append((f"head:{proj}", ui.styled(proj or "—", "dim")))
         for t in items:
             task_ids.append(t.id)
-            lines = _safe(f"T{t.id}", lambda t=t: task_lines(t, pulses.get(t.id), now, pw))
+            lines = _safe(f"T{t.id}", lambda t=t: task_lines(t, pulses.get(t.id), now, pw, frame))
             blocks.append((f"T{t.id}", "\n".join(lines)))
     if not tasks:
         blocks.append(("empty", ui.styled(_t("console.no_tasks"), "dim")))
@@ -445,31 +565,50 @@ class ConsoleApp(App):
     """Bare-TTY console: the same app for `ahub` with no args and `ahub top`."""
 
     CSS = """
-    #welcome { height: auto; margin: 0 1; }
-    #alerts { height: 1; margin: 0 1; }
-    #tasks { height: 1fr; border: round #ff8700; margin: 0 1; }
-    #transcript { height: 8; border: round #ff8700; margin: 0 1; }
-    #live { height: 1; margin: 0 1; }
-    #input { margin: 0 1; border: round #ff8700; }
-    #footer { height: 1; margin: 0 1; }
-    #shortcuts { height: auto; margin: 0 1; }
-    #dialog { width: 80; height: auto; border: thick $primary; background: $surface; padding: 1 2; }
-    #live-head { height: 1; background: $boost; }
-    #live-box { height: 1fr; border: round $primary; }
-    #live-log { width: 100%; }
-    #prompt-box { width: 90%; height: 80%; border: thick $primary; background: $surface; padding: 1 2; }
-    #prompt-text { width: 100%; }
-    Confirm, Ask, Help { align: center middle; }
-    Prompt { align: center middle; }
-    Transcript { align: center middle; }
+    Screen { background: ansi_default; }
+    #welcome { height: auto; margin: 0 1; background: ansi_default; scrollbar-size: 0 0; border: none; }
+    #welcome:focus { border: none; background: ansi_default; }
+    #alerts { height: 1; margin: 0 1; background: ansi_default; }
+    #tasks { height: 1fr; border: round #ff8700; margin: 0 1; background: ansi_default;
+             scrollbar-background: ansi_default; scrollbar-background-hover: ansi_default;
+             scrollbar-background-active: ansi_default; scrollbar-color: #ff8700;
+             scrollbar-color-hover: #ff8700; scrollbar-color-active: #ff8700;
+             scrollbar-corner-color: ansi_default; }
+    #transcript { height: 8; border: round #ff8700; margin: 0 1; background: ansi_default;
+                 scrollbar-background: ansi_default; scrollbar-background-hover: ansi_default;
+                 scrollbar-background-active: ansi_default; scrollbar-color: #ff8700;
+                 scrollbar-color-hover: #ff8700; scrollbar-color-active: #ff8700;
+                 scrollbar-corner-color: ansi_default; }
+    #tasks-inner { background: ansi_default; }
+    #transcript-inner { background: ansi_default; }
+    #live { height: 1; margin: 0 1; background: ansi_default; }
+    #input { margin: 0 1; border: round #ff8700; background: ansi_default; }
+    #input:focus { border: round #ff8700; background: ansi_default; }
+    #footer { height: 1; margin: 0 1; background: ansi_default; }
+    #shortcuts { height: auto; margin: 0 1; background: ansi_default; }
+    #dialog { width: 80; height: auto; border: thick #ff8700; background: ansi_default; padding: 1 2; }
+    #live-head { height: 1; background: ansi_default; }
+    #live-box { height: 1fr; border: round #ff8700; background: ansi_default; }
+    #live-log { width: 100%; background: ansi_default; }
+    #prompt-box { width: 90%; height: 80%; border: thick #ff8700; background: ansi_default; padding: 1 2; }
+    #prompt-text { width: 100%; background: ansi_default; }
+    Static { background: ansi_default; }
+    VerticalScroll { background: ansi_default; }
+    Input { background: ansi_default; }
+    Confirm, Ask, Help { align: center middle; background: ansi_default; }
+    Prompt { align: center middle; background: ansi_default; }
+    Transcript { align: center middle; background: ansi_default; }
     Transcript Footer { display: none; }
     """
-    # the pane/input borders above are the accent (ui 38;5;208 = #ff8700):
-    # ✻, box borders, the product name — nothing else.
+    # Transparent like Claude Code: the terminal's own background (incl. transparency) shows
+    # through — Screen and every widget are ansi_default, borders keep the accent (#ff8700 =
+    # ui 38;5;208). Scrollbars are dim track (transparent) + accent thumb, never textual blue.
+    # The welcome box draws its own rounded accent border in text (ui.box): no CSS border,
+    # no focus/scroll indicator, no blue left edge.
 
     def __init__(self, store: Store | None = None, all_projects: bool = False,
                  project: str | None = None, control: bool = False) -> None:
-        super().__init__()
+        super().__init__(ansi_color=True)
         self.store = store or Store()
         if all_projects:
             self.scope = scope.Scope()
@@ -483,6 +622,8 @@ class ConsoleApp(App):
         self._blocks: dict[str, str] = {}
         self._order: list[str] = []
         self._task_ids: list[int] = []
+        self._tasks: dict[int, Task] = {}  # last snapshot cache: _resolve_task reads it, not the store
+        self._need_init = False  # on_mount sets it: first refresh records the cursor, no replay
         self._selected = 0
         self.focus_mode = "tasks" if control else "input"
         self._history: list[str] = []
@@ -524,10 +665,10 @@ class ConsoleApp(App):
         yield Static("", id="footer")  # the dim console footer — the only one, no textual bar
 
     def on_mount(self) -> None:
-        try:
-            self._last_event = self.store.last_event_id()
-        except Exception:
-            self._last_event = 0
+        # No store reads on the UI thread: _last_event is set by the first refresh_data
+        # off-thread (see _feed_lines init path). The input stays focused from the start.
+        self._last_event = 0
+        self._need_init = True
         self.refresh_data()
         self.set_interval(REFRESH_S, self.refresh_data)
         if self.focus_mode == "tasks":
@@ -576,9 +717,11 @@ class ConsoleApp(App):
             self._busy = False
 
     def _safe_update(self, selector: str, widget_name: str, get_text, display: bool = True) -> None:
-        """One widget update that never kills the app. A build failure renders
-        "✗ <widget>: <hint>" in place; if update() itself rejects the renderable,
-        retry once with plain text (no ANSI parsing), then give up quietly."""
+        """One widget update that never kills the app.
+
+        A build failure renders "✗ <widget>: <hint>" in place. The single fallback
+        (plain text, no ANSI parsing) cannot raise: update failures are swallowed.
+        """
         try:
             w = self.query_one(selector, Static)
         except Exception:
@@ -597,18 +740,33 @@ class ConsoleApp(App):
             w.update(_plain(text))
             w.display = True
         except Exception:
+            # one fallback path that cannot raise: plain string, failure swallowed
             try:
-                w.update(_t("console.widget_error", widget=widget_name, hint="update failed"))
+                w.update(str(_t("console.widget_error", widget=widget_name, hint="update failed")))
                 w.display = True
             except Exception:
                 pass
 
     def _apply_stale(self, stale_s: int) -> None:
-        """Keep the existing view on snapshot deadline timeout, updating only the footer."""
+        """Keep the existing view on snapshot deadline timeout, updating only the footer.
+
+        The stale marker is never the part that is clipped: its room is reserved first,
+        then the old footer is clipped to what is left.
+        """
         stale_note = _t("console.stale", n=stale_s)
-        footer = f"{self._last_footer} · {stale_note}" if self._last_footer else ui.styled(stale_note, "dim")
         avail = max(20, (self._last_w or 80) - 2)
-        text = footer if ui.plain_len(footer) <= avail else ui.clip_width(footer, avail)
+        need = ui.plain_len(stale_note) + 3  # " · " + marker
+        if self._last_footer and ui.plain_len(self._last_footer) + need <= avail:
+            text = f"{self._last_footer} · {stale_note}"
+        elif self._last_footer:
+            kept = ui.clip_width(self._last_footer, max(4, avail - need))
+            text = f"{kept} · {stale_note}"
+        else:
+            text = ui.styled(stale_note, "dim")
+            if ui.plain_len(stale_note) > avail:
+                text = ui.styled(ui.clip_width(stale_note, avail), "dim")
+            self._safe_update("#footer", "footer", lambda: text)
+            return
         self._safe_update("#footer", "footer", lambda: text)
 
     def _render_tasks(self) -> None:
@@ -632,9 +790,20 @@ class ConsoleApp(App):
             self._safe_update("#tasks-inner", "tasks", lambda: text)
 
     def _feed_lines(self, width: int) -> list[str]:
-        """New DONE/DECISION/ERROR/ANSWER/OWNER lines since the last refresh."""
+        """New DONE/DECISION/ERROR/ANSWER/OWNER lines since the last refresh.
+
+        Runs on the snapshot worker thread (refresh_data), never on the UI thread.
+        The first call after mount only records the cursor (no replay of old events).
+        """
         pw = _pane_w(width)
         try:
+            if self._need_init:
+                try:
+                    self._last_event = self.store.last_event_id()
+                except Exception:
+                    self._last_event = 0
+                self._need_init = False
+                return []
             evs = self.store.events(after_id=self._last_event)
         except Exception:
             return []
@@ -680,6 +849,7 @@ class ConsoleApp(App):
         self._blocks = dict(snap.blocks)
         self._order = [k for k, _ in snap.blocks]
         self._task_ids = list(snap.task_ids)
+        self._tasks = dict(snap.tasks)
         self._pulses = snap.pulses
         self._render_tasks()
         if new_lines:
@@ -734,12 +904,10 @@ class ConsoleApp(App):
         except Exception:
             pass
 
-    # --- focus model ---
+    # --- focus model (gated by check_action's one predicate; no repeated guards here) ---
 
     def action_focus_tasks(self) -> None:
         """Tab: move focus into the task blocks pane (repeated Tab keeps the selection)."""
-        if not self._on_main():
-            return
         if self.focus_mode != "tasks":
             self.focus_mode = "tasks"
             self._selected = 0
@@ -751,8 +919,6 @@ class ConsoleApp(App):
 
     def action_focus_input(self) -> None:
         """Esc: back to the input."""
-        if not self._on_main():
-            return
         self.focus_mode = "input"
         self._render_tasks()
         try:
@@ -762,8 +928,6 @@ class ConsoleApp(App):
 
     def action_cycle_project(self) -> None:
         """Ctrl+O: cycle the project (config list, then all)."""
-        if not self._on_main():
-            return
         try:
             projects, _ = config.load_projects()
             names = [p.name for p in projects]
@@ -818,13 +982,13 @@ class ConsoleApp(App):
         self.run_command(text)
 
     def _say_ok(self, msg: str, next_key: str = "", label: str = "") -> None:
-        """A command result into the transcript: ⏺ statement + ⎿ Next."""
+        """A command result into the transcript: ⏺ statement + ⎿ Next (green success)."""
         try:
             nxt = _t("views.hint_next", cmd=_t(next_key, label=label)) if next_key else ""
         except Exception:
             nxt = ""
         try:
-            text = ui.item(msg, [nxt] if nxt else [])
+            text = ui.item(msg, [nxt] if nxt else [], status="success")
         except Exception:
             text = f"⏺ {msg}" + (f"\n  ⎿ {nxt}" if nxt else "")
         self._say(text.splitlines() or [""])
@@ -1018,12 +1182,19 @@ class ConsoleApp(App):
             pass
 
     def _resolve_task(self, ref: str) -> Task | None:
+        """Task by ref without a UI-thread store read: snapshot cache first, else the worker."""
         try:
             tid = parse_task_id(ref)
         except ValueError:
             return None
+        t = self._tasks.get(tid)
+        if t is not None:
+            if self.scope is not None and scope.foreign(self.scope, t.project):
+                return None
+            return t
         try:
-            t = self.store.get_task(tid)
+            fut = self._executor.submit(self.store.get_task, tid)
+            t = fut.result(timeout=SNAPSHOT_DEADLINE_S)
         except Exception:
             return None
         if t is None:
@@ -1599,9 +1770,8 @@ class ConsoleApp(App):
             return True
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action in ("focus_tasks", "cycle_project") and not self._on_main():
-            return False
-        if action == "focus_input" and not self._on_main():
+        """One predicate: focus/project keys run only on the main screen (its keys win otherwise)."""
+        if action in ("focus_tasks", "focus_input", "cycle_project") and not self._on_main():
             return False
         return True
 
