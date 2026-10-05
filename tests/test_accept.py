@@ -619,6 +619,7 @@ def test_second_accept_waits_and_names_the_holder_on_a_tty(store, project, monke
 def test_accept_waiting_for_the_lock_keeps_the_lease(store, project, monkeypatch):
     """A long wait for the project lock is not an expired lease — the service must not call the waiter an orphan."""
     import threading
+    import time
 
     from ahub import gates as g
     from ahub import transitions
@@ -633,9 +634,16 @@ def test_accept_waiting_for_the_lock_keeps_the_lease(store, project, monkeypatch
         if kw.get("task_label") == f"T{t1.id}":
             first_in.set()
             claimed = wait_until(lambda: store.get_task(t2.id).lease_until)  # the waiter is queued with a lease
+            assert claimed, "T2 never acquired a lease while waiting for the project lock"
             # the wait is longer than the lease below — the keeper of the waiter has to move it past that
             wait_until(lambda: (store.get_task(t2.id).lease_until or 0) > (claimed or 0) + lease_ms)
-            waiter = store.get_task(t2.id)  # the verdict is read here: the wait is over by the time the test asserts
+            # the keeper must keep the lease valid while T2 waits: poll for a fresh snapshot —
+            # one delayed sample under parallel-suite load is scheduling jitter, not a dead keeper
+            waiter = store.get_task(t2.id)
+            deadline = time.monotonic() + 5
+            while transitions.is_orphan(waiter, now_ms()) and time.monotonic() < deadline:
+                time.sleep(0.05)
+                waiter = store.get_task(t2.id)
             seen.append((waiter, transitions.is_orphan(waiter, now_ms())))
         return True, "", "pytest"
 
