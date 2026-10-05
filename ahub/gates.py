@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import fcntl
 import fnmatch
+import json
 import os
 import subprocess
 import time
@@ -24,7 +25,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ahub import archive, reasons, workspace
+from ahub import reasons, workspace
 from ahub.config import ProjectConfig
 from ahub.i18n import t as _t
 from ahub.i18n import template
@@ -37,7 +38,7 @@ LOCK_WAIT_S = 30 * 60
 TAIL_LINES = 15
 DIFF_LIMIT = 200_000  # the diff a reviewer reads; over that it is cut, not the task
 # the shape of .ahub/result.json — a problem an orchestrator's own edit over the result may cause
-RESULT_JSON_CODES = frozenset({"result_commit", "result_files", "no_result"})
+RESULT_JSON_CODES = frozenset({"result_commit", "result_files", "no_result", "result_json"})
 
 
 class Problem(str):
@@ -133,7 +134,11 @@ def clear_pycache(root: str) -> None:
 
 
 class LockTimeout(RuntimeError):
-    pass
+    """The test lock stayed busy past the wait (stopped — a stop was requested meanwhile)."""
+
+    def __init__(self, msg: str, *, stopped: bool = False) -> None:
+        super().__init__(msg)
+        self.stopped = stopped
 
 
 def with_lock(path: str, fn: Callable[[], object], *, wait_s: float = LOCK_WAIT_S,
@@ -157,7 +162,7 @@ def with_lock(path: str, fn: Callable[[], object], *, wait_s: float = LOCK_WAIT_
                 if time.monotonic() >= deadline:
                     raise LockTimeout(_t("gates.lock_busy", path=path, secs=int(wait_s))) from None
                 if should_stop is not None and should_stop():
-                    raise LockTimeout(_t("gates.lock_stopped")) from None
+                    raise LockTimeout(_t("gates.lock_stopped"), stopped=True) from None
                 time.sleep(1.0)
         try:
             return fn()
@@ -170,7 +175,11 @@ def with_lock(path: str, fn: Callable[[], object], *, wait_s: float = LOCK_WAIT_
 def run_acceptance(project: ProjectConfig, cwd: str, nodes: list[str], *, task_label: str = "",
                    on_wait: Callable[[], None] | None = None,
                    should_stop: Callable[[], bool] | None = None) -> tuple[bool, str, str]:
-    """(green?, output tail, command). Under the project test resource."""
+    """(green?, output tail, command). Under the project test resource.
+
+    A busy test lock is a wait, not a red acceptance: LockTimeout propagates and the caller
+    waits (the engine re-queues) or refuses (accept) — it never becomes a failing-test fix.
+    """
     py = project.python_bin()
     cmd = [py, "-m", "pytest", "-q", *nodes]
     env = scrub_env(dict(os.environ))
@@ -190,10 +199,7 @@ def run_acceptance(project: ProjectConfig, cwd: str, nodes: list[str], *, task_l
         tail = "\n".join((r.stdout + "\n" + r.stderr).strip().splitlines()[-TAIL_LINES:])
         return r.returncode == 0, tail
 
-    try:
-        ok, tail = with_lock(lock, _run, on_wait=on_wait, should_stop=should_stop)
-    except LockTimeout as e:
-        return False, str(e), " ".join(cmd)
+    ok, tail = with_lock(lock, _run, on_wait=on_wait, should_stop=should_stop)
     return ok, tail, " ".join(cmd[2:])
 
 
@@ -217,17 +223,35 @@ def check(project: ProjectConfig, task: Task, *, run_tests: bool = True, orch_ed
     if outside:
         g.fatal.append(problem("outside", files=", ".join(outside[:10])))
     if not orch_edit:
-        res = archive.read_json(Path(path) / workspace.AHUB_DIR / "result.json")
-        if not res:
+        res_path = Path(path) / workspace.AHUB_DIR / "result.json"
+        try:
+            raw = res_path.read_text(encoding="utf-8")
+        except OSError:
             g.repairable.append(problem("no_result"))
+            res: dict = {}
         else:
-            if str(res.get("commit", ""))[:7] != head[:7] or not str(res.get("commit", "")).strip():
-                g.repairable.append(problem("result_commit", got=str(res.get("commit", ""))[:10] or "—",
-                                            head=head[:10]))
-            files = res.get("files") or []
-            extra = [f for f in files if f not in g.diff_files]
-            if extra:
-                g.repairable.append(problem("result_files", files=", ".join(map(str, extra[:10]))))
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as e:
+                g.repairable.append(problem("result_json", err=str(e)[:200]))
+                res = {}
+            else:
+                if not isinstance(data, dict):
+                    g.repairable.append(problem("result_json", err="not a JSON object"))
+                    res = {}
+                elif not data:
+                    g.repairable.append(problem("no_result"))
+                    res = {}
+                else:
+                    res = data
+            if res:
+                if str(res.get("commit", ""))[:7] != head[:7] or not str(res.get("commit", "")).strip():
+                    g.repairable.append(problem("result_commit", got=str(res.get("commit", ""))[:10] or "—",
+                                                head=head[:10]))
+                files = res.get("files") or []
+                extra = [f for f in files if f not in g.diff_files]
+                if extra:
+                    g.repairable.append(problem("result_files", files=", ".join(map(str, extra[:10]))))
     if run_tests and task.kind is Kind.CODE and not g.repairable and not g.fatal:
         nodes = list(task.limits.get("accept") or [])
         if nodes:

@@ -2,7 +2,8 @@
 
 Started by the service (V09b) in its own process group; drives one task with the engine and exits.
 Exit code: 0 — task reached a decision (any), 2 — no task/project, 3 — held by another owner,
-4 — the owner poll keeps failing (the code cannot read the schema; the service re-picks the task).
+4 — the owner poll keeps failing, or hub code changed mid-run (stale imports; the service
+re-picks the task on the new code). A genuine bug with unchanged code still goes to error.
 
 SIGTERM/SIGINT: the provider process group is stopped (runner stops a run by group), then the process
 exits — the task stays active and the service picks it up as an orphan, on the current code.
@@ -15,7 +16,7 @@ import sys
 
 from ahub import config
 from ahub import log as hublog
-from ahub.engine import Engine, PollFailed
+from ahub.engine import Engine, PollFailed, _code_changed_since, _code_fingerprint, _stale_code_error
 from ahub.i18n import t as _t
 from ahub.model import parse_task_id
 from ahub.providers import runner
@@ -68,10 +69,21 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     lg.info("task process starting")
     install_signal_handlers()
+    code0 = _code_fingerprint()  # hub code as this worker started; stale imports compare against it
     try:
         res = Engine(store, project, tid).run()
     except PollFailed:
         return 4  # the engine has logged it once; the task stays for the service to re-pick
+    except (ImportError, AttributeError) as e:
+        if not _stale_code_error(e) or not _code_changed_since(code0):
+            raise  # unchanged code is a genuine bug, not a live update
+        lg.error("stale hub code (%s: %s) — the task is left to the service",
+                 type(e).__name__, str(e)[:200])
+        try:
+            runner.request_stop()
+        except Exception:
+            lg.exception("stopping the provider failed")
+        return 4
     lg.info("task process done: %s %s", res.state.value, res.reason[:200])
     return 3 if res.busy else 0
 
