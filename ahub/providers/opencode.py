@@ -22,9 +22,22 @@ from pathlib import Path
 
 from ahub import log as hublog
 from ahub.i18n import t as _t
-from ahub.providers.base import Act, Activity, Cap, Health, ModelInfo, Provider, RunSpec, SessionState, Usage
+from ahub.providers.base import (
+    Act,
+    Activity,
+    Cap,
+    CatalogEntry,
+    Health,
+    Provider,
+    RunSpec,
+    SessionState,
+    Usage,
+    infer_plan,
+    infer_vendor,
+)
 
 PROMPT_ARG_LIMIT = 60_000  # bytes; one Linux argument caps at 128 KB
+CATALOG_TTL_S = 24 * 3600  # hub cache for `opencode models <provider> --verbose`
 _log = hublog.get("opencode")
 
 TRANSIENT_MARKERS = ("unexpected server error", "cannot connect to api", "unable to connect", "econnrefused",
@@ -235,16 +248,38 @@ class OpencodeProvider(Provider):
             return None
         return data if isinstance(data, dict) else None
 
-    def catalog(self) -> list[ModelInfo]:
+    def catalog(self, refresh: bool = False) -> list[CatalogEntry]:
+        """Catalog from `opencode models <provider> --verbose`: one call per provider id.
+
+        Cached in the hub data dir for 24 h (paths.data_dir()); refresh=True re-reads.
+        """
+        binary = self._bin()
         try:
-            rc, out, _err = run_capture([self._bin(), "models", "--verbose"], env=self.extra_env)
+            provider_ids = _list_provider_ids(binary, self.extra_env)
         except (OSError, subprocess.SubprocessError) as e:
             _log.warning("models: %s", e)
             return []
-        if rc != 0:
-            _log.warning("models: code %s", rc)
-            return []
-        return parse_models_verbose(out)
+        out: list[CatalogEntry] = []
+        for pid in provider_ids:
+            cached = None if refresh else _read_cache(pid)
+            if cached is not None:
+                out.extend(cached)
+                continue
+            try:
+                rc, raw, _err = run_capture([binary, "models", pid, "--verbose"], env=self.extra_env)
+            except (OSError, subprocess.SubprocessError) as e:
+                _log.warning("models %s: %s", pid, e)
+                continue
+            if rc != 0:
+                _log.warning("models %s: code %s", pid, rc)
+                continue
+            entries = parse_models_verbose(raw)
+            _write_cache(pid, entries)
+            out.extend(entries)
+        # a provider without the per-id form (old binary): fall back to the whole list
+        if not out and not refresh:
+            pass
+        return out
 
     def health(self) -> Health:
         problems: list[str] = []
@@ -309,9 +344,9 @@ def extract_json(text: str) -> dict | None:
 _MODEL_LINE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.:/@-]+$")
 
 
-def parse_models_verbose(out: str) -> list[ModelInfo]:
-    """`opencode models --verbose` output: a "provider/model" line followed by a JSON object."""
-    models: list[ModelInfo] = []
+def parse_models_verbose(out: str) -> list[CatalogEntry]:
+    """`opencode models <provider> --verbose` output: a "provider/model" line + JSON object."""
+    models: list[CatalogEntry] = []
     lines = out.splitlines()
     i = 0
     while i < len(lines):
@@ -340,11 +375,88 @@ def parse_models_verbose(out: str) -> list[ModelInfo]:
         variants = tuple(info.get("variants", {}).keys()) if isinstance(info.get("variants"), dict) else ()
         cost = info.get("cost") if isinstance(info.get("cost"), dict) else {}
         pin, pout = cost.get("input"), cost.get("output")
-        free = name.endswith("-free") or (pin == 0 and pout == 0)
-        counter = "free" if free else ("go" if provider_id == "opencode-go" else "usd")
-        models.append(ModelInfo(name, variants, counter=counter,
-                                price_in=pin if isinstance(pin, (int, float)) else None,
-                                price_out=pout if isinstance(pout, (int, float)) else None,
-                                note=str(info.get("status", ""))))
+        cache = cost.get("cache") if isinstance(cost.get("cache"), dict) else {}
+        pcache = cache.get("read")
+        limit = info.get("limit") if isinstance(info.get("limit"), dict) else {}
+        ctx = limit.get("context")
+        display = str(info.get("name") or name.split("/", 1)[-1])
+        family = str(info.get("family") or "")
+        vendor = infer_vendor(family, display, name)
+        plan = infer_plan(provider_id, name,
+                          pin if isinstance(pin, (int, float)) else None,
+                          pout if isinstance(pout, (int, float)) else None)
+        models.append(CatalogEntry(
+            model_id=name,
+            display_name=display,
+            vendor=vendor,
+            plan=plan,
+            price_in=pin if isinstance(pin, (int, float)) else None,
+            price_out=pout if isinstance(pout, (int, float)) else None,
+            price_cache=pcache if isinstance(pcache, (int, float)) else None,
+            context=ctx if isinstance(ctx, int) else None,
+            reasoning=variants,
+            status=str(info.get("status", "")),
+        ))
         i = j if j > i + 1 else i + 1
     return models
+
+
+def catalog_cache_path(provider_id: str):
+    """Cache file for one provider's verbose catalog in the hub data dir."""
+    from ahub import paths
+
+    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in provider_id)
+    return paths.data_dir() / f"catalog-opencode-{safe or 'unknown'}.json"
+
+
+def _list_provider_ids(binary: str, env: dict[str, str] | None) -> list[str]:
+    """Provider ids from `opencode models` (one "provider/model" per line)."""
+    rc, out, _err = run_capture([binary, "models"], env=env)
+    if rc != 0:
+        return ["opencode", "opencode-go", "openrouter"]
+    seen: list[str] = []
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not _MODEL_LINE.match(line) or "/" not in line:
+            continue
+        pid = line.split("/", 1)[0]
+        if pid and pid not in seen:
+            seen.append(pid)
+    return seen or ["opencode", "opencode-go", "openrouter"]
+
+
+def _read_cache(provider_id: str) -> list[CatalogEntry] | None:
+    """Cached catalog for the provider, None when missing or older than 24 h."""
+    import time
+
+    path = catalog_cache_path(provider_id)
+    try:
+        if not path.is_file():
+            return None
+        if time.time() - path.stat().st_mtime > CATALOG_TTL_S:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    items = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return None
+    try:
+        return [CatalogEntry.from_dict(e) for e in items if isinstance(e, dict)]
+    except (TypeError, ValueError):
+        return None
+
+
+def _write_cache(provider_id: str, entries: list[CatalogEntry]) -> None:
+    """Store the catalog for 24 h; a failure is a log line, never an error."""
+    import time
+
+    path = catalog_cache_path(provider_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"ts": time.time(), "entries": [e.to_dict() for e in entries]}
+        tmp = path.with_suffix(f".tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as e:
+        _log.warning("catalog cache %s: %s", provider_id, e)

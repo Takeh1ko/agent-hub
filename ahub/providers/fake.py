@@ -22,8 +22,9 @@ from ahub.providers.base import (
     Act,
     Activity,
     Cap,
+    CatalogEntry,
     Health,
-    ModelInfo,
+    PlanKind,
     Provider,
     QuotaBucket,
     RunSpec,
@@ -141,8 +142,10 @@ class FakeProvider(Provider):
     def session_state(self, session_id: str) -> SessionState | None:
         return None
 
-    def catalog(self) -> list[ModelInfo]:
-        return [ModelInfo(MODEL_ID, ("low", "high"), counter="go", price_in=0.1, price_out=0.2)]
+    def catalog(self, refresh: bool = False) -> list[CatalogEntry]:
+        del refresh
+        return [CatalogEntry(MODEL_ID, display_name="Fake model", vendor="", plan=PlanKind.GO,
+                             price_in=0.1, price_out=0.2, reasoning=("low", "high"))]
 
     def health(self) -> Health:
         if self.healthy:

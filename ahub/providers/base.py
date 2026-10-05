@@ -135,6 +135,77 @@ class RunResult:
         return self.outcome is Outcome.OK
 
 
+class PlanKind(StrEnum):
+    FREE = "free"  # no money, no quota
+    GO = "go-plan"  # counts against the Go month limit
+    PAYG = "pay-as-you-go"  # USD per token
+    SUBSCRIPTION = "subscription"  # quota window, no money per token
+
+
+def infer_plan(provider_id: str, model_id: str, cost_in: float | None, cost_out: float | None) -> PlanKind:
+    """Plan from the provider + catalog (opencode-go → go-plan, *-free or cost 0 → free,
+    openrouter → pay-as-you-go, agy/codex → subscription)."""
+    mid = (model_id or "").lower()
+    pid = (provider_id or "").lower()
+    if mid.endswith("-free") or (isinstance(cost_in, (int, float)) and isinstance(cost_out, (int, float))
+                                 and cost_in == 0 and cost_out == 0):
+        return PlanKind.FREE
+    if pid == "opencode-go" or mid.startswith("opencode-go/"):
+        return PlanKind.GO
+    if pid in ("agy", "codex"):
+        return PlanKind.SUBSCRIPTION
+    if pid == "openrouter" or mid.startswith("openrouter/"):
+        return PlanKind.PAYG
+    if pid in ("opencode", "fake") or "/" in mid:
+        # opencode paid models are USD; fake bills like go-plan (old counter go)
+        return PlanKind.GO if pid == "fake" else PlanKind.PAYG
+    return PlanKind.PAYG
+
+
+# family/name fragments → vendor (when known, else "")
+_VENDOR_MAP: tuple[tuple[str, str], ...] = (
+    ("gemini", "Google"),
+    ("gemma", "Google"),
+    ("deepseek", "DeepSeek"),
+    ("claude", "Anthropic"),
+    ("anthropic", "Anthropic"),
+    ("gpt", "OpenAI"),
+    ("openai", "OpenAI"),
+    ("o1", "OpenAI"),
+    ("o3", "OpenAI"),
+    ("o4", "OpenAI"),
+    ("codex", "OpenAI"),
+    ("grok", "xAI"),
+    ("kimi", "Moonshot AI"),
+    ("moonshot", "Moonshot AI"),
+    ("glm", "Zhipu"),
+    ("zhipu", "Zhipu"),
+    ("qwen", "Alibaba"),
+    ("mimo", "Xiaomi"),
+    ("minimax", "MiniMax"),
+    ("llama", "Meta"),
+    ("muse", "Meta"),
+    ("spark", "Meta"),
+    ("mistral", "Mistral"),
+    ("nemotron", "NVIDIA"),
+    ("longcat", "Meituan"),
+    ("ling", "Ling"),
+    ("seed", "ByteDance"),
+    ("big-pickle", ""),
+    ("space-bunny", ""),
+    ("fledge", ""),
+)
+
+
+def infer_vendor(family: str = "", name: str = "", model_id: str = "") -> str:
+    """Vendor from family/name/model id, "" when unknown."""
+    hay = f"{family or ''} {name or ''} {model_id or ''}".lower()
+    for frag, vendor in _VENDOR_MAP:
+        if frag and frag in hay:
+            return vendor
+    return ""
+
+
 @dataclass(frozen=True)
 class ModelInfo:
     model_id: str
@@ -143,6 +214,74 @@ class ModelInfo:
     price_in: float | None = None  # $ per 1M input
     price_out: float | None = None  # $ per 1M output
     note: str = ""
+
+
+@dataclass(frozen=True)
+class CatalogEntry:
+    """One model the hub can use: provider, real name, reasoning levels, plan and prices.
+
+    The provider catalog() returns these; the old ModelInfo fields stay available
+    as properties (variants → reasoning, counter → plan, note → display name)
+    so existing readers keep working.
+    """
+
+    model_id: str
+    display_name: str = ""
+    vendor: str = ""
+    plan: PlanKind = PlanKind.PAYG
+    price_in: float | None = None  # $ per 1M input (None when not money)
+    price_out: float | None = None  # $ per 1M output
+    price_cache: float | None = None  # $ per 1M cache read
+    context: int | None = None  # context window, tokens
+    reasoning: tuple[str, ...] = ()  # reasoning levels, may be empty
+    status: str = ""
+
+    @property
+    def variants(self) -> tuple[str, ...]:
+        return self.reasoning
+
+    @property
+    def counter(self) -> str:
+        return {"free": "free", "go-plan": "go", "pay-as-you-go": "usd",
+                "subscription": "quota"}.get(self.plan.value, "usd")
+
+    @property
+    def note(self) -> str:
+        return self.display_name or self.status
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model_id": self.model_id,
+            "display_name": self.display_name,
+            "vendor": self.vendor,
+            "plan": self.plan.value,
+            "price_in": self.price_in,
+            "price_out": self.price_out,
+            "price_cache": self.price_cache,
+            "context": self.context,
+            "reasoning": list(self.reasoning),
+            "status": self.status,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CatalogEntry":
+        try:
+            plan = PlanKind(str(data.get("plan", PlanKind.PAYG.value)))
+        except ValueError:
+            plan = PlanKind.PAYG
+        reasoning = data.get("reasoning") or []
+        return cls(
+            model_id=str(data.get("model_id") or ""),
+            display_name=str(data.get("display_name") or ""),
+            vendor=str(data.get("vendor") or ""),
+            plan=plan,
+            price_in=data.get("price_in"),
+            price_out=data.get("price_out"),
+            price_cache=data.get("price_cache"),
+            context=data.get("context"),
+            reasoning=tuple(str(r) for r in reasoning) if isinstance(reasoning, list) else (),
+            status=str(data.get("status") or ""),
+        )
 
 
 @dataclass(frozen=True)
@@ -239,7 +378,7 @@ class Provider(ABC):
     def export(self, session_id: str) -> dict | None:
         return None
 
-    def catalog(self) -> list[ModelInfo]:
+    def catalog(self, refresh: bool = False) -> list[CatalogEntry]:
         return []
 
     def quota(self, force: bool = False) -> list[QuotaBucket]:

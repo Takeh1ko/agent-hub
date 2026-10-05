@@ -258,13 +258,21 @@ def _provider_states() -> list[doctor.ProviderState]:
 PROVIDERS = """\
 name      found  login  enabled
 opencode  ✓      ✓      on
-  models  bunny, deepseek-flash, mimo-flash, spark, spark-free, spark-high, spark-medium
+  · bunny — opencode/space-bunny-free · — · free · free
+  · deepseek-flash — opencode-go/deepseek-v4.1-flash · high · Go plan · Go plan
+  · mimo-flash — opencode-go/mimo-v2.6-flash · — · Go plan · Go plan
+  · spark — opencode-go/muse-spark-1.3-contributor · xhigh · Go plan · Go plan
+  · spark-free — opencode/muse-spark-1.3-contributor-free · xhigh · free · free
+  · spark-high — opencode-go/muse-spark-1.3-contributor · high · Go plan · Go plan
+  · spark-medium — opencode-go/muse-spark-1.3-contributor · medium · Go plan · Go plan
   · opencode-go: paid Spark available
 agy       ✓      ✓      on
-  models  gemini, gemini-low
+  · gemini — gemini-3.8-flash-high · high · subscription · —
+  · gemini-low — gemini-3.8-flash-low · low · subscription · —
   · Gemini via Antigravity, window quota (no money)
 codex     ✗      –      on
-  models  codex, codex-fast
+  · codex — gpt-5.6-terra · — · subscription · —
+  · codex-fast — gpt-5.6-luna · — · subscription · —
   · uses your ChatGPT plan
   → install codex: npm i -g @openai/codex, then codex login
 """
@@ -272,8 +280,13 @@ codex     ✗      –      on
 
 def test_providers_table_with_a_note_and_a_hint_under_each_row(capsys, monkeypatch):
     monkeypatch.setattr(doctor, "provider_states", lambda *a, **k: _provider_states())
-    # quota windows come from the live machine — the snapshot pins the layout, not the numbers
+    # quota windows and the live catalog come from the machine — the snapshot pins the layout
     monkeypatch.setattr("ahub.providers.agy.AgyProvider.quota", lambda self, force=False: [])
+    monkeypatch.setattr("ahub.catalog.get_catalogs", lambda refresh=False: {})
+    monkeypatch.setattr("ahub.catalog._quota_pct_for", lambda entry, store=None: None)
+    monkeypatch.setattr("ahub.catalog._go_numbers", lambda: (None, None))
+    monkeypatch.setattr("ahub.catalog.go_summary", lambda: "")
+    monkeypatch.setattr("ahub.catalog.quota_summary", lambda provider: "")
     rc, out = run(capsys, "providers")
     assert rc == 0 and out == PROVIDERS
     assert run(capsys, "providers", "disable", "codex") == (0, "codex: off\nNext  ahub status\n")
@@ -281,32 +294,35 @@ def test_providers_table_with_a_note_and_a_hint_under_each_row(capsys, monkeypat
 
 
 MODELS = """\
-  role      default     other models
-  executor  spark       mimo-flash, deepseek-flash(project-denied)
-  reviewer  spark       mimo-flash, deepseek-flash(project-denied)
-  scout     spark       deepseek-flash(project-denied)
-  routine   spark       mimo-flash
-  observer  spark-high  spark-medium
-  drafter   spark-high  spark
-
-  model           provider  model id
-  bunny           opencode  opencode/space-bunny-free
-  codex           codex     gpt-5.6-terra
-  codex-fast      codex     gpt-5.6-luna
-  deepseek-flash  opencode  opencode-go/deepseek-v4.1-flash [high] (project-denied)
-  gemini          agy       gemini-3.8-flash-high
-  gemini-low      agy       gemini-3.8-flash-low
-  mimo-flash      opencode  opencode-go/mimo-v2.6-flash
-  spark           opencode  opencode-go/muse-spark-1.3-contributor [xhigh]
-  spark-free      opencode  opencode/muse-spark-1.3-contributor-free [xhigh]
-  spark-high      opencode  opencode-go/muse-spark-1.3-contributor [high]
-  spark-medium    opencode  opencode-go/muse-spark-1.3-contributor [medium]
+opencode
+  alias                         model                         reasoning  plan     $ in / $ out  rol…
+  bunny                         opencode/space-bunny-free     —          free     free          —
+  deepseek-flash(project-deni…  opencode-go/deepseek-v4.1-f…  high       Go plan  Go plan       —
+  mimo-flash                    opencode-go/mimo-v2.6-flash   —          Go plan  Go plan       —
+  spark                         opencode-go/muse-spark-1.3…   xhigh      Go plan  Go plan       exe…
+  spark-free                    opencode/muse-spark-1.3-con…  xhigh      free     free          —
+  spark-high                    opencode-go/muse-spark-1.3…   high       Go plan  Go plan       obs…
+  spark-medium                  opencode-go/muse-spark-1.3…   medium     Go plan  Go plan       —
+agy
+  alias       model                  reasoning  plan          $ in / $ out  roles
+  gemini      gemini-3.8-flash-high  high       subscription  —             —
+  gemini-low  gemini-3.8-flash-low   low        subscription  —             —
+codex
+  alias       model          reasoning  plan          $ in / $ out  roles
+  codex       gpt-5.6-terra  —          subscription  —             —
+  codex-fast  gpt-5.6-luna   —          subscription  —             —
 """
 
 
 def test_models_menus_and_the_full_list(capsys, monkeypatch, tmp_path):
     write(tmp_path / "p" / ".hub.toml", 'schema_version = 2\nname = "P"\n[models]\ndeny = ["deepseek"]\n')
     monkeypatch.chdir(tmp_path / "p")
+    # the live catalog comes from the machine — the snapshot pins the layout with an empty one
+    monkeypatch.setattr("ahub.catalog.get_catalogs", lambda refresh=False: {})
+    monkeypatch.setattr("ahub.catalog._quota_pct_for", lambda entry, store=None: None)
+    monkeypatch.setattr("ahub.catalog._go_numbers", lambda: (None, None))
+    monkeypatch.setattr("ahub.catalog.go_summary", lambda: "")
+    monkeypatch.setattr("ahub.catalog.quota_summary", lambda provider: "")
     rc, out = run(capsys, "models", "--all")
     assert rc == 0 and out == MODELS
 
@@ -1040,15 +1056,19 @@ def test_providers_shows_every_model_of_a_provider(capsys, monkeypatch):
         doctor.ProviderState("opencode", True, True, detail="found /bin/opencode", note="", hint="")])
     aliases = [f"spark-{i:02d}" for i in range(24)]
     monkeypatch.setattr(registry, "models", lambda store: [
-        type("E", (), {"provider": "opencode", "alias": a})() for a in aliases])
+        registry.ModelEntry(a, "opencode", f"opencode-go/{a}", "", True, "") for a in aliases])
+    monkeypatch.setattr("ahub.catalog.get_catalogs", lambda refresh=False: {})
+    monkeypatch.setattr("ahub.catalog._quota_pct_for", lambda entry, store=None: None)
+    monkeypatch.setattr("ahub.catalog._go_numbers", lambda: (None, None))
+    monkeypatch.setattr("ahub.providers.agy.AgyProvider.quota", lambda self, force=False: [])
     rc, out = run(capsys, "providers")
     lines = out.splitlines()
     models = [ln.strip() for ln in lines if "spark-" in ln]
     assert rc == 0
-    assert sum(ln.count("spark-") for ln in models) == len(aliases)  # all of them, none cut
+    assert len(models) == len(aliases)  # one short line per model, none cut
+    assert all(a in " ".join(models) for a in aliases)
     assert "…" not in "".join(models)
     assert max(len(ln) for ln in lines) <= W  # and wrapped to the width
-    assert len(models) > 1  # wrapped over several lines under the row
 
 
 def test_the_root_scope_flags_survive_a_subcommand(capsys, monkeypatch, tmp_path):

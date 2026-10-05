@@ -56,7 +56,20 @@ from pathlib import Path
 
 from ahub import log as hublog
 from ahub.i18n import t as _t
-from ahub.providers.base import Act, Activity, Cap, Health, ModelInfo, Outcome, Provider, RunSpec, Usage, clip
+from ahub.providers.base import (
+    Act,
+    Activity,
+    Cap,
+    CatalogEntry,
+    Health,
+    Outcome,
+    PlanKind,
+    Provider,
+    RunSpec,
+    Usage,
+    clip,
+    infer_vendor,
+)
 from ahub.providers.opencode import extract_json, prompt_arg, run_capture  # shared bits
 
 _log = hublog.get("codex")
@@ -155,7 +168,7 @@ def usage_of(raw) -> Usage | None:
                  context=tin or None)
 
 
-def parse_models(out: str) -> list[ModelInfo]:
+def parse_models(out: str) -> list[CatalogEntry]:
     """`codex debug models` output: {"models":[{slug, display_name, visibility, supported_reasoning_levels…}]}.
 
     Hidden models (visibility "hide") are skipped — they are not offered for a turn.
@@ -167,7 +180,7 @@ def parse_models(out: str) -> list[ModelInfo]:
     models = data.get("models") if isinstance(data, dict) else None
     if not isinstance(models, list):
         return []
-    out: list[ModelInfo] = []
+    out: list[CatalogEntry] = []
     for m in models:
         if not isinstance(m, dict):
             continue
@@ -178,8 +191,15 @@ def parse_models(out: str) -> list[ModelInfo]:
         variants = tuple(str(r["effort"]) for r in levels if isinstance(r, dict) and r.get("effort")) \
             if isinstance(levels, list) else ()
         # a ChatGPT subscription: no per-token prices and no quota numbers in the stream
-        out.append(ModelInfo(slug, variants=variants, counter="quota",
-                             note=str(m.get("display_name") or "")))
+        display = str(m.get("display_name") or "")
+        out.append(CatalogEntry(
+            model_id=slug,
+            display_name=display,
+            vendor=infer_vendor("", display, slug),
+            plan=PlanKind.SUBSCRIPTION,
+            reasoning=variants,
+            status=str(m.get("visibility") or ""),
+        ))
     return out
 
 
@@ -358,9 +378,10 @@ class CodexProvider(Provider):
 
     # --- provider data ---
 
-    def catalog(self) -> list[ModelInfo]:
+    def catalog(self, refresh: bool = False) -> list[CatalogEntry]:
         """`codex debug models` — the catalog of this login (it refreshes the local cache, so the
         timeout is short: health() runs it in the observer's loop)."""
+        del refresh  # no hub cache here: the command refreshes its own cache
         try:
             rc, out, _err = run_capture([self._bin(), "debug", "models"], timeout=_CATALOG_TIMEOUT_S,
                                         env=self.extra_env)

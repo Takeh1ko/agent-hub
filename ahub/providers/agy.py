@@ -34,7 +34,20 @@ from pathlib import Path
 from ahub import log as hublog
 from ahub import paths
 from ahub.i18n import t as _t
-from ahub.providers.base import Act, Activity, Cap, Health, ModelInfo, Outcome, Provider, QuotaBucket, RunSpec, Usage
+from ahub.providers.base import (
+    Act,
+    Activity,
+    Cap,
+    CatalogEntry,
+    Health,
+    Outcome,
+    PlanKind,
+    Provider,
+    QuotaBucket,
+    RunSpec,
+    Usage,
+    infer_vendor,
+)
 from ahub.providers.opencode import extract_json, prompt_arg  # shared bits: prompt → argument, JSON out of text
 
 _log = hublog.get("agy")
@@ -129,13 +142,29 @@ def _tool_input(tool_info) -> dict:
     return {k: (v[:200] if isinstance(v, str) else v) for k, v in params.items() if v not in ("", None)}
 
 
-def parse_models(out: str) -> list[ModelInfo]:
+_AGY_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def _agy_level(model_id: str) -> tuple[str, ...]:
+    """Reasoning level from the model id suffix (gemini-3.8-flash-high → high), else empty."""
+    tail = (model_id or "").lower().rsplit("-", 1)[-1]
+    return (tail,) if tail in _AGY_LEVELS else ()
+
+
+def parse_models(out: str) -> list[CatalogEntry]:
     """`agy models` output: "id<TAB>Name" lines after the "Fetching available models…" header."""
-    models: list[ModelInfo] = []
+    models: list[CatalogEntry] = []
     for line in (out or "").splitlines():
         m = _MODEL_LINE.match(line.strip())
         if m:
-            models.append(ModelInfo(m.group(1), counter="quota", note=m.group(2)))
+            mid, name = m.group(1), m.group(2)
+            models.append(CatalogEntry(
+                model_id=mid,
+                display_name=name,
+                vendor=infer_vendor("", name, mid),
+                plan=PlanKind.SUBSCRIPTION,
+                reasoning=_agy_level(mid),
+            ))
     return models
 
 
@@ -404,7 +433,8 @@ class AgyProvider(Provider):
 
     # --- provider data ---
 
-    def catalog(self) -> list[ModelInfo]:
+    def catalog(self, refresh: bool = False) -> list[CatalogEntry]:
+        del refresh  # no cache here: `agy models` is fast, quota has its own 60 s cache
         try:
             rc, out, _err = run_capture([self._bin(), "models"], env=self.extra_env)
         except (OSError, subprocess.SubprocessError) as e:
