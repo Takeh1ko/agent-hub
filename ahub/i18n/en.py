@@ -514,6 +514,8 @@ MESSAGES: dict[str, str] = {
     "reason.wait_quota": "waiting for {group} quota: {window} {pct}%, resets {reset}",
     "reason.wait_quota_concurrency": "waiting for {group} quota concurrency ({running}/{max})",
     "reason.quota_fallback": "quota threshold reached → running on {model}",
+    "reason.quota_hold": "waiting for {group} quota ({window} {pct}%, resets {reset}) — set [quota] {setting} or `{cmd}`",
+    "reason.quota_hold_err": "provider quota ({err}) — set [quota] {setting} or `{cmd}`",
     "reason.red_rolled_back": "acceptance is red after the merge — merge rolled back ({cmd})",
     "reason.accept_red": "acceptance is red — nothing merged ({cmd})",
     "reason.work_moved": "work branch moved during acceptance ({now} != {base}) — retry the accept",

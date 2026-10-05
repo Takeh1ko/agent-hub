@@ -274,3 +274,18 @@ column shows $ in / $ out per 1M whenever the catalog has a cost, whatever the p
 a subscription without prices → "—"); reasoning is the alias level plus the compact available range
 ("xhigh (minimal–xhigh)"), context is rounded ("200K", "1M"). The fake provider shows only with
 `AHUB_FAKE_PROVIDER=1`.
+
+## 10. Quota holds
+
+A stage whose model is below the `[quota]` thresholds holds instead of working: the executor gets no
+turn, the review gets no panel. The engine records the hold in the task limits (`quota_hold`: stage,
+wait reason, first-hold time, re-pick time, hold count, owner-noticed flag; a review hold of a
+code/routine task also stores what the passed gates saw — HEAD, result commit, base, tests — so the
+re-pick resumes straight at the review panel when result.json commit == HEAD on a clean tree, with no
+worker turn and no gates re-run). A held task is re-picked at the quota bucket's reset, or with
+back-off (15 min → 30 min → 1 h) when the reset is far — not every service tick; a newly configured
+fallback or an explicit owner action (`task edit`, `model`, `rework`, `continue`) wakes it at once.
+With no fallback, the review first tries the next reviewer-menu entry that is enabled, allowed by the
+project and above the thresholds (the panel models themselves are never candidates). A hold longer
+than 30 min raises one `DECISION` event per task (`reason.quota_hold[...]`, naming the fallback setting
+and the command that sets it); the task itself stays queued.

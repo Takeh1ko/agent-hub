@@ -45,7 +45,11 @@ def ensure_model(store: Store, alias: str, provider: str = "fake", model_id: str
     try:
         registry.add_model(store, alias, provider, model_id or alias)
     except registry.RegistryError:
-        pass
+        # A seeded alias (e.g. bunny → opencode) stays on its provider after a failed add:
+        # point it at the fake one, or the test runs a real session (slow, flaky, network).
+        with store.tx() as c:
+            c.execute("UPDATE model SET provider=?, model_id=? WHERE alias=?",
+                      (provider, model_id or alias, alias))
 
 
 def set_hub_quota(cfg_text: str) -> None:
@@ -259,7 +263,65 @@ def test_concurrency_cap_per_quota_group(store, tmp_path):
 
 
 def test_turn_quota_error_requeue_and_fresh_start_after_reset(store, tmp_path):
-    """Turn failing with quota error requeues to State.QUEUED and restarts fresh after reset."""
+    """Executor below threshold gets no turn: hold, then a fresh start after reset."""
+    from ahub import engine
+
+    project = make_project(tmp_path, max_parallel=2)
+    # Load-safe: slow fake startup under parallel suites is not silence.
+    project = dataclasses.replace(project, timeouts=dataclasses.replace(project.timeouts, idle_s=120))
+    res_json = '{"summary": "ok", "status": "done"}'
+    fake = install_fake(store, [
+        {"session": "ses_new", "steps": [{"write": {"path": ".ahub/report.md", "text": "## Суть\nok\n"}},
+                                         {"write": {"path": ".ahub/result.json", "text": res_json}},
+                                         {"event": {"type": "text", "text": "ok"}}]}
+    ])
+    ensure_model(store, "gemini-flash", "fake", "gemini-flash")
+
+    now = int(time.time() * 1000)
+    fake.set_quota([
+        QuotaBucket("Gemini", "5h", 0.12, now + 10_000, lambda m: "gemini" in m.lower()),
+        QuotaBucket("Gemini", "weekly", 0.60, now + 86400_000, lambda m: "gemini" in m.lower()),
+    ])
+
+    t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.SCOUT, title="scout task",
+                                           model="gemini-flash"), project, collect=False)
+
+    # 1. The breach is visible upfront: requeued to QUEUED with no turn spent.
+    eng = engine.Engine(store, project, t.id, sleep=lambda s: None)
+    settled = eng.run()
+
+    assert settled.state is State.QUEUED
+    assert "waiting for Gemini quota" in settled.reason
+    task_after = store.get_task(t.id)
+    assert task_after.state is State.QUEUED
+    assert fake.calls == []
+    hold = task_after.limits.get("quota_hold") or {}
+    assert hold.get("stage") == "executor" and hold.get("n") == 1
+
+    # 2. While quota is below threshold and before reset, service does not start it
+    s, rec = svc(store, project, tmp_path)
+    with patch("ahub.quota.now_ms", return_value=now + 5000):
+        s.tick()
+        assert rec.spawned == []
+
+    # 3. After reset_at passes and quota is restored, service launches it
+    fake.set_quota([
+        QuotaBucket("Gemini", "5h", 0.60, now + 20_000, lambda m: "gemini" in m.lower()),
+        QuotaBucket("Gemini", "weekly", 0.60, now + 86400_000, lambda m: "gemini" in m.lower()),
+    ])
+    with patch("ahub.quota.now_ms", return_value=now + 15_000):
+        s.tick()
+        assert rec.spawned == [t.id]
+
+    # 4. Engine runs again: the first (and only) turn, same task done
+    eng2 = engine.Engine(store, project, t.id, sleep=lambda s: None)
+    settled2 = eng2.run()
+    assert settled2.state is State.DONE
+    assert len(fake.calls) == 1 and fake.calls[-1]["session_id"] is None
+
+
+def test_turn_quota_error_mid_run_holds_and_restarts_fresh(store, tmp_path):
+    """Quota error invisible upfront (buckets look fine) still requeues and restarts fresh."""
     from ahub import engine
 
     project = make_project(tmp_path, max_parallel=2)
@@ -278,14 +340,14 @@ def test_turn_quota_error_requeue_and_fresh_start_after_reset(store, tmp_path):
 
     now = int(time.time() * 1000)
     fake.set_quota([
-        QuotaBucket("Gemini", "5h", 0.12, now + 10_000, lambda m: "gemini" in m.lower()),
+        QuotaBucket("Gemini", "5h", 0.60, now + 3600_000, lambda m: "gemini" in m.lower()),
         QuotaBucket("Gemini", "weekly", 0.60, now + 86400_000, lambda m: "gemini" in m.lower()),
     ])
 
     t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.SCOUT, title="scout task",
                                            model="gemini-flash"), project, collect=False)
 
-    # 1. Run engine turn: fails with Outcome.QUOTA
+    # 1. The turn runs (quota looks fine) and fails with Outcome.QUOTA.
     eng = engine.Engine(store, project, t.id, sleep=lambda s: None)
     settled = eng.run()
 
@@ -296,22 +358,7 @@ def test_turn_quota_error_requeue_and_fresh_start_after_reset(store, tmp_path):
     assert task_after.state is State.QUEUED
     assert task_after.limits.get("fresh_session") is True
 
-    # 2. While quota is below threshold and before reset, service does not start it
-    s, rec = svc(store, project, tmp_path)
-    with patch("ahub.quota.now_ms", return_value=now + 5000):
-        s.tick()
-        assert rec.spawned == []
-
-    # 3. After reset_at passes and quota is restored, service launches it
-    fake.set_quota([
-        QuotaBucket("Gemini", "5h", 0.60, now + 20_000, lambda m: "gemini" in m.lower()),
-        QuotaBucket("Gemini", "weekly", 0.60, now + 86400_000, lambda m: "gemini" in m.lower()),
-    ])
-    with patch("ahub.quota.now_ms", return_value=now + 15_000):
-        s.tick()
-        assert rec.spawned == [t.id]
-
-    # 4. Engine runs again: a new session (the old one would repeat the quota error), same task done
+    # 2. Engine runs again: a new session (the old one would repeat the quota error), same task done
     eng2 = engine.Engine(store, project, t.id, sleep=lambda s: None)
     settled2 = eng2.run()
     assert settled2.state is State.DONE
@@ -477,6 +524,9 @@ def test_reviewer_quota_below_threshold_with_fallback(store, tmp_path, monkeypat
     ])
     ensure_model(store, "gemini-flash", "fake", "gemini-flash")
     ensure_model(store, "bunny", "fake", "bunny")
+    # The fallback must resolve to the fake provider (a seeded bunny → opencode
+    # would run a real session here: ~25 s and network in a unit test).
+    assert registry.get(store, "bunny").provider == "fake"
 
     set_hub_quota('[quota]\nfallback_reviewer = "bunny"\n')
 
@@ -494,6 +544,7 @@ def test_reviewer_quota_below_threshold_with_fallback(store, tmp_path, monkeypat
     settled = eng.run()
 
     assert settled.state is State.DONE
+    assert fake.calls, "the reviewer turn ran on the fake provider, not a real one"
     events = store.events(task_id=t.id)
     model_ev = next((e for e in events if e.kind == Ev.MODEL_CHANGED.value), None)
     assert model_ev is not None
