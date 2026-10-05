@@ -46,7 +46,7 @@ from ahub.time import now_ms
 
 LEASE_MS = 90_000
 STOP_POLL_S = 3.0
-NUDGE_MAX = 8  # messages from the orchestrator in a row per step (each one is a whole turn)
+NUDGE_MAX = 8  # messages from the orchestrator in a row per run (each one is a whole turn)
 BUDGET_POLL_S = 30.0
 POLL_FAIL_MAX = 3  # owner poll failures in a row — the process gives up (a live reload broke its schema)
 REPORT_MAX_BYTES = 18_000  # 12 KB per contract plus margin; over that is flagged, not rejected
@@ -198,11 +198,6 @@ def _findings_summary(findings: list[review.Finding]) -> str:
                   parts=parts)
 
 
-def _problem(code: str, **params) -> gates.Problem:
-    """One scout-result problem: the text for a repair prompt, the code for the task reason."""
-    return gates.Problem(_t("engine." + code, **params), code, params)
-
-
 def _gate_problems(g: gates.GateResult) -> list[dict]:
     """The gate problems as sub-reasons — to store on the task, not translated text."""
     items = gates.codes(g.repairable)
@@ -221,6 +216,7 @@ class Settled:
 
     state: State
     reason: str = ""
+    busy: bool = False
 
 
 class Engine:
@@ -240,33 +236,18 @@ class Engine:
         self.budget_hit = False
         self._budget_at = 0.0
         self._soft_sent = False
+        self._nudge_turns = 0
         self.log = hublog.get("engine", task=self.task_id, project=project.name)
-
-    # --- lease ---
-
-    def _keeper(self, done: threading.Event) -> None:
-        interval = max(1.0, self.lease_ms / 3000)
-        while not done.wait(interval):
-            try:
-                ok = transitions.renew(self.store, self.task_id, self.owner, lease_ms=self.lease_ms)
-            except sqlite3.Error:
-                self.log.exception("lease renewal failed")
-                continue
-            if not ok:
-                self.log.warning("lease lost — stopping")
-                self.lost.set()
-                return
 
     def run(self) -> Settled:
         if not transitions.acquire(self.store, self.task_id, self.owner, pid=os.getpid(), lease_ms=self.lease_ms):
             self.log.info("task owned by another owner — exiting")
             t = self.store.get_task(self.task_id)
-            return Settled(t.state if t else State.ERROR, reasons.text(reasons.dump("busy")))
-        done = threading.Event()
-        keeper = threading.Thread(target=self._keeper, args=(done,), daemon=True)
-        keeper.start()
+            return Settled(t.state if t else State.ERROR, reasons.text(reasons.dump("busy")), busy=True)
         try:
-            return self._run()
+            with transitions.keep_lease(self.store, self.task_id, self.owner, lease_ms=self.lease_ms,
+                                        on_lost=self.lost.set, name=f"engine-lease-T{self.task_id}"):
+                return self._run()
         except LeaseLost:
             t = self.store.get_task(self.task_id)
             return Settled(t.state if t else State.ERROR, reasons.text(reasons.dump("lease_lost")))
@@ -284,8 +265,6 @@ class Engine:
                 self.log.exception("failed to record error")
                 raise
         finally:
-            done.set()
-            keeper.join(timeout=5)
             try:
                 transitions.release(self.store, self.task_id, self.owner)
             except sqlite3.Error:
@@ -365,7 +344,7 @@ class Engine:
         except Exception as e:
             self._poll_fails += 1
             if self._poll_fails < POLL_FAIL_MAX:
-                self.log.debug("%s poll failed (%d/%d): %s", what, self._poll_fails, POLL_FAIL_MAX, e)
+                self.log.warning("%s poll failed (%d/%d): %s", what, self._poll_fails, POLL_FAIL_MAX, e)
                 return False, default
             self.log.error("%s poll failed %d times in a row (%s: %s) — the task is left to the service",
                            what, self._poll_fails, type(e).__name__, str(e)[:200])
@@ -570,7 +549,7 @@ class Engine:
                 self.log.warning("provider failure: %s → retry %d/%d in %d s", r.error[:200], attempt,
                                  tmo.retry_max, pause)
                 self.set_phase(Phase.WAITING)
-                if not self._pause(pause, should_stop):
+                if not self._pause(pause, self.stop_requested):
                     return RunResult(Outcome.KILLED, r.session_id, error=_t("engine.pause_killed"))
                 if keep_session_on_retry and r.session_id:
                     session_id = r.session_id
@@ -643,19 +622,26 @@ class Engine:
 
     def _take_nudge(self, role: Role, alias: str, r: RunResult, session_id: str | None,
                     log_name: str) -> RunResult:
-        """Deliver what the orchestrator asked into the same session (the turn was interrupted for it).
+        """Deliver what the orchestrator asked into the same session.
 
-        The message is taken from the task row before the turn, so a nudge that comes during the turn
-        itself is not eaten by it. Round, budget and gates are untouched — this is one more turn.
+        Round, budget and gates are untouched — this is one more turn. A message that arrives during a
+        nudge turn interrupts it (a turn carries a message) and is delivered in the next one: the turns
+        of all nudges in one run are capped at NUDGE_MAX.
         """
-        for _ in range(NUDGE_MAX):
+        while self._nudge_turns < NUDGE_MAX:
             text = self.pending_nudge()
             if not text:
                 return r
             self._take_request_back("nudge", text)
+            self._nudge_turns += 1
             self.log.info("nudge into the %s session: %s", role.value, text[:200])
             r = self.session(role, alias, prompts.nudge_prompt(text), session_id=r.session_id or session_id,
                              log_name=log_name, prompt_kind="nudge")
+            if r.outcome is Outcome.KILLED and not self.stop_requested() and self.pending_nudge():
+                continue  # the turn was cut short by the next message — it is delivered right here
+            # a turn that ended badly settles the task — the message that arrived meanwhile does not paper over it
+            if self._outcome_to_state(r) is not None:
+                return r
         return r
 
     # --- scout ---
@@ -693,9 +679,14 @@ class Engine:
             return self._settle(State.NEEDS_DECISION, reasons.dump("blocked", summary=summary),
                                 payload={"summary": summary})
         report = Path(t.worktree) / workspace.AHUB_DIR / "report.md"
+        try:
+            st_size = report.stat().st_size
+        except OSError:  # the report is gone between the check and now (a directory is caught by _check_scout)
+            return self._settle(State.NEEDS_DECISION,
+                                reasons.dump("scout_bad", problems=[reasons.part("no_report")]))
         return self._settle(State.DONE, reasons.dump("report_ready"),
                             payload={"summary": str(res.get("summary", ""))[:500],
-                                     "report_bytes": report.stat().st_size})
+                                     "report_bytes": st_size})
 
     def _result(self, t: Task) -> dict:
         p = Path(t.worktree) / workspace.AHUB_DIR / "result.json"
@@ -710,26 +701,30 @@ class Engine:
         problems: list[gates.Problem] = []
         changed = workspace.changed_files(t.worktree)
         if changed:
-            problems.append(_problem("scout_files", files=", ".join(changed[:10])))
+            problems.append(gates.problem("scout_files", files=", ".join(changed[:10])))
         if workspace.commits_since(t.worktree, t.base_sha):
-            problems.append(_problem("scout_commits"))
+            problems.append(gates.problem("scout_commits"))
         base = Path(t.worktree) / workspace.AHUB_DIR
         res_path = base / "result.json"
         if not res_path.exists():
-            problems.append(_problem("no_result"))
+            problems.append(gates.problem("no_result"))
+            res = {}
         else:
             res = self._result(t)
             if not res:
-                problems.append(_problem("result_not_json"))
+                problems.append(gates.problem("result_not_json"))
             else:
                 if not str(res.get("summary", "")).strip():
-                    problems.append(_problem("empty_summary"))
+                    problems.append(gates.problem("empty_summary"))
                 if res.get("status") not in ("done", "blocked"):
-                    problems.append(_problem("bad_status"))
+                    problems.append(gates.problem("bad_status"))
         report = base / "report.md"
-        if not report.exists() or not report.read_text(encoding="utf-8", errors="replace").strip():
-            if self._result(t).get("status") != "blocked":
-                problems.append(_problem("no_report"))
+        try:
+            report_ok = report.is_file() and bool(report.read_text(encoding="utf-8", errors="replace").strip())
+        except OSError:
+            report_ok = False
+        if not report_ok and res.get("status") != "blocked":
+            problems.append(gates.problem("no_report"))
         return problems
 
     # --- review ---

@@ -69,6 +69,16 @@ def test_unknown_code_shows_the_code_itself():
     assert reasons.text('{"code":"no_such_code"}') == "no_such_code"
 
 
+def test_a_waiting_reason_is_a_sentence():
+    """The reason goes next to the state in every line of the UI: a bare label reads as a column value."""
+    assert reasons.text(reasons.dump("gates")) == "waiting on gates"
+
+
+def test_the_money_in_a_reason_is_the_money_of_the_catalogue():
+    """`${go}` is the project's money notation (`$` + the value), like views.cost_go and accept.budget_msg."""
+    assert reasons.text(reasons.dump("budget_spent", go="0.500", budget="1.5")) == "budget exhausted ($0.500 of $1.5)"
+
+
 def test_a_state_param_is_read_as_a_word(monkeypatch):
     """A stored machine name becomes a readable word — in the language of the reader."""
     stored = reasons.dump("wait_accept", task="T53", state="reviewing")

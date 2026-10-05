@@ -8,6 +8,7 @@ import sys
 import time
 
 from ahub import procs, pulse, service
+from tests.conftest import wait_until
 
 NOPROC = "/nonexistent"  # no such dir — the psutil branch
 
@@ -44,7 +45,7 @@ def test_psutil_children_alive_cmdline_start_time():
 def test_psutil_zombie_not_alive():
     z = subprocess.Popen([sys.executable, "-c", "pass"])
     try:
-        time.sleep(0.5)
+        assert wait_until(lambda: not procs.alive(z.pid, NOPROC)), "the child is still running"
         # not reaped yet — a zombie (the /proc entry is there, psutil has no state)
         assert not procs.alive(z.pid, NOPROC)
         assert not procs.alive(z.pid)  # and via /proc it is not alive either
@@ -67,12 +68,12 @@ def test_psutil_no_data_without_psutil(monkeypatch):
 
 
 def test_psutil_live_workers_finds_marked():
-    tid = 987654
+    # live_workers() keys the map by task id and the scan is machine-wide, so the id must belong to this
+    # run alone: another suite (or the live hub) spawning "ahub.worker T987654" would own that key.
+    tid = 900_000 + os.getpid() % 90_000
     s = _sleep(["-m", "ahub.worker", f"T{tid}"])  # the shape the service spawns
     try:
-        time.sleep(0.5)
-        live = service.live_workers(NOPROC)
-        assert live.get(tid) == s.pid
+        assert wait_until(lambda: service.live_workers(NOPROC).get(tid) == s.pid), "the worker was not seen"
     finally:
         s.kill()
         s.wait()

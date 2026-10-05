@@ -6,23 +6,26 @@ never logs secret values (auth.json values are never read into output, a proxy U
 
 Also the live model probe (probe_model): one tiny request through the provider module, so setup never
 makes a model that does not answer the default (the free Spark was silent for hours on 2026-10-02).
-And what every provider looks like right now (provider_states): the same checks, one state per provider,
-which `ahub setup` and `ahub providers` show and probe_models probes all at once.
+And what every provider looks like right now (provider_states): the auth check and, for opencode, its health —
+one state per provider, which `ahub setup` and `ahub providers` show and probe_models probes at once
+(one provider at a time, its models in parallel).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 from ahub.i18n import t as _t
 
@@ -91,11 +94,13 @@ def check_config() -> Check:
 
 
 def _service_unit() -> str:
+    from ahub.service import PLIST_FILES, UNIT_SERVICE
+
     home = Path.home()
-    sys_unit = home / ".config" / "systemd" / "user" / "ahub.service"
+    sys_unit = home / ".config" / "systemd" / "user" / UNIT_SERVICE
     if sys_unit.is_file():
         return str(sys_unit)
-    plist = home / "Library" / "LaunchAgents" / "dev.ahub.service.plist"
+    plist = home / "Library" / "LaunchAgents" / PLIST_FILES[UNIT_SERVICE]
     if plist.is_file():
         return str(plist)
     return ""
@@ -217,9 +222,23 @@ def auth_providers(binary: str | None = None) -> list[str]:
     return sorted(found)
 
 
+def _authorized(providers: list[str] | None, name: str) -> bool:
+    """Is the provider in the authorized list? Case-insensitive — the names come from a file."""
+    return any(p.strip().lower() == name for p in providers or ())
+
+
 def has_go_login(providers: list[str] | None = None) -> bool:
     provs = providers if providers is not None else auth_providers()
-    return any(p.strip().lower() == "opencode-go" for p in provs)
+    return _authorized(provs, "opencode-go")
+
+
+def has_any_login(providers: list[str] | None = None) -> bool:
+    """A login opencode answers with at all: "opencode" (the free models) or "opencode-go".
+
+    A foreign key in auth.json (anthropic and the like) is no ahub login — it must not be counted as one.
+    """
+    provs = providers if providers is not None else auth_providers()
+    return _authorized(provs, "opencode") or _authorized(provs, "opencode-go")
 
 
 def _auth_check(providers: list[str]) -> Check:
@@ -233,6 +252,118 @@ def _auth_check(providers: list[str]) -> Check:
 
 def check_opencode_auth() -> Check:
     return _auth_check(auth_providers())
+
+
+def _systemd_show(argv: list[str]) -> str:
+    """One `systemctl --user …` answer, "" when systemctl cannot say it (no binary, no bus, no unit)."""
+    exe = shutil.which("systemctl")
+    if not exe:
+        return ""
+    try:
+        r = subprocess.run([exe, "--user", *argv], capture_output=True, text=True, timeout=TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (r.stdout or "") if r.returncode == 0 else ""
+
+
+def _env_names(text: str) -> set[str]:
+    """Env var names from a systemd `NAME=value` / `Environment=` listing — a value is never kept."""
+    return {token.strip('"').split("=", 1)[0] for token in text.split()}
+
+
+def _live_env_names() -> set[str] | None:
+    """Env var names the running service process has, None when it is not running or /proc cannot say.
+
+    The process env is what a turn really gets — a drop-in or an EnvironmentFile= is already in it.
+    Names only: everything after the first `=` is dropped before the bytes are decoded.
+    """
+    from ahub.service import UNIT_SERVICE
+
+    pid = _systemd_show(["show", UNIT_SERVICE, "-p", "MainPID", "--value"]).strip()
+    if not pid.isdigit() or int(pid) < 1:
+        return None
+    try:
+        raw = Path(f"/proc/{int(pid)}/environ").read_bytes()
+    except OSError:
+        return None
+    return {item.split(b"=", 1)[0].decode("utf-8", "replace") for item in raw.split(b"\0") if item} or None
+
+
+def _systemd_env_names() -> set[str] | None:
+    """Env var names the hub service runs with, None when systemd cannot say.
+
+    The running process first; without it (the service is stopped) the unit's own `Environment=` unioned
+    with the user manager's — a key exported in the session profile reaches the manager. An empty unit
+    listing means "no unit" (systemd answers `Environment=` with rc 0 for a unit it does not know), never
+    "the service has no keys": an installed unit always carries PYTHONUNBUFFERED=1.
+    """
+    from ahub.service import UNIT_SERVICE
+
+    live = _live_env_names()
+    if live is not None:
+        return live
+    names = _env_names(_systemd_show(["show", UNIT_SERVICE, "-p", "Environment"])
+                       .strip().removeprefix("Environment="))
+    if not names:
+        return None
+    return names | _env_names(_systemd_show(["show-environment"]))
+
+
+def _service_env_names() -> set[str] | None:
+    """Env var names the hub service runs with, None when they cannot be read.
+
+    Linux — what the process has, else what systemd gives the unit and its manager; macOS — the
+    EnvironmentVariables of the plist. The service does not read the shell profile: a key exported there
+    only is invisible to it.
+    """
+    from ahub.service import PLIST_FILES, UNIT_SERVICE
+
+    if not sys.platform.startswith("darwin"):
+        return _systemd_env_names()
+    plist = Path.home() / "Library" / "LaunchAgents" / PLIST_FILES[UNIT_SERVICE]
+    try:
+        data = plistlib.loads(plist.read_bytes())
+    except (OSError, ValueError, ExpatError):  # a truncated plist is an interrupted write, not a fact
+        return None
+    env = data.get("EnvironmentVariables") if isinstance(data, dict) else None
+    if not isinstance(env, dict) or not env:
+        return None  # a plist without them cannot say what the service runs with (as Linux: no unit)
+    return {str(k) for k in env}
+
+
+def check_provider_keys() -> Check:
+    """A provider key of this env that the service cannot see: exported in the shell profile, in neither
+    the service env nor the opencode auth store — opencode then fails with a generic server error.
+
+    No key of the env, or no service env to compare with — no data (None). Values are never read.
+    """
+    from ahub.prepare import PROVIDER_KEYS
+    from ahub.service import LABELS, UNIT_SERVICE
+
+    mine_env = {k.upper(): k for k in os.environ}  # the names are matched case-insensitively (KEEP_ENV)
+    mine = [name for name in PROVIDER_KEYS if mine_env.get(name)]
+    if not mine:
+        return Check("provider_keys", None, _t("doctor.keys_none"), "")
+    names = _service_env_names()
+    if names is None:
+        return Check("provider_keys", None, _t("doctor.keys_no_unit_env"), "")
+    service = {n.upper() for n in names}
+    auth = _providers_from_auth_file()
+    hidden: dict[str, list[str]] = {}
+    for name in mine:
+        provider = PROVIDER_KEYS[name]
+        if name not in service and provider not in auth:
+            hidden.setdefault(provider, []).append(name)  # one fix per provider, not per variable
+    if not hidden:
+        return Check("provider_keys", True, _t("doctor.keys_ok", keys=", ".join(mine)), "")
+    keys = "; ".join(f"{p}: {', '.join(vars_)}" for p, vars_ in hidden.items())
+    reload_key = "doctor.keys_reload_launchd" if sys.platform.startswith("darwin") \
+        else "doctor.keys_reload_systemd"
+    fix = "; ".join(_t("doctor.keys_fix", provider=p, names=", ".join(vars_))
+                     for p, vars_ in hidden.items())
+    # an edited Environment= reaches the running service only after a reload and a restart
+    return Check("provider_keys", False, _t("doctor.keys_hidden", keys=keys),
+                 f"{fix}; {_t(reload_key, unit=UNIT_SERVICE, label=LABELS[UNIT_SERVICE])}")
 
 
 def check_agy() -> Check:
@@ -336,12 +467,21 @@ def install_hint(name: str) -> str:
 
 
 def provider_state(name: str, auth: list[str] | None = None) -> ProviderState:
-    """One provider state, from the same checks `ahub doctor` runs."""
+    """One provider state: the auth check of `ahub doctor`, plus opencode's health.
+
+    A broken opencode.db is not a login problem — the models still answer, so the wizard keeps probing
+    them; its reason is the detail (the opencode_health check says it in `ahub doctor`).
+    """
     provs = auth if auth is not None else auth_providers()
     if name == "opencode":
-        check = check_opencode()
-        found, logged, detail = bool(check.ok), bool(provs), check.detail
-        fix = "" if logged else (check.fix or _t("doctor.auth_fix"))
+        binary = check_opencode()
+        health = check_opencode_health() if binary.ok else None
+        found = bool(binary.ok)
+        # an "opencode" key answers for the free models, "opencode-go" for the paid ones too;
+        # a foreign key (anthropic) is no ahub login at all
+        logged = has_any_login(provs)
+        detail = (health.detail if health is not None and not health.ok else "") or binary.detail
+        fix = "" if logged else (binary.fix or _t("doctor.auth_fix"))
     elif name == "agy":
         check = check_agy()
         found, logged = check.ok is not None, bool(check.ok)
@@ -440,9 +580,13 @@ def _probe_one(entry, timeout_s: int) -> tuple[bool, str]:
         return False, _t("doctor.probe_error", alias=entry.alias, err=f"{e.__class__.__name__}: {e}"[:200])
 
 
-def probe_models(entries, timeout_s: int = PROBE_WIZARD_S,
-                 workers: int = PROBE_WORKERS) -> dict[str, tuple[bool, str]]:
+def probe_models(entries, timeout_s: int = PROBE_WIZARD_S, workers: int = PROBE_WORKERS,
+                 step: Callable[[], None] | None = None) -> dict[str, tuple[bool, str]]:
     """Live probe of several models at once: alias → (answers, detail).
+
+    One provider at a time, its models in parallel: several live turns of one account at once hit its
+    quota, and the wizard then recommends a model for the wrong reason. step() — after every finished
+    probe (the caller's live line).
 
     Empty with probing off (AHUB_PROBE=0) or nothing to probe — the caller then keeps its own fallback.
     """
@@ -450,10 +594,16 @@ def probe_models(entries, timeout_s: int = PROBE_WIZARD_S,
     if not items or not probing_enabled():
         return {}
     out: dict[str, tuple[bool, str]] = {}
-    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(items)))) as pool:
-        futures = [pool.submit(_probe_one, e, timeout_s) for e in items]
-        for entry, fut in zip(items, futures, strict=True):
-            out[entry.alias] = fut.result()
+    groups: dict[str, list] = {}
+    for e in items:
+        groups.setdefault(e.provider, []).append(e)
+    for group in groups.values():
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(group)))) as pool:
+            futures = {pool.submit(_probe_one, e, timeout_s): e for e in group}
+            for fut in as_completed(futures):
+                out[futures[fut].alias] = fut.result()
+                if step is not None:
+                    step()  # per finished probe — a slow one does not hold the line back
     return out
 
 
@@ -471,9 +621,19 @@ def recommend_model(entries, results: dict[str, tuple[bool, str]]) -> str:
     return pick[0].alias
 
 
-def probe_none_warning(aliases) -> str:
-    """The warning when nothing answered a probe (aliases of what was tried)."""
-    return _t("doctor.probe_none", tried=", ".join(aliases), fix=_t("doctor.probe_fix"))
+def probe_none_warning(aliases, *, free: bool = False) -> str:
+    """The warning when nothing answered a probe (aliases of what was tried).
+
+    free — only free models were probed; otherwise the paid ones were in there too.
+    """
+    key = "doctor.probe_none_free" if free else "doctor.probe_none"
+    return _t(key, tried=", ".join(aliases), fix=_t("doctor.probe_fix"))
+
+
+def probe_detail(detail, alias: str) -> str:
+    """The probe detail without the alias it repeats in its own cell ("spark: …" → "…")."""
+    text = str(detail or "")
+    return text[len(alias) + 2:] if text.startswith(f"{alias}: ") else text
 
 
 def _free_alias(store) -> str:
@@ -504,7 +664,7 @@ def pick_free(store, *, timeout_s: int = PROBE_TIMEOUT_S,
             step()
         if ok:
             return entry.alias, ""
-    return cands[0].alias, probe_none_warning([e.alias for e in cands])
+    return cands[0].alias, probe_none_warning([e.alias for e in cands], free=True)
 
 
 def check_models(auth: list[str] | None = None) -> Check:
@@ -528,6 +688,9 @@ def check_models(auth: list[str] | None = None) -> Check:
             continue
         if default.model_id.startswith("opencode-go/") and not go:
             bad.append(role.value)
+    if menus and not any(menus.values()):
+        # every provider switched off: no role has a model at all — a green doctor here would be a lie
+        return Check("models", False, _t("doctor.models_none"), _t("doctor.models_none_fix"))
     if not bad:
         return Check("models", True, _t("doctor.models_ok"), "")
     free = _free_alias(store)
@@ -619,22 +782,25 @@ def bash_allowed(root: Path | None = None) -> bool:
 
 
 def check_claude_skill(root: Path | None = None) -> Check:
-    """The skill in ~/.claude/skills/ahub and the Bash(ahub:*) rule in the project settings.json.
+    """The skill in ~/.claude/skills/ahub — without it Claude Code does not know the workflow.
 
-    Both come from the same setup step: without the rule Claude Code asks for a permission on every command.
+    The Bash(ahub:*) permission it runs with is a convenience, so it is a separate check (check_claude_rule):
+    an optional rule must not turn a correct install red.
     """
     path = skill_path()
-    settings = settings_path(root)
-    if path.is_file() and bash_allowed(root):
-        return Check("claude_skill", True,
-                     _t("doctor.skill_ok", path=str(path)) + ", "
-                     + _t("doctor.perm_ok", path=str(settings), rule=BASH_RULE), "")
     if path.is_file():
-        return Check("claude_skill", False,
-                     _t("doctor.skill_ok", path=str(path)) + ", "
-                     + _t("doctor.perm_missing", path=str(settings), rule=BASH_RULE),
-                     _t("doctor.skill_fix"))
+        return Check("claude_skill", True, _t("doctor.skill_ok", path=str(path)), "")
     return Check("claude_skill", False, _t("doctor.skill_missing", path=str(path)),
+                 _t("doctor.skill_fix"))
+
+
+def check_claude_rule(root: Path | None = None) -> Check:
+    """The Bash(ahub:*) rule in the project .claude/settings.json: without it Claude Code asks for a
+    permission on every command. Not written — no data (None), never a failure."""
+    settings = settings_path(root)
+    if bash_allowed(root):
+        return Check("claude_rule", True, _t("doctor.perm_ok", path=str(settings), rule=BASH_RULE), "")
+    return Check("claude_rule", None, _t("doctor.perm_missing", path=str(settings), rule=BASH_RULE),
                  _t("doctor.skill_fix"))
 
 
@@ -683,14 +849,15 @@ def _safe(name: str, fn) -> Check:
         return _fail(name, e)
 
 
-# the checks that call a binary (the slow ones): `ahub doctor` shows one live line while they run
-_SLOW = frozenset({"opencode_health", "agy", "codex", "network"})
+# the checks that call a binary or read a store (the slow ones): `ahub doctor` shows one live line while
+# they run; a fast check would only make it flicker
+_SLOW = frozenset({"opencode_health", "agy", "codex", "models", "provider_keys"})
 
 
 def run_all(root: Path | None = None, step: Callable[[], None] | None = None) -> list[Check]:
-    """All checks in display order; never raises. root — the project of the claude_skill check, cwd by
-    default. step() — the caller's live line: called after each slow check (the provider binaries), never
-    after a fast one, so the line only moves when something is really being waited for."""
+    """All checks in display order; never raises. root — the project of the claude checks, cwd by
+    default. step() — the caller's live line: called after each slow check (the provider binaries, the
+    role menus), never after a fast one, so the line only moves when something is really being waited for."""
     providers: list[str] = []
     try:
         providers = auth_providers()
@@ -704,12 +871,14 @@ def run_all(root: Path | None = None, step: Callable[[], None] | None = None) ->
         ("opencode", check_opencode),
         ("opencode_health", check_opencode_health),
         ("opencode_auth", lambda: _auth_check(providers)),
+        ("provider_keys", check_provider_keys),
         ("agy", check_agy),
         ("codex", check_codex),
         ("models", lambda: check_models(providers)),
         ("network", check_network),
         ("claude", check_claude),
         ("claude_skill", lambda: check_claude_skill(root)),
+        ("claude_rule", lambda: check_claude_rule(root)),
         ("prompts", lambda: check_prompts(root)),
         ("telegram", check_telegram),
     ]
@@ -722,11 +891,14 @@ def run_all(root: Path | None = None, step: Callable[[], None] | None = None) ->
 
 
 __all__ = ["Check", "ProviderState", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_WIZARD_S", "PROBE_PROMPT",
-           "auth_providers", "auth_file_path", "has_go_login", "run_all", "probe_model", "probing_enabled",
+           "auth_providers", "auth_file_path", "has_go_login", "has_any_login", "run_all", "probe_model",
+           "probing_enabled",
            "pick_free", "free_candidates", "probe_models", "recommend_model", "probe_none_warning",
+           "probe_detail",
            "provider_states", "provider_state", "provider_line", "install_hint",
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
-           "check_opencode_health", "check_opencode_auth", "check_agy", "check_codex", "check_models",
-           "check_network", "check_claude", "check_claude_skill", "check_prompts", "check_telegram",
+           "check_opencode_health", "check_opencode_auth", "check_provider_keys", "check_agy", "check_codex",
+           "check_models", "check_network", "check_claude", "check_claude_skill", "check_claude_rule",
+           "check_prompts", "check_telegram",
            "provider_proxy_detail",
            "skill_path", "settings_path", "bash_allowed", "apparmor_blocks_userns", "codex_sandbox_fix"]

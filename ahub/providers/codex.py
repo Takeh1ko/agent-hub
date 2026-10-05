@@ -325,7 +325,7 @@ class CodexProvider(Provider):
             if item.get("exit_code") is not None:
                 data["exit_code"] = item.get("exit_code")
             out = item.get("aggregated_output")
-            if isinstance(out, str) and out.strip():  # first lines for the transcript
+            if isinstance(out, str) and out.strip():  # first 300 characters for the transcript
                 data["output"] = out[:300]
             kind = Act.TOOL_START if started else Act.TOOL_END
             return [Activity(kind, now, tool=itype, data=data)]

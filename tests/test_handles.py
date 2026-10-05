@@ -66,6 +66,23 @@ def test_new_errors_one_line(env, capsys):
     assert rc == 2 and err.startswith("ошибка: задача не создана:") and "«bot/**» вне" in err and "приёмка" in err
 
 
+def test_review_task_panel_by_flag(env, capsys):
+    """`--review` of a review kind is its panel; `--model` is one reviewer, --rounds does not apply."""
+    store, _ = env
+    install_fake(store, [])
+    rc, out, err = ahub(capsys, "task", "new", "--kind", "review", "--title", "посмотри ветку",
+                        "--review", "fake", "--input", "main..ahub/T1")
+    assert rc == 0 and "ревью fake×1" in out, err
+    assert store.get_task(1).review == {"models": ["fake"], "rounds": 1}
+    rc, _, err = ahub(capsys, "task", "new", "--kind", "review", "--title", "x", "--review", "fake",
+                      "--model", "fake", "--input", "main")
+    assert rc == 2 and "--review и --model вместе нельзя" in err
+    rc, _, err = ahub(capsys, "task", "new", "--kind", "review", "--title", "y", "--review", "fake",
+                      "--rounds", "2", "--input", "main")
+    assert rc == 2 and "--rounds неприменим к задаче «ревью»" in err
+    assert store.get_task(2) is None
+
+
 def test_key_idempotent(env, capsys):
     store, _ = env
     install_fake(store, [])
@@ -86,6 +103,15 @@ def test_stop_continue_reject(env, capsys):
     assert rc == 2 and "продолжить можно" in err
     rc, _, err = ahub(capsys, "status", "T99")
     assert rc == 2 and "нет задачи" in err
+
+
+def test_budget_lowers_the_real_money_budget(env, capsys):
+    store, _ = env
+    install_fake(store, [])
+    ahub(capsys, "task", "new", "--kind", "scout", "--title", "x", "--model", "fake", "--budget-usd", "0.5")
+    rc, out, err = ahub(capsys, "budget", "T1", "--set-usd", "0.02")
+    assert rc == 0 and "реальные $0.5 → $0.02" in out, err
+    assert store.get_task(1).budget_usd == 0.02
 
 
 def test_nudge_refused_without_a_running_worker(env, capsys):
@@ -255,6 +281,23 @@ def test_watch_counts_failures_again_after_a_working_poll(env, capsys, monkeypat
         "watch: OperationalError: database is locked"] * 2  # one line per streak, not per poll
 
 
+def test_wait_and_watch_do_not_catch_programmer_defects(env, monkeypatch):
+    """TypeError/AttributeError in poll is a code defect, not a transient DB error — raises immediately."""
+    def fake_wait(*a, **kw):
+        raise TypeError("internal bug")
+
+    monkeypatch.setattr(events, "wait", fake_wait)
+    with pytest.raises(TypeError, match="internal bug"):
+        cli.main(["wait", "--timeout", "1s"])
+
+    def fake_watch(*a, **kw):
+        raise AttributeError("another bug")
+
+    monkeypatch.setattr(events, "ready_batch", fake_watch)
+    with pytest.raises(AttributeError, match="another bug"):
+        cli.main(["watch", "--poll", "0"])
+
+
 def test_say_ask_answer_alarms(env, capsys):
     store, _ = env
     assert ahub(capsys, "say", "T12 готова, смотрю")[1] == "отправлено владельцу"
@@ -284,6 +327,7 @@ def test_say_ask_answer_alarms(env, capsys):
     rc, out, _ = ahub(capsys, "alarms", "--ack")
     assert rc == 0 and out.splitlines()[-1] == "2 тревоги отмечены прочитанными"
     assert ahub(capsys, "alarms")[1] == "тревог нет"
+    assert "codex отвечает медленно" in ahub(capsys, "alarms", "--acked")[1]
 
 
 LONG_OWNER = ("Я тебе ставил конкретные цели на прошлой неделе, а ты сделал вид, что ничего не было, и я хочу "

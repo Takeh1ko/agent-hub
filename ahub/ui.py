@@ -21,6 +21,7 @@ import re
 import shutil
 import sys
 import textwrap
+import threading
 import unicodedata
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
@@ -47,7 +48,9 @@ _ANSI = re.compile(r"\033\[[0-9;]*m")
 _ITEM = re.compile(r"^([-*•]|\d+\.)\s+(.*)$")
 _SENTENCE = re.compile(r"[.!?…](?=\s|$)")
 _PARAGRAPH = re.compile(r"\n[ \t]*\n")
-_force_plain = False
+# plain() is per thread: the observer builds its snapshot and the TG launcher its prompt on their own
+# threads, and while they do, the terminal output of the main thread still belongs to a human.
+_plain = threading.local()
 
 Value = str | Sequence[Any]  # a kv value: text, or the chunks of the line (a string, or a (label, value) pair)
 
@@ -59,10 +62,14 @@ def width(explicit: int | None = None) -> int:
     return max(MIN_WIDTH, shutil.get_terminal_size((DEFAULT_WIDTH, 24)).columns or DEFAULT_WIDTH)
 
 
+def plain_on() -> bool:
+    """True inside this thread's `plain()` block (the text is leaving the terminal)."""
+    return bool(getattr(_plain, "on", False))
+
+
 def colour_on() -> bool:
     """True — a human at a terminal that wants colour. A pipe, NO_COLOR or plain() — plain text."""
-    global _force_plain
-    if _force_plain:
+    if plain_on():
         return False
     try:
         tty = sys.stdout.isatty()
@@ -77,12 +84,12 @@ def plain() -> Iterator[None]:
 
     The layout follows the colour: the compact aligned text, not the ⏺ item language.
     """
-    global _force_plain
-    prev, _force_plain = _force_plain, True
+    prev = plain_on()
+    _plain.on = True
     try:
         yield
     finally:
-        _force_plain = prev
+        _plain.on = prev
 
 
 def styled(text: str, *styles: str) -> str:
@@ -278,6 +285,8 @@ def table(head: Sequence[str] | None, rows: Sequence[Sequence[Any]], *, max_widt
     head=None — no column head (the rows speak for themselves)."""
     head = list(head) if head else []
     cols = max([len(head)] + [len(r) for r in rows]) if rows else len(head)
+    if head:
+        head = head + [""] * (cols - len(head))
     body = [list(r) + [""] * (cols - len(r)) for r in rows]
     widths = [max(([plain_len(str(head[i]))] if head else [0]) + [plain_len(str(r[i])) for r in body])
               for i in range(cols)]

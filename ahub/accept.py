@@ -7,9 +7,11 @@ current HEAD (orchestrator edit — if HEAD ≠ worker result commit: legitimate
 `git merge --no-ff` into the work branch → acceptance under the test resource → red — roll the merge back →
 push per config → "accepted", task_cleanup hook, copy and branch removed, archived.
 
-Resumable: if the task branch is already merged into the work branch (the accept was interrupted after the merge
-— the gates there see nothing but the merge commit), the gates and the merge are skipped: acceptance runs on HEAD
-(red — roll the merge back, as usual), then the same tail.
+Resumable: if accept's own merge commit (`merge T<n>: …`, second parent = the task branch tip) is the tip of the work
+branch (the accept was interrupted after the merge — the gates on the copy see nothing but the merge commit), the gates
+and the merge are skipped: acceptance runs on HEAD (red — roll the merge back, as usual), then the same tail. A foreign
+merge is never taken for that state: a hand-merge, or an extra commit on top of it, is refused for the orchestrator to
+finish by hand.
 
 The lease is taken with this process's pid and renewed in the background while the acceptance runs: a long
 acceptance is not an orphan, and `service` leaves an "accepting" task with a live owner process alone.
@@ -19,9 +21,7 @@ from __future__ import annotations
 
 import fcntl
 import os
-import sqlite3
 import sys
-import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -68,13 +68,30 @@ def _merged_sha(project: ProjectConfig, t: Task) -> str:
     """The work branch HEAD when the task branch tip is already in it ('' — not merged yet).
 
     That is the state of an accept interrupted after the merge: the gates on the copy see an empty diff.
+    Only accept's own merge commit at the tip of the work branch qualifies.
     """
     if not t.branch:
         return ""
     r = workspace.git(project.root, "merge-base", "--is-ancestor", t.branch, project.work_branch, check=False)
     if r.returncode != 0:
         return ""
-    return workspace.git(project.root, "rev-parse", project.work_branch).stdout.strip()
+    head = workspace.git(project.root, "rev-parse", project.work_branch, check=False).stdout.strip()
+    if not head:
+        return ""
+    parents = workspace.git(project.root, "rev-parse", f"{head}^@", check=False).stdout.split()
+    if len(parents) < 2:
+        return ""
+    branch_tip = workspace.git(project.root, "rev-parse", t.branch, check=False).stdout.strip()
+    if parents[1] != branch_tip:
+        return ""
+    subj = workspace.git(project.root, "log", "-1", "--format=%s", head, check=False).stdout.strip()
+    if not subj.startswith(f"merge {t.label}:"):
+        return ""
+    if t.worktree and Path(t.worktree).is_dir():
+        wt_head = workspace.head(t.worktree)
+        if wt_head and branch_tip != wt_head:
+            return ""
+    return head
 
 
 def _root_ready(project: ProjectConfig) -> None:
@@ -85,34 +102,6 @@ def _root_ready(project: ProjectConfig) -> None:
              .splitlines() if ln.strip()]
     if dirty:
         raise DecisionError(_t("accept.root_dirty", files=", ".join(x[3:] for x in dirty[:5])))
-
-
-@contextmanager
-def _keep_lease(store: Store, task_id: int, owner: str, lease_ms: int = ACCEPT_LEASE_MS) -> Iterator[None]:
-    """Renew the lease while acceptance runs — the gates and the test run outlive one lease.
-
-    Acceptance takes minutes; without this the service sees an expired lease and calls the live accept an orphan
-    (a false "acceptance interrupted"). A lost lease is only logged: the final move still writes the state, and the
-    pid on the row keeps the service off the task.
-    """
-    done = threading.Event()
-
-    def _renew() -> None:
-        while not done.wait(RENEW_S):
-            try:
-                if not transitions.renew(store, task_id, owner, lease_ms=lease_ms):
-                    _log.warning("accept T%d: lease lost", task_id, extra={"task": task_id})
-                    return
-            except sqlite3.Error:
-                _log.exception("lease renewal failed")
-
-    keeper = threading.Thread(target=_renew, name=f"accept-lease-T{task_id}", daemon=True)
-    keeper.start()
-    try:
-        yield
-    finally:
-        done.set()
-        keeper.join(timeout=5)
 
 
 def _is_tty() -> bool:
@@ -189,7 +178,10 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
         return _t("accept.accepted_msg", label=t.label)
     if t.state not in (State.DONE, State.NEEDS_DECISION, State.ACCEPTING):
         raise DecisionError(_t("accept.can_accept", label=t.label, state=t.state.value))
-    merged = _merged_sha(project, t)  # an interrupted accept: the merge is already in the work branch
+    try:
+        merged = _merged_sha(project, t)  # an interrupted accept: the merge is already in the work branch
+    except workspace.WorkspaceError as e:  # the path is a directory, but not a git worktree
+        raise DecisionError(_t("accept.no_worktree", label=t.label, wt=t.worktree or "—")) from e
     if not merged and (not t.worktree or not Path(t.worktree).is_dir()):
         raise DecisionError(_t("accept.no_worktree", label=t.label, wt=t.worktree or "—"))
     _root_ready(project)
@@ -200,11 +192,12 @@ def accept(store: Store, project: ProjectConfig, task_id: int, *, by: str = "orc
     if not transitions.acquire(store, t.id, owner, pid=os.getpid(), lease_ms=ACCEPT_LEASE_MS):
         raise DecisionError(_t("accept.busy", label=t.label))
     try:
-        with _keep_lease(store, t.id, owner, ACCEPT_LEASE_MS):
-            # the lease keeper is inside the lock: a long wait for the lock is not an expired lease either
+        with transitions.keep_lease(store, t.id, owner, lease_ms=ACCEPT_LEASE_MS, interval_s=RENEW_S,
+                                    name=f"accept-lease-T{t.id}"):
+            # the lease keeper wraps the lock: a long wait for it is not an expired lease either
             with _project_lock(project, t):
                 _root_ready(project)  # the root may have moved or got dirty while we were waiting for the lock
-                merged = _merged_sha(project, t)
+                merged = _merged_sha(project, t)  # so may the branch: an interrupted accept is re-read under the lock
                 return _merge(store, project, _get(store, t.id), owner, by, merged=merged)
     except DecisionError as e:
         _back(store, t.id, owner, e.reason or str(e))
@@ -244,14 +237,18 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *
             raise DecisionError(_t("accept.gates_head", problems="; ".join(problems)),
                                 reasons.dump("accept_gates", problems=gates.codes(problems)))
         title = t.title.replace('"', "'")[:100]
+        head_before = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
         r = workspace.git(project.root, "merge", "--no-ff", "-m", f"merge {t.label}: {title}", t.branch, check=False)
         if r.returncode != 0:
-            listing = workspace.git(project.root, "diff", "--name-only", "--diff-filter=U", check=False)
-            conflicts = listing.stdout.split()
+            diff_u = workspace.git(project.root, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
             workspace.git(project.root, "merge", "--abort", check=False)
-            files = ", ".join(conflicts[:10]) or (r.stderr or r.stdout)[-300:]
-            raise DecisionError(_t("accept.conflict", info=files), reasons.dump("merge_conflict", files=files))
-        merged = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
+            conflicts = ", ".join(diff_u[:10]) or (r.stderr or r.stdout)[-300:]
+            raise DecisionError(_t("accept.conflict", info=conflicts), reasons.dump("merge_conflict", files=conflicts))
+        head_after = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
+        if head_after == head_before:
+            raise DecisionError(_t("accept.already_merged", branch=project.work_branch, label=t.label),
+                                reasons.dump("already_merged", branch=project.work_branch, label=t.label))
+        merged = head_after
     else:
         _log.info("T%d is already merged into %s (%s) — acceptance on HEAD", t.id, project.work_branch, merged[:10])
     nodes = list(t.limits.get("accept") or [])
@@ -262,7 +259,13 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *
             if head_now != merged:  # someone committed into the work branch meanwhile — leave foreign commits alone
                 raise DecisionError(_t("accept.root_moved", now=head_now[:10], merged=merged[:10]),
                                     reasons.dump("root_moved", now=head_now[:10], merged=merged[:10]))
-            workspace.git(project.root, "reset", "--keep", "HEAD~1", check=False)  # --keep leaves foreign dirt alone
+            # --keep leaves foreign dirt alone; it refuses rather than overwrite it
+            rr = workspace.git(project.root, "reset", "--keep", "HEAD~1", check=False)
+            head_after_reset = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
+            if rr.returncode != 0 or head_after_reset == merged:
+                err = (rr.stderr or rr.stdout).strip()[-300:] or "reset did not move HEAD"
+                raise DecisionError(_t("accept.rollback_failed", err=err),
+                                    reasons.dump("rollback_failed", err=err))
             raise DecisionError(_t("accept.red_rolled_back", cmd=cmd, tail=tail[-600:]),
                                 reasons.dump("red_rolled_back", cmd=cmd))
     push_error = ""
@@ -337,6 +340,14 @@ def review_started(store: Store, task_id: int) -> bool:
                for e in store.events(task_id=task_id))
 
 
+def _panel_locked(store: Store, t: Task, flag: str) -> None:
+    """A review task runs its panel (engine._review) — the executor is only the fallback reviewer, so
+    every way of naming a reviewer (`--review`, `--model`, `ahub model`) goes through this lock."""
+    if review_started(store, t.id):
+        raise DecisionError(_t("accept.review_panel_locked", label=t.label, flag=flag),
+                            hint=_t("hint.status_task", label=t.label))
+
+
 def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None = None,
          title: str | None = None, review: list[str] | None = None, rounds: int | None = None,
          model: str | None = None, input: str | None = None, by: str = "orchestrator") -> str:
@@ -344,18 +355,22 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
 
     review/rounds — before the review starts: the panel decides what the task is checked against, so it
     cannot change once a reviewer has run (`review_started()`). model — like `ahub model`, any inactive
-    task: the executor is picked for the next session, review or not.
+    task: the executor is picked for the next session, review or not; a review task has no executor turn
+    to pick, so its panel becomes the one reviewer.
     """
     t = _get(store, task_id)
     if t.state in (State.ACCEPTED, State.REJECTED) or t.state in transitions.ACTIVE:
         raise DecisionError(_t("accept.edit_state", label=t.label), hint=_t("hint.status_task", label=t.label))
+    panel = list(t.review.get("models") or []) if t.kind is Kind.REVIEW else []
+    if t.kind is Kind.REVIEW and review is not None and model:
+        raise DecisionError(_t("tasks.review_both"))
     changes: list[str] = []
     fields: dict[str, Any] = {}
     limits = dict(t.limits)
     if review is not None or rounds is not None:
-        if review_started(store, t.id):
-            raise DecisionError(_t("accept.edit_review_state", label=t.label),
-                                hint=_t("hint.status_task", label=t.label))
+        if t.kind is Kind.REVIEW and rounds is not None:
+            raise DecisionError(_t("tasks.review_no_rounds"))
+        _panel_locked(store, t, "--rounds" if review is None else "--review")
         models = list(review if review is not None else (t.review.get("models") or []))
         count = int(rounds if rounds is not None else (t.review.get("rounds") or 0))
         if not models:
@@ -371,7 +386,7 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
             except registry.RegistryError as e:
                 raise DecisionError(str(e), hint=_t("hint.models")) from e
         if t.kind is Kind.REVIEW:
-            raise DecisionError(_t("tasks.review_self"), hint=_t("help.task_new_review"))
+            count = 1  # the same one round tasks.resolve gives a review task
         fields["review"] = {"models": models, "rounds": count}
         changes.append(_t("accept.review_msg", models="+".join(models), rounds=count))
     if model:
@@ -379,7 +394,13 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
             registry.check(store, model, project)
         except registry.RegistryError as e:
             raise DecisionError(str(e), hint=_t("hint.models")) from e
-        if model != t.executor:
+        if panel:
+            # a review task with a panel runs that panel — a model here names the one reviewer of it
+            _panel_locked(store, t, "--model")
+            count = int(t.review.get("rounds") or 1)
+            fields["review"] = {"models": [model], "rounds": count}
+            changes.append(_t("accept.review_msg", models=model, rounds=count))
+        elif model != t.executor:
             changes.append(_t("accept.model_edit", old=t.executor or "—", new=model))
             fields["executor"] = model
             limits["fresh_session"] = True  # never resume another model's session
@@ -439,15 +460,21 @@ def _stopped_by_budget(store: Store, task_id: int) -> bool:
 
 
 def extend_budget(store: Store, task_id: int, *, add: float | None = None, set_to: float | None = None,
-                  add_usd: float | None = None, by: str = "orchestrator") -> str:
-    """Top up the budget in one move: raised + resumed (if the task was parked on budget).
+                  add_usd: float | None = None, set_usd: float | None = None, by: str = "orchestrator") -> str:
+    """Set the budget in one move: raised (or lowered) + resumed (if the task was parked on budget).
 
-    add/set_to — Go counter (subscription); add_usd — real money (default 0 = no spending).
+    add/set_to — Go counter (subscription); add_usd/set_usd — real money (default 0 = no spending).
+    set_usd cannot go below what the task already spent.
     """
     t = _get(store, task_id)
     new = set_to if set_to is not None else t.budget_go + (add or 0.0)
-    new_usd = t.budget_usd + (add_usd or 0.0)
-    if new <= t.budget_go and set_to is None and new_usd <= t.budget_usd:
+    new_usd = set_usd if set_usd is not None else t.budget_usd + (add_usd or 0.0)
+    if set_usd is not None:
+        spent = archive.task_cost(store, t.id)[1]
+        if new_usd < spent:
+            raise DecisionError(_t("accept.budget_below_spent", spent=f"{spent:.3f}"))
+    # an explicit set is a change even when it lowers the budget
+    if set_to is None and set_usd is None and new <= t.budget_go and new_usd <= t.budget_usd:
         raise DecisionError(_t("accept.budget_need"))
     store.update_task(t.id, budget_go=float(new), budget_usd=float(new_usd))
     store.add_event(Ev.BUDGET_EXTENDED, task_id=t.id, project=t.project,
@@ -470,6 +497,15 @@ def change_model(store: Store, project: ProjectConfig, task_id: int, alias: str,
         registry.check(store, alias, project)
     except registry.RegistryError as e:
         raise DecisionError(str(e), hint=_t("hint.models")) from e
+    panel = list(t.review.get("models") or []) if t.kind is Kind.REVIEW else []
+    if panel:
+        # what reviews is the panel (engine._review) — the executor is only the fallback reviewer
+        _panel_locked(store, t, "ahub model")
+        rounds = int(t.review.get("rounds") or 1)
+        store.update_task(t.id, review={"models": [alias], "rounds": rounds})
+        store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                        payload={"from": ", ".join(panel), "to": alias, "by": by})
+        return _t("accept.model_panel", label=t.label, old=", ".join(panel), new=alias)
     lim = dict(t.limits)
     lim["fresh_session"] = True  # never resume another model's session
     store.update_task(t.id, executor=alias, limits=lim)

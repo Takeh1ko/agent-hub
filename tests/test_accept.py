@@ -10,6 +10,7 @@ from ahub import accept, reasons, tasks, views
 from ahub.engine import Engine
 from ahub.model import Kind, State
 from ahub.store import Store
+from tests.conftest import wait_until
 from tests.enginekit import git, install_fake, make_project
 from tests.test_engine_code import work
 
@@ -202,6 +203,24 @@ def test_edit_spec_new_session(store, project):
     assert fake.calls[1]["session_id"] is None and "совсем другое" in fake.calls[1]["prompt"]
 
 
+def test_edit_refusals(store, project):
+    """Refuse bad edit parameters: rounds out of bounds, an empty panel, an unknown model alias."""
+    install_fake(store, [])
+    t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.CODE, title="x", model="fake",
+                                           paths=["core/**"], accept=["tests/test_a.py::test_x"],
+                                           review_models=["fake"], review_rounds=1), project, collect=False)
+    with pytest.raises(accept.DecisionError, match="круги 99: допустимо 1-"):
+        accept.edit(store, project, t.id, rounds=99)
+    with pytest.raises(accept.DecisionError, match="круги 0: допустимо 1-"):
+        accept.edit(store, project, t.id, rounds=0)
+    with pytest.raises(accept.DecisionError, match="--review хотя бы с одной моделью"):
+        accept.edit(store, project, t.id, review=[])
+    with pytest.raises(accept.DecisionError, match="нет модели 'nonexistent_model'"):
+        accept.edit(store, project, t.id, review=["nonexistent_model"])
+    with pytest.raises(accept.DecisionError, match="нет модели 'nonexistent_model'"):
+        accept.edit(store, project, t.id, model="nonexistent_model")
+
+
 def test_usd_budget_extend(store, project):
     t, _, _ = done_code(store, project)
     from ahub import transitions
@@ -215,6 +234,17 @@ def test_usd_budget_extend(store, project):
     assert store.get_task(t.id).budget_usd == 0.5
     with pytest.raises(accept.DecisionError):
         accept.extend_budget(store, t.id)
+
+
+def test_usd_budget_lowered_but_not_below_the_spend(store, project):
+    sc = work()
+    sc["steps"][0]["event"]["usd"] = 0.04  # real money of the run
+    t, _, _ = done_code(store, project, scenarios=[sc], budget_usd=0.5)
+    msg = accept.extend_budget(store, t.id, set_usd=0.05)  # lowering is allowed
+    assert "реальные $0.5 → $0.05" in msg and store.get_task(t.id).budget_usd == 0.05
+    with pytest.raises(accept.DecisionError, match=r"ниже потраченных \$0\.040"):
+        accept.extend_budget(store, t.id, set_usd=0.01)
+    assert store.get_task(t.id).budget_usd == 0.05  # the refusal writes nothing
 
 
 def test_red_after_merge_root_moved_not_reset(store, project, monkeypatch):
@@ -276,6 +306,109 @@ def test_resumed_accept_rolls_back_a_red_merge(store, project, tmp_path):
     assert store.get_task(t.id).state is State.NEEDS_DECISION
 
 
+def test_resumed_accept_refuses_foreign_commit_on_top(store, project, tmp_path):
+    """Foreign commit on top of the merge — accept refuses and does not rollback foreign commit."""
+    t, _, _ = done_code(store, project)
+    interrupted_accept(store, project, tmp_path, t.id)
+    (Path(project.root) / "core" / "c.py").write_text("Z = 1\n")
+    git(project.root, "add", "-A")
+    git(project.root, "commit", "-q", "-m", "чужой коммит поверх слияния")
+    foreign_head = git_out(project.root, "rev-parse", "HEAD").strip()
+    with pytest.raises(accept.DecisionError):
+        accept.accept(store, project, t.id)
+    assert git_out(project.root, "rev-parse", "HEAD").strip() == foreign_head
+
+
+def test_resumed_accept_refuses_a_copy_that_moved(store, project, tmp_path):
+    """The copy is not on the task branch tip any more — accept refuses instead of skipping the gates.
+
+    The work branch still carries accept's merge commit, but the copy has its own commit on top: what the
+    gates would have checked is not what is in the branch.
+    """
+    t, _, _ = done_code(store, project)
+    interrupted_accept(store, project, tmp_path, t.id)
+    merged = git_out(project.root, "rev-parse", "HEAD").strip()
+    copy = Path(t.worktree)
+    git(copy, "commit", "--allow-empty", "-q", "-m", "правка в копии после слияния")
+    moved = git_out(copy, "rev-parse", "HEAD").strip()
+    git(copy, "checkout", "-q", "--detach")  # the copy is left on its own commit
+    git(project.root, "update-ref", f"refs/heads/{t.branch}", f"{moved}~1")  # the branch stays where it was
+    with pytest.raises(accept.DecisionError, match="уже слита в main без приёмки"):
+        accept.accept(store, project, t.id)
+    assert git_out(project.root, "rev-parse", "HEAD").strip() == merged  # nothing moved in the work branch
+    after = store.get_task(t.id)
+    assert after.state is State.NEEDS_DECISION and '"already_merged"' in after.state_reason
+
+
+def test_accept_refuses_branch_already_merged_without_acceptance(store, project, monkeypatch):
+    """Orchestrator hand-merges the task branch into main: accept refuses already_merged."""
+    from ahub import gates as g
+    t, _, _ = done_code(store, project)
+    git(project.root, "merge", "--ff-only", t.branch)  # fast-forward merge (not accept's merge commit)
+    monkeypatch.setattr(g, "check", lambda *a, **kw: g.GateResult(base="b", head="h"))
+    with pytest.raises(accept.DecisionError, match="уже слита в main без приёмки"):
+        accept.accept(store, project, t.id)
+
+
+def test_accept_refuses_a_hand_merge_with_the_own_parents(store, project, monkeypatch):
+    """A hand `--no-ff` merge of the same branch — the parents of accept's merge, another subject.
+
+    Only accept's own merge commit (`merge T<n>: …`) is the state of an interrupted accept: a foreign one is
+    refused, so the orchestrator finishes it by hand.
+    """
+    from ahub import gates as g
+    t, _, _ = done_code(store, project)
+    git(project.root, "merge", "--no-ff", "-m", "слил руками", t.branch)  # the same parents accept would write
+    monkeypatch.setattr(g, "check", lambda *a, **kw: g.GateResult(base="b", head="h"))
+    with pytest.raises(accept.DecisionError, match="уже слита в main без приёмки"):
+        accept.accept(store, project, t.id)
+    assert '"already_merged"' in store.get_task(t.id).state_reason
+
+
+def test_rollback_keeps_a_local_edit(store, project, monkeypatch):
+    """Rollback uses `reset --keep`, not `--hard`: a tracked file the merge did not touch keeps its edit.
+
+    An untracked file survives both, so it cannot tell the two apart — this edit can.
+    """
+    from ahub import gates as g
+    t, _, _ = done_code(store, project)
+    before = git_out(project.root, "rev-parse", "HEAD").strip()
+    edited = Path(project.root) / "core" / "a.py"  # the task touches core/b.py, this file the merge does not
+
+    def red_with_a_local_edit(project_, cwd, nodes, **kw):
+        edited.write_text(edited.read_text() + "# правка человека во время приёмки\n")
+        return False, "FAILED", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", red_with_a_local_edit)
+    with pytest.raises(accept.DecisionError, match="приёмка красная — слияние откачено"):
+        accept.accept(store, project, t.id)
+    assert git_out(project.root, "rev-parse", "HEAD").strip() == before  # the merge is gone
+    assert edited.read_text() == "X = 1\n# правка человека во время приёмки\n"  # the edit is not thrown away
+    assert not (Path(project.root) / "core" / "b.py").exists()  # only the merge is rolled back
+
+
+def test_rollback_refuses_to_destroy_a_local_edit(store, project, monkeypatch):
+    """`reset --keep` refuses when a tracked file the merge touched is edited locally.
+
+    Accept must say the rollback failed: `--hard` would have thrown the edit away and claimed a rollback.
+    """
+    from ahub import gates as g
+    t, _, _ = done_code(store, project, [work(path="core/a.py", text="Y = 9\n")])
+    tracked = Path(project.root) / "core" / "a.py"
+
+    def red_with_a_local_edit(project_, cwd, nodes, **kw):
+        tracked.write_text(tracked.read_text() + "# правка человека во время приёмки\n")
+        return False, "FAILED", "pytest"
+
+    monkeypatch.setattr(g, "run_acceptance", red_with_a_local_edit)
+    with pytest.raises(accept.DecisionError, match="откат не удался"):
+        accept.accept(store, project, t.id)
+    assert "# правка человека" in tracked.read_text()  # the edit is untouched
+    assert len(git_out(project.root, "log", "-1", "--format=%P", "HEAD").split()) == 2  # the merge is still in place
+    t2 = store.get_task(t.id)
+    assert t2.state is State.NEEDS_DECISION and '"rollback_failed"' in t2.state_reason
+
+
 def test_not_merged_still_needs_the_copy(store, project):
     t, _, _ = done_code(store, project)
     import shutil
@@ -285,10 +418,24 @@ def test_not_merged_still_needs_the_copy(store, project):
         accept.accept(store, project, t.id)
 
 
+def test_a_copy_that_is_not_a_git_worktree(store, project, tmp_path):
+    """Something that is not a worktree took the place of the copy: one line, not a git traceback.
+
+    The copy is read when the branch carries accept's own merge — then it must still be the branch tip.
+    """
+    import shutil
+
+    t, _, _ = done_code(store, project)
+    interrupted_accept(store, project, tmp_path, t.id)
+    shutil.rmtree(t.worktree)
+    Path(t.worktree).mkdir()
+    with pytest.raises(accept.DecisionError, match="нет копии задачи"):
+        accept.accept(store, project, t.id)
+    assert store.get_task(t.id).state is State.NEEDS_DECISION  # refused before the transition — task untouched
+
+
 def test_accept_renews_the_lease_during_acceptance(store, project, monkeypatch):
     """Acceptance outlives the lease — the accept keeps the lease alive (engine-style keeper)."""
-    import time as _time
-
     from ahub import gates as g
 
     t, _, _ = done_code(store, project)
@@ -296,7 +443,8 @@ def test_accept_renews_the_lease_during_acceptance(store, project, monkeypatch):
 
     def slow(project_, cwd, nodes, **kw):
         first = store.get_task(t.id).lease_until
-        _time.sleep(0.3)  # longer than the renewal interval below
+        # the keeper renews in a thread of its own — wait for the lease to move, a pause is not a promise
+        wait_until(lambda: (store.get_task(t.id).lease_until or 0) > (first or 0))
         leases.append((first, store.get_task(t.id).lease_until))
         return True, "", "pytest"
 
@@ -454,12 +602,12 @@ def test_second_accept_waits_and_names_the_holder_on_a_tty(store, project, monke
 def test_accept_waiting_for_the_lock_keeps_the_lease(store, project, monkeypatch):
     """A long wait for the project lock is not an expired lease — the service must not call the waiter an orphan."""
     import threading
-    import time
 
     from ahub import gates as g
     from ahub import transitions
     from ahub.time import now_ms
 
+    lease_ms = 200
     t1, t2 = two_done_tasks(store, project, b_text="B = 3\n", c_text="C = 3\n")
     first_in = threading.Event()
     seen = []
@@ -467,14 +615,16 @@ def test_accept_waiting_for_the_lock_keeps_the_lease(store, project, monkeypatch
     def slow_acceptance(project_, cwd, nodes, **kw):
         if kw.get("task_label") == f"T{t1.id}":
             first_in.set()
-            time.sleep(0.6)  # longer than the lease below — the waiter is queued all this time
+            claimed = wait_until(lambda: store.get_task(t2.id).lease_until)  # the waiter is queued with a lease
+            # the wait is longer than the lease below — the keeper of the waiter has to move it past that
+            wait_until(lambda: (store.get_task(t2.id).lease_until or 0) > (claimed or 0) + lease_ms)
             waiter = store.get_task(t2.id)  # the verdict is read here: the wait is over by the time the test asserts
             seen.append((waiter, transitions.is_orphan(waiter, now_ms())))
         return True, "", "pytest"
 
     monkeypatch.setattr(g, "run_acceptance", slow_acceptance)
     monkeypatch.setattr(accept, "RENEW_S", 0.05)
-    monkeypatch.setattr(accept, "ACCEPT_LEASE_MS", 200)  # without renewal it would be gone before the wait is over
+    monkeypatch.setattr(accept, "ACCEPT_LEASE_MS", lease_ms)  # without renewal it would be gone before the wait is over
     threads = [threading.Thread(target=accept.accept, args=(store, project, tid)) for tid in (t1.id, t2.id)]
     threads[0].start()
     assert first_in.wait(timeout=10)

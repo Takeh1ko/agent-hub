@@ -149,7 +149,23 @@ def test_hub_config_and_projects(tmp_path):
     projects, errors = config.load_projects()
     assert [p.name for p in projects] == ["A"]
     assert any("уже занято" in e for e in errors)
-    assert any("missing" in e for e in errors)
+    assert any(f'{tmp_path / "missing"}: нет .hub.toml' in e for e in errors)
+
+
+def test_a_project_entry_without_a_file_is_not_an_encoding_error(tmp_path, monkeypatch):
+    """T107 review: no file — FileNotFoundError, so load_projects names the entry; not 'not UTF-8 text'."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError):
+        config.load_project_file(empty / config.PROJECT_FILE)
+    write(paths.global_config_path(), f'projects = ["{empty}"]\n')
+    projects, errors = config.load_projects()
+    assert projects == []
+    assert errors == [f"{empty}: no .hub.toml"]  # config.entry_no_file, not the encoding message
 
 
 def test_hub_config_ignores_v1_location(tmp_path):
@@ -390,3 +406,38 @@ def test_python_bin_explicit_venv_or_path(tmp_path):
     assert cfg.python_bin() == str(venv_py)
     fixed = config.parse_project({"schema_version": 2, "name": "A", "python": "/opt/py"}, tmp_path)
     assert fixed.python_bin() == "/opt/py"
+
+
+def test_hub_non_utf8_raises_config_error(tmp_path, monkeypatch):
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    p = paths.global_config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes("# русский комментарий в cp1251\nlang = 'ru'\n".encode("cp1251"))
+    with pytest.raises(config.ConfigError) as ei:
+        config.load_hub()
+    assert str(p) in str(ei.value)  # the file, not a traceback out of a command
+    assert "cp1251" in str(ei.value)
+
+
+def test_project_non_utf8_raises_config_error(tmp_path):
+    p = tmp_path / config.PROJECT_FILE
+    p.write_bytes("# русский комментарий в cp1251\nname = 'demo'\n".encode("cp1251"))
+    with pytest.raises(config.ConfigError) as ei:
+        config.load_project_file(p)
+    assert str(p) in str(ei.value)
+
+
+def test_hub_provider_case_insensitive(tmp_path, monkeypatch):
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    write(paths.global_config_path(), '[providers.Codex]\nenabled = false\nproxy = "socks5://127.0.0.1:1080"\n')
+    hub = config.load_hub()
+    assert hub.provider_enabled("codex") is False
+    assert hub.provider_enabled("Codex") is False
+    assert hub.provider("codex").proxy == "socks5://127.0.0.1:1080"
+    assert hub.provider("Codex").proxy == "socks5://127.0.0.1:1080"
+    assert hub.providers_off == ("codex",)
+

@@ -51,7 +51,7 @@ def clip_bytes(text: str, limit: int) -> str:
     return cut.rsplit("\n", 1)[0] + "\n…" if "\n" in cut else cut + "…"
 
 
-def _age(ms: int, now: int) -> str:
+def age(ms: int, now: int) -> str:
     m = max(0, (now - ms) // 60000)
     if m < 60:
         return _t("views.age_min", m=m)
@@ -96,7 +96,7 @@ def _bytes(lines: list[str]) -> int:
     return sum(len(ln.encode("utf-8")) + 1 for ln in lines)
 
 
-def _state_cell(t: Task) -> str:
+def state_cell(t: Task) -> str:
     """The state column: the phase of an active task (what it is doing), else the state."""
     if t.state in ACTIVE and t.phase:
         return PHASE_WORDS.get(t.phase, t.phase)
@@ -115,7 +115,7 @@ def _pulse_detail(pl: pulse.Pulse | None) -> str:
 def _item_details(t: Task, ts: int, cost: str = "") -> str:
     """The details line of a task item: what it is doing · model · idle · cost. It is always this line and
     never a right-aligned tail on the title line — the item has one rhythm, whatever the width is."""
-    return " · ".join([x for x in (_state_cell(t), t.executor or "—", _age(t.updated_at, ts), cost) if x])
+    return " · ".join([x for x in (state_cell(t), t.executor or "—", age(t.updated_at, ts), cost) if x])
 
 
 def _waiting_item(t: Task, w: int | None) -> str:
@@ -140,8 +140,8 @@ def _active_table(store: Store, active: list[Task], live: dict[int, int], pulses
         go, usd = archive.task_cost(store, t.id)
         pl = pulses.get(t.id)
         mark = ui.badge(pl.mark, "", pl.state) if pl else ("⚫" if t.id not in live else "")
-        rows.append([mark, t.label, t.kind.value, t.title, _state_cell(t), t.executor or "—",
-                     str(t.round), _age(t.updated_at, ts), f"${go + usd:.3f}"])
+        rows.append([mark, t.label, t.kind.value, t.title, state_cell(t), t.executor or "—",
+                     str(t.round), age(t.updated_at, ts), f"${go + usd:.3f}"])
     lines = ui.table(head, rows, max_width=[1, 6, 7, None, 13, 10, 5, 8, 10], indent=2, w=w).split("\n")
     return lines[0], lines[1:]
 
@@ -301,7 +301,7 @@ def _findings_lines(t: Task, w: int | None) -> list[str]:
         used += size
     if more:
         out.append(_point(plural(more, "views.findings_more_one", "views.findings_more_few",
-                                 "views.findings_more", label=t.label), 2, w))
+                                 "views.findings_more_many", label=t.label), 2, w))
     return out
 
 
@@ -344,7 +344,7 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
     groups.append([(_t("views.lbl_model"), model)])
     if go or usd or t.budget_go:
         groups.append([(_t("views.lbl_cost"), _cost_cell(go, usd, t.budget_go))])
-    since: list[Any] = [_age(t.created_at, ts)]
+    since: list[Any] = [age(t.created_at, ts)]
     if t.after:
         since.append((_t("views.lbl_after"), ", ".join(f"T{a}" for a in t.after)))
     groups.append([(_t("views.lbl_age"), since)])
@@ -451,7 +451,7 @@ def history_text(store: Store, *, scope: Scope | None = None, limit: int = 20, w
     rows = []
     for t in done:
         go, usd = archive.task_cost(store, t.id)
-        dur = _age(t.created_at, t.finished_at) if t.finished_at else "—"
+        dur = age(t.created_at, t.finished_at) if t.finished_at else "—"
         rows.append([t.label, t.kind.value, t.title, state_word(t.state), str(t.round),
                      f"${go + usd:.3f}", dur])
     return ui.table(head, rows, max_width=[6, 7, None, 16, 5, 9, 13], indent=2, w=w)

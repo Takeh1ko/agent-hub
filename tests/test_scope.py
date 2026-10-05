@@ -396,10 +396,26 @@ def test_say_and_ask_write_the_current_project(two_projects, capsys, monkeypatch
     rows = {r["id"]: r["project"] for r in comms.open_questions(store, scope=OWNER)}
     assert rows == {qid: "B", qid + 1: "A"}
 
+
     assert comms.answer(store, qid, "да")  # the ANSWER event carries the question's project
     answer = [e for e in store.events(needs_reaction=True) if e.kind == Ev.ANSWER.value][0]
     assert answer.project == "B"
     assert [e.kind for e in events.unacked(store, Scope(("A",)))] == []
+
+
+def test_say_and_ask_refuse_all_scope(two_projects, capsys):
+    rc, out, err = ahub(capsys, "--all", "say", "hello")
+    assert rc == 2
+    assert "не поддерживается" in err or "--all is not supported" in err
+
+    rc, out, err = ahub(capsys, "--all", "ask", "question?")
+    assert rc == 2
+    assert "не поддерживается" in err or "--all is not supported" in err
+
+    rc, out, err = ahub(capsys, "--lang", "en", "--all", "say", "hello")
+    assert rc == 2
+    assert "--all is not supported for say" in err
+    assert "ahub say --project <name>" in err
 
 
 def test_question_project_is_backfilled_from_the_task(tmp_path):

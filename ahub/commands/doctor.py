@@ -2,7 +2,7 @@
 
 The checks live in ahub/doctor.py; this module draws them: one section per area, the ✓/✗/– marks
 in a column of their own, and the fix of a failed check indented right under it. `ahub setup` prints the
-same list as its last step (_text).
+same list as its last step (text).
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ _STYLES = {True: "green", False: "red", None: "dim"}
 _AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("doctor.area_system", ("python", "git")),
     ("doctor.area_hub", ("config", "service", "models", "network", "prompts")),
-    ("doctor.area_providers", ("opencode", "opencode_health", "opencode_auth", "agy", "codex")),
-    ("doctor.area_claude", ("claude", "claude_skill")),
+    ("doctor.area_providers", ("opencode", "opencode_health", "opencode_auth", "provider_keys", "agy", "codex")),
+    ("doctor.area_claude", ("claude", "claude_skill", "claude_rule")),
     ("doctor.area_optional", ("telegram",)),
 )
 
@@ -47,7 +47,7 @@ def _lines(checks: list[doctor.Check], w: int | None) -> list[str]:
                 out.extend(lines[1:])
             else:
                 out.append(head.rstrip())
-            if c.ok is False and c.fix:
+            if c.fix and c.ok is not True:  # a failed check and an optional one both print their fix
                 out.append(ui.para(t("doctor.fix_line", fix=c.fix), indent=4, w=w))
     rest = [c for c in checks if c.name not in shown]  # a check the areas do not know about
     if rest:
@@ -56,13 +56,13 @@ def _lines(checks: list[doctor.Check], w: int | None) -> list[str]:
             out.append(f"  {_MARKS[c.ok]} {t(f'doctor.name_{c.name}')}: {c.detail}")
     bad = sum(1 for c in checks if c.ok is False)
     # one / few / many — Russian inflects the noun by the count
-    last = plural(bad, "doctor.problem_one", "doctor.problems_few", "doctor.problems") if bad \
+    last = plural(bad, "doctor.problems_one", "doctor.problems_few", "doctor.problems_many") if bad \
         else t("doctor.ok_all")
     out.append(ui.item(last) if ui.colour_on() else ui.styled(last, "dim"))
     return out
 
 
-def _text(checks: list[doctor.Check], w: int | None = None) -> str:
+def text(checks: list[doctor.Check], w: int | None = None) -> str:
     return "\n".join(_lines(checks, w))
 
 
@@ -73,7 +73,7 @@ def cmd_doctor(args) -> int:
     with ui.Live(t("doctor.checking")) as p:
         checks = doctor.run_all(step=p.step)
     data = [asdict(c) for c in checks]
-    emit(args, {"checks": data}, _text(checks))
+    emit(args, {"checks": data}, text(checks))
     return 1 if any(c.ok is False for c in checks) else 0
 
 

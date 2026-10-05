@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from ahub import comms
 from ahub.store import Store
-from ahub.views import _age, inbox_text, message_text, question_text, report_essence
+from ahub.views import age, inbox_text, message_text, question_text, report_essence
 
 LONG = ("Я тебе ставил конкретные цели на прошлой неделе, а ты сделал вид, что ничего не было, и я хочу "
         "понять почему так вышло и что ты собираешься с этим делать дальше, потому что сроки уже в четверг.")
@@ -14,26 +14,26 @@ URL = "https://example.com/a/really/long/link/that/never/breaks/at/any/word/boun
 
 def test_minuty():
     now = 1_000_000_000_000
-    assert _age(now - 5 * 60000, now) == "5 мин"
-    assert _age(now, now) == "0 мин"
+    assert age(now - 5 * 60000, now) == "5 мин"
+    assert age(now, now) == "0 мин"
 
 
 def test_chasy():
     now = 1_000_000_000_000
-    assert _age(now - 90 * 60000, now) == "1 ч 30 мин"
-    assert _age(now - 59 * 60000, now) == "59 мин"
+    assert age(now - 90 * 60000, now) == "1 ч 30 мин"
+    assert age(now - 59 * 60000, now) == "59 мин"
 
 
 def test_granitsa_24_ch():
     now = 1_000_000_000_000
-    assert _age(now - (23 * 60 + 59) * 60000, now) == "23 ч 59 мин"
-    assert _age(now - 24 * 60 * 60000, now) == "1 д 0 ч"
+    assert age(now - (23 * 60 + 59) * 60000, now) == "23 ч 59 мин"
+    assert age(now - 24 * 60 * 60000, now) == "1 д 0 ч"
 
 
 def test_dni():
     now = 1_000_000_000_000
-    assert _age(now - (26 * 60 + 15) * 60000, now) == "1 д 2 ч"
-    assert _age(now - (3 * 24 * 60 + 5 * 60) * 60000, now) == "3 д 5 ч"
+    assert age(now - (26 * 60 + 15) * 60000, now) == "1 д 2 ч"
+    assert age(now - (3 * 24 * 60 + 5 * 60) * 60000, now) == "3 д 5 ч"
 
 
 def test_essence_ru():

@@ -126,10 +126,16 @@ def _ask(a: dict) -> list[str]:
     return _project_flag(a, argv)
 
 
-@tool("budget", "Extend the task budget (a budget-blocked task resumes).",
-      {"task": S, "add": {"type": "number"}, "project": S, "all": {"type": "boolean"}}, ["task", "add"])
+@tool("budget", "Extend the task budget, or set the real-money one (a budget-blocked task resumes).",
+      {"task": S, "add": {"type": "number"}, "set_usd": {"type": "number"}, "project": S,
+       "all": {"type": "boolean"}}, ["task"])
 def _budget(a: dict) -> list[str]:
-    return _project_flag(a, ["budget", a["task"], "--add", str(a["add"]), "--by", "mcp"])
+    argv = ["budget", a["task"]]
+    if a.get("add") is not None:
+        argv += ["--add", str(a["add"])]
+    if a.get("set_usd") is not None:
+        argv += ["--set-usd", str(a["set_usd"])]
+    return _project_flag(a, argv + ["--by", "mcp"])
 
 
 @tool("prompts_show", "Show assembled prompt for a role (all|code|routine|scout|review).",

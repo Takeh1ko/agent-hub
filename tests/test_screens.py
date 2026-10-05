@@ -76,10 +76,43 @@ def test_home_screen_without_a_hub(capsys, monkeypatch, tmp_path):
     assert rc == 0
     assert snap(out, tmp_path) == (
         "ahub 3.0.0 · no project in this directory · service not running\n"
-        "  the hub is not configured yet — Run `ahub setup` to get started\n"
+        "  the hub is not configured yet — run `ahub setup` to get started\n"
         "  • ahub setup\n"
         "  • ahub doctor\n"
         "  • ahub models\n")
+
+
+def test_home_screen_builds_only_emitted_representation(capsys, monkeypatch, tmp_path):
+    """Running ahub builds only text; ahub --json builds only data (no double evaluation)."""
+    import ahub.home
+
+    monkeypatch.chdir(tmp_path)
+    data_calls = 0
+    text_calls = 0
+
+    orig_data = ahub.home.data
+    orig_text = ahub.home.text
+
+    def mock_data(*a, **kw):
+        nonlocal data_calls
+        data_calls += 1
+        return orig_data(*a, **kw)
+
+    def mock_text(*a, **kw):
+        nonlocal text_calls
+        text_calls += 1
+        return orig_text(*a, **kw)
+
+    monkeypatch.setattr(ahub.home, "data", mock_data)
+    monkeypatch.setattr(ahub.home, "text", mock_text)
+
+    run(capsys)
+    assert text_calls == 1
+    assert data_calls == 0
+
+    run(capsys, "--json")
+    assert text_calls == 1
+    assert data_calls == 1
 
 
 def test_home_screen_with_work_and_a_decision(capsys, monkeypatch, tmp_path):
@@ -319,22 +352,22 @@ SETUP = """\
     providers off: codex
 3. Models
     roles executor, reviewer, scout, routine, observer, drafter now default to spark-free
-4. Claude Code
+4. Service
+    service files written: {tmp}/.config/systemd/user/ahub.service
+    next  systemctl --user daemon-reload && systemctl --user enable --now ahub.service
+5. Claude Code
     Claude skill: {tmp}/.claude/skills/ahub/SKILL.md
     CLAUDE.md: block added
     permission Bash(ahub:*) allowed ({tmp}/shop/.claude/settings.json)
     for other agents (Codex, Cursor): claude mcp add ahub -- ahub mcp
-5. Service
-    service files written: {tmp}/.config/systemd/user/ahub.service
-    next  systemctl --user daemon-reload && systemctl --user enable --now ahub.service
 Summary
   Project      shop · {tmp}/shop
   Config       config {tmp}/d/config/config.toml
   Providers    opencode, agy
   Models       executor=spark-free, reviewer=spark-free, scout=spark-free, routine=spark-free,
                observer=spark-free, drafter=spark-free
-  Claude Code  skill + CLAUDE.md + Bash(ahub:*)
   Service      —
+  Claude Code  skill + CLAUDE.md + Bash(ahub:*)
   Next  ahub task new --kind scout --title "…" · ahub doctor
 """
 
@@ -361,19 +394,19 @@ SETUP_YES_NO_CLAUDE = """\
     providers off: codex
 3. Models
     roles executor, reviewer, scout, routine, observer, drafter now default to spark-free
-4. Claude Code
-    skipped — later: ahub setup --claude
-5. Service
+4. Service
     service files written: {tmp}/.config/systemd/user/ahub.service
     next  systemctl --user daemon-reload && systemctl --user enable --now ahub.service
+5. Claude Code
+    skipped — later: ahub setup --claude
 Summary
   Project      shop · {tmp}/shop
   Config       config {tmp}/d/config/config.toml
   Providers    opencode, agy
   Models       executor=spark-free, reviewer=spark-free, scout=spark-free, routine=spark-free,
                observer=spark-free, drafter=spark-free
-  Claude Code  —
   Service      —
+  Claude Code  —
   Next  ahub task new --kind scout --title "…" · ahub doctor
 """
 
@@ -471,6 +504,49 @@ def test_task_edit_changes_the_review_panel_and_the_executor(capsys, monkeypatch
     assert cli.main(["task", "edit", t.label, "--rounds", "-1"]) == 2
     assert cli.main(["task", "edit", t.label, "--review", "no-such-model"]) == 2
     assert "no model" in capsys.readouterr().err
+    # a review task runs its panel: --review names it, --model renames it to one reviewer, --rounds is
+    # nothing for it and both flags together are the same mistake as at creation
+    r = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="look", review_input="main",
+                                           review_models=["spark"]), project, collect=False)
+    out = run(capsys, "task", "edit", r.label, "--review", "bunny")[1].strip()
+    assert out == f"{r.label}: review panel bunny ×1"
+    assert store.get_task(r.id).review == {"models": ["bunny"], "rounds": 1}
+    out = run(capsys, "task", "edit", r.label, "--model", "spark")[1].strip()
+    assert out == f"{r.label}: review panel spark ×1"  # the panel, not the executor (it is spark already)
+    assert store.get_task(r.id).review == {"models": ["spark"], "rounds": 1}
+    assert store.get_task(r.id).executor == "spark"
+    assert cli.main(["task", "edit", r.label, "--review", "bunny", "--rounds", "2"]) == 2
+    assert "--rounds does not apply to a review task" in capsys.readouterr().err
+    assert cli.main(["task", "edit", r.label, "--review", "bunny", "--model", "spark"]) == 2
+    assert "--review and --model together" in capsys.readouterr().err
+    assert store.get_task(r.id).review == {"models": ["spark"], "rounds": 1}  # refused — untouched
+    one = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="look too", review_input="main",
+                                             model="spark"), project, collect=False)
+    out = run(capsys, "task", "edit", one.label, "--model", "bunny")[1].strip()
+    assert out == f"{one.label}: executor spark → bunny"  # no panel — the executor is the reviewer
+
+
+
+def test_ahub_model_names_the_panel_of_a_review_task(capsys, monkeypatch, tmp_path):
+    """What reviews a review task is its panel — `ahub model` renames that, not the unused executor."""
+    from ahub import tasks
+    from ahub.model import Kind
+    from tests.enginekit import install_fake, make_project
+
+    project = make_project(tmp_path)
+    store = Store()
+    install_fake(store, [])
+    in_project(project, tmp_path, monkeypatch)
+    panel = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="look", review_input="main",
+                                               review_models=["spark", "bunny"]), project, collect=False)
+    rc, out = run(capsys, "model", panel.label, "bunny")
+    assert rc == 0 and out.splitlines()[0] == f"{panel.label}: review panel spark, bunny → bunny"
+    row = store.get_task(panel.id)
+    assert row.review == {"models": ["bunny"], "rounds": 1} and row.executor == "spark"  # fallback reviewer
+    one = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="one", review_input="main",
+                                             model="spark"), project, collect=False)
+    out = run(capsys, "model", one.label, "bunny")[1].splitlines()[0]
+    assert out == f"{one.label}: model spark → bunny" and store.get_task(one.id).executor == "bunny"
 
 
 def test_the_review_panel_is_locked_once_the_review_started(capsys, monkeypatch, tmp_path):
@@ -493,6 +569,21 @@ def test_the_review_panel_is_locked_once_the_review_started(capsys, monkeypatch,
     err = capsys.readouterr().err
     assert "the review has already started" in err and f"ahub status {t.label}" in err
     assert store.get_task(t.id).review["models"] == ["spark"]  # untouched
+    # a review task: its panel is named the same way before the review, and by no way after it
+    r = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.REVIEW, title="look", review_input="main",
+                                           review_models=["spark"]), project, collect=False)
+    assert cli.main(["model", r.label, "bunny"]) == 0  # before: the panel takes the model
+    assert store.get_task(r.id).review == {"models": ["bunny"], "rounds": 1}
+    for st in (State.PREPARING, State.WORKING, State.REVIEWING):
+        transitions.move(store, r.id, st)
+    transitions.move(store, r.id, State.NEEDS_DECISION)
+    for argv, flag in ((["task", "edit", r.label, "--review", "spark"], "--review"),
+                       (["task", "edit", r.label, "--model", "spark"], "--model"),
+                       (["model", r.label, "spark"], "ahub model")):
+        assert cli.main(argv) == 2
+        err = capsys.readouterr().err
+        assert "the review has already started" in err and f"({flag})" in err
+    assert store.get_task(r.id).review == {"models": ["bunny"], "rounds": 1}  # untouched
 
 
 def test_an_error_is_one_line_and_names_the_command(capsys, monkeypatch, tmp_path):
@@ -507,11 +598,10 @@ def test_an_error_is_one_line_and_names_the_command(capsys, monkeypatch, tmp_pat
     assert err.splitlines()[1] == "  hint: ahub status"  # what to do
     # a provider that is off: the refusal itself already names the command
     from ahub import tasks
-    from ahub.commands.setup import set_provider_enabled
     from tests.enginekit import make_project
 
     project = make_project(tmp_path / "proj")
-    set_provider_enabled("codex", False)
+    registry.set_provider_enabled("codex", False)
     with pytest.raises(registry.RegistryError) as ei:
         registry.check(Store(), "codex", None)
     assert command_hint(str(ei.value)) == "ahub providers enable codex"
@@ -996,3 +1086,19 @@ def test_the_root_scope_flags_survive_a_subcommand(capsys, monkeypatch, tmp_path
 def home_lines(capsys, monkeypatch, *argv: str) -> str:
     assert cli.main(list(argv)) == 0
     return capsys.readouterr().out
+
+
+def test_the_next_block_wraps_to_the_given_width(capsys, monkeypatch, tmp_path):
+    """The Next block is a block like the others: it wraps to the caller's width, not to COLUMNS."""
+    import ahub.home
+    from ahub import ui
+    from ahub.i18n import t as real_t
+
+    long_cmd = 'ahub task new --kind code --title "почини тест, который падает в CI" --project shop'
+    monkeypatch.chdir(tmp_path)  # no hub configured — the screen stops right after the Next block
+    monkeypatch.setattr(ahub.home, "_t", lambda k, **kw: long_cmd if k == "home.next_setup" else real_t(k, **kw))
+    out = ahub.home.text(w=40)
+    block = out.split(ui.BULLET, 1)[1].splitlines()  # the Next block: the bullet and its wrapped lines
+    assert max(len(ui.BULLET + ln) for ln in block) <= 40, block
+    assert len(block) > 3  # the long command really wraps — it is not simply shorter than the width
+    assert long_cmd[:20] in out
