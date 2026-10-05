@@ -5,7 +5,7 @@ work_branch = "main"
 python = "$HOME/Projects/Python/agent-hub/.venv/bin/python"
 rules = "docs/agents/ahub_rules.md"
 allowed_paths = ["ahub/**", "tests/**", "docs/**", "tools/**", ".github/**", "pyproject.toml", ".hub.toml", ".gitignore", "README.md", "README.ru.md", "LICENSE", "CONTRIBUTING.md", "CHANGELOG.md", "CLAUDE.md"]
-max_parallel = 4
+max_parallel = 6
 test_resource = "selftest"
 
 [resources]

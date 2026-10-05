@@ -23,6 +23,8 @@ def _cells(state, enabled: bool) -> list[str]:
 
 
 def cmd_providers(args) -> int:
+    from ahub import providers as provider_mod
+    from ahub import quota
     from ahub.i18n import t
 
     store = Store()
@@ -30,23 +32,38 @@ def cmd_providers(args) -> int:
     rows = []
     for state in doctor.provider_states():
         aliases = [e.alias for e in registry.models(store) if e.provider == state.name]
-        rows.append((_cells(state, state.name not in off), state, aliases))
+        buckets = []
+        try:
+            prov = provider_mod.get(state.name)
+            if hasattr(prov, "quota"):
+                buckets = prov.quota()
+        except KeyError:
+            pass
+        rows.append((_cells(state, state.name not in off), state, aliases, buckets))
     head = [t(f"providers.col_{c}") for c in ("name", "found", "login", "enabled")]
-    table = ui.table(head, [cells for cells, _s, _a in rows], max_width=None).split("\n")
+    table = ui.table(head, [cells for cells, _s, _a, _b in rows], max_width=None).split("\n")
     # the table is a table; the models of a provider, its note and its install/login hint are text under
     # its row — all of them, wrapped (a cell would be clipped at the end of a long list)
     out: list[str] = [table[0]]
-    for i, (_row, state, aliases) in enumerate(rows, start=1):
+    all_buckets = []
+    for i, (_row, state, aliases, buckets) in enumerate(rows, start=1):
         out.append(table[i])
         out.append(ui.kv([(t("providers.lbl_models"),
                            ", ".join(aliases) if aliases else t("providers.no_models"))], indent=2))
+        if buckets:
+            all_buckets.extend(buckets)
+            groups = sorted(list({b.group for b in buckets}))
+            for g in groups:
+                out.append(ui.para(f"· {quota.format_bucket_group(g, buckets)}", indent=2))
         if state.note:
             out.append(ui.para(f"· {state.note}", indent=2))
         if state.hint:
             out.append(ui.para(f"→ {state.hint}", indent=2))
     data = {"providers": [{"name": st.name, "found": st.found, "logged_in": st.logged_in,
                            "enabled": st.name not in off, "detail": st.detail, "note": st.note,
-                           "hint": st.hint, "models": aliases} for _cells, st, aliases in rows]}
+                           "hint": st.hint, "models": aliases,
+                           "buckets": [b.to_dict() for b in buckets]} for _cells, st, aliases, buckets in rows],
+            "buckets": [b.to_dict() for b in all_buckets]}
     emit(args, data, "\n".join(out))
     return 0
 

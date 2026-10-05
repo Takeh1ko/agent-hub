@@ -221,11 +221,13 @@ def on_answer_button(store: Store, data: str, *, via: str = "tg") -> str:
         return _t("tg.q_bad_option")
     if not comms.answer(store, qid_i, opts[idx_i], via=via):
         return _t("tg.q_answered", qid=qid_i, answer=row["answer"])
+    forget_question(store, qid_i)  # answered — no chat re-answers it after a re-exec either
     return _t("tg.q_sent", qid=qid_i, text=row["text"], opt=opts[idx_i])
 
 
 def on_reply_to_question(store: Store, qid: int, text: str) -> str:
     if comms.answer(store, qid, text, via="tg"):
+        forget_question(store, qid)  # answered — drop the other chats' mappings too
         return _t("tg.reply_sent", qid=qid)
     return _t("tg.reply_closed", qid=qid)
 
@@ -234,6 +236,38 @@ def pending_questions(store: Store) -> list[dict]:
     with store.read() as c:
         rows = [dict(r) for r in c.execute("SELECT * FROM question WHERE status='open' AND tg_sent_at IS NULL")]
     return rows
+
+
+QMSG_PREFIX = "tg_qmsg:"  # (chat, bot_msg_id) → question id; in meta so a re-exec still routes the reply
+
+
+def _qmsg_key(chat_id: int, msg_id: int) -> str:
+    return f"{QMSG_PREFIX}{int(chat_id)}:{int(msg_id)}"
+
+
+def remember_question_message(store: Store, chat_id: int, msg_id: int, qid: int) -> None:
+    """Remember which question a sent bot message asks — survives a re-exec (meta, not process memory)."""
+    store.meta_set(_qmsg_key(chat_id, msg_id), str(int(qid)))
+
+
+def take_question_message(store: Store, chat_id: int, msg_id: int) -> int | None:
+    """Question id of a replied-to bot message, forgetting it (None — not a question message)."""
+    key = _qmsg_key(chat_id, msg_id)
+    raw = store.meta_get(key)
+    if raw is None:
+        return None
+    store.meta_del(key)
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def forget_question(store: Store, qid: int) -> None:
+    """Drop every pending mapping of a question (it was answered — other chats must not re-answer it)."""
+    with store.tx() as c:
+        c.execute("DELETE FROM meta WHERE key LIKE ? ESCAPE '\\' AND value=?",
+                  ("tg\\_qmsg:%", str(int(qid))))
 
 
 def mark_question_sent(store: Store, qid: int) -> None:

@@ -27,6 +27,8 @@ def _states(monkeypatch, **kw) -> list[doctor.ProviderState]:
     states.update(kw)
     out = [states[n] for n in ("opencode", "agy", "codex") if n in states]
     monkeypatch.setattr(doctor, "provider_states", lambda *a, **k: list(out))
+    # quota windows come from the live machine — the table pins the layout, not the numbers
+    monkeypatch.setattr("ahub.providers.agy.AgyProvider.quota", lambda self, force=False: [])
     return out
 
 
@@ -84,7 +86,8 @@ def test_providers_json(capsys, monkeypatch):
     data = json.loads(capsys.readouterr().out)
     assert [p["name"] for p in data["providers"]] == ["opencode", "agy", "codex"]
     first = data["providers"][0]
-    assert set(first) == {"name", "found", "logged_in", "enabled", "detail", "note", "hint", "models"}
+    assert set(first) == {"name", "found", "logged_in", "enabled", "detail", "note", "hint", "models",
+                          "buckets"}
     assert first["enabled"] is True and "spark" in first["models"]
     codex = data["providers"][2]
     assert codex["found"] is False and codex["logged_in"] is False and codex["enabled"] is True

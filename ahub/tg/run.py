@@ -21,8 +21,6 @@ LAUNCH_S = 10
 FAIL_MAX = 3  # the same failure in a row — the owner hears about it once, the loop slows down
 FAIL_BACKOFF_S = 60.0
 _log = hublog.get("tg")
-_QMSG: dict[tuple[int, int], int] = {}  # (chat, bot_msg_id) → question_id — reply answers
-_NODIR: dict[str, int] = {}  # project → when it was last reported (this process, one bot for weeks)
 
 
 def _markup(rows):
@@ -86,17 +84,27 @@ async def _alarm(bot, store: Store, err: str) -> None:
 async def background(bot, store: Store) -> None:
     last_launch = 0.0
     loop = asyncio.get_running_loop()
-    code0 = await asyncio.to_thread(selfupdate.code_fingerprint)
+    code0: str | None = None  # None — not read yet (or the read failed); the pass still runs
+    fp_warned = False
     last_code_check = loop.time()
     fail_n, reported = 0, False
     while True:
         try:
+            if code0 is None:
+                try:
+                    code0 = await asyncio.to_thread(selfupdate.code_fingerprint)
+                except OSError:
+                    if not fp_warned:  # once — then a quiet retry on every tick until it works
+                        fp_warned = True
+                        _log.exception("the bot's code fingerprint failed — retry on the next pass")
+                else:
+                    fp_warned = False
             for m in await asyncio.to_thread(comms.outbox, store):
                 if await _send(bot, store, core.Reply(m["text"])):
                     await asyncio.to_thread(comms.mark_sent, store, m["id"])
             for q in await asyncio.to_thread(core.pending_questions, store):
-                for key in await _send(bot, store, core.question_reply(q)):
-                    _QMSG[key] = q["id"]
+                for chat, mid in await _send(bot, store, core.question_reply(q)):
+                    await asyncio.to_thread(core.remember_question_message, store, chat, mid, q["id"])
                 await asyncio.to_thread(core.mark_question_sent, store, q["id"])
             alarms = await asyncio.to_thread(comms.alarms_for_tg, store)
             for e in alarms:
@@ -104,7 +112,7 @@ async def background(bot, store: Store) -> None:
             await asyncio.to_thread(comms.mark_tg_sent, store, [e.id for e in alarms])
             if loop.time() - last_launch >= LAUNCH_S:
                 last_launch = loop.time()
-                res = await asyncio.to_thread(launcher.tick, store, no_dir=_NODIR)
+                res = await asyncio.to_thread(launcher.tick, store)  # nodir dedupe lives in meta (a re-exec keeps it)
                 if res == "limit":
                     _log.warning("Claude launch hourly limit exhausted")
                 elif res.startswith("nodir:"):  # the launcher says it once — the owner hears it once
@@ -121,7 +129,7 @@ async def background(bot, store: Store) -> None:
                 _log.exception("bot background loop failed %d times in a row (%s) — retry in %d s",
                                fail_n, type(e).__name__, FAIL_BACKOFF_S)
                 await _alarm(bot, store, f"{type(e).__name__}: {str(e)[:200]}")
-        if loop.time() - last_code_check >= selfupdate.CODE_CHECK_S:
+        if code0 is not None and loop.time() - last_code_check >= selfupdate.CODE_CHECK_S:
             # outside the try, like the service's: a pass that keeps failing is exactly when new code is wanted
             last_code_check = loop.time()
             try:
@@ -197,10 +205,9 @@ def build_dispatcher(store: Store):
     @r.message(F.text)
     async def _text(msg: Message) -> None:
         if msg.reply_to_message is not None:
-            key = (msg.chat.id, msg.reply_to_message.message_id)
-            qid = _QMSG.get(key)
-            if qid is not None:
-                _QMSG.pop(key, None)  # the question is closed — a bot that runs for weeks must not keep every one
+            qid = await asyncio.to_thread(core.take_question_message, store,
+                                          msg.chat.id, msg.reply_to_message.message_id)
+            if qid is not None:  # the mapping is forgotten with the take — no growth over weeks
                 await msg.answer(await asyncio.to_thread(core.on_reply_to_question, store, qid, msg.text))
                 return
         rep = await asyncio.to_thread(core.on_text, store, msg.chat.id, msg.text, projects=_projects())

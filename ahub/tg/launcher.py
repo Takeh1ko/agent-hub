@@ -233,6 +233,16 @@ def _reap(store: Store, ts: int) -> str | None:
     return outcome
 
 
+NODIR_PREFIX = "tg_nodir:"  # last report of a group with no directory (survives a re-exec)
+
+
+def _nodir_last(store: Store, target: str) -> int:
+    try:
+        return int(store.meta_get(f"{NODIR_PREFIX}{target}") or 0)
+    except (ValueError, TypeError):
+        return 0
+
+
 def _no_directory(target: str, ts: int, reported: dict[str, int]) -> bool:
     """A group with no directory: log it once in a while (not on every tick). True — tell the owner.
 
@@ -250,6 +260,18 @@ def _no_directory(target: str, ts: int, reported: dict[str, int]) -> bool:
     return True
 
 
+def _no_directory_store(store: Store, target: str, ts: int) -> bool:
+    """Store-backed `_no_directory`: the dedupe lives in meta, so a re-exec does not re-announce."""
+    if ts - _nodir_last(store, target) < NO_DIR_MS:
+        return False
+    store.meta_set(f"{NODIR_PREFIX}{target}", str(ts))
+    if target:
+        _log.warning("cannot launch Claude: no directory for project %s — no such project in the hub config", target)
+    else:
+        _log.warning("cannot launch Claude: no directory for the hub-wide group — no projects in the hub config")
+    return True
+
+
 def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, now: int | None = None,
          spawn=None, binary: str | None = None, no_dir: dict[str, int] | None = None) -> str:
     """One supervise/launch step.
@@ -257,10 +279,10 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
     Returns what happened: idle | running | finished | killed | launched | limit | nodir:<project>
     (nothing will ever be launched for that project — each group with no directory is said once in NO_DIR_MS,
     one per tick; an empty name — the hub-wide group with no configured project). `no_dir` — the caller's
-    memory of what was already reported (without it every tick reports again).
+    memory of what was already reported; None — the store (meta, survives a re-exec).
     """
     ts = now if now is not None else now_ms()
-    reported = no_dir if no_dir is not None else {}
+    reported = no_dir
     ended = _reap(store, ts)
     if ended is not None:
         return ended
@@ -313,6 +335,9 @@ def tick(store: Store, *, projects: list[config.ProjectConfig] | None = None, no
                   "resume" if resume else "new session")
         return "launched"
     for target in nodir:
-        if _no_directory(target, ts, reported):
+        if reported is not None:
+            if _no_directory(target, ts, reported):
+                return f"nodir:{target}"  # one per tick; the rest of them are due on the next ones
+        elif _no_directory_store(store, target, ts):
             return f"nodir:{target}"  # one per tick; the rest of them are due on the next ones
     return "running" if alive else "idle"
