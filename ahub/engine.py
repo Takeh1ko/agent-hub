@@ -954,20 +954,32 @@ class Engine:
         else:
             prompt, kind = prompts.CONTINUE_PROMPT, "continue"
         self._clear_fresh(t)
+        # a lock-wait requeue resumes straight at the gates — the worker turn already happened
+        lock_resume = bool(self.task().limits.get("lock_wait"))
+        if lock_resume:
+            t.limits.pop("lock_wait", None)
+            lim = dict(self.task().limits)
+            lim.pop("lock_wait", None)
+            self.store.update_task(t.id, limits=lim)
         round_no = t.round
+        skip_turn = lock_resume
         while True:
-            self.set_phase(Phase.WRITING)
-            r, final = self._step_with_continue(role, t.executor, prompt, session_id=sid, log_name=role.value,
-                                                prompt_kind=kind)
-            sid = r.session_id or sid
-            if final is not None:
-                if self.budget_hit:
-                    return self._budget_stop(role, t.executor, sid)
-                return self._settle(*final)
-            blocked = self._blocked(t)
-            if blocked:
-                return self._settle(State.NEEDS_DECISION, reasons.dump("blocked", summary=blocked[:400]))
-            t = self.move(State.CHECKING, reasons.dump("gates"))
+            if skip_turn:
+                skip_turn = False
+                t = self.move(State.CHECKING, reasons.dump("gates"))
+            else:
+                self.set_phase(Phase.WRITING)
+                r, final = self._step_with_continue(role, t.executor, prompt, session_id=sid, log_name=role.value,
+                                                    prompt_kind=kind)
+                sid = r.session_id or sid
+                if final is not None:
+                    if self.budget_hit:
+                        return self._budget_stop(role, t.executor, sid)
+                    return self._settle(*final)
+                blocked = self._blocked(t)
+                if blocked:
+                    return self._settle(State.NEEDS_DECISION, reasons.dump("blocked", summary=blocked[:400]))
+                t = self.move(State.CHECKING, reasons.dump("gates"))
             try:
                 g = self._gate(t)
             except gates.LockTimeout as e:
@@ -1053,6 +1065,9 @@ class Engine:
         if getattr(e, "stopped", False) or self.stop_requested():
             return self._settle(State.STOPPED, reasons.dump("stopped"))
         self.set_phase(Phase.WAITING)
+        lim = dict(self.task().limits)
+        lim["lock_wait"] = True  # the resume skips the worker turn and goes straight to the gates
+        self.store.update_task(self.task_id, limits=lim)
         return self._settle(State.QUEUED, reasons.dump("wait_test_lock"))
 
     def _review_round(self, t: Task, g: gates.GateResult, models: list[str], round_no: int,

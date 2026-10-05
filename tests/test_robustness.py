@@ -91,6 +91,34 @@ def test_engine_lock_busy_goes_to_queue(store: Store, tmp_path, monkeypatch):
     assert len(fake.calls) == 1  # never reached the worker as a failing test
 
 
+def test_lock_wait_resume_runs_gates_without_new_turn(store: Store, tmp_path, monkeypatch):
+    """After a lock-wait requeue the resume goes straight to the gates: no new worker turn."""
+    project = make_project(tmp_path)
+    fake = install_fake(store, [work()])
+    t = _code_task(store, project)
+    real_run_acceptance = gates.run_acceptance
+    calls = {"n": 0}
+
+    def _busy_once(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise gates.LockTimeout("lock busy", stopped=False)
+        return real_run_acceptance(*a, **kw)
+
+    monkeypatch.setattr(gates, "run_acceptance", _busy_once)
+    first = Engine(store, project, t.id, sleep=lambda s: None).run()
+    assert first.state is State.QUEUED, first.reason
+    assert '"wait_test_lock"' in store.get_task(t.id).state_reason
+    assert len(fake.calls) == 1
+    sessions_after_first = len(store.list_sessions(t.id))
+
+    second = Engine(store, project, t.id, sleep=lambda s: None).run()
+    assert second.state is State.DONE, second.reason
+    assert len(fake.calls) == 1  # the resume ran the gates, not another worker turn
+    assert len(store.list_sessions(t.id)) == sessions_after_first
+    assert "lock_wait" not in store.get_task(t.id).limits  # the flag is cleared when used
+
+
 def test_engine_lock_stopped_is_stopped(store: Store, tmp_path, monkeypatch):
     """A stop during the lock wait is STOPPED, not a wait and not red."""
     project = make_project(tmp_path)
