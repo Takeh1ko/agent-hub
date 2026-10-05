@@ -1797,11 +1797,27 @@ class ConsoleApp(App):
             return False
         return True
 
+    def _tasks_pane_focused(self) -> bool:
+        """The real focus, not only the mode flag: a click into the input leaves the flag behind."""
+        w = self.focused
+        return w is not None and getattr(w, "id", None) == "tasks"
+
+    def on_descendant_focus(self, ev) -> None:  # noqa: N802 - textual hook
+        """Keep focus_mode in step with the widget that really has focus (Tab, Esc, a mouse click)."""
+        mode = "tasks" if getattr(ev.widget, "id", None) == "tasks" else "input"
+        if isinstance(ev.widget, Input) or mode == "tasks":
+            if mode != self.focus_mode:
+                self.focus_mode = mode
+                self._render_tasks()
+
     def on_key(self, ev) -> None:  # noqa: N802 - textual hook
-        """Tasks-pane keys: Up/Down select, Enter follow, a/x/r/m act on the selected task."""
+        """Tasks-pane keys: Up/Down select, Enter follow, a/x/r/m act on the selected task.
+
+        Only while the task pane really has focus — typed text in the input never acts on a task.
+        """
         if not self._on_main():
             return
-        if self.focus_mode == "tasks":
+        if self.focus_mode == "tasks" and self._tasks_pane_focused():
             key = getattr(ev, "key", "")
             if key == "up":
                 self._selected = max(0, self._selected - 1)
