@@ -30,9 +30,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ahub import config, paths, procs, reasons, transitions
+from ahub import config, paths, procs, quota, reasons, transitions
 from ahub import log as hublog
-from ahub.model import ACTIVE, Ev, State
+from ahub.model import ACTIVE, Ev, Kind, State
 from ahub.selfupdate import CODE_CHECK_S, code_fingerprint, hub_env, new_code_healthy, restart_self
 from ahub.store import Store, Task
 from ahub.time import now_ms
@@ -203,6 +203,16 @@ class Service:
         load: dict[str, ProjectLoad] = {}
         self._orphans(live, busy)
         all_tasks = self.store.list_tasks(states=ACTIVE | {State.QUEUED})
+        hub_cfg = config.load_hub()
+        group_counts: dict[str, int] = {}
+        for t in all_tasks:
+            if t.id in busy:
+                _role, m_list = quota.task_models(t)
+                for m in m_list:
+                    _prov, b_list = quota.get_model_buckets(self.store, m)
+                    for b in b_list:
+                        group_counts[b.group] = group_counts.get(b.group, 0) + 1
+                        break
         by_project: dict[str, list[Task]] = {}
         for t in all_tasks:
             by_project.setdefault(t.project, []).append(t)
@@ -238,6 +248,26 @@ class Service:
                         if spec.lock and self.lock_busy(spec.lock):
                             reason = reasons.dump("wait_resource_busy", name=r)
                             break
+                if not reason:
+                    qres = quota.check_quota_for_task(self.store, t, hub_cfg.quota, group_counts)
+                    if not qres.ok:
+                        if qres.fallback_model:
+                            old_model = t.executor
+                            if t.kind is Kind.REVIEW:
+                                rev = dict(t.review)
+                                models = list(rev.get("models") or [t.executor])
+                                old_model = models[0] if models else t.executor
+                                rev["models"] = [qres.fallback_model]
+                                self.store.update_task(t.id, review=rev)
+                            else:
+                                self.store.update_task(t.id, executor=qres.fallback_model,
+                                                       limits={**t.limits, "fresh_session": True})
+                                t.executor = qres.fallback_model
+                            self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                                 payload={"from": old_model, "to": qres.fallback_model,
+                                                          "text": qres.event_text})
+                        else:
+                            reason = qres.wait_reason
                 if reason:
                     pl.waiting[t.id] = reasons.text(reason)
                     self._set_wait(t, reason)
@@ -255,6 +285,12 @@ class Service:
                 slots -= 1
                 for r in t.limits.get("resources") or []:
                     res_use[r] = res_use.get(r, 0) + 1
+                _role, m_list = quota.task_models(t)
+                for m in m_list:
+                    _prov, b_list = quota.get_model_buckets(self.store, m)
+                    for b in b_list:
+                        group_counts[b.group] = group_counts.get(b.group, 0) + 1
+                        break
                 self.log.info("worker process T%d started (pid %s)", t.id, pid, extra={"task": t.id})
         self.store.meta_set(HEARTBEAT_KEY, str(now_ms()))
         return TickReport(live=live, spawned=spawned, load=load, paused=paused)

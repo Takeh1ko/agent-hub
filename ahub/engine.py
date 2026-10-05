@@ -32,12 +32,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ahub import gates, prepare, prompts, providers, reasons, registry, review, transcript, transitions, workspace
+from ahub import (
+    gates,
+    prepare,
+    prompts,
+    providers,
+    reasons,
+    registry,
+    review,
+    selfupdate,
+    transcript,
+    transitions,
+    workspace,
+)
 from ahub import log as hublog
 from ahub.config import ProjectConfig
 from ahub.i18n import plural
 from ahub.i18n import t as _t
-from ahub.model import ACTIVE, Kind, Phase, Role, State
+from ahub.model import ACTIVE, Ev, Kind, Phase, Role, State
 from ahub.providers.base import Act, Activity, Outcome, RunResult, RunSpec
 from ahub.providers.runner import PollFailed
 from ahub.providers.runner import run as run_session
@@ -77,6 +89,61 @@ class LeaseLost(RuntimeError):
 
 class ReviewInputError(RuntimeError):
     """The --input of a review task names nothing that exists — the task needs a decision, not a worker."""
+
+
+def _tb_has_hub(e: BaseException) -> bool:
+    """The traceback goes through hub code (ahub.*) — not a provider subprocess output."""
+    tb = e.__traceback__
+    while tb is not None:
+        fn = (tb.tb_frame.f_code.co_filename or "").replace("\\", "/")
+        if "/ahub/" in fn or fn.endswith("/ahub.py"):
+            return True
+        mod = tb.tb_frame.f_globals.get("__name__", "")
+        if isinstance(mod, str) and (mod == "ahub" or mod.startswith("ahub.")):
+            return True
+        tb = tb.tb_next
+    return False
+
+
+def _stale_code_error(e: BaseException) -> bool:
+    """Old worker on new code: a hub import broke or a hub attribute vanished.
+
+    Only hub code counts — an ImportError in a provider subprocess output never raises here,
+    it arrives as Outcome text, not as an exception.
+    """
+    if isinstance(e, ImportError):
+        name = getattr(e, "name", "") or ""
+        if isinstance(name, str) and name.startswith("ahub"):
+            return True
+        if "ahub" in str(e):
+            return True
+        return _tb_has_hub(e)
+    if isinstance(e, AttributeError):
+        # a hub module lost an attribute under a live update: the message names it
+        if "ahub" in str(e):
+            return True
+        return False
+    return False
+
+
+def _code_fingerprint() -> str:
+    """Best-effort fingerprint of the hub code ('' when unknown)."""
+    try:
+        return selfupdate.code_fingerprint()
+    except Exception:
+        return ""
+
+
+def _code_changed_since(fp: str) -> bool:
+    """Hub code changed since fp was taken; False when either fingerprint is unknown.
+
+    Unknown never counts as changed: a genuine bug must go to error, not loop re-picks on the
+    same code.
+    """
+    if not fp:
+        return False
+    now = _code_fingerprint()
+    return bool(now) and now != fp
 
 
 UNFIXABLE_SCOUT = ("scout_files", "scout_commits")  # a scout that touched files — a repair prompt cannot fix it
@@ -237,6 +304,7 @@ class Engine:
         self._budget_at = 0.0
         self._soft_sent = False
         self._nudge_turns = 0
+        self._code0 = _code_fingerprint()  # hub code as this worker started; stale imports compare against it
         self.log = hublog.get("engine", task=self.task_id, project=project.name)
 
     def run(self) -> Settled:
@@ -257,6 +325,19 @@ class Engine:
             self.log.error("worktree: %s", e)
             return self._settle(State.ERROR, reasons.dump("prepare_failed", err=e))
         except Exception as e:
+            if _stale_code_error(e) and _code_changed_since(self._code0):
+                # the hub code changed under this worker: like the poll failure path — one log line,
+                # the provider group is stopped, the worker exits 4 and the service re-picks the task.
+                # Unchanged code is a genuine bug and settles error as before (no re-pick loop).
+                self.log.error("stale hub code (%s: %s) — the task is left to the service",
+                               type(e).__name__, str(e)[:200])
+                try:
+                    from ahub.providers import runner as _runner
+
+                    _runner.request_stop()
+                except Exception:
+                    self.log.exception("stopping the provider failed")
+                raise PollFailed(f"stale code: {type(e).__name__}: {e}") from e
             self.log.exception("engine crashed")
             try:
                 # an exception message is technical detail — stored as text, not as a reason code
@@ -444,7 +525,7 @@ class Engine:
         return max(1, int((self._deadline_ms - now_ms()) / 1000))
 
     def _session_row(self, provider: str, role: Role, alias: str, round_no: int, session_id: str | None,
-                     log_path: str) -> int:
+                     log_path: str, prompts_summary: str = "") -> int:
         """Session row: resume — same row (provider id is unique), new — new row."""
         if session_id:
             for s in self.store.list_sessions(self.task_id):
@@ -452,7 +533,8 @@ class Engine:
                     self.store.update_session(s.id, status="running", outcome="", ended_at=None, log_path=log_path)
                     return s.id
         return self.store.add_session(task_id=self.task_id, provider=provider, role=role.value, model=alias,
-                                      round=round_no, external_id=session_id or "", log_path=log_path)
+                                       round=round_no, external_id=session_id or "", log_path=log_path,
+                                       prompts=prompts_summary)
 
     def _close_session(self, row: int) -> None:
         """The provider group is gone and the turn is lost — the row must not stay 'running'."""
@@ -482,12 +564,14 @@ class Engine:
     def session(self, role: Role, alias: str, prompt: str, *, session_id: str | None = None,
                 keep_session_on_retry: bool = True, log_name: str = "", schema: dict | None = None,
                 cwd: str | None = None, prompt_kind: str = "start",
-                stop_predicate: Callable[[], bool] | None = None) -> RunResult:
+                stop_predicate: Callable[[], bool] | None = None, prompts_summary: str = "") -> RunResult:
         """One worker step with retries on network failure (architecture §6.3).
 
         `prompt_kind` says what the prompt is (start | continue | repair | rework | stop | review | nudge) and goes
         into the prompts sidecar, which is what `ahub follow` shows as the turn header. One call is one
         turn: a network retry repeats the run of the same prompt, not the turn.
+
+        `prompts_summary` — the canonical prompt-layers summary, stored on a new session row (reviewers).
 
         `stop_predicate` — what interrupts this turn. By default a nudge does (a worker turn carries the
         message); a reviewer or a save-and-stop turn passes `self.stop_requested` and waits for its turn.
@@ -504,7 +588,7 @@ class Engine:
         attempt = 0
         while True:
             self._check_lease()
-            row = self._session_row(prov.name, role, alias, t.round, session_id, log_path)
+            row = self._session_row(prov.name, role, alias, t.round, session_id, log_path, prompts_summary)
 
             def on_session(sid: str, _row=row) -> None:
                 try:
@@ -522,6 +606,13 @@ class Engine:
             except PollFailed:  # the runner killed the provider group — the row must not stay running
                 self._close_session(row)
                 raise
+            except (ImportError, AttributeError) as e:
+                if not _stale_code_error(e) or not _code_changed_since(self._code0):
+                    raise
+                self._close_session(row)
+                self.log.error("stale hub code (%s: %s) — the task is left to the service",
+                               type(e).__name__, str(e)[:200])
+                raise PollFailed(f"stale code: {type(e).__name__}: {e}") from e
             u = r.usage
             fields: dict = {"status": "ok" if r.ok else ("killed" if r.outcome is Outcome.KILLED else "failed"),
                             "outcome": r.outcome.value, "ended_at": r.ended_ms}
@@ -583,7 +674,8 @@ class Engine:
             t = self.move(State.WORKING, reasons.dump("worker_started"), fields={**fields, "round": max(1, t.round)})
         return t
 
-    def _outcome_to_state(self, r: RunResult) -> tuple[State, str] | None:
+    def _outcome_to_state(self, r: RunResult, *, role: Role = Role.EXECUTOR,
+                          model_alias: str = "") -> tuple[State, str] | None:
         """Step result after which there is nothing to continue. None — step ok or handled separately."""
         if r.outcome is Outcome.KILLED:
             if self.lost.is_set():
@@ -594,12 +686,45 @@ class Engine:
         if r.outcome is Outcome.TIMEOUT:
             return State.NEEDS_DECISION, reasons.dump("time_limit", err=r.error)
         if r.outcome is Outcome.QUOTA:
-            return State.NEEDS_DECISION, reasons.dump("quota", err=r.error[:300])
+            return self._handle_quota_outcome(r, role=role, model_alias=model_alias)
         if r.outcome is Outcome.TRANSIENT:
             return State.NEEDS_DECISION, reasons.dump("transient_out", err=r.error[:300])
         if r.outcome in (Outcome.NO_ACCESS, Outcome.MODEL_ERROR, Outcome.CRASH, Outcome.NOT_STARTED):
             return State.ERROR, reasons.dump("step_failed", outcome=r.outcome.value, err=r.error[:400])
         return None
+
+    def _handle_quota_outcome(self, r: RunResult, *, role: Role = Role.EXECUTOR,
+                              model_alias: str = "") -> tuple[State, str]:
+        from ahub import config, quota
+
+        alias = model_alias or self.task().executor
+        _prov, buckets = quota.get_model_buckets(self.store, alias, force=True)
+
+        hub_cfg = config.load_hub()
+        quota_cfg = hub_cfg.quota
+        fb_role = quota_cfg.fallback_reviewer if role is Role.REVIEWER else quota_cfg.fallback_executor
+        fallback = fb_role or quota_cfg.fallback
+
+        t = self.task()
+        reason, event_text = quota.describe_error(t.label, buckets, r.error, fallback)
+        if fallback:
+            if role is Role.REVIEWER:
+                # a reviewer never takes the executor's seat: only its panel entry moves
+                old_model = alias
+                rev = dict(t.review)
+                rev["models"] = [fallback if x == alias else x for x in list(rev.get("models") or [])]
+                self.store.update_task(t.id, review=rev)
+            else:
+                old_model = t.executor
+                self.store.update_task(t.id, executor=fallback, limits={**t.limits, "fresh_session": True})
+                t.executor = fallback
+            self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                 payload={"from": old_model, "to": fallback, "text": event_text})
+        elif role is not Role.REVIEWER:
+            # the session that hit the quota error is poisoned (agy answers a resume with the old
+            # error again) — abandon it; the work is on the branch, the new session starts fresh
+            self.store.update_task(t.id, limits={**t.limits, "fresh_session": True})
+        return State.QUEUED, reason
 
     def _step_with_continue(self, role: Role, alias: str, prompt: str, *, session_id: str | None,
                             log_name: str, prompt_kind: str = "start") -> tuple[RunResult, tuple[State, str] | None]:
@@ -615,7 +740,7 @@ class Engine:
             r = self._take_nudge(role, alias, r, session_id, log_name)
             if r.outcome is Outcome.SILENCE:
                 return r, (State.NEEDS_DECISION, reasons.dump("silence_twice", secs=r.silence_s))
-        return r, self._outcome_to_state(r)
+        return r, self._outcome_to_state(r, role=role, model_alias=alias)
 
     def _take_nudge(self, role: Role, alias: str, r: RunResult, session_id: str | None,
                     log_name: str) -> RunResult:
@@ -649,7 +774,11 @@ class Engine:
         prev = [s for s in self.store.list_sessions(t.id) if s.role == Role.SCOUT.value and s.external_id]
         resume_sid = prev[-1].external_id if prev and not t.limits.get("fresh_session") else None  # resume
         self._clear_fresh(t)
-        prompt = prompts.CONTINUE_PROMPT if resume_sid else prompts.scout_prompt(self.project, t)
+        if resume_sid:
+            prompt = prompts.CONTINUE_PROMPT
+        else:
+            prompt, summary, _ = prompts.scout_prompt(self.project, t)
+            self._record_prompts(t, summary)
         r, final = self._step_with_continue(Role.SCOUT, t.executor, prompt, session_id=resume_sid,
                                             log_name="scout",
                                             prompt_kind="continue" if resume_sid else "start")
@@ -703,14 +832,27 @@ class Engine:
             problems.append(gates.problem("no_result"))
             res = {}
         else:
-            res = self._result(t)
-            if not res:
+            try:
+                raw = res_path.read_text(encoding="utf-8")
+            except OSError:
                 problems.append(gates.problem("result_not_json"))
+                res = {}
             else:
-                if not str(res.get("summary", "")).strip():
-                    problems.append(gates.problem("empty_summary"))
-                if res.get("status") not in ("done", "blocked"):
-                    problems.append(gates.problem("bad_status"))
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as e:
+                    problems.append(gates.problem("result_json", err=str(e)[:200]))
+                    res = {}
+                else:
+                    if not isinstance(data, dict) or not data:
+                        problems.append(gates.problem("result_not_json"))
+                        res = {}
+                    else:
+                        res = data
+                        if not str(res.get("summary", "")).strip():
+                            problems.append(gates.problem("empty_summary"))
+                        if res.get("status") not in ("done", "blocked"):
+                            problems.append(gates.problem("bad_status"))
         report = base / "report.md"
         try:
             report_ok = report.is_file() and bool(report.read_text(encoding="utf-8", errors="replace").strip())
@@ -742,15 +884,20 @@ class Engine:
         round_no = max(1, t.round)
         rework_notes = str(t.limits.get("rework_notes") or "")
         if rework_notes:
-            lim = dict(t.limits)
+            t.limits.pop("rework_notes", None)
+            lim = dict(self.task().limits)
             lim.pop("rework_notes", None)
             self.store.update_task(t.id, limits=lim)
         self.set_phase(Phase.STUDYING)
+        _, rev_summary, _ = prompts.assemble_guidance(self.project, "review")
+        self._record_prompts(t, rev_summary)
         t = self.move(State.REVIEWING, reasons.dump("review_round", round=round_no))
         # no gates of a code task here: an empty result, so nothing pretends a test ran
         decision, reason, findings = self._review_round(t, gates.GateResult(base="", head=""), models, round_no,
                                                         max(1, int(t.review.get("rounds") or 1)),
                                                         material=material, rework=False, notes=rework_notes)
+        if decision == "queued":
+            return self._settle(State.QUEUED, reason)
         if decision == "decision":  # a reviewer without a verdict, a stop, the budget
             return self._settle(State.NEEDS_DECISION, reason, payload={"findings": len(findings)})
         summary = _findings_summary(findings)
@@ -824,11 +971,14 @@ class Engine:
         notes = str(t.limits.get("rework_notes") or "")
         fresh = bool(t.limits.get("fresh_session")) or not sid
         if notes:
-            lim = dict(t.limits)
+            t.limits.pop("rework_notes", None)
+            lim = dict(self.task().limits)
             lim.pop("rework_notes", None)
             self.store.update_task(t.id, limits=lim)
         if fresh:  # new session (different model/brief, or no session before): full brief + instructions
-            prompt, kind = prompts.code_prompt(self.project, t), "start"
+            prompt, summary, _ = prompts.code_prompt(self.project, t)
+            self._record_prompts(t, summary)
+            kind = "start"
             if notes:
                 prompt += f"\n\n{prompts.orchestrator_heading(rework=True)}\n" + notes
                 kind = "rework"
@@ -838,21 +988,38 @@ class Engine:
         else:
             prompt, kind = prompts.CONTINUE_PROMPT, "continue"
         self._clear_fresh(t)
+        # a lock-wait requeue resumes straight at the gates — the worker turn already happened.
+        # A fresh session or pending rework notes still need a real turn, so they overrule the skip.
+        # The flag is cleared either way once consumed.
+        lock_resume = bool(self.task().limits.get("lock_wait")) and not fresh and not notes
+        if self.task().limits.get("lock_wait"):
+            t.limits.pop("lock_wait", None)
+            lim = dict(self.task().limits)
+            lim.pop("lock_wait", None)
+            self.store.update_task(t.id, limits=lim)
         round_no = t.round
+        skip_turn = lock_resume
         while True:
-            self.set_phase(Phase.WRITING)
-            r, final = self._step_with_continue(role, t.executor, prompt, session_id=sid, log_name=role.value,
-                                                prompt_kind=kind)
-            sid = r.session_id or sid
-            if final is not None:
-                if self.budget_hit:
-                    return self._budget_stop(role, t.executor, sid)
-                return self._settle(*final)
-            blocked = self._blocked(t)
-            if blocked:
-                return self._settle(State.NEEDS_DECISION, reasons.dump("blocked", summary=blocked[:400]))
-            t = self.move(State.CHECKING, reasons.dump("gates"))
-            g = self._gate(t)
+            if skip_turn:
+                skip_turn = False
+                t = self.move(State.CHECKING, reasons.dump("gates"))
+            else:
+                self.set_phase(Phase.WRITING)
+                r, final = self._step_with_continue(role, t.executor, prompt, session_id=sid, log_name=role.value,
+                                                    prompt_kind=kind)
+                sid = r.session_id or sid
+                if final is not None:
+                    if self.budget_hit:
+                        return self._budget_stop(role, t.executor, sid)
+                    return self._settle(*final)
+                blocked = self._blocked(t)
+                if blocked:
+                    return self._settle(State.NEEDS_DECISION, reasons.dump("blocked", summary=blocked[:400]))
+                t = self.move(State.CHECKING, reasons.dump("gates"))
+            try:
+                g = self._gate(t)
+            except gates.LockTimeout as e:
+                return self._lock_wait(e)
             fixed_once = False
             while True:
                 if g.fatal:
@@ -878,7 +1045,10 @@ class Engine:
                     if self.budget_hit:
                         return self._budget_stop(role, t.executor, sid)
                     return self._settle(*final)
-                g = self._gate(self.task())
+                try:
+                    g = self._gate(self.task())
+                except gates.LockTimeout as e:
+                    return self._lock_wait(e)
             summary = self._result(t).get("summary", "")
             payload = {"summary": str(summary)[:500], "diffstat": g.diffstat,
                        "tests": "green" if g.tests_ok else ("none" if g.tests_ok is None else "red")}
@@ -889,6 +1059,8 @@ class Engine:
                 return self._budget_stop(role, t.executor, sid)
             t = self.move(State.REVIEWING, reasons.dump("review_round", round=round_no))
             decision, reason, findings = self._review_round(t, g, models, round_no, max_rounds)
+            if decision == "queued":
+                return self._settle(State.QUEUED, reason)
             if decision == "done":
                 return self._settle(State.DONE, reason, payload=payload)
             if decision == "decision":
@@ -898,8 +1070,15 @@ class Engine:
             t = self.move(State.FIXING, reason, fields={"round": round_no})
             prompt, kind = review.fix_prompt(findings), "rework"
 
+    def _record_prompts(self, t: Task, summary: str) -> None:
+        lim = dict(self.task().limits)
+        lim["prompts"] = summary
+        t.limits["prompts"] = summary
+        self.store.update_task(t.id, limits=lim)
+
     def _clear_fresh(self, t: Task) -> None:
         if t.limits.get("fresh_session"):
+            t.limits.pop("fresh_session", None)
             lim = dict(self.task().limits)
             lim.pop("fresh_session", None)
             self.store.update_task(t.id, limits=lim)
@@ -917,6 +1096,16 @@ class Engine:
         orch = bool(t.limits.get("orch_edit"))
         return gates.check(self.project, t, orch_edit=orch, on_wait=on_wait, should_stop=self.stop_requested)
 
+    def _lock_wait(self, e: gates.LockTimeout) -> Settled:
+        """A busy test lock is a wait, not a red acceptance: back to the queue, gates re-run."""
+        if getattr(e, "stopped", False) or self.stop_requested():
+            return self._settle(State.STOPPED, reasons.dump("stopped"))
+        self.set_phase(Phase.WAITING)
+        lim = dict(self.task().limits)
+        lim["lock_wait"] = True  # the resume skips the worker turn and goes straight to the gates
+        self.store.update_task(self.task_id, limits=lim)
+        return self._settle(State.QUEUED, reasons.dump("wait_test_lock"))
+
     def _review_round(self, t: Task, g: gates.GateResult, models: list[str], round_no: int,
                       max_rounds: int, *, material: str | None = None,
                       rework: bool = True, notes: str = "") -> tuple[str, str, list]:
@@ -928,20 +1117,73 @@ class Engine:
         from concurrent.futures import ThreadPoolExecutor
 
         diff = gates.diff_text(t.worktree, g.base) if material is None else material
+        from ahub import config, quota
+        from ahub.time import fmt_local
+
+        hub_cfg = config.load_hub()
+        quota_cfg = hub_cfg.quota
+        fallback_rev = quota_cfg.fallback_reviewer or quota_cfg.fallback
+        new_models = []
+        for m in models:
+            _prov, buckets = quota.get_model_buckets(self.store, m)
+            b_5h = next((b for b in buckets if b.window == "5h"), None)
+            b_week = next((b for b in buckets if b.window in ("weekly", "week")), None)
+            now = now_ms()
+            breached = None
+            if b_5h and b_5h.remaining < quota_cfg.min_5h and now < b_5h.reset_at:
+                breached = b_5h
+            elif b_week and b_week.remaining < quota_cfg.min_weekly and now < b_week.reset_at:
+                breached = b_week
+
+            if breached:
+                pct = int(round(breached.remaining * 100))
+                if fallback_rev:
+                    event_text = _t("engine.quota_fallback", label=t.label, group=breached.group,
+                                    window=breached.window, pct=pct, fallback=fallback_rev)
+                    self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                         payload={"from": m, "to": fallback_rev, "text": event_text})
+                    new_models.append(fallback_rev)
+                else:
+                    reset_str = fmt_local(breached.reset_at)
+                    reason = reasons.dump("wait_quota", group=breached.group, window=breached.window,
+                                          pct=pct, reset=reset_str)
+                    return "queued", reason, []
+            else:
+                new_models.append(m)
+        models = new_models
+
         for m in models:
             review.review_path(t.worktree, round_no, m).unlink(missing_ok=True)
 
+        prompts_by_model: dict[str, str] = {}
+        summaries_by_model: dict[str, str] = {}
+        for m in models:
+            p, s, _ = review.review_prompt(self.project, t, diff, g, round_no, m, notes=notes)
+            prompts_by_model[m] = p
+            summaries_by_model[m] = s
+
         def one(m: str):
-            prompt = review.review_prompt(self.project, t, diff, g, round_no, m, notes=notes)
+            prompt = prompts_by_model[m]
             # a reviewer is not interrupted by a nudge: the message waits for the executor's next turn
             return self.session(Role.REVIEWER, m, prompt, keep_session_on_retry=False,
                                 log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review",
-                                stop_predicate=self.stop_requested)
+                                stop_predicate=self.stop_requested, prompts_summary=summaries_by_model[m])
 
         with ThreadPoolExecutor(max_workers=len(models)) as ex:
             results = list(ex.map(one, models))
         if (stop := self._review_interrupted(results)) is not None:
             return stop
+        for m, r in zip(models, results, strict=True):
+            if r.outcome is Outcome.QUOTA:
+                _prov, buckets = quota.get_model_buckets(self.store, m, force=True)
+                reason, event_text = quota.describe_error(t.label, buckets, r.error, fallback_rev)
+                if fallback_rev:
+                    self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                         payload={"from": m, "to": fallback_rev, "text": event_text})
+                    rev = dict(t.review)
+                    rev["models"] = [fallback_rev if x == m else x for x in models]
+                    self.store.update_task(t.id, review=rev)
+                return "queued", reason, []
         self._revert_reviewer(t)
         by_model = dict(zip(models, results, strict=True))
         found: dict[str, review.Review] = {}
@@ -961,6 +1203,17 @@ class Engine:
                 retries = list(ex.map(retry_one, missing))
             if (stop := self._review_interrupted(retries)) is not None:
                 return stop
+            for m, r in zip(missing, retries, strict=True):
+                if r.outcome is Outcome.QUOTA:
+                    _prov, buckets = quota.get_model_buckets(self.store, m, force=True)
+                    reason, event_text = quota.describe_error(t.label, buckets, r.error, fallback_rev)
+                    if fallback_rev:
+                        self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                             payload={"from": m, "to": fallback_rev, "text": event_text})
+                        rev = dict(t.review)
+                        rev["models"] = [fallback_rev if x == m else x for x in models]
+                        self.store.update_task(t.id, review=rev)
+                    return "queued", reason, []
             self._revert_reviewer(t)
             for m in missing:
                 rv = review.parse(review.review_path(t.worktree, round_no, m), m)

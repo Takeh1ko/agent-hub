@@ -147,7 +147,7 @@ def welcome_box(store: Store, sc: scope.Scope, now: int, width: int) -> str:
     state = _t("console.svc_running") if alive else _t("console.svc_stopped")
     svc_line = _t("console.svc_tick", state=state, age=age)
     try:
-        money = topdata.header(store, {}, now).split("\n")[-1]
+        money = topdata.header(store, now).split("\n")[-1]
     except Exception:
         money = ""
     title = f"{ui.styled('✻', 'accent')} {ui.styled(f'ahub {ahub.__version__}', 'accent')}"
@@ -775,6 +775,7 @@ class ConsoleApp(App):
         cur = "all" if self.scope.all else self.scope.name
         nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else order[0]
         self.scope = scope.Scope() if nxt == "all" else scope.Scope((nxt,))
+        self._selected = 0
         self._blocks, self._order = {}, []
         self.refresh_data()
 
@@ -1073,13 +1074,22 @@ class ConsoleApp(App):
         self.call_from_thread(self._say, text.splitlines() or [""])
 
     def cmd_project(self, cmd: str, args: list[str]) -> None:
+        """Switch the scope: /project NAME|all, /all. Unknown names keep the scope."""
         if cmd == "all" or (args and args[0] == "all"):
             self.scope = scope.Scope()
-        elif args:
-            self.scope = scope.Scope((scope.name_of(args[0]),))
-        else:
-            self._say_err(_t("console.project_usage"))
+        elif not args:
+            self._say([_t("console.project_usage")])
             return
+        else:
+            from ahub.cliutil import CliError
+
+            try:
+                name = scope.checked(args[0])
+            except CliError as e:
+                self._say([str(e)])
+                return
+            self.scope = scope.Scope((name,))
+        self._selected = 0
         self._blocks, self._order = {}, []
         self.refresh_data()
 

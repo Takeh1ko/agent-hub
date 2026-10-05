@@ -18,7 +18,7 @@ _STYLES = {True: "green", False: "red", None: "dim"}
 # area title key → the checks of it, in display order (doctor.run_all returns all of them)
 _AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("doctor.area_system", ("python", "git")),
-    ("doctor.area_hub", ("config", "service", "models", "network")),
+    ("doctor.area_hub", ("config", "service", "models", "network", "prompts")),
     ("doctor.area_providers", ("opencode", "opencode_health", "opencode_auth", "provider_keys", "agy", "codex")),
     ("doctor.area_claude", ("claude", "claude_skill", "claude_rule")),
     ("doctor.area_optional", ("telegram",)),
@@ -67,13 +67,22 @@ def text(checks: list[doctor.Check], w: int | None = None) -> str:
 
 
 def cmd_doctor(args) -> int:
+    from ahub import providers as provider_mod
     from ahub.i18n import t
 
     # the provider checks call the binaries — one live line while they run, only on a terminal
     with ui.Live(t("doctor.checking")) as p:
         checks = doctor.run_all(step=p.step)
+    all_buckets = []
+    for n in list(provider_mod.names()) + (["fake"] if "fake" in provider_mod._cache else []):
+        try:
+            prov = provider_mod.get(n)
+            if hasattr(prov, "quota"):
+                all_buckets.extend(prov.quota())
+        except (KeyError, OSError, ValueError):
+            pass
     data = [asdict(c) for c in checks]
-    emit(args, {"checks": data}, text(checks))
+    emit(args, {"checks": data, "buckets": [b.to_dict() for b in all_buckets]}, text(checks))
     return 1 if any(c.ok is False for c in checks) else 0
 
 

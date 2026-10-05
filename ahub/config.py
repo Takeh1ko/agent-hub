@@ -183,6 +183,15 @@ class ProviderSettings:
 
 
 @dataclass(frozen=True)
+class QuotaConfig:
+    min_5h: float = 0.15
+    min_weekly: float = 0.05
+    fallback: str = ""
+    fallback_executor: str = ""
+    fallback_reviewer: str = ""
+
+
+@dataclass(frozen=True)
 class HubConfig:
     projects: tuple[str, ...] = ()  # paths to project roots (or to their .hub.toml)
     source: str = ""
@@ -195,6 +204,7 @@ class HubConfig:
     claude: str = ""  # [paths] claude; empty — which/known location
     opencode_db: str = ""  # [paths] opencode_db; empty — XDG/known location
     provider_settings: dict[str, ProviderSettings] = field(default_factory=dict)  # [providers.<name>]
+    quota: QuotaConfig = field(default_factory=QuotaConfig)
 
     @property
     def telegram_enabled(self) -> bool:
@@ -517,6 +527,19 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
         r.errors.append(_t("config.bad_lang_type", got=type(raw).__name__))
         norm = ""
     raw_lang = norm
+    quota_raw = r.table(data, "quota")
+    min_5h = r.float_(quota_raw, "min_5h", 0.15, "quota.")
+    min_weekly = r.float_(quota_raw, "min_weekly", 0.05, "quota.")
+    fallback = r.str_(quota_raw, "fallback", "", "quota.").strip()
+    fallback_executor = r.str_(quota_raw, "fallback_executor", "", "quota.").strip()
+    fallback_reviewer = r.str_(quota_raw, "fallback_reviewer", "", "quota.").strip()
+    quota_cfg = QuotaConfig(
+        min_5h=min_5h,
+        min_weekly=min_weekly,
+        fallback=fallback,
+        fallback_executor=fallback_executor,
+        fallback_reviewer=fallback_reviewer,
+    )
     if r.errors:
         raise ConfigError(source or "<dict>", r.errors)
     return HubConfig(
@@ -531,6 +554,7 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
         claude=claude,
         opencode_db=opencode_db,
         provider_settings=provider_settings,
+        quota=quota_cfg,
     )
 
 

@@ -31,7 +31,9 @@ def test_initialize_and_list():
              {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])
     assert len(r) == 2 and r[0]["result"]["serverInfo"]["name"] == "ahub"
     names = {t["name"] for t in r[1]["result"]["tools"]}
-    assert {"task_new", "status", "result", "decide", "wait", "inbox", "say", "ask", "budget", "nudge"} <= names
+    expected = {"task_new", "status", "result", "decide", "wait", "inbox", "say", "ask", "budget", "nudge",
+                "prompts_show"}
+    assert expected <= names
 
 
 def test_call_status_and_say():
@@ -41,6 +43,18 @@ def test_call_status_and_say():
                                                                            "arguments": {"text": "привет"}}}])
     assert r[0]["result"]["content"][0]["text"].startswith("тихо")
     assert not r[1]["result"]["isError"] and comms.outbox(store)[0]["text"] == "привет"
+
+
+def test_call_prompts_show(tmp_path):
+    root = tmp_path / "proj"
+    write(root / ".hub.toml", 'schema_version = 2\nname = "proj"\n')
+    write(root / ".hub" / "prompts" / "code.md", "custom code rule\n")
+    r = rpc([{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+              "params": {"name": "prompts_show", "arguments": {"role": "code", "project": str(root)}}}])
+    assert not r[0]["result"]["isError"]
+    text = r[0]["result"]["content"][0]["text"]
+    assert "## Project guidance" in text
+    assert "custom code rule" in text
 
 
 def test_call_nudge_refuses_a_queued_task():

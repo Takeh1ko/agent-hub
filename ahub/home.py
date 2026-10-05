@@ -7,6 +7,7 @@ through t().
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import ahub
@@ -20,20 +21,25 @@ from ahub.time import now_ms
 MAX_TASKS = 5  # the screen is a glance, not a list: `ahub status` has all of them
 
 
-def _head(project: str | None, alive: bool, w: int | None = None) -> str:
+def _head(project: str | None, alive: bool, quota_line: str = "", w: int | None = None) -> str:
     """The header of a terminal: a rounded box, one line inside — the product, the version, the project,
     the service. A pipe gets the same words as one plain line (`_line_head`)."""
     svc = _t("home.svc_running") if alive else _t("home.svc_stopped")
     rest = _t("home.head_tty", version=ahub.__version__,
               project=project or _t("home.no_project"), svc=svc)
     inside = f"{ui.styled('✻ ahub', 'accent')} {ui.styled(rest, 'dim')}"
+    if quota_line:
+        inside += f" {ui.styled('· ' + quota_line, 'dim')}"
     return ui.box([inside], w=w)
 
 
-def _line_head(project: str | None, alive: bool) -> str:
+def _line_head(project: str | None, alive: bool, quota_line: str = "") -> str:
     svc = _t("home.head_up") if alive else _t("home.head_down")
-    return ui.styled(_t("home.head", version=ahub.__version__,
+    head = ui.styled(_t("home.head", version=ahub.__version__,
                         project=project or _t("home.no_project"), svc=svc), "bold")
+    if quota_line:
+        head += " · " + quota_line
+    return head
 
 
 def _project_here() -> str | None:
@@ -77,7 +83,19 @@ def text(*, w: int | None = None, all_projects: bool = False, project: str | Non
     hb = store.meta_get(HEARTBEAT_KEY)
     alive = bool(hb) and now - int(hb) < 30_000
     items = ui.colour_on()
-    out = [_head(_project_here(), alive, w)] if items else [_line_head(_project_here(), alive)]
+    quota_line = ""
+    try:
+        from ahub import quota
+        for t in store.list_tasks(states=ACTIVE):
+            if quota.is_gemini_task(store, t):
+                _prov, buckets = quota.get_model_buckets(store, t.executor or "gemini-flash")
+                b_5h = next((b for b in buckets if b.group == "Gemini" and b.window == "5h"), None)
+                if b_5h:
+                    quota_line = quota.format_5h_line(b_5h)
+                    break
+    except (sqlite3.Error, KeyError, ValueError, OSError):
+        pass
+    out = [_head(_project_here(), alive, quota_line, w)] if items else [_line_head(_project_here(), alive, quota_line)]
     if not _configured():
         out.append(ui.item(_t("home.unconfigured")) if items
                    else ui.para(_t("home.unconfigured"), indent=2, w=w))
@@ -160,6 +178,16 @@ def data(*, all_projects: bool = False, project: str | None = None) -> dict:
         out["waiting"].append({"id": task.id, "label": task.label, "project": task.project,
                                "state": task.state.value, "state_reason_text": reasons.text(task.state_reason),
                                "next": _t(views.next_key(_focus([task])), label=task.label)})
+    all_buckets = []
+    from ahub import providers as provider_mod
+    for n in list(provider_mod.names()) + (["fake"] if "fake" in provider_mod._cache else []):
+        try:
+            p = provider_mod.get(n)
+            if hasattr(p, "quota"):
+                all_buckets.extend(p.quota())
+        except (KeyError, OSError, ValueError):
+            pass
+    out["buckets"] = [b.to_dict() for b in all_buckets]
     return out
 
 

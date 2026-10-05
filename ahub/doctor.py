@@ -23,7 +23,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from xml.parsers.expat import ExpatError
 
@@ -48,6 +48,7 @@ class Check:
     ok: bool | None
     detail: str = ""
     fix: str = ""
+    buckets: list[dict] = field(default_factory=list)
 
 
 def _fail(name: str, err: Exception) -> Check:
@@ -378,8 +379,20 @@ def check_agy() -> Check:
     if h.ok:
         ver = str(h.details.get("version", "")).strip()[:40]
         suffix = _t("doctor.health_version", version=ver) if ver else ""
-        return Check("agy", True, _t("doctor.agy_found", binary=binary) + suffix
-                     + provider_proxy_detail("agy"), "")
+        detail = _t("doctor.agy_found", binary=binary) + suffix + provider_proxy_detail("agy")
+        buckets = []
+        try:
+            prov = providers.get("agy")
+            if hasattr(prov, "quota"):
+                buckets = prov.quota()
+        except KeyError:
+            pass
+        if buckets:
+            from ahub import quota
+            groups = sorted(list({b.group for b in buckets}))
+            lines = [quota.format_bucket_group(g, buckets) for g in groups]
+            detail += "\n" + "\n".join(lines)
+        return Check("agy", True, detail, "", buckets=[b.to_dict() for b in buckets])
     problems = "; ".join(h.problems)[:500]
     fix = _t("doctor.agy_fix_login") if not agy_state_file().is_file() else ""
     return Check("agy", False, _t("doctor.health_bad", problems=problems), fix)
@@ -820,6 +833,28 @@ def check_telegram() -> Check:
     return Check("telegram", False, _t("doctor.telegram_no_aiogram"), _t("doctor.telegram_fix"))
 
 
+def check_prompts(root: Path | None = None) -> Check:
+    from ahub import config, prompts
+
+    project = None
+    try:
+        project = config.load_project(root or Path.cwd())
+    except FileNotFoundError:
+        pass
+    except config.ConfigError as e:
+        src = e.source or str((root or Path.cwd()) / config.PROJECT_FILE)
+        return Check("prompts", False, str(e), _t("doctor.config_fix", source=src))
+    issues = prompts.check_prompts_for_project(project)
+    errors = [i for i in issues if i.severity == "error"]
+    warnings = [i for i in issues if i.severity != "error"]
+    if errors:
+        return Check("prompts", False, _t("doctor.prompts_bad", problems="; ".join(i.message for i in errors)),
+                     _t("doctor.prompts_fix"))
+    if warnings:
+        return Check("prompts", True, "; ".join(i.message for i in warnings), "")
+    return Check("prompts", True, _t("doctor.prompts_ok"), "")
+
+
 def _safe(name: str, fn) -> Check:
     try:
         return fn()
@@ -857,6 +892,7 @@ def run_all(root: Path | None = None, step: Callable[[], None] | None = None) ->
         ("claude", check_claude),
         ("claude_skill", lambda: check_claude_skill(root)),
         ("claude_rule", lambda: check_claude_rule(root)),
+        ("prompts", lambda: check_prompts(root)),
         ("telegram", check_telegram),
     ]
     out: list[Check] = []
@@ -876,6 +912,6 @@ __all__ = ["Check", "ProviderState", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_WIZA
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
            "check_opencode_health", "check_opencode_auth", "check_provider_keys", "check_agy", "check_codex",
            "check_models", "check_network", "check_claude", "check_claude_skill", "check_claude_rule",
-           "check_telegram",
+           "check_prompts", "check_telegram",
            "provider_proxy_detail",
            "skill_path", "settings_path", "bash_allowed", "apparmor_blocks_userns", "codex_sandbox_fix"]

@@ -12,6 +12,7 @@ Rules:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -157,6 +158,7 @@ class Session:
     quota: float
     tokens: dict
     log_path: str
+    prompts: str = ""  # canonical prompt-layers summary of the session's own prompt (T133)
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Session":
@@ -167,6 +169,9 @@ class Session:
 class Store:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path) if path is not None else paths.db_path()
+        if os.environ.get(paths.UNDER_TEST) == "1" and paths.is_live_hub_path(self.path):
+            raise RuntimeError(
+                f"refusing live hub DB in tests: {self.path} (HOME/AHUB_HOME was not isolated in this process)")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
 
@@ -413,13 +418,13 @@ class Store:
 
     def add_session(self, *, task_id: int | None, provider: str, role: str, model: str = "",
                     round: int = 0, pid: int | None = None, external_id: str = "",
-                    log_path: str = "", now: int | None = None) -> int:
+                    log_path: str = "", prompts: str = "", now: int | None = None) -> int:
         with self.tx() as c:
             cur = c.execute(
-                "INSERT INTO session(task_id, provider, external_id, role, round, model, pid, started_at, log_path)"
-                " VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO session(task_id, provider, external_id, role, round, model, pid, started_at,"
+                " log_path, prompts) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (task_id, provider, external_id, role, int(round), model, pid,
-                 now if now is not None else now_ms(), log_path))
+                 now if now is not None else now_ms(), log_path, prompts))
             return int(cur.lastrowid)
 
     def update_session(self, session_id: int, **fields: Any) -> None:
