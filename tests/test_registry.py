@@ -40,7 +40,10 @@ def test_seed_once(store):
     assert registry.get(store, "spark").model_id == registry.SPARK
     assert [e.alias for e, d in registry.menu(store, Role.EXECUTOR) if d] == ["spark"]
     assert [e.alias for e, _ in registry.menu(store, Role.SCOUT)] == ["spark", "deepseek-flash"]
-    assert [e.alias for e, d in registry.menu(store, Role.OBSERVER) if d] == ["spark-high"]
+    default = next(e for e, d in registry.menu(store, Role.OBSERVER) if d)
+    assert (default.alias, default.variant) == ("spark", "high")
+    assert [(e.alias, e.variant) for e, _ in registry.menu(store, Role.OBSERVER)] == [
+        ("spark", "high"), ("spark", "medium")]
 
 
 def test_pick_default_and_explicit(store):
@@ -72,13 +75,15 @@ def test_orchestrator_cannot_lift_project_deny(store):
 
 
 def test_disabled_and_empty_menu(store):
-    registry.set_enabled(store, "spark-high", False)
-    assert registry.pick(store, Role.OBSERVER, None).alias == "spark-medium"
-    registry.set_enabled(store, "spark-medium", False)
+    registry.set_enabled(store, "mimo-flash", False)
+    assert registry.pick(store, Role.EXECUTOR, None).alias == "spark"
+    registry.set_enabled(store, "spark", False)
+    assert registry.pick(store, Role.EXECUTOR, None).alias == "deepseek-flash"
+    registry.set_enabled(store, "deepseek-flash", False)
     with pytest.raises(registry.RegistryError, match="нет доступной модели"):
-        registry.pick(store, Role.OBSERVER, None)
+        registry.pick(store, Role.EXECUTOR, None)
     with pytest.raises(registry.RegistryError, match="выключена"):
-        registry.check(store, "spark-high", None)
+        registry.check(store, "spark", None)
 
 
 def test_menu_edits(store):
@@ -108,7 +113,7 @@ def test_cli_models(tmp_path, monkeypatch, capsys):
     assert "mimo-flash" in capsys.readouterr().out
     assert cli.main(["--json", "models", "--role", "scout"]) == 0
     data = json.loads(capsys.readouterr().out)
-    assert {"alias": "mimo-flash", "default": True} in data["roles"]["scout"]
+    assert {"alias": "mimo-flash", "effort": "", "ref": "mimo-flash", "default": True} in data["roles"]["scout"]
     assert cli.main(["models", "disable", "nope"]) == 2
     assert cli.main(["models", "--all"]) == 0
     assert "opencode-go/mimo-v2.6-flash" in capsys.readouterr().out
@@ -174,9 +179,9 @@ def test_cli_models_check_probes(capsys, monkeypatch):
     assert cli.main(["--json", "models", "check", "spark"]) == 1
     data = json.loads(capsys.readouterr().out)
     assert data["checked"] == [{"alias": "spark", "ok": False, "detail": "spark: молчит"}]
-    # no aliases — the role defaults (the observer/drafter default is spark-high)
+    # no aliases — the role defaults (executor spark, observer spark:high)
     assert cli.main(["models", "check"]) == 1
-    assert tried[-2:] == ["spark", "spark-high"]
+    assert tried[-2:] == ["spark", "spark"]
     assert cli.main(["models", "check", "nope"]) == 2
 
 

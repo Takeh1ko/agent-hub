@@ -167,7 +167,7 @@ DETAIL = """\
 T3  code  Setup wizard: choose providers and per-role models
 ────────────────────────────────────────────────────────────
 State  done · gates passed, acceptance is green · process alive
-Model  bunny  Review  spark ×2  Round  3
+Model  bunny  Review  spark:xhigh ×2  Round  3
 Cost   $0.046 Go of $1.50 budget
 Age    4 h 0 min  After  T2
 Summary
@@ -196,7 +196,7 @@ DETAIL_TTY = """\
 \x1b[33m⏺\x1b[0m T3  code  Setup wizard: choose providers and per-role models
 \x1b[2m──────────────────────────────────────────────────────────────\x1b[0m
 \x1b[2mState\x1b[0m  done · gates passed, acceptance is green · process alive
-\x1b[2mModel\x1b[0m  bunny  \x1b[2mReview\x1b[0m  spark ×2  \x1b[2mRound\x1b[0m  3
+\x1b[2mModel\x1b[0m  bunny  \x1b[2mReview\x1b[0m  spark:xhigh ×2  \x1b[2mRound\x1b[0m  3
 \x1b[2mCost\x1b[0m   $0.046 Go of $1.50 budget
 \x1b[2mAge\x1b[0m    4 h 0 min  \x1b[2mAfter\x1b[0m  T2
 \x1b[1mSummary\x1b[0m
@@ -265,7 +265,10 @@ def _fill(store: Store, tmp_path) -> dict[str, int]:
     return {"active": a, "base": base, "done": done, "queued": q}
 
 
-def test_status_detail_snapshot(tmp_path):
+def test_status_detail_snapshot(tmp_path, monkeypatch):
+    from ahub import catalog as _catalog
+
+    monkeypatch.setattr(_catalog, "get_catalogs", lambda refresh=False: {})
     store = Store()
     ids = _fill(store, tmp_path)
     text = views.task_text(store, store.get_task(ids["done"]), live={ids["done"]: 1}, now=NOW + 4 * HOUR, w=W)
@@ -284,7 +287,10 @@ def test_status_overview_snapshot(tmp_path):
 
 
 def test_status_detail_tty_snapshot(tmp_path, monkeypatch):
+    from ahub import catalog as _catalog
+
     monkeypatch.setattr(ui, "colour_on", lambda: True)
+    monkeypatch.setattr(_catalog, "get_catalogs", lambda refresh=False: {})
     store = Store()
     ids = _fill(store, tmp_path)
     text = views.task_text(store, store.get_task(ids["done"]), live={ids["done"]: 1}, now=NOW + 4 * HOUR, w=W)
@@ -320,9 +326,11 @@ def test_status_overview_non_green_pulse_tty(tmp_path, monkeypatch):
 
 
 def test_status_detail_active_task_keeps_pulse_colour_tty(tmp_path, monkeypatch):
+    from ahub import catalog as _catalog
     from ahub import pulse
 
     monkeypatch.setattr(ui, "colour_on", lambda: True)
+    monkeypatch.setattr(_catalog, "get_catalogs", lambda refresh=False: {})
     store = Store()
     ids = _fill(store, tmp_path)
     pulses = {ids["active"]: pulse.Pulse(ids["active"], "working", pid=42)}
@@ -331,7 +339,7 @@ def test_status_detail_active_task_keeps_pulse_colour_tty(tmp_path, monkeypatch)
     lines = text.splitlines()
     assert lines[0] == "⏺ T1  code  Setup wizard: choose providers"
     assert lines[2] == "\x1b[2mState\x1b[0m  \x1b[32mworking · writing · process alive\x1b[0m"
-    assert lines[3] == "\x1b[2mModel\x1b[0m  bunny  \x1b[2mReview\x1b[0m  spark ×2  \x1b[2mRound\x1b[0m  3"
+    assert lines[3] == "\x1b[2mModel\x1b[0m  bunny  \x1b[2mReview\x1b[0m  spark:xhigh ×2  \x1b[2mRound\x1b[0m  3"
     assert lines[4] == "\x1b[2mCost\x1b[0m   $0.046 Go of $1.50 budget"
     assert lines[5] == "\x1b[2mAge\x1b[0m    2 min"
 
@@ -598,7 +606,7 @@ def test_home_screen_configured_tty_snapshot(tmp_path, monkeypatch):
         f"│ \x1b[38;5;208m✻ ahub\x1b[0m \x1b[2m{ahub.__version__} · demo · service running\x1b[0m │",
         "\x1b[2m╰───────────────────────────────────────╯\x1b[0m",
         "⏺ T1  Setup wizard: choose providers",
-        "  \x1b[2m⎿\x1b[0m \x1b[2mwriting · spark · 0 min\x1b[0m",
+        "  \x1b[2m⎿\x1b[0m \x1b[2mwriting · spark:xhigh · 0 min\x1b[0m",
         "\x1b[33m⏺\x1b[0m Waiting for you",
         '  \x1b[2m⎿\x1b[0m \x1b[2mahub accept T2 · ahub rework T2 --notes "…" · ahub reject T2\x1b[0m',
         '\x1b[2mahub status · ahub top · ahub doctor · ahub task new --kind scout --title "…"\x1b[0m',

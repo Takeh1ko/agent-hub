@@ -154,7 +154,7 @@ def _bucket(task: Task) -> int:
     return 4
 
 
-def task_lines(task: Task, pl, now: int, width: int, frame: int = 0) -> list[str]:
+def task_lines(task: Task, pl, now: int, width: int, frame: int = 0, store=None) -> list[str]:
     """One task block as one-line rows, each clipped by display width.
 
     width is the pane content width (see _pane_w). ⏺ line: id + title; first ⎿:
@@ -184,7 +184,13 @@ def task_lines(task: Task, pl, now: int, width: int, frame: int = 0) -> list[str
         stage = _stage_word(task)
     head = ui.clip_width(f"{task.label}  {task.title}", body_w)
     out = [f"{mark} {head}"]
-    detail = " · ".join(x for x in (stage, task.executor or "—",
+    try:
+        from ahub import views as _views
+
+        model_s = _views.display_ref(task, store)
+    except Exception:
+        model_s = task.executor or "—"
+    detail = " · ".join(x for x in (stage, model_s,
                                     _elapsed_inner(max(0, now - task.updated_at))) if x)
     if detail:
         out.append(f"  {ui.styled('⎿', 'dim')} {ui.styled(ui.clip_width(detail, body_w), 'dim')}")
@@ -320,8 +326,14 @@ def live_text(store: Store, sc: scope.Scope | None, now: int,
     mark = ui.styled(marks[frame % len(marks)], "accent")
     verb = _t("console.live_verb")
     edad = _elapsed_inner(max(0, now - t.updated_at))
+    try:
+        from ahub import views as _views
+
+        live_model = _views.display_ref(t, store)
+    except Exception:
+        live_model = t.executor or "—"
     line = _t("console.live", mark=mark, verb=verb, label=t.label, elapsed=edad,
-              model=t.executor or "—")
+              model=live_model)
     return ui.clip_width(line, max(20, width - 2))
 
 
@@ -468,7 +480,7 @@ def snapshot(store: Store, sc: scope.Scope, width: int, now: int, frame: int = 0
             blocks.append((f"head:{proj}", ui.styled(proj or "—", "dim")))
         for t in items:
             task_ids.append(t.id)
-            lines = _safe(f"T{t.id}", lambda t=t: task_lines(t, pulses.get(t.id), now, pw, frame))
+            lines = _safe(f"T{t.id}", lambda t=t: task_lines(t, pulses.get(t.id), now, pw, frame, store))
             blocks.append((f"T{t.id}", "\n".join(lines)))
     if not tasks:
         blocks.append(("empty", ui.styled(_t("console.no_tasks"), "dim")))
@@ -1405,7 +1417,9 @@ class ConsoleApp(App):
         p = self._project_of_task(t)
         if p is None:
             raise accept.DecisionError(_t("tui.no_project", name=t.project))
-        return accept.change_model(self.store, p, t.id, alias.strip(), by="human")
+        note = registry.legacy_notice(alias.strip())
+        msg = accept.change_model(self.store, p, t.id, alias.strip(), by="human")
+        return (note + "\n" + msg) if note else msg
 
     def cmd_budget(self, args: list[str]) -> None:
         if not args:

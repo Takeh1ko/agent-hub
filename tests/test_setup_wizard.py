@@ -239,12 +239,12 @@ def test_wizard_asks_the_default_per_role_and_never_offers_a_dead_model(tmp_path
     assert "✓" in out and "✗" in out
     assert "spark-free" in out  # the dead model is shown, with the mark
     # every model of a provider that is on is probed once (concurrently — the order is not fixed)
-    assert set(tried) == {"bunny", "deepseek-flash", "gemini", "gemini-low", "mimo-flash", "spark",
-                          "spark-free", "spark-high", "spark-medium"}
+    assert set(tried) == {"bunny", "deepseek-flash", "gemini", "mimo-flash", "spark",
+                          "spark-free"}
     assert "codex" not in tried  # a provider that is off is never probed
     assert _defaults()["executor"] == "bunny" and _defaults()["reviewer"] == "spark"
     assert _defaults()["scout"] == "spark"  # its own default answered
-    assert _defaults()["observer"] == "bunny"  # spark-high is dead — it follows the executor
+    assert _defaults()["observer"] == "spark"  # spark:high answered — it keeps its effort default
     assert "executor=bunny" in out and "reviewer=spark" in out
 
 

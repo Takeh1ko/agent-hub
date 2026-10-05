@@ -175,9 +175,9 @@ def test_price_cells(monkeypatch):
     assert _catalog.price_text(free, None) == "free"
     # the catalog cost wins whatever the plan: go-plan rows show $ in / $ out too
     go_e = _entry()
-    assert _catalog.price_text(go_e, _fake_catalogs()["opencode"][0]) == "$0.1 / $0.2"
+    assert _catalog.price_text(go_e, _fake_catalogs()["opencode"][0]) == "$0.10 / $0.20"
     payg_e = _entry("m", "opencode", "openrouter/x/test", "")
-    assert _catalog.price_text(payg_e, _fake_catalogs()["opencode"][2]) == "$2 / $10"
+    assert _catalog.price_text(payg_e, _fake_catalogs()["opencode"][2]) == "$2.00 / $10.00"
     # no catalog cost: subscription shows no money, free shows free
     agy_e = _entry("gemini", "agy", "gemini-3.8-flash-high", "")
     assert _catalog.price_text(agy_e, _fake_catalogs()["agy"][0]) == "—"
@@ -204,7 +204,7 @@ def test_build_rows_with_fake_catalogs(monkeypatch):
     store = Store()
     rows, _extra = _catalog.build_rows(store)
     by_alias = {r.entry.alias: r for r in rows}
-    assert by_alias["spark"].price == "$0.1 / $0.2"
+    assert by_alias["spark"].price == "$0.10 / $0.20"
     assert by_alias["spark-free"].price == "free"
     assert by_alias["gemini"].price == "—"
     assert by_alias["spark"].roles  # spark is a role default
@@ -275,7 +275,7 @@ def test_models_table_at_140_and_80_columns(monkeypatch, capsys):
     assert "agy · Gemini quota: 5h 87% · week 31%" in out
     assert "Muse Spark 1.3 Contributor (Meta)" in out  # name and vendor unclipped
     assert "xhigh (minimal–xhigh)" in out
-    assert "$0.1 / $0.2" in out  # the price, whatever the plan
+    assert "$0.10 / $0.20" in out  # the price, whatever the plan (two decimals)
     assert "Go plan" in out  # human plan labels…
     assert "go-plan" not in out and "pay-as-you…" not in out \
         and "Go pla…" not in out and "subscriptio…" not in out  # …never clipped

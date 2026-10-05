@@ -511,7 +511,7 @@ def _model_step(store, states, ask: bool, out: Steps) -> dict[str, str]:
         price_cell = r.price if r is not None else _catalog.plan_label(plan)
         rows.append(["✓" if ok else "✗", entry.alias, model_cell, reasoning_cell,
                      _catalog.plan_label(plan), price_cell, body])
-    out.table(None, rows, max_width=[1, 16, 28, 24, 12, 14, None])
+    out.table(None, rows, max_width=[1, 16, 28, 24, _catalog._plan_width(), 18, None])
     recommended = doctor.recommend_model(entries, results)
     if not recommended:
         out.line("! " + doctor.probe_none_warning([e.alias for e in entries]))

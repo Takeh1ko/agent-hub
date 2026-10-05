@@ -41,10 +41,10 @@ I = {"type": "integer"}  # noqa: E741
 @tool("task_new", "Create a task for a worker (scout|code|routine|review). Reply is one line with the number.",
       {"kind": {"type": "string", "enum": ["scout", "code", "routine", "review"]}, "title": S, "spec": S,
        "project": S, "paths": S, "accept": S, "level": I, "after": S, "budget": {"type": "number"}, "input": S,
-       "model": S}, ["kind", "title"])
+       "model": S, "effort": S}, ["kind", "title"])
 def _task_new(a: dict) -> list[str]:
     argv = ["task", "new", "--kind", a["kind"], "--title", a["title"]]
-    for k in ("spec", "paths", "accept", "after", "input", "model"):
+    for k in ("spec", "paths", "accept", "after", "input", "model", "effort"):
         if a.get(k):
             argv += [f"--{k}", str(a[k])]
     if a.get("project"):

@@ -128,27 +128,36 @@ and providers, Integrations). The pinned handles:
 
 ```
 ahub task new --kind scout|code|review|routine --title "goal" (--spec "text" | --spec-file F)
-              [--model spark] [--level 0-4] [--review "spark,mimo-flash" --rounds 2 | --no-review]
+              [--model spark] [--effort low|medium|high|xhigh|max] [--level 0-4]
+              [--review "spark,mimo-flash" --rounds 2 | --no-review]
               [--paths "core/**,tests/**"] [--accept "tests/test_x.py::test_y"] [--read "…"] [--format "…"]
               [--budget 1.5] [--budget-usd 0] [--time-limit 30] [--after T3] [--resources test_db]
               [--input <branch|sha|a..b|files>] [--key K] [--draft] [--no-collect] [--by who]
    → two lines, see below; --key is idempotency (a repeat returns the same task), --draft stops at "T12 draft (…)"
-ahub status [T12]            L1 / L2
+   (--model accepts ALIAS[:EFFORT] and legacy spark-high/spark-medium/gemini-low, mapped with one line
+   "spark-high is spark:high"; --effort overrides it, a mismatch is refused; unknown levels are refused
+   listing the catalog's valid ones; the task stores alias + effort, status shows the level)
+ahub status [T12]            L1 / L2 (L1 model column and L2 Model line show alias:effort, L2 adds the dim
+                             identity "<display> · <plan> · <level>", e.g. spark + Muse Spark 1.3 · Go plan · xhigh)
 ahub result T12 [--full]     L2 / L3
 ahub diff T12 | log T12      L3 (the readable transcript of a session is `ahub follow T12 [--role] [--round] [--full]
                                        [--no-follow]` — it follows the log until the task leaves an active state)
 ahub accept T12 | reject T12 [--reason] | rework T12 --notes "…" | continue T12 | stop T12 [--reason]
-ahub nudge T12 "…" | task edit T12 [--spec|--spec-file|--title] [--review …] [--rounds N] [--model alias]
-ahub extend T12 --paths "…" | budget T12 --add N [--set N] | model T12 <alias>
+ahub nudge T12 "…" | task edit T12 [--spec|--spec-file|--title] [--review …] [--rounds N] [--model alias[:effort]]
+ahub extend T12 --paths "…" | budget T12 --add N [--set N] | model T12 <alias[:effort]> (console: /model T12 alias[:effort])
 ahub wait | watch | ack <id…|all> | inbox [<id>] [--peek] [--full] | questions [<id>] | alarms [--ack] [--acked]
 ahub say "text" | ask "question" --options "yes,no" [--task T12]
 ahub history [-n 20] | projects | cost [--project X|--all] [--since 30d] | doctor | top [--control]
 ahub prompts | prompts show <role> [--json] | prompts edit <role> [--global|--local] | prompts check
 ahub service {run,install,status,pause,resume,start,stop} | setup [path] | providers | draft "…" | bot run | mcp
-ahub models [--role R] [--refresh] [--json] | models add … | models role … | models check | models enable|disable <alias>
-   (the catalog table, grouped by provider: alias · model + vendor · reasoning · plan · price · context · roles;
-   the provider header carries plan-level usage — Go spend of the month limit, agy quota windows;
-   --role — that role's menu with the same columns; it does not lift project bans)
+ahub models [--role R] [--refresh] [--json] | models add … | models role R (--add ALIAS[:EFFORT] |
+   --remove ALIAS[:EFFORT] | --set-default ALIAS[:EFFORT]) | models check | models enable|disable <alias>
+   (the catalog table, grouped by provider: alias · model + vendor · reasoning · plan · price · context · roles,
+   roles with the default effort next to each — executor:xhigh; plan column sized to "pay-as-you-go",
+   prices with two decimals — $0.60 / $0.10; the provider header carries plan-level usage — Go spend of
+   the month limit, agy quota windows; --role — that role's menu with the same columns and the effort
+   in the alias cell — spark:high; it does not lift project bans; legacy spark-high/spark-medium/gemini-low
+   are hidden from the tables but accepted with the mapping line)
 ```
 `ahub projects` and `ahub cost` are the owner's glance at the whole hub — they do not follow the directory's scope;
 `ahub cost` takes a scope and a period of its own.
@@ -240,19 +249,22 @@ code tasks run in parallel and their acceptance runs wait for the lock one by on
 
 ## 9. Default models (the registry at first start)
 
-| alias | provider / model / variant | roles (menu) |
+| alias | provider / model / default level | roles (menu, effort next to each default) |
 |---|---|---|
-| spark | opencode / opencode-go/muse-spark-1.3-contributor / xhigh | executor★, reviewer★, scout★, routine★ |
-| spark-high | opencode / opencode-go/muse-spark-1.3-contributor / high | observer★, drafter★ |
-| spark-medium | opencode / opencode-go/muse-spark-1.3-contributor / medium | observer |
+| spark | opencode / opencode-go/muse-spark-1.3-contributor / xhigh | executor★:xhigh, reviewer★:xhigh, scout★:xhigh, routine★:xhigh, observer★:high, drafter★:high |
 | mimo-flash | opencode / opencode-go/mimo-v2.6-flash / — | executor, reviewer, routine |
 | deepseek-flash | opencode / opencode-go/deepseek-v4.1-flash / high | executor, reviewer, scout |
 | spark-free | opencode / opencode/muse-spark-1.3-contributor-free / xhigh | (outside the menu, available explicitly) |
-| gemini | agy / gemini-3.8-flash-high / — | (outside the menu — chosen explicitly; window quota) |
-| gemini-low | agy / gemini-3.8-flash-low / — | (outside the menu — chosen explicitly; window quota) |
+| bunny | opencode / opencode/space-bunny-free / — | (outside the menu, available explicitly) |
+| gemini | agy / gemini-3.8-flash-high / high | (outside the menu — chosen explicitly; window quota; :low picks the low sibling) |
 | codex | codex / gpt-5.6-terra / — | (outside the menu — chosen explicitly; subscription + OS sandbox) |
 | codex-fast | codex / gpt-5.6-luna / — | (outside the menu — chosen explicitly; subscription, cheaper/faster) |
-★ — the default in the role.
+★ — the default in the role (role menus store alias + effort: observer spark:high, drafter spark:high + spark).
+
+Legacy spark-high/spark-medium/gemini-low are not seeded; an old hub maps their menu rows to
+spark:high/spark:medium/gemini:low (migration 008, additive) and accepts them everywhere with one line
+"spark-high is spark:high", hidden from the tables. One alias per model+plan: spark is the paid default
+route, spark-free the free one.
 
 Plans (`providers/base.py:PlanKind`, `registry.plan_kind`): free · Go plan (Go month limit) ·
 pay-as-you-go (USD) · subscription (quota window). The catalog (`Provider.catalog() → CatalogEntry`:

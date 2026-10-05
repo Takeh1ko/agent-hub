@@ -55,9 +55,9 @@ def format_5h_line(bucket: QuotaBucket) -> str:
 
 
 def get_model_buckets(store: Store, model_alias: str, force: bool = False) -> tuple[str, list[QuotaBucket]]:
-    """Provider name and matching quota buckets for a model alias."""
+    """Provider name and matching quota buckets for a model alias (ALIAS[:EFFORT] accepted)."""
     try:
-        entry = registry.get(store, model_alias)
+        entry = registry.get(store, registry.base_alias(model_alias))
     except registry.RegistryError:
         entry = None
 
@@ -79,17 +79,20 @@ def get_model_buckets(store: Store, model_alias: str, force: bool = False) -> tu
 
     buckets = prov.quota() if not force else (
         prov.quota(force=True) if hasattr(prov, "quota") else [])
-    matching = [b for b in buckets if b.models(entry.model_id) or b.models(model_alias) or b.models(entry.alias)]
+    base = registry.base_alias(model_alias)
+    matching = [b for b in buckets if b.models(entry.model_id) or b.models(base) or b.models(entry.alias)]
     return entry.provider, matching
 
 
 def task_models(task: Task) -> tuple[Role, list[str]]:
-    """The role and model aliases a task uses."""
+    """The role and model refs (ALIAS[:EFFORT]) a task uses."""
+    from ahub import tasks as _tasks
+
     if task.kind is Kind.REVIEW:
-        models = list(task.review.get("models") or []) or ([task.executor] if task.executor else [])
+        models = _tasks.review_refs(task) or ([_tasks.executor_ref(task)] if task.executor else [])
         return Role.REVIEWER, models
     role = ROLE_FOR_KIND.get(task.kind, Role.EXECUTOR)
-    models = [task.executor] if task.executor else []
+    models = [_tasks.executor_ref(task)] if task.executor else []
     return role, models
 
 

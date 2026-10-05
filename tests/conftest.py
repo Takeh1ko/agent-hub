@@ -58,13 +58,15 @@ def _isolated_env(tmp_path, monkeypatch):
     for name in PROVIDER_KEYS:  # a developer shell exports its provider keys; the doctor check must not read them
         monkeypatch.delenv(name, raising=False)
     _reset()  # language is picked lazily — reset it between tests
-    from ahub import registry
+    from ahub import catalog, registry
 
     registry._cached_disabled = None  # the provider switch is cached by mtime — one test per file state
+    catalog.reset_cache()  # provider catalogs are cached in memory — one test per fetch
     log.setup()  # module loggers were built at import with the real HOME — send the log to the temp dir
     yield
     _reset()
     registry._cached_disabled = None
+    catalog.reset_cache()
 
 
 @pytest.fixture(scope="session", autouse=True)

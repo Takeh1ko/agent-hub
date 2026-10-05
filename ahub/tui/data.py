@@ -142,8 +142,14 @@ def _task_row(store: Store, t: Task, pl, now: int) -> Row:
              "queued": "⏳", "draft": "📝", "accepted": "✔", "rejected": "✖"}
     mark = pl.mark if pl else marks.get(t.state.value, " ")
     state_word = archive.STATE_WORDS.get(t.state.value, t.state.value)
+    try:
+        from ahub import views as _views
+
+        model_s = _views.display_ref(t, store)
+    except Exception:
+        model_s = t.executor
     return Row(t.id, mark, t.label, t.kind.value, t.title, state_word,
-               PHASE.get(t.phase, "") if t.state in ACTIVE else "", t.executor, t.round,
+               PHASE.get(t.phase, "") if t.state in ACTIVE else "", model_s, t.round,
                _age(t.updated_at, now), f"{go + usd:.3f}", t.project, go=go, usd=usd)
 
 

@@ -52,8 +52,8 @@ def cmd_new(args) -> int:
         review_models = _csv(args.review)
     spec = tasks.TaskSpec(
         project=project.name, kind=Kind(args.kind), title=args.title, spec=spec_text,
-        result_format=args.format or "", model=args.model, review_level=args.level,
-        review_models=review_models, review_rounds=args.rounds, paths=_csv(args.paths),
+        result_format=args.format or "", model=args.model, effort=args.effort,
+        review_level=args.level, review_models=review_models, review_rounds=args.rounds, paths=_csv(args.paths),
         accept=_csv(args.accept), read=_csv(args.read), review_input=args.input or "",
         resources=_csv(args.resources), after=[parse_task_id(a) for a in _csv(args.after)],
         budget_go=args.budget, budget_usd=args.budget_usd, time_limit_min=args.time_limit, created_by=args.by)
@@ -64,15 +64,29 @@ def cmd_new(args) -> int:
         from ahub.i18n import t as _t
 
         raise CliError(_t("err.task_invalid", errors="; ".join(e.errors)), hint=_t("hint.task_new")) from e
+    from ahub import registry as _registry
     from ahub.i18n import t as _t
 
+    notices: list[str] = []
+    for ref in ([args.model] if args.model else []) + (review_models or []):
+        note = _registry.legacy_notice(ref)
+        if note and note not in notices:
+            notices.append(note)
     word = _t("task.word_draft") if t.state is State.DRAFT else _t("task.word_queued")
     if t.review:
-        extra = _t("task.review_extra", models="+".join(t.review["models"]), rounds=t.review["rounds"])
+        refs = tasks.review_refs(t)
+        extra = _t("task.review_extra", models="+".join(refs), rounds=t.review["rounds"])
     else:
         extra = ""
-    msg = _t("task.created", label=t.label, word=word, kind=t.kind.value, executor=t.executor, extra=extra)
-    result(args, {"id": t.id, "label": t.label, "state": t.state.value}, msg, "views.next_new", t.label)
+    ref = tasks.executor_ref(t)
+    msg = _t("task.created", label=t.label, word=word, kind=t.kind.value, executor=ref, extra=extra)
+    data = {"id": t.id, "label": t.label, "state": t.state.value, "model": ref}
+    if notices:
+        data["notice"] = "; ".join(notices)
+    text = ("\n".join(notices) + "\n" if notices and not getattr(args, "json", False) else "") + msg
+    if notices and getattr(args, "json", False):
+        text = msg
+    result(args, data, text, "views.next_new", t.label)
     return 0
 
 
@@ -176,12 +190,23 @@ def cmd_rework(args) -> int:
 def cmd_edit(args) -> int:
     """A new brief (title/spec), and — before the review starts — a new panel and executor."""
     from ahub import accept
+    from ahub import registry as _registry
 
     spec = Path(args.spec_file).read_text(encoding="utf-8") if args.spec_file else args.spec
     review = _csv(args.review) or None
-    return _decide(args, lambda s, t: accept.edit(s, _project_of(s, t), t.id, spec=spec, title=args.title,
-                                                  review=review, rounds=args.rounds, model=args.model,
-                                                  input=args.input, by=args.by))
+    notices = []
+    for ref in ([args.model] if args.model else []) + (review or []):
+        note = _registry.legacy_notice(ref)
+        if note and note not in notices:
+            notices.append(note)
+
+    def _run(s, t):
+        msg = accept.edit(s, _project_of(s, t), t.id, spec=spec, title=args.title,
+                          review=review, rounds=args.rounds, model=args.model,
+                          input=args.input, by=args.by)
+        return ("\n".join(notices) + "\n" + msg) if notices and not getattr(args, "json", False) else msg
+
+    return _decide(args, _run)
 
 
 def cmd_extend(args) -> int:
@@ -201,9 +226,15 @@ def cmd_budget(args) -> int:
 
 def cmd_model(args) -> int:
     from ahub import accept
+    from ahub import registry as _registry
 
-    return _decide(args, lambda s, t: accept.change_model(s, _project_of(s, t), t.id, args.alias, by=args.by),
-                   "views.next_task")
+    note = _registry.legacy_notice(args.alias)
+
+    def _run(s, t):
+        msg = accept.change_model(s, _project_of(s, t), t.id, args.alias, by=args.by)
+        return (note + "\n" + msg) if note and not getattr(args, "json", False) else msg
+
+    return _decide(args, _run)
 
 
 def cmd_stop(args) -> int:
@@ -275,6 +306,8 @@ def register(subparsers) -> None:
     g.add_argument("--spec-file", help=t("help.task_new_spec_file"))
     n.add_argument("--format", help=t("help.task_new_format"))
     n.add_argument("--model", help=t("help.task_new_model"))
+    n.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
+                   help=t("help.task_new_effort"))
     n.add_argument("--level", type=int, help=t("help.task_new_level"))
     n.add_argument("--review", help=t("help.task_new_review"))
     n.add_argument("--rounds", type=int, help=t("help.task_new_rounds"))
