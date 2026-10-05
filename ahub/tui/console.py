@@ -400,7 +400,9 @@ class ConsoleSuggester(Suggester):
     """Completion for the console input: command names, then task ids of the scope."""
 
     def __init__(self, app: ConsoleApp) -> None:
-        super().__init__(case_sensitive=False)
+        # no cache: task ids change as tasks come and go, so a cached suggestion
+        # (or a cached None from when no task was active) would go stale at once
+        super().__init__(use_cache=False, case_sensitive=False)
         self._app = app
 
     async def get_suggestion(self, value: str) -> str | None:

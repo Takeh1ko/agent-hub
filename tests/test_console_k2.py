@@ -61,6 +61,33 @@ def test_complete_task_ids():
     assert complete_input("/cost ", ["T12"]) is None  # not a task command
 
 
+async def test_suggester_recomputes_dynamic_task_ids(store: Store):
+    """The widget path (_get_suggestion) must not serve cached completions.
+
+    With the base-class LRU cache on, a None cached while no task was active
+    would suppress the suggestion forever for the same input.
+    """
+
+    class _Catcher:
+        def __init__(self) -> None:
+            self.messages: list = []
+
+        def post_message(self, msg) -> bool:
+            self.messages.append(msg)
+            return True
+
+    app = ConsoleApp(store=store, all_projects=True)
+    suggester = con.ConsoleSuggester(app)
+    catcher = _Catcher()
+    await suggester._get_suggestion(catcher, "/accept ")
+    assert catcher.messages == []
+    tid = _task(store)
+    app._task_ids = [tid]
+    await suggester._get_suggestion(catcher, "/accept ")
+    assert len(catcher.messages) == 1
+    assert catcher.messages[0].suggestion == f"/accept T{tid}"
+
+
 async def test_accept_calls_function_and_confirms(store: Store, monkeypatch):
     _proj(monkeypatch)
     tid = _task(store)
