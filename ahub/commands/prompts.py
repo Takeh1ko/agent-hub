@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ahub import gates, paths, prompts, review, ui
 from ahub.cliutil import CliError, add_project_arg, emit, resolve_project
+from ahub.config import ProjectConfig
 from ahub.i18n import t
 from ahub.model import Kind
 from ahub.store import Task
@@ -34,6 +35,33 @@ def _format_size(size: int) -> str:
     if size >= 1024:
         return f"{size / 1024:.1f} KB"
     return f"{size} B"
+
+
+def _file_has_guidance(path: Path) -> bool:
+    """A guidance file counts when it is readable, within the refusal size, and not blank."""
+    try:
+        if path.stat().st_size > prompts.REFUSE_BYTES:
+            return False
+        return bool(path.read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def _role_has_guidance(project: ProjectConfig, role: str) -> bool:
+    """Whether any all.md (every session) or <role>.md file carries guidance for the role."""
+    candidates = [
+        paths.global_prompts_dir() / "all.md",
+        paths.local_prompts_dir(project.name) / "all.md",
+    ]
+    p_all = prompts.resolve_project_all_file(project)
+    candidates.append(p_all if p_all is not None else paths.project_prompts_dir(project.root) / "all.md")
+    if role != "all":
+        candidates += [
+            paths.global_prompts_dir() / f"{role}.md",
+            paths.project_prompts_dir(project.root) / f"{role}.md",
+            paths.local_prompts_dir(project.name) / f"{role}.md",
+        ]
+    return any(_file_has_guidance(p) for p in candidates)
 
 
 def _format_cell(path: Path, size: int, project_root: Path | None = None, cap: int = 22) -> str:
@@ -83,7 +111,7 @@ def cmd_prompts(args) -> int:
 
         # Check project
         if r == "all":
-            p_path, _ = prompts.resolve_project_all_file(project)
+            p_path = prompts.resolve_project_all_file(project)
             p_target = p_path if p_path is not None else paths.project_prompts_dir(project.root) / "all.md"
         else:
             p_target = paths.project_prompts_dir(project.root) / f"{r}.md"
@@ -105,7 +133,7 @@ def cmd_prompts(args) -> int:
         p_cell = _format_cell(p_target, p_size, project.root, 21) if p_exists else "—"
         l_cell = _format_cell(l_path, l_size, None, 22) if l_exists else "—"
 
-        is_empty = not (g_exists or p_exists or l_exists)
+        is_empty = not _role_has_guidance(project, r)
         rows.append((r, [r, g_cell, p_cell, l_cell], is_empty))
 
     head = [t("prompts.col_role"), t("prompts.col_global"), t("prompts.col_project"), t("prompts.col_local")]
@@ -140,18 +168,18 @@ def cmd_show(args) -> int:
         dummy_diff = "diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n"
         prompt_text, summary, layers = review.review_prompt(project, task, dummy_diff, dummy_gate, 1, "reviewer")
 
-    data = {
-        "role": role,
-        "summary": summary,
-        "guidance": [
-            {"scope": layer.scope, "role": layer.role, "path": str(layer.path),
-             "heading": layer.heading, "content": layer.content}
-            for layer in layers if layer.exists
-        ],
-        "prompt": prompt_text,
-    }
     hint_str = t("prompts.hint_empty", role=role)
     human_text = prompt_text if prompt_text.strip() else (ui.hint(hint_str) if ui.colour_on() else f"→ {hint_str}")
+    data = {
+        "role": role,
+        "summary": prompts.render_summary(summary),
+        "guidance": [
+            {"scope": layer.scope, "role": layer.role, "path": str(layer.path),
+              "heading": layer.heading, "content": layer.content, "skipped": layer.skipped}
+            for layer in layers if layer.exists or layer.skipped
+        ],
+        "prompt": human_text,
+    }
     emit(args, data, human_text)
     return 0
 
@@ -161,16 +189,6 @@ def _edit_template(role: str, scope_name: str) -> str:
         f"<!-- Guidance for {role} ({scope_name}) -->\n"
         "<!-- Rules here are loaded before the task spec and the built-in hub layer. -->\n"
     )
-    if role == "code":
-        return base + (
-            "\n## Quality bar\n"
-            "- Smallest diff that does the task; match surrounding code (naming, comment density, idioms).\n"
-            "- No dead code, commented-out code, or duplicated helpers.\n"
-            "- No broad `except Exception` — catch what you expect.\n"
-            "- Every behaviour change gets a test that fails without it.\n"
-            "- Run the project's linter, if it has one, and the acceptance before the last commit.\n"
-            "- No new dependencies.\n"
-        )
     if role == "review":
         return base + (
             "\n- blocker: any SQL built with string formatting; require parameterization.\n"

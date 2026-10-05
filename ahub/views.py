@@ -352,7 +352,7 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
 
     prompts_line = t.limits.get("prompts")
     if prompts_line:
-        formatted_prompts = prompts.format_summary(prompts_line)
+        formatted_prompts = prompts.render_summary(prompts_line)
         out.append(ui.styled(_t("views.lbl_prompts", summary=formatted_prompts), "dim"))
 
     rj, rp = _result_paths(t)

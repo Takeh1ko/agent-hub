@@ -63,6 +63,13 @@ def test_check_prompts_broken_hub_toml(tmp_path):
     assert ".hub.toml" in c.fix
 
 
+def test_broken_hub_toml_reported_once(tmp_path):
+    """A broken .hub.toml is reported by exactly one doctor check (the prompts area)."""
+    write(tmp_path / ".hub.toml", "this is not valid toml = [[{\n")
+    mentions = [c for c in doctor.run_all(tmp_path) if ".hub.toml" in c.detail or ".hub.toml" in c.fix]
+    assert len(mentions) == 1 and mentions[0].name == "prompts"
+
+
 def test_service_alive_dead_unit(monkeypatch):
     c = doctor.check_service()
     assert c.ok is False and "install" in c.fix  # no heartbeat, no unit in tmp HOME

@@ -92,9 +92,9 @@ def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResul
     guidance_sections, summary, layers = assemble_guidance(project, "review")
     sections = [*guidance_sections,
                 f"# Review of {task.label}: {task.title}\nYou are a reviewer in a fresh session; you have not seen "
-                f"the worker's work. {BOUNDARY} "
-                "Do not change or commit project files.",
-                "## Task\n" + strip_arbiter(task.spec.strip() or "(empty description)")]
+                "the worker's work. Do not change or commit project files.",
+                "## Task\n" + strip_arbiter(task.spec.strip() or "(empty description)"),
+                BOUNDARY]
     if task.kind is Kind.REVIEW:
         sections.append(f"## Under review\n`{task.limits.get('input') or ''}`")
         sections.append("## Material under review\n```\n" + diff + "\n```")

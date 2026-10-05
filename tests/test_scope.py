@@ -419,7 +419,7 @@ def test_question_project_is_backfilled_from_the_task(tmp_path):
     con.close()
 
     store = Store(db)
-    assert store.schema_version() == 6
+    assert store.schema_version() == 7
     with store.read() as c:
         rows = c.execute("SELECT text, project FROM question ORDER BY id").fetchall()
     assert [(r["text"], r["project"]) for r in rows] == [("с задачей", "B"), ("без задачи", "")]
@@ -439,7 +439,7 @@ def test_presence_gets_its_own_table(tmp_path):
     con.close()
 
     store = Store(db)
-    assert store.schema_version() == 6
+    assert store.schema_version() == 7
     assert events.presence(store, "claude", "A")["last_seen"] == 10  # the old row is still read
     assert not events.presence(store, "claude", "B")
     events.touch(store, "claude", project="B", via="wait", now=20)
@@ -458,6 +458,8 @@ def test_presence_of_a_process_on_the_previous_code(tmp_path):
     db = tmp_path / "old.db"
     con = sqlite3.connect(db)
     for f in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql")):
+        if int(f.name[:3]) > 6:  # the previous code knows migrations up to 006 only
+            continue
         for stmt in _split_sql(f.read_text(encoding="utf-8")):
             con.execute(stmt)
     con.execute("PRAGMA user_version=6")

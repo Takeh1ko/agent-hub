@@ -1,10 +1,14 @@
 """Worker prompts: global/project/local guidance per role on top of a lean built-in layer.
 
 Scope-major order: global (all, role) -> project (all, role) -> local (all, role).
+The layers summary is a canonical English string built from structured per-scope
+parts (``built-in + global(all, code) + ...``); readers render it in the hub
+language with `render_summary`.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,17 +47,37 @@ class PromptLayer:
     content: str
     exists: bool
     heading: str
+    skipped: str = ""  # why a present file was skipped: "" | "size" | "decode" | "unreadable"
 
 
-def resolve_project_all_file(project: ProjectConfig) -> tuple[Path | None, bool]:
-    """Returns (path, is_legacy). Checks .hub/prompts/all.md first, then legacy project.rules_path()."""
+@dataclass(frozen=True)
+class ScopeUse:
+    """Structured summary part: which roles of one scope made it into the prompt."""
+
+    scope: str  # "global" | "project" | "local"
+    roles: tuple[str, ...] = ()
+    skipped: tuple[tuple[str, str], ...] = ()  # (role, reason): reason is "size" | "decode" | "unreadable"
+
+
+# Canonical skip reason words (storage form; rendered via t() by render_summary).
+SKIP_WORDS = {"size": "too big", "decode": "non-UTF-8", "unreadable": "unreadable"}
+
+_SUMMARY_PART = re.compile(r"^(?P<scope>global|project|local)\((?P<items>.*)\)$")
+_SUMMARY_ITEM = re.compile(r"^(?P<role>\w+)(?:: skipped, (?P<reason>too big|non-UTF-8|unreadable))?$")
+_SUMMARY_TOKEN = re.compile(r"\w+(?:: skipped, (?:too big|non-UTF-8|unreadable))?")
+_SKIP_WORD_KEYS = {"too big": "prompts.skipped_size", "non-UTF-8": "prompts.skipped_decode",
+                   "unreadable": "prompts.skipped_unreadable"}
+
+
+def resolve_project_all_file(project: ProjectConfig) -> Path | None:
+    """Project all.md, falling back to the legacy rules= file; None when neither exists."""
     hub_all = paths.project_prompts_dir(project.root) / "all.md"
     if hub_all.is_file():
-        return hub_all, False
+        return hub_all
     rp = project.rules_path()
     if rp is not None and rp.is_file():
-        return rp, True
-    return None, False
+        return rp
+    return None
 
 
 def assemble_guidance(project: ProjectConfig, role: str) -> tuple[list[str], str, list[PromptLayer]]:
@@ -66,7 +90,7 @@ def assemble_guidance(project: ProjectConfig, role: str) -> tuple[list[str], str
       (sections, summary_line, layers)
     where each non-empty scope has one heading: '## Global guidance', '## Project guidance', or '## Local guidance'.
     """
-    p_all_path, _ = resolve_project_all_file(project)
+    p_all_path = resolve_project_all_file(project)
     p_all_target = p_all_path if p_all_path is not None else paths.project_prompts_dir(project.root) / "all.md"
 
     scopes = [
@@ -86,16 +110,18 @@ def assemble_guidance(project: ProjectConfig, role: str) -> tuple[list[str], str
 
     sections: list[str] = []
     layers: list[PromptLayer] = []
-    used_by_scope: dict[str, list[str]] = {"global": [], "project": [], "local": []}
+    used: list[ScopeUse] = []
 
     for scope, heading_name, scope_candidates in scopes:
         heading = f"## {heading_name}"
         scope_texts: list[str] = []
+        roles: list[str] = []
+        skipped: list[tuple[str, str]] = []
         for r, path in scope_candidates:
             content = ""
             exists = False
+            skip_reason = ""
             if path.is_file():
-                skip_reason: str | None = None
                 try:
                     if path.stat().st_size > REFUSE_BYTES:
                         skip_reason = "size"
@@ -107,55 +133,71 @@ def assemble_guidance(project: ProjectConfig, role: str) -> tuple[list[str], str
                 except OSError:
                     skip_reason = "unreadable"
 
-                if skip_reason is not None:
+                if skip_reason:
                     _log.warning("prompt guidance %s: skipped, %s", path, skip_reason)
-                    skip_note = f"{r}: {_t('prompts.skipped')}, {_t(f'prompts.skipped_{skip_reason}')}"
-                    used_by_scope[scope].append(skip_note)
-            layer = PromptLayer(scope=scope, role=r, path=path, content=content, exists=exists, heading=heading)
+                    skipped.append((r, skip_reason))
+            layer = PromptLayer(scope=scope, role=r, path=path, content=content, exists=exists, heading=heading,
+                                skipped=skip_reason)
             layers.append(layer)
             if content.strip():
                 scope_texts.append(content.strip())
-                if r not in used_by_scope[scope]:
-                    used_by_scope[scope].append(r)
+                if r not in roles:
+                    roles.append(r)
         if scope_texts:
             sections.append(f"{heading}\n" + "\n\n".join(scope_texts))
+        if roles or skipped:
+            used.append(ScopeUse(scope=scope, roles=tuple(roles), skipped=tuple(skipped)))
 
-    # Form summary: e.g. "built-in + global(code) + project(all, code)"
-    parts = [_t("prompts.scope_builtin")]
-    for sc in ("global", "project", "local"):
-        roles_in_sc = used_by_scope[sc]
-        if roles_in_sc:
-            parts.append(f"{_t(f'prompts.scope_{sc}')}({', '.join(roles_in_sc)})")
-    summary = " + ".join(parts)
-
-    return sections, summary, layers
+    return sections, build_summary(used), layers
 
 
-def format_summary(summary: str) -> str:
-    """Format prompt summary for display on the card in the current language."""
-    res = summary
-    res = res.replace("built-in", _t("prompts.scope_builtin"))
-    res = res.replace("встроенный", _t("prompts.scope_builtin"))
-    for sc in ("global", "project", "local"):
-        res = res.replace(f"{sc}(", f"{_t(f'prompts.scope_{sc}')}(")
-    for sc_ru, sc_en in [("глобальный", "global"), ("проектный", "project"), ("локальный", "local")]:
-        res = res.replace(f"{sc_ru}(", f"{_t(f'prompts.scope_{sc_en}')}(")
-    for prefix in ("skipped", "пропущен"):
-        for reason, key in [
-            ("unreadable", "skipped_unreadable"),
-            ("не удаётся прочитать", "skipped_unreadable"),
-            ("non-UTF-8", "skipped_decode"),
-            ("не-UTF-8", "skipped_decode"),
-            ("too big", "skipped_size"),
-            ("слишком большой", "skipped_size"),
-        ]:
-            res = res.replace(f"{prefix}, {reason}", f"{_t('prompts.skipped')}, {_t(f'prompts.{key}')}")
-    return res
+def build_summary(used: list[ScopeUse]) -> str:
+    """Canonical (English) summary from structured parts, e.g. "built-in + project(all, code)"."""
+    parts = ["built-in"]
+    for u in used:
+        items = list(u.roles) + [f"{r}: skipped, {SKIP_WORDS[reason]}" for r, reason in u.skipped]
+        parts.append(f"{u.scope}({', '.join(items)})")
+    return " + ".join(parts)
+
+
+def render_summary(summary: str) -> str:
+    """Render a canonical summary in the hub language, one word at a time (no stored translations)."""
+    parts = summary.split(" + ")
+    if not parts:
+        return summary
+    out = [_t("prompts.scope_builtin") if parts[0] == "built-in" else parts[0]]
+    for part in parts[1:]:
+        m = _SUMMARY_PART.match(part)
+        if not m:
+            out.append(part)
+            continue
+        scope_key = f"prompts.scope_{m.group('scope')}"
+        out.append(f"{_t(scope_key)}({_render_items(m.group('items'))})")
+    return " + ".join(out)
+
+
+def _render_items(inner: str) -> str:
+    """Render one scope's item list; unknown shapes pass through untouched."""
+    tokens = _SUMMARY_TOKEN.findall(inner)
+    if not tokens and inner:
+        return inner
+    if ", ".join(tokens) != inner:
+        return inner
+    rendered = []
+    for tok in tokens:
+        m = _SUMMARY_ITEM.match(tok)
+        assert m is not None  # findall only yields grammar items
+        if m.group("reason") is None:
+            rendered.append(m.group("role"))
+        else:
+            rendered.append(f"{m.group('role')}: {_t('prompts.skipped')}, "
+                            f"{_t(_SKIP_WORD_KEYS[m.group('reason')])}")
+    return ", ".join(rendered)
 
 
 def rules_text(project: ProjectConfig) -> str:
     """Legacy helper: read project all.md, fallback to project.rules_path() or DEFAULT_RULES."""
-    p, _ = resolve_project_all_file(project)
+    p = resolve_project_all_file(project)
     if p is not None and p.is_file():
         try:
             return p.read_text(encoding="utf-8")
@@ -210,7 +252,7 @@ def _header(task: Task) -> str:
 def scout_delivery() -> str:
     head = report_heading()
     return f"""## How to submit (required; overrides project rules about commits and reports)
-1. {BOUNDARY} Change and commit nothing in the project — this is reconnaissance. Create files only in `.ahub/` (the hub service directory, not in git).
+1. Change and commit nothing in the project — this is reconnaissance. Create files only in `.ahub/` (the hub service directory, not in git).
 2. Report — `.ahub/report.md` (<= {REPORT_LIMIT_KB} KB). First section — `{head}`: at most 10 lines, the key
    points needed for a decision. Cite `file:line` for every claim; say what you did not check.
 3. Result — `.ahub/result.json`:
@@ -223,7 +265,7 @@ def scout_delivery() -> str:
 
 def scout_prompt(project: ProjectConfig, task: Task) -> tuple[str, str, list[PromptLayer]]:
     sections, summary, layers = assemble_guidance(project, "scout")
-    return "\n\n".join([*sections, _header(task), scout_delivery()]), summary, layers
+    return "\n\n".join([*sections, _header(task), BOUNDARY, scout_delivery()]), summary, layers
 
 
 def repair_prompt(problem: str) -> str:
@@ -266,8 +308,16 @@ Need more — do not change, write it in the result notes.
 ## Acceptance (must be green)
 {tests}
 
+## Quality bar
+- Smallest diff that does the task; match surrounding code (naming, comment density, idioms).
+- No dead code, commented-out code, or duplicated helpers.
+- No broad `except Exception` — catch what you expect.
+- Every behaviour change gets a test that fails without it.
+- Run the project's linter, if it has one, and the acceptance before the last commit.
+- No new dependencies.
+
 ## How to submit (required)
-1. {BOUNDARY} Commit as you go: `git add <paths>` by name (never `-A`/`.`), commit message in {commit_lang}. No uncommitted changes at the end.
+1. Commit as you go: `git add <paths>` by name (never `-A`/`.`), commit message in {commit_lang}. No uncommitted changes at the end.
 2. Result — `.ahub/result.json` (the hub service directory is `.ahub/`, not in git):
    {{"summary": "1-3 sentences", "status": "done", "commit": "<HEAD sha>", "files": ["changed files"],
     "tests": {{"cmd": "...", "ok": true, "tail": "last output lines"}}, "notes": "what is not done / open questions"}}
@@ -280,7 +330,7 @@ Need more — do not change, write it in the result notes.
 def code_prompt(project: ProjectConfig, task: Task) -> tuple[str, str, list[PromptLayer]]:
     role = "routine" if task.kind is Kind.ROUTINE else "code"
     sections, summary, layers = assemble_guidance(project, role)
-    return "\n\n".join([*sections, _header(task), code_delivery(task)]), summary, layers
+    return "\n\n".join([*sections, _header(task), BOUNDARY, code_delivery(task)]), summary, layers
 
 
 @dataclass(frozen=True)
@@ -294,12 +344,12 @@ class PromptCheckIssue:
 def check_prompts_for_project(project: ProjectConfig | None = None) -> list[PromptCheckIssue]:
     """Check prompts directories: unknown files, size over 4 KB, refusal size over 16 KB, legacy rules."""
     issues: list[PromptCheckIssue] = []
-    dirs: list[tuple[str, Path]] = [("global", paths.global_prompts_dir())]
+    dirs = [paths.global_prompts_dir()]
     if project is not None:
-        dirs.append(("project", paths.project_prompts_dir(project.root)))
-        dirs.append(("local", paths.local_prompts_dir(project.name)))
+        dirs.append(paths.project_prompts_dir(project.root))
+        dirs.append(paths.local_prompts_dir(project.name))
 
-    for _scope, d in dirs:
+    for d in dirs:
         if not d.is_dir():
             continue
         try:

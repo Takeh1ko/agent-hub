@@ -151,8 +151,8 @@ def test_verdict_codes_english():
     assert set(review.VERDICTS) == {"approve", "changes", "dispute"}
 
 
-def test_quality_bar_in_template_not_builtin(tmp_path, monkeypatch):
-    """Built-in hub layer carries only submission contract, no taste; Quality bar is in edit template."""
+def test_quality_bar_in_builtin_worker_layer(tmp_path, monkeypatch):
+    """The built-in worker layer (code/routine) carries the short Quality bar; edit templates stay lean."""
     monkeypatch.setenv("AHUB_LANG", "en")
     from ahub.i18n import _reset
 
@@ -166,22 +166,30 @@ def test_quality_bar_in_template_not_builtin(tmp_path, monkeypatch):
     project = make_project(tmp_path)
     code_tid = store.create_task(project="P", kind="code", title="fix")
     store.update_task(code_tid, limits={"paths": ["core/**"], "accept": ["tests/test_a.py::test_x"]})
+    routine_tid = store.create_task(project="P", kind="routine", title="tidy")
+    store.update_task(routine_tid, limits={"paths": ["docs/**"], "accept": []})
+
     code, _, _ = prompts.code_prompt(project, store.get_task(code_tid))
+    routine, _, _ = prompts.code_prompt(project, store.get_task(routine_tid))
 
-    # Built-in prompt has no quality bar
-    assert "## Quality bar" not in code
-    assert "## How to submit" in code
-    assert "## Allowed files" in code
-    assert "## Acceptance" in code
+    # Built-in code and routine prompts carry the Quality bar
+    for text in (code, routine):
+        assert "## Quality bar" in text
+        assert "Smallest diff" in text
+        assert "dead code" in text
+        assert "except Exception" in text
+        assert "fails without it" in text
+        assert "No new dependencies" in text
 
-    # Template for code has quality bar
+    # Scout prompt does not carry the Quality bar
+    scout_tid = store.create_task(project="P", kind="scout", title="find leak")
+    scout, _, _ = prompts.scout_prompt(project, store.get_task(scout_tid))
+    assert "## Quality bar" not in scout
+    assert "## Quality bar" not in prompts.scout_delivery()
+
+    # The edit template does not repeat the built-in Quality bar
     tmpl = _edit_template("code", "project")
-    assert "## Quality bar" in tmpl
-    assert "Smallest diff" in tmpl
-    assert "dead code" in tmpl
-    assert "except Exception" in tmpl
-    assert "fails without it" in tmpl
-    assert "No new dependencies" in tmpl
+    assert "## Quality bar" not in tmpl
 
 
 def test_scout_delivery_cites_sources(tmp_path, monkeypatch):
@@ -483,8 +491,7 @@ def test_edit_creates_template(tmp_path, monkeypatch, capsys):
     assert code_path.is_file()
     content = code_path.read_text(encoding="utf-8")
     assert "<!-- Guidance for code (project) -->" in content
-    assert "## Quality bar" in content
-    assert "Smallest diff" in content
+    assert "## Quality bar" not in content
 
     # Global scope
     global_path = paths.global_prompts_dir() / "scout.md"
@@ -1087,39 +1094,226 @@ def test_skipped_unreadable_file_leaves_note_in_summary_and_log(tmp_path, monkey
     assert "промпты: встроенный + глобальный(code: пропущен, не удаётся прочитать)" in card_ru
 
 
-def test_code_task_reviewer_summary_recorded(tmp_path, monkeypatch):
-    """When a code task runs a review round, the reviewer prompt summary is recorded on the task."""
+def test_code_task_reviewer_summary_on_session_row(tmp_path, monkeypatch):
+    """A reviewed code task keeps the worker summary on the card; reviewer summaries go to session rows."""
     monkeypatch.setenv("AHUB_LANG", "en")
     from ahub.i18n import _reset
     _reset()
 
-    from ahub import engine, gates, paths
-    from ahub.providers.base import Outcome, RunResult
+    import json
+
+    from ahub import paths, tasks, views
+    from ahub.engine import Engine
+    from ahub.model import Kind
+    from ahub.store import Store
+    from tests.conftest import write
+    from tests.enginekit import install_fake, make_project
+
+    store = Store()
+    project = make_project(tmp_path)
+    write(paths.project_prompts_dir(project.root) / "code.md", "CODE_GUIDANCE")
+    write(paths.project_prompts_dir(project.root) / "review.md", "REVIEW_GUIDANCE")
+
+    work_step = {
+        "session": "ses_code",
+        "steps": [
+            {"write": {"path": "core/b.py", "text": "Y = 2\n"}},
+            {"git_commit": "feat: feature"},
+            {"result": {"summary": "implemented", "files": ["core/b.py"]}},
+            {"event": {"type": "text", "text": "готово"}},
+        ],
+    }
+    verdict_body = {"verdict": "approve", "summary": "looks good", "findings": []}
+    review_step = {
+        "session": "ses_rev",
+        "steps": [
+            {"write": {"path": ".ahub/review_r1_fake.json", "text": json.dumps(verdict_body)}},
+            {"event": {"type": "text", "text": "готово"}},
+        ],
+    }
+    install_fake(store, [work_step, review_step])
+    t = tasks.create(
+        store,
+        tasks.TaskSpec(
+            project="P",
+            kind=Kind.CODE,
+            title="implement feature",
+            model="fake",
+            paths=["core/**"],
+            accept=["tests/test_a.py::test_x"],
+            review_models=["fake"],
+            review_rounds=1,
+        ),
+        project,
+        collect=False,
+    )
+
+    Engine(store, project, t.id, sleep=lambda s: None).run()
+
+    task = store.get_task(t.id)
+    # The card keeps the worker (executor) summary, not the reviewer one.
+    assert task.limits.get("prompts") == "built-in + project(code)"
+    card = views.task_text(store, task)
+    assert "prompts: built-in + project(code)" in card
+    # Each reviewer session row carries its own summary.
+    reviewers = [s for s in store.list_sessions(t.id) if s.role == "reviewer"]
+    assert reviewers
+    for s in reviewers:
+        assert s.prompts == "built-in + project(review)"
+
+
+def test_session_prompts_column_roundtrip(tmp_path, monkeypatch):
+    """The session row stores the canonical prompt-layers summary (migration 007)."""
+    from ahub.store import Store
+
+    store = Store()
+    assert store.schema_version() >= 7
+    row = store.add_session(task_id=None, provider="fake", role="reviewer", model="fake",
+                            log_path="reviewer.log", prompts="built-in + project(review)")
+    session = store.get_session(row)
+    assert session is not None and session.prompts == "built-in + project(review)"
+    legacy = store.add_session(task_id=None, provider="fake", role="executor", model="fake")
+    assert store.get_session(legacy).prompts == ""
+
+
+
+
+def test_build_summary_from_structured_parts():
+    """build_summary composes the canonical English summary from structured per-scope parts."""
+    from ahub import prompts
+
+    assert prompts.build_summary([]) == "built-in"
+    used = [
+        prompts.ScopeUse(scope="global", roles=("all",), skipped=(("code", "size"),)),
+        prompts.ScopeUse(scope="project", roles=("all", "code")),
+    ]
+    assert prompts.build_summary(used) == ("built-in + global(all, code: skipped, too big)"
+                                           " + project(all, code)")
+
+
+def test_render_summary_words_via_t(monkeypatch):
+    """render_summary renders each canonical word through t(): identity in en, translated in ru."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
+    from ahub import prompts
+
+    assert prompts.render_summary("built-in") == "built-in"
+    assert (prompts.render_summary("built-in + global(all, code) + project(code: skipped, too big)")
+            == "built-in + global(all, code) + project(code: skipped, too big)")
+    # Unknown shapes pass through untouched (old rows never break the card).
+    assert prompts.render_summary("mystery") == "mystery"
+
+    monkeypatch.setenv("AHUB_LANG", "ru")
+    _reset()
+    assert prompts.render_summary("built-in") == "встроенный"
+    assert (prompts.render_summary("built-in + global(code: skipped, unreadable)")
+            == "встроенный + глобальный(code: пропущен, не удаётся прочитать)")
+    assert (prompts.render_summary("built-in + project(all, review)")
+            == "встроенный + проектный(all, review)")
+
+
+def test_boundary_own_paragraph(tmp_path, monkeypatch):
+    """BOUNDARY is its own paragraph before the built-in layer, not glued into an item."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
+    from ahub import gates, prompts, review
+    from ahub.store import Store
+    from tests.enginekit import make_project
+
+    store = Store()
+    project = make_project(tmp_path)
+    code_tid = store.create_task(project="P", kind="code", title="fix")
+    store.update_task(code_tid, limits={"paths": ["core/**"], "accept": []})
+    scout_tid = store.create_task(project="P", kind="scout", title="find leak")
+
+    code, _, _ = prompts.code_prompt(project, store.get_task(code_tid))
+    assert f"\n\n{prompts.BOUNDARY}\n\n## Allowed files" in code
+    scout, _, _ = prompts.scout_prompt(project, store.get_task(scout_tid))
+    assert f"\n\n{prompts.BOUNDARY}\n\n## How to submit" in scout
+
+    gate = gates.GateResult(base="b", head="h", diffstat="1 file")
+    rev, _, _ = review.review_prompt(project, store.get_task(code_tid), "diff", gate, 1, "m")
+    assert f"\n\n{prompts.BOUNDARY}\n\n" in rev
+
+    for text in (code, scout, rev):
+        assert "1. Stay in the copy" not in text
+
+
+def test_empty_role_hint_counts_all_and_blank(tmp_path, monkeypatch, capsys):
+    """The empty-role hint counts all.md files; blank files count as empty."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
+    from pathlib import Path
+
+    from ahub import cli, paths
+    from ahub.commands import prompts as prompts_cmd
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    write(Path(project.root) / ".hub.toml", 'schema_version = 2\nname = "P"\n')
+    monkeypatch.chdir(project.root)
+
+    # Only project all.md: every role has guidance, no hints.
+    write(paths.project_prompts_dir(project.root) / "all.md", "SHARED_GUIDANCE")
+    assert prompts_cmd._role_has_guidance(project, "code")
+    assert prompts_cmd._role_has_guidance(project, "all")
+    assert cli.main(["prompts"]) == 0
+    assert "no guidance for code" not in capsys.readouterr().out
+
+    # Blank files count as empty: the hint is back.
+    write(paths.project_prompts_dir(project.root) / "all.md", "  \n\n")
+    write(paths.project_prompts_dir(project.root) / "code.md", "\n")
+    assert not prompts_cmd._role_has_guidance(project, "code")
+    assert cli.main(["prompts"]) == 0
+    assert "no guidance for code" in capsys.readouterr().out
+
+
+def test_show_json_summary_matches_shown(tmp_path, monkeypatch, capsys):
+    """--json summary is the rendered summary; skipped files appear in the parts it names."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
+    import json
+    from pathlib import Path
+
+    from ahub import cli, paths, prompts
     from ahub.store import Store
     from tests.conftest import write
     from tests.enginekit import make_project
 
     project = make_project(tmp_path)
-    write(paths.project_prompts_dir(project.root) / "review.md", "REVIEW_RULE")
+    write(Path(project.root) / ".hub.toml", 'schema_version = 2\nname = "P"\n')
+    monkeypatch.chdir(project.root)
+    write(paths.project_prompts_dir(project.root) / "all.md", "SHARED_GUIDANCE")
+    big = paths.project_prompts_dir(project.root) / "code.md"
+    big.parent.mkdir(parents=True, exist_ok=True)
+    big.write_text("x" * (prompts.REFUSE_BYTES + 1), encoding="utf-8")
+
+    assert cli.main(["prompts", "show", "code"]) == 0
+    human = capsys.readouterr().out
+    assert cli.main(["--json", "prompts", "show", "code"]) == 0
+    data = json.loads(capsys.readouterr().out)
 
     store = Store()
-    tid = store.create_task(project="P", kind="code", title="feature")
-    store.update_task(tid, limits={"paths": ["src/**"], "accept": []})
-    task = store.get_task(tid)
+    tid = store.create_task(project="P", kind="code", title="Example task", spec="Task specification.")
+    _, summary, _ = prompts.code_prompt(project, store.get_task(tid))
+    assert data["summary"] == prompts.render_summary(summary)
+    assert data["prompt"].rstrip("\n") == human.rstrip("\n")
+    assert any(g["role"] == "code" and g["skipped"] == "size" for g in data["guidance"])
 
-    eng = engine.Engine(store, project, tid)
-    g = gates.GateResult(base="base", head="head", diffstat="1 file")
-
-    # Mock session to return empty run result without spawning real process
-    def mock_session(role, model, prompt, **kwargs):
-        return RunResult(outcome=Outcome.OK, session_id="s1")
-
-    monkeypatch.setattr(eng, "session", mock_session)
-    monkeypatch.setattr(eng, "_revert_reviewer", lambda t: None)
-    eng._review_round(task, g, ["mock_model"], 1, 1, material="diff")
-
-    updated = store.get_task(tid)
-    assert "prompts" in updated.limits
-    assert updated.limits["prompts"] == "built-in + project(review)"
-
-
+    # Same for "show all": --json summary is the rendered summary of what is shown.
+    assert cli.main(["prompts", "show", "all"]) == 0
+    human_all = capsys.readouterr().out
+    assert cli.main(["--json", "prompts", "show", "all"]) == 0
+    data_all = json.loads(capsys.readouterr().out)
+    sections_all, summary_all, _ = prompts.assemble_guidance(project, "all")
+    assert data_all["summary"] == prompts.render_summary(summary_all)
+    assert data_all["prompt"].rstrip("\n") == human_all.rstrip("\n")
