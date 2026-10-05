@@ -224,13 +224,12 @@ def test_pick_effort_falls_back_past_denied_default(store, monkeypatch):
     assert (picked.alias, picked.variant) == ("deepseek-flash", "high")
 
 
-def test_migration_maps_legacy_menus(tmp_path, monkeypatch):
-    """Migration 008 on real v7 legacy data: menus, task executors and sessions map to base + effort."""
+def _v7_legacy_db(tmp_path):
+    """A v7 database with legacy model/menu/task/session rows, as an old hub left them."""
     import sqlite3
 
     from ahub.store import MIGRATIONS_DIR, _split_sql
 
-    _en(monkeypatch)
     db = tmp_path / "old.db"
     con = sqlite3.connect(db)
     for num in range(1, 8):
@@ -254,6 +253,13 @@ def test_migration_maps_legacy_menus(tmp_path, monkeypatch):
                 " log_path) VALUES(1,'agy','','scout',0,'gemini-low',0,'')")
     con.commit()
     con.close()
+    return db
+
+
+def test_migration_maps_legacy_menus(tmp_path, monkeypatch):
+    """Migration 008 on real v7 legacy data: menus, task executors and sessions map to base + effort."""
+    _en(monkeypatch)
+    db = _v7_legacy_db(tmp_path)
 
     store = Store(path=db)
     assert store.schema_version() == 8
@@ -305,6 +311,36 @@ def test_console_model_usage_mentions_effort(monkeypatch):
 
     _reset()
     assert "alias[:effort]" in t("console.model_usage")
+
+
+def test_set_enabled_maps_legacy_alias(store, tmp_path, monkeypatch):
+    """models disable spark-high disables the base spark row — fresh and migrated DBs alike."""
+    _en(monkeypatch)
+    registry.set_enabled(store, "spark-high", False)
+    assert registry.get(store, "spark").enabled is False
+    registry.set_enabled(store, "spark-high", True)
+    assert registry.get(store, "spark").enabled is True
+
+    migrated = Store(path=_v7_legacy_db(tmp_path))
+    assert migrated.schema_version() == 8
+    registry.set_enabled(migrated, "spark-high", False)
+    assert registry.get(migrated, "spark").enabled is False
+
+
+def test_role_remove_requires_effort_for_several(monkeypatch, capsys):
+    """`models role observer --remove spark` with spark:high + spark:medium refuses listing both;
+    --remove spark:medium drops one row; removing the last one is refused (menu_last)."""
+    _en(monkeypatch)
+    registry.seed(Store())  # menus exist (every real flow seeds via models/pick/get first)
+    assert cli.main(["models", "role", "observer", "--remove", "spark"]) == 2
+    err = capsys.readouterr().err
+    assert "ALIAS:EFFORT" in err and "spark:high" in err and "spark:medium" in err
+    store = Store()
+    assert len(registry.menu_efforts(store, Role.OBSERVER)) == 2  # nothing removed
+    assert cli.main(["models", "role", "observer", "--remove", "spark:medium"]) == 0
+    assert registry.menu_efforts(Store(), Role.OBSERVER) == [("spark", "high", True)]
+    assert cli.main(["models", "role", "observer", "--remove", "spark:high"]) == 2
+    assert "at least one" in capsys.readouterr().err
 
 
 def test_role_menu_effort_roundtrip(store):

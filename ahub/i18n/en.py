@@ -838,6 +838,7 @@ MESSAGES: dict[str, str] = {
     "registry.no_menu": "{alias} is not in the {role} role menu",
     "registry.menu_last": "the {role} role menu must keep at least one model",
     "registry.menu_add_first": "{alias} is not in the {role} role menu — add it first",
+    "registry.need_effort": "{alias} has several efforts in the {role} role menu ({refs}) — name one as ALIAS:EFFORT",
     "registry.legacy_mapped": "{alias} is {base}:{effort}",
     "registry.legacy_mapped_full": "{ref} is {base}:{effort}",
     "registry.bad_effort": "unknown reasoning level {effort!r} for model {alias} (valid: {valid})",

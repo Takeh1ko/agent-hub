@@ -597,9 +597,11 @@ def add_model(store: Store, alias: str, provider: str, model_id: str, variant: s
 
 
 def set_enabled(store: Store, alias: str, enabled: bool) -> None:
-    get(store, alias)
+    alias_part, effort_part = split_ref(alias)
+    base, _stored, _notice = map_legacy(alias_part, effort_part)
+    get(store, base)
     with store.tx() as c:
-        c.execute("UPDATE model SET enabled=? WHERE alias=?", (1 if enabled else 0, alias))
+        c.execute("UPDATE model SET enabled=? WHERE alias=?", (1 if enabled else 0, base))
 
 
 def add_to_role(store: Store, role: Role | str, alias: str, default: bool = False,
@@ -628,30 +630,45 @@ def add_to_role(store: Store, role: Role | str, alias: str, default: bool = Fals
 def remove_from_role(store: Store, role: Role | str, alias: str, effort: str | None = None) -> None:
     alias_part, effort_part = split_ref(alias)
     base, stored, _notice = map_legacy(alias_part, effort_part if effort is None else effort)
+    explicit = effort is not None or bool(effort_part)
     r = Role(role).value
     with store.tx() as c:
         try:
-            if effort is None and not effort_part:
-                row = c.execute("SELECT is_default FROM role_model WHERE role=? AND alias=?",
-                                (r, base)).fetchone()
-            else:
-                row = c.execute("SELECT is_default FROM role_model WHERE role=? AND alias=? AND effort=?",
-                                (r, base, stored)).fetchone()
+            rows = c.execute("SELECT effort, is_default FROM role_model WHERE role=? AND alias=?"
+                             " ORDER BY position", (r, base)).fetchall()
+            left = c.execute("SELECT COUNT(*) FROM role_model WHERE role=?", (r,)).fetchone()[0]
+            use_effort = True
         except Exception:
+            rows, left, use_effort = None, 0, False
+        if rows is None:
+            # pre-effort schema (live reload under migration): one row per alias at most
             row = c.execute("SELECT is_default FROM role_model WHERE role=? AND alias=?", (r, base)).fetchone()
-        if row is None:
-            raise RegistryError(_t("registry.no_menu", alias=base, role=r))
-        left = c.execute("SELECT COUNT(*) FROM role_model WHERE role=?", (r,)).fetchone()[0]
-        if left <= 1:
-            raise RegistryError(_t("registry.menu_last", role=r))
-        try:
-            if effort is None and not effort_part:
-                c.execute("DELETE FROM role_model WHERE role=? AND alias=?", (r, base))
-            else:
-                c.execute("DELETE FROM role_model WHERE role=? AND alias=? AND effort=?", (r, base, stored))
-        except Exception:
+            if row is None:
+                raise RegistryError(_t("registry.no_menu", alias=base, role=r))
+            left = c.execute("SELECT COUNT(*) FROM role_model WHERE role=?", (r,)).fetchone()[0]
+            if left <= 1:
+                raise RegistryError(_t("registry.menu_last", role=r))
             c.execute("DELETE FROM role_model WHERE role=? AND alias=?", (r, base))
-        if row["is_default"]:
+            if row["is_default"]:
+                c.execute("UPDATE role_model SET is_default=1 WHERE role=? AND alias="
+                          "(SELECT alias FROM role_model WHERE role=? ORDER BY position LIMIT 1)", (r, r))
+            return
+        if not rows:
+            raise RegistryError(_t("registry.no_menu",
+                                    alias=model_ref(base, stored) if explicit else base, role=r))
+        if not explicit and len(rows) > 1:
+            refs = ", ".join(model_ref(base, str(w["effort"] or "")) for w in rows)
+            raise RegistryError(_t("registry.need_effort", alias=base, role=r, refs=refs))
+        doomed = [w for w in rows if str(w["effort"] or "") == stored] if explicit else list(rows)
+        if not doomed:
+            raise RegistryError(_t("registry.no_menu", alias=model_ref(base, stored), role=r))
+        if left - len(doomed) < 1:
+            raise RegistryError(_t("registry.menu_last", role=r))
+        if explicit and use_effort:
+            c.execute("DELETE FROM role_model WHERE role=? AND alias=? AND effort=?", (r, base, stored))
+        else:
+            c.execute("DELETE FROM role_model WHERE role=? AND alias=?", (r, base))
+        if any(w["is_default"] for w in doomed):
             try:
                 c.execute("UPDATE role_model SET is_default=1 WHERE role=? AND (alias, effort)=("
                           "SELECT alias, effort FROM role_model WHERE role=? ORDER BY position LIMIT 1)",

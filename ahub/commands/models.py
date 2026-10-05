@@ -305,14 +305,22 @@ def _body(detail: str, alias: str) -> str:
 def cmd_enable(args, on: bool) -> int:
     from ahub.i18n import t
 
+    note = registry.legacy_notice(args.alias)
     try:
         registry.set_enabled(Store(), args.alias, on)
     except registry.RegistryError as e:
         raise CliError(str(e), hint=t("hint.models_enable", alias=args.alias)) from e
     state = t("models.enabled_on") if on else t("models.enabled_off")
-    emit(args, {"ok": True}, t("models.enabled_line", alias=args.alias, state=state) + "\n"
-         + ui.styled(ui.kv([(t("views.lbl_next"), t("hint.status") if on
-                             else t("hint.models_enable", alias=args.alias))]), "dim"))
+    base = registry.base_alias(args.alias)
+    text = t("models.enabled_line", alias=base, state=state) + "\n" \
+        + ui.styled(ui.kv([(t("views.lbl_next"), t("hint.status") if on
+                            else t("hint.models_enable", alias=base))]), "dim")
+    data: dict = {"ok": True, "alias": base}
+    if note:
+        data["notice"] = note
+        if not getattr(args, "json", False):
+            text = note + "\n" + text
+    emit(args, data, text)
     return 0
 
 

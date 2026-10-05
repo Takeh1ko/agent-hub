@@ -838,6 +838,7 @@ MESSAGES: dict[str, str] = {
     "registry.no_menu": "{alias} нет в меню роли {role}",
     "registry.menu_last": "в меню роли {role} должна остаться хотя бы одна модель",
     "registry.menu_add_first": "{alias} нет в меню роли {role} — сначала добавьте",
+    "registry.need_effort": "у {alias} несколько уровней в меню роли {role} ({refs}) — укажите один как АЛИАС:УРОВЕНЬ",
     "registry.legacy_mapped": "{alias} is {base}:{effort}",
     "registry.legacy_mapped_full": "{ref} is {base}:{effort}",
     "registry.bad_effort": "неизвестный уровень рассуждений {effort!r} для модели {alias} (допустимые: {valid})",
