@@ -954,9 +954,11 @@ class Engine:
         else:
             prompt, kind = prompts.CONTINUE_PROMPT, "continue"
         self._clear_fresh(t)
-        # a lock-wait requeue resumes straight at the gates — the worker turn already happened
-        lock_resume = bool(self.task().limits.get("lock_wait"))
-        if lock_resume:
+        # a lock-wait requeue resumes straight at the gates — the worker turn already happened.
+        # A fresh session or pending rework notes still need a real turn, so they overrule the skip.
+        # The flag is cleared either way once consumed.
+        lock_resume = bool(self.task().limits.get("lock_wait")) and not fresh and not notes
+        if self.task().limits.get("lock_wait"):
             t.limits.pop("lock_wait", None)
             lim = dict(self.task().limits)
             lim.pop("lock_wait", None)

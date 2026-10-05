@@ -119,6 +119,34 @@ def test_lock_wait_resume_runs_gates_without_new_turn(store: Store, tmp_path, mo
     assert "lock_wait" not in store.get_task(t.id).limits  # the flag is cleared when used
 
 
+def test_lock_wait_resume_with_fresh_session_runs_a_turn(store: Store, tmp_path, monkeypatch):
+    """A fresh session overrules the lock-wait skip: the worker still gets its turn."""
+    project = make_project(tmp_path)
+    fake = install_fake(store, [work(), work(session="ses_new", text="Y = 3\n")])
+    t = _code_task(store, project)
+    real_run_acceptance = gates.run_acceptance
+    calls = {"n": 0}
+
+    def _busy_once(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise gates.LockTimeout("lock busy", stopped=False)
+        return real_run_acceptance(*a, **kw)
+
+    monkeypatch.setattr(gates, "run_acceptance", _busy_once)
+    first = Engine(store, project, t.id, sleep=lambda s: None).run()
+    assert first.state is State.QUEUED, first.reason
+    assert len(fake.calls) == 1
+    lim = dict(store.get_task(t.id).limits)
+    lim["fresh_session"] = True
+    store.update_task(t.id, limits=lim)
+
+    second = Engine(store, project, t.id, sleep=lambda s: None).run()
+    assert second.state is State.DONE, second.reason
+    assert len(fake.calls) == 2  # the fresh turn was not skipped
+    assert "lock_wait" not in store.get_task(t.id).limits
+
+
 def test_engine_lock_stopped_is_stopped(store: Store, tmp_path, monkeypatch):
     """A stop during the lock wait is STOPPED, not a wait and not red."""
     project = make_project(tmp_path)
