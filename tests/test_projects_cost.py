@@ -500,8 +500,17 @@ async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
     async with app.run_test() as pilot:
         await rows_ready(app, pilot, want=6)
         app.query_one("#tasks").move_cursor(row=3)  # the header row of B
+        applied: list[int] = []
+        real_apply = app._apply
+
+        def _counting(screen, live, pulses) -> None:
+            applied.append(1)
+            return real_apply(screen, live, pulses)
+
+        app._apply = _counting  # type: ignore[method-assign]
+        before = len(applied)
         app.refresh_data()
-        await rows_ready(app, pilot, want=6)  # a refresh of the screen, not a fixed pause
+        await wait_for(pilot, lambda n=before: len(applied) > n)  # the refresh applied, not just the rows
         assert app.query_one("#tasks").cursor_row == 3
 
 
