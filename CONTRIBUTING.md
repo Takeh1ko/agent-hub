@@ -55,3 +55,13 @@ through them. The design is in [docs/architecture.md](docs/architecture.md), the
 ## Platforms
 
 Linux and macOS are tested in CI. Windows is supported through WSL2 only.
+
+## Releasing
+
+1. Bump the version in `pyproject.toml` and `ahub/__init__.py`, add a `CHANGELOG.md` entry, merge to `main`.
+2. Tag and push: `git tag v3.1.0 && git push --tags`. The `release` workflow checks that the tag matches the
+   package version, builds the wheel, runs `twine check` and publishes it to PyPI — no token, Trusted Publishing.
+3. Run `tools/smoke.sh` before the release whenever packaging or the setup wizard changed.
+
+One-time PyPI setup: on pypi.org open the `ahub` project → Publishing → add a GitHub publisher
+(owner `Takeh1ko`, repository `agent-hub`, workflow `release.yml`, environment `pypi`).
