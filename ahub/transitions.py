@@ -264,9 +264,14 @@ def once(store: Store, key: str, fn: Callable[[sqlite3.Connection], Any], *, now
     """Run fn(con) once per key. A repeat with the same key returns the earlier result.
 
     fn runs in the same transaction as the key write: either both the action and the key, or neither.
-    The result must serialize to JSON.
+    The result must serialize to JSON. fn is DB-only (no provider calls, no file I/O): it runs
+    under the write lock. A repeat never takes the write lock — it reads first.
     """
     ts = now if now is not None else now_ms()
+    with store.read() as c:
+        row = c.execute("SELECT result_json FROM op WHERE key=?", (key,)).fetchone()
+        if row is not None:
+            return json.loads(row[0])
     with store.tx() as c:
         row = c.execute("SELECT result_json FROM op WHERE key=?", (key,)).fetchone()
         if row is not None:
