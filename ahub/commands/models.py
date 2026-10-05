@@ -54,12 +54,7 @@ def _config_error() -> str:
 
 def _provider_order(entries) -> list[str]:
     """Hub providers in registration order, then any others alphabetically."""
-    from ahub import providers as _providers
-
-    known = _providers.names()
-    seen = [e.provider for e in entries]
-    ordered = [n for n in known if n in seen]
-    return ordered + sorted({p for p in seen if p not in ordered})
+    return _catalog.provider_order([e.provider for e in entries])
 
 
 def cmd_list(args) -> int:
@@ -76,6 +71,7 @@ def cmd_list(args) -> int:
         entries = [e for e in registry.models(store) if e.alias in wanted]
     else:
         entries = registry.models(store)
+    entries = _catalog.visible_entries(entries)
     rows, extra = _catalog.build_rows(store, entries, refresh=refresh)
     by_alias = {r.entry.alias: r for r in rows}
     # --json: every field raw (registry + catalog + derived); roles kept for old readers
@@ -110,14 +106,13 @@ def cmd_list(args) -> int:
             continue
         data["roles"][role.value] = [{"alias": e.alias, "default": d} for e, d in items]
     w = ui.width()
-    with_vendor = w >= 100
-    with_context = w >= 120
+    with_vendor, with_context, maxw = _catalog.table_columns(w)
     lines: list[str] = []
     for prov in _provider_order(entries):
         group = [by_alias[e.alias] for e in entries if e.provider == prov and e.alias in by_alias]
         if not group:
             continue
-        lines.append(ui.section(prov))
+        lines.append(ui.section(_catalog.group_title(prov)))
         head = [t("models.col_alias"), t("models.col_model"), t("models.col_reasoning"),
                 t("models.col_plan"), t("models.col_price")]
         if with_context:
@@ -135,10 +130,6 @@ def cmd_list(args) -> int:
                 row.append(r.context)
             row.append(roles_cell)
             body.append(row)
-        maxw: list[int | None] = [32, 28, 16, 12, 14]
-        if with_context:
-            maxw.append(7)
-        maxw.append(None)
         lines.append(ui.table(head, body, max_width=maxw, indent=2))
     if not lines:
         lines.append(ui.table(None, [], indent=2))

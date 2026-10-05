@@ -1528,18 +1528,19 @@ class ConsoleApp(App):
             w = self._width()
             project = self._current_project()
             try:
-                rows, _extra = _catalog.build_rows(self.store)
+                all_rows, _extra = _catalog.build_rows(self.store)
             except (OSError, ValueError, RuntimeError):
-                rows = []
-            with_vendor = w >= 100
-            with_context = w >= 120
+                all_rows = []
+            shown = {e.alias for e in _catalog.visible_entries([r.entry for r in all_rows])}
+            rows = [r for r in all_rows if r.entry.alias in shown]
+            with_vendor, with_context, maxw = _catalog.table_columns(w)
             head = [_t("models.col_alias"), _t("models.col_model"), _t("models.col_reasoning"),
                     _t("models.col_plan"), _t("models.col_price")]
             if with_context:
                 head.append(_t("models.col_context"))
             head.append(_t("models.col_roles"))
-            body = []
-            for r in rows:
+
+            def _cells(r) -> list[str]:
                 alias_cell = r.entry.alias + self._model_tags(r.entry, project)
                 model_cell = _catalog.model_text(r.info, with_vendor=with_vendor,
                                                  fallback=r.entry.model_id)
@@ -1549,12 +1550,17 @@ class ConsoleApp(App):
                 if with_context:
                     row.append(r.context)
                 row.append(roles_cell)
-                body.append(row)
-            maxw: list[int | None] = [32, 28, 16, 12, 14]
-            if with_context:
-                maxw.append(7)
-            maxw.append(None)
-            self._say(ui.table(head, body, max_width=maxw, indent=2, w=w).splitlines() or [""])
+                return row
+
+            by_provider: dict[str, list] = {}
+            for r in rows:
+                by_provider.setdefault(r.entry.provider, []).append(r)
+            lines: list[str] = []
+            for prov in _catalog.provider_order(list(by_provider)):
+                lines.append(ui.section(_catalog.group_title(prov)))
+                lines.append(ui.table(head, [_cells(r) for r in by_provider[prov]],
+                                      max_width=maxw, indent=2, w=w))
+            self._say("\n".join(lines).splitlines() or [""])
         except (OSError, ValueError, RuntimeError) as e:
             self._say([_t("console.widget_error", widget="models", hint=str(e)[:100])])
 

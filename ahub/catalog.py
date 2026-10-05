@@ -18,6 +18,15 @@ from ahub.store import Store
 
 _AGY_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
 
+# Reasoning strength, weakest first: the table shows the available range in this order.
+LEVEL_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+_LEVEL_RANK = {lvl: i for i, lvl in enumerate(LEVEL_ORDER)}
+
+
+def _level_key(lvl: str) -> tuple[int, str]:
+    low = (lvl or "").lower()
+    return (_LEVEL_RANK.get(low, len(_LEVEL_RANK)), low)
+
 
 def plan_label(plan: PlanKind) -> str:
     """Human plan label (i18n): free · go-plan · pay-as-you-go · subscription."""
@@ -125,44 +134,40 @@ def available_levels(entry: registry.ModelEntry, info: CatalogEntry | None,
 
 def reasoning_text(entry: registry.ModelEntry, info: CatalogEntry | None,
                    index: dict[str, CatalogEntry] | None = None) -> str:
-    """Alias level + the others available (e.g. "xhigh (low, high)"), "—" when neither."""
+    """Alias level + compact available range (e.g. "xhigh (minimal–xhigh)"), "—" when neither."""
     level = alias_level(entry)
-    avail = available_levels(entry, info, index)
-    others = [r for r in avail if r != level] if level else list(avail)
-    if level and others:
-        return f"{level} ({', '.join(others)})"
+    avail = sorted(set(available_levels(entry, info, index)), key=_level_key)
     if level:
-        return level
-    if others:
-        return ", ".join(others)
-    return _t("models.no_reasoning")
+        if not avail or (len(avail) == 1 and avail[0] == level):
+            return level
+        lo, hi = avail[0], avail[-1]
+        span = lo if lo == hi else f"{lo}–{hi}"
+        return f"{level} ({span})"
+    if not avail:
+        return _t("models.no_reasoning")
+    if len(avail) == 1:
+        return avail[0]
+    return f"{avail[0]}–{avail[-1]}"
 
 
-def price_text(entry: registry.ModelEntry, info: CatalogEntry | None,
-               quota_pct: float | None = None,
-               go_pct: float | None = None, go_limit: float | None = None) -> str:
-    """Price cell: "free" · "quota 31%" · "Go 9% of $60" · "$0.15 / $0.60"."""
+def price_text(entry: registry.ModelEntry, info: CatalogEntry | None) -> str:
+    """Price cell: "$in / $out per 1M" whenever the catalog has a cost, whatever the plan.
+
+    Plan-level usage lives in the provider group header instead. Without a catalog cost:
+    free → "free", subscription → "—" (no money per token), otherwise the plan label.
+    """
     plan = registry.plan_kind(entry, info)
     if plan is PlanKind.FREE:
         return _t("models.price_free")
-    if plan is PlanKind.SUBSCRIPTION:
-        if quota_pct is not None:
-            return _t("models.quota_pct", pct=int(round(quota_pct * 100)))
-        return plan_label(plan)
-    if plan is PlanKind.GO:
-        if go_pct is not None and go_limit is not None:
-            return _t("models.go_pct", pct=int(round(go_pct * 100)), limit=f"{go_limit:.0f}")
-        if info is not None and info.price_in is not None and info.price_out is not None:
-            return _t("models.price_pair", pin=_fmt_price(info.price_in),
-                       pout=_fmt_price(info.price_out))
-        return plan_label(plan)
-    # pay-as-you-go: USD per 1M
     if info is not None and info.price_in is not None and info.price_out is not None:
-        return _t("models.price_pair", pin=_fmt_price(info.price_in), pout=_fmt_price(info.price_out))
+        return _t("models.price_pair", pin=_fmt_price(info.price_in),
+                   pout=_fmt_price(info.price_out))
     if info is not None and (info.price_in is not None or info.price_out is not None):
-        pin = _fmt_price(info.price_in) if info.price_in is not None else "—"
-        pout = _fmt_price(info.price_out) if info.price_out is not None else "—"
+        pin = _fmt_price(info.price_in) if info.price_in is not None else _t("models.price_none")
+        pout = _fmt_price(info.price_out) if info.price_out is not None else _t("models.price_none")
         return _t("models.price_pair", pin=pin, pout=pout)
+    if plan is PlanKind.SUBSCRIPTION:
+        return _t("models.price_none")
     return plan_label(plan)
 
 
@@ -175,19 +180,17 @@ def _fmt_price(v: float | None) -> str:
 
 
 def context_text(info: CatalogEntry | None) -> str:
-    """Context window cell: "1M", "200k", else the raw number; "—" when unknown."""
+    """Context window cell: "200K", "262K", "1M" (rounded, no decimals); "—" when unknown."""
     if info is None or info.context is None:
         return "—"
     try:
         n = int(info.context)
     except (TypeError, ValueError):
         return "—"
-    if n >= 1_000_000 and n % 1_000_000 == 0:
-        return f"{n // 1_000_000}M"
     if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M"
-    if n >= 1000 and n % 1000 == 0:
-        return f"{n // 1000}k"
+        return f"{round(n / 1_000_000)}M"
+    if n >= 1000:
+        return f"{round(n / 1000)}K"
     return str(n)
 
 
@@ -256,7 +259,7 @@ def _quota_pct_for(entry, store: Store | None = None) -> float | None:
 
 
 def _go_numbers() -> tuple[float | None, float | None]:
-    """(month Go spend, limit): None when unknown."""
+    """(month Go spend, limit): (None, None) when unknown, (spend, None) with no limit set."""
     try:
         from ahub import config as _config
         from ahub import cost as _cost
@@ -271,12 +274,88 @@ def _go_numbers() -> tuple[float | None, float | None]:
             limit = _config.load_hub().go_month_limit
         except _config.ConfigError:
             limit = None
-        if limit is None:
-            return go, None
-        pct = (go / limit) if limit else 0.0
-        return pct, limit
+        return go, limit
     except (OSError, ValueError, RuntimeError):
         return None, None
+
+
+def go_summary() -> str:
+    """Plan-level Go usage for a provider group header: " · Go plan: $5.29 of $60 this month (9%)"."""
+    spend, limit = _go_numbers()
+    if spend is None or limit is None:
+        return ""
+    pct = int(round(spend / limit * 100)) if limit else 0
+    return " · " + _t("models.go_plan_summary", spend=f"{spend:.2f}", limit=f"{limit:.0f}", pct=pct)
+
+
+_WINDOW_SHORT = {"5h": "5h", "weekly": "week", "week": "week"}
+
+
+def quota_summary(provider: str) -> str:
+    """Plan-level quota for a provider group header: " · Gemini quota: 5h 87% · week 31%"."""
+    from ahub import providers as _providers
+
+    try:
+        buckets = _providers.get(provider).quota()
+    except (KeyError, OSError, ValueError, RuntimeError, AttributeError):
+        return ""
+    groups: list[str] = []
+    for b in buckets or []:
+        if b.group not in groups:
+            groups.append(b.group)
+    out: list[str] = []
+    for group in groups:
+        parts = []
+        for window in ("5h", "weekly", "week"):
+            b = next((x for x in buckets if x.group == group and x.window == window), None)
+            if b is not None:
+                parts.append(f"{_WINDOW_SHORT[window]} {int(round(b.remaining * 100))}%")
+        if parts:
+            out.append(_t("models.quota_plan_summary", group=group, parts=" · ".join(parts)))
+    return (" · " + " · ".join(out)) if out else ""
+
+
+def group_title(provider: str) -> str:
+    """Provider group header: the name plus plan-level usage (Go spend, quota windows) when known."""
+    if provider == "opencode":
+        return provider + go_summary()
+    return provider + quota_summary(provider)
+
+
+def provider_order(names: list[str]) -> list[str]:
+    """Hub providers in registration order, then any others alphabetically."""
+    from ahub import providers as _providers
+
+    known = _providers.names()
+    ordered = [n for n in known if n in names]
+    return ordered + sorted({n for n in names if n not in ordered})
+
+
+def visible_entries(entries: list[registry.ModelEntry]) -> list[registry.ModelEntry]:
+    """Entries shown in the tables: the fake provider only with AHUB_FAKE_PROVIDER=1."""
+    from ahub.providers.fake import selectable_from_env
+
+    if selectable_from_env():
+        return list(entries)
+    return [e for e in entries if e.provider != "fake"]
+
+
+def table_columns(w: int) -> tuple[bool, bool, list[int | None]]:
+    """Column toggles and caps for the models table at width w.
+
+    At 140+ nothing is clipped; below that context goes first, then the vendor inside
+    the model cell; alias and plan stay whatever the width.
+    """
+    with_vendor = w >= 100
+    with_context = w >= 120
+    if w >= 140:
+        maxw: list[int | None] = [34, None, 24, 12, 16]
+    else:
+        maxw = [32, 28, 16, 12, 14]
+    if with_context:
+        maxw.append(8)
+    maxw.append(None)
+    return with_vendor, with_context, maxw
 
 
 def build_rows(store: Store, entries: list[registry.ModelEntry] | None = None,
@@ -289,7 +368,7 @@ def build_rows(store: Store, entries: list[registry.ModelEntry] | None = None,
         catalogs = get_catalogs(refresh=refresh)
     if index is None:
         index = index_by_id(catalogs)
-    go_pct, go_limit = _go_numbers()
+    spend, go_limit = _go_numbers()
     rows: list[ModelRow] = []
     for e in entries:
         info = match_entry(e, index)
@@ -301,14 +380,13 @@ def build_rows(store: Store, entries: list[registry.ModelEntry] | None = None,
         alias = getattr(e, "alias", "") or ""
         model_id = getattr(e, "model_id", "") or alias
         quota_pct = _quota_pct_for(e, store) if plan is PlanKind.SUBSCRIPTION and provider == "agy" else None
-        gpct = go_pct if plan is PlanKind.GO and go_pct is not None and go_limit is not None else None
-        glim = go_limit if plan is PlanKind.GO else None
+        gpct = (spend / go_limit) if plan is PlanKind.GO and spend is not None and go_limit else None
         try:
             reasoning = reasoning_text(e, info, index)
         except (OSError, ValueError, RuntimeError, AttributeError):
             reasoning = ""
         try:
-            price = price_text(e, info, quota_pct=quota_pct, go_pct=gpct, go_limit=glim)
+            price = price_text(e, info)
         except (OSError, ValueError, RuntimeError, AttributeError):
             price = ""
         try:
