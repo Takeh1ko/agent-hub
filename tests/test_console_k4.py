@@ -13,6 +13,7 @@ from ahub.store import Store
 from ahub.time import now_ms
 from ahub.tui import console as con
 from ahub.tui.console import ConsoleApp
+from tests.conftest import wait_for
 
 
 @pytest.fixture(autouse=True)
@@ -169,7 +170,7 @@ async def test_stale_marker_never_clipped(store: Store):
 
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: app._frame >= 1)
         app._last_w = 40
         app._last_footer = "x" * 60
         stale = t("console.stale", n=7)
@@ -187,7 +188,7 @@ async def test_stale_marker_never_clipped(store: Store):
 
         app._safe_update = _capture  # type: ignore[method-assign]
         app._apply_stale(7)
-        await pilot.pause(0.1)
+        await wait_for(pilot, lambda: len(delivered) > 0)
         assert delivered, "stale footer was never delivered to the widget"
         text = delivered[-1]
         # the stale note survives verbatim: its room was reserved, the old footer was clipped
@@ -200,7 +201,7 @@ async def test_safe_update_class_patch_keeps_app_alive(store: Store, monkeypatch
 
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: app._frame >= 1)
         calls: list[int] = []
         orig = Static.update
 
@@ -213,7 +214,7 @@ async def test_safe_update_class_patch_keeps_app_alive(store: Store, monkeypatch
         monkeypatch.setattr(Static, "update", _flaky)
         # first update raises, the single fallback delivers the error text instead
         app._safe_update("#welcome", "welcome", lambda: "hi")
-        await pilot.pause(0.1)
+        await wait_for(pilot, lambda: len(calls) == 2)
         assert len(calls) == 2
         assert app.is_running
         rendered = str(app.query_one("#welcome", Static).render())
@@ -236,7 +237,7 @@ async def test_on_mount_reads_nothing_on_ui_thread(store: Store, monkeypatch):
     monkeypatch.setattr(_Store, "last_event_id", _recording)
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.6)
+        await wait_for(pilot, lambda: bool(calls) and app._need_init is False)
         # the cursor is recorded off the UI thread by the first refresh, never on mount
         assert calls, "expected the worker to record the event cursor"
         assert all(name != ui_thread for name in calls)
@@ -268,7 +269,7 @@ async def test_refresh_does_not_steal_real_focus(store: Store):
     _task(store, "P", "keep me")
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
+        await wait_for(pilot, lambda: app._frame >= 1)
         inp = app.query_one("#input", Input)
         inp.value = "hello /status"
         inp.focus()
@@ -276,7 +277,7 @@ async def test_refresh_does_not_steal_real_focus(store: Store):
         assert app.focused is inp
         snap = con.snapshot(store, app.scope, 80, now_ms())
         app._apply(snap, [])
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: app.query_one("#input", Input).value == "hello /status")
         assert app.query_one("#input", Input).value == "hello /status"
         assert app.focused is app.query_one("#input", Input)
 
@@ -397,11 +398,11 @@ async def test_input_emits_no_background_sgr(store: Store):
 
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test(size=(120, 35)) as pilot:
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: app._frame >= 1 and app.native_ansi_color)
         assert app.native_ansi_color
         inp = app.query_one("#input", Input)
         inp.focus()
-        await pilot.pause(0.1)
+        await wait_for(pilot, lambda: app.focused is inp)
         assert app.focused is inp
         assert inp.styles.background_tint.a == 0
         for comp in ("input--placeholder", "input--suggestion", "input--cursor"):

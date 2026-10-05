@@ -9,6 +9,7 @@ from ahub.store import Store
 from ahub.time import now_ms
 from ahub.tui import console as con
 from ahub.tui.console import ConsoleApp, complete_input
+from tests.conftest import wait_for
 
 
 @pytest.fixture
@@ -33,7 +34,9 @@ def _transcript(app: ConsoleApp) -> str:
 
 
 async def _confirm_name(app: ConsoleApp, pilot, wait: float = 0.3) -> str:
-    await pilot.pause(wait)
+    await wait_for(pilot, lambda: app.screen.__class__.__name__ in ("Confirm", "Ask")
+                   and bool(app.screen.query("#dialog")),
+                   timeout=max(15.0, wait))
     return app.screen.__class__.__name__
 
 
@@ -100,11 +103,11 @@ async def test_accept_calls_function_and_confirms(store: Store, monkeypatch):
     monkeypatch.setattr(con.accept, "accept", _fake)
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
+        await wait_for(pilot, lambda: app._frame >= 1)
         app.run_command(f"/accept T{tid}")
         assert await _confirm_name(app, pilot) == "Confirm"
         await pilot.press("y")
-        await pilot.pause(0.4)
+        await wait_for(pilot, lambda: called.get("tid") == tid)
         assert called.get("tid") == tid
         assert called.get("by") == "human"
         assert "⏺" in _transcript(app)
@@ -123,11 +126,12 @@ async def test_accept_no_cancels_without_call(store: Store, monkeypatch):
     monkeypatch.setattr(con.accept, "accept", _fake)
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
+        await wait_for(pilot, lambda: app._frame >= 1)
         app.run_command(f"/accept T{tid}")
         assert await _confirm_name(app, pilot) == "Confirm"
         await pilot.press("n")
-        await pilot.pause(0.4)
+        await wait_for(pilot, lambda: "cancelled" in _transcript(app).lower()
+                       or "отмен" in _transcript(app).lower())
         assert "yes" not in called
         assert "cancelled" in _transcript(app).lower() or "отмен" in _transcript(app).lower()
 
@@ -152,14 +156,15 @@ async def test_reject_rework_stop_nudge_model_budget(store: Store, monkeypatch):
 
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
+        await wait_for(pilot, lambda: app._frame >= 1)
         for cmd in (f"/reject T{tid} oops", f"/rework T{tid} fix it",
                     f"/stop T{tid}", f"/nudge T{tid} hello",
                     f"/model T{tid} spark", f"/budget T{tid} +0.5"):
+            before = len(app._transcript)
             app.run_command(cmd)
             assert await _confirm_name(app, pilot) == "Confirm", cmd
             await pilot.press("y")
-            await pilot.pause(0.4)
+            await wait_for(pilot, lambda b=before: len(app._transcript) > b)
         assert hits["reject"][0] == tid
         assert hits["rework"] == (tid, "fix it")
         assert hits["stop"] == tid
@@ -178,7 +183,7 @@ async def test_rework_without_notes_asks(store: Store, monkeypatch):
                         lambda s, i, n, **k: hits.setdefault("rework", n) or "reworked")
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
+        await wait_for(pilot, lambda: app._frame >= 1)
         app.run_command(f"/rework T{tid}")
         assert await _confirm_name(app, pilot) == "Ask"
 
@@ -192,7 +197,7 @@ async def test_inbox_questions_alarms_models_providers_projects_cost(store: Stor
     comms.ask(store, "merge?", ["yes", "no"], project="P")
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
+        await wait_for(pilot, lambda: app._frame >= 1)
         app.run_command("/inbox")
         app.run_command("/questions")
         app.run_command("/alarms")
@@ -200,7 +205,7 @@ async def test_inbox_questions_alarms_models_providers_projects_cost(store: Stor
         app.run_command("/providers")
         app.run_command("/projects")
         app.run_command("/cost")
-        await pilot.pause(0.5)
+        await wait_for(pilot, lambda: len(app._transcript) >= 5)
         text = _transcript(app)
         assert len(app._transcript) >= 5
         assert "🚨" in text or "alarm" in text.lower() or "тревог" in text.lower() or "no alarms" in text.lower()
@@ -226,9 +231,9 @@ async def test_draft_plain_text_preview_start_and_cancel(store: Store, monkeypat
     monkeypatch.setattr(con.drafts, "create", lambda s, p, t, **k: did)
     app = ConsoleApp(store=store, project="P")
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
+        await wait_for(pilot, lambda: app._frame >= 1)
         app.run_command("find the leak")
-        await pilot.pause(1.0)
+        await wait_for(pilot, lambda: f"/start {did}" in _transcript(app))
         text = _transcript(app)
         assert "✻" in text  # Drafting… status line
         assert f"/start {did}" in text  # preview + start hint
@@ -236,7 +241,8 @@ async def test_draft_plain_text_preview_start_and_cancel(store: Store, monkeypat
         app.run_command(f"/start {did}")
         assert await _confirm_name(app, pilot) == "Confirm"
         await pilot.press("y")
-        await pilot.pause(0.5)
+        await wait_for(pilot, lambda: "queued" in _transcript(app).lower()
+                       or "очереди" in _transcript(app).lower())
         assert "queued" in _transcript(app).lower() or "очереди" in _transcript(app).lower()
         # cancel path: another ready draft, start → no → cancelled
         task_json2 = _json.dumps({"project": "P", "kind": "scout", "title": "other",
@@ -248,7 +254,7 @@ async def test_draft_plain_text_preview_start_and_cancel(store: Store, monkeypat
         app.run_command(f"/start {did2}")
         assert await _confirm_name(app, pilot) == "Confirm"
         await pilot.press("n")
-        await pilot.pause(0.4)
+        await wait_for(pilot, lambda: drafts.status(store, did2) == "cancelled")
         assert drafts.status(store, did2) == "cancelled"
 
 
@@ -271,19 +277,20 @@ async def test_draft_matches_by_status_code_not_text(store: Store, monkeypatch, 
             (now_ms(), "Q", "x", task_json, drafts.READY)).lastrowid)
     app = ConsoleApp(store=store, project="Q")
     async with app.run_test() as pilot:
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: app._frame >= 1)
         preview = drafts.preview(store, did)
         assert "failed" in preview
         app._offer_draft(proj, did, preview, drafts.status(store, did))
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: f"/start {did}" in _transcript(app))
         assert f"/start {did}" in _transcript(app)
         # a failed draft with the same words shows an error, no start hint
         with store.tx() as c:
             bad = int(c.execute(
                 "INSERT INTO draft(ts, project, text, task_json, status, errors) VALUES(?,?,?,?,?,?)",
                 (now_ms(), "Q", "x", "{}", "failed", "boom")).lastrowid)
+        before = len(app._transcript)
         app._offer_draft(proj, bad, drafts.preview(store, bad), drafts.status(store, bad))
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: len(app._transcript) > before)
         assert f"/start {bad}" not in _transcript(app)
         assert "✗" in _transcript(app)
 
@@ -298,7 +305,7 @@ async def test_tasks_pane_axrm_keys(store: Store, monkeypatch):
     monkeypatch.setattr(con.accept, "accept", lambda s, p, i, **k: "ok")
     app = ConsoleApp(store=store, all_projects=True, control=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.6)
+        await wait_for(pilot, lambda: app.focus_mode == "tasks" and len(app._task_ids) >= 2)
         assert app.focus_mode == "tasks"
         assert len(app._task_ids) >= 2
         app._selected = 0
@@ -309,8 +316,9 @@ async def test_tasks_pane_axrm_keys(store: Store, monkeypatch):
         ev = Mock()
         ev.key = "a"
         app.on_key(ev)
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Confirm"
+                       and bool(app.screen.query("#dialog")))
         assert app.screen.__class__.__name__ == "Confirm"
         await pilot.press("n")
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: first in app._task_ids)
         assert first in app._task_ids
