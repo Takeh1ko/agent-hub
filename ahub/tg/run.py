@@ -199,9 +199,6 @@ def build_dispatcher(store: Store):
     @r.callback_query(F.data.startswith("ans:"))
     async def _ans(call: CallbackQuery) -> None:
         text = await asyncio.to_thread(core.on_answer_button, store, call.data)
-        if call.message is not None:  # answered — a later reply to it is not an answer
-            await asyncio.to_thread(core.forget_question_message, store,
-                                    call.message.chat.id, call.message.message_id)
         await call.message.edit_text(text)
         await call.answer()
 

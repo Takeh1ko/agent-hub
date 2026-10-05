@@ -263,11 +263,6 @@ def take_question_message(store: Store, chat_id: int, msg_id: int) -> int | None
         return None
 
 
-def forget_question_message(store: Store, chat_id: int, msg_id: int) -> None:
-    """Drop the mapping of one bot message (a button answered it — a later reply is not an answer)."""
-    store.meta_del(_qmsg_key(chat_id, msg_id))
-
-
 def forget_question(store: Store, qid: int) -> None:
     """Drop every pending mapping of a question (it was answered — other chats must not re-answer it)."""
     with store.tx() as c:

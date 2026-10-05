@@ -410,7 +410,7 @@ async def test_background_one_pass(store, monkeypatch):
     from ahub.tg import run as tgrun
     core.remember_chat(store, 7)
     comms.say(store, "T12 готова")
-    comms.ask(store, "сливать?", ["да", "нет"])
+    qid = comms.ask(store, "сливать?", ["да", "нет"])
     comms.raise_alarm(store, "opencode лёг", critical=True)
     monkeypatch.setattr(tgrun.launcher, "tick", lambda *a, **kw: "idle")
 
@@ -424,6 +424,7 @@ async def test_background_one_pass(store, monkeypatch):
     texts = [t for _, t, _ in bot.sent]
     assert texts[0] == "T12 готова" and "сливать?" in texts[1] and texts[2].startswith("🚨")
     assert bot.sent[1][2] is not None  # the answer buttons
+    assert core.take_question_message(store, 7, 2) == qid  # background remembered the question message
     assert comms.outbox(store) == [] and core.pending_questions(store) == [] and comms.alarms_for_tg(store) == []
 
 
