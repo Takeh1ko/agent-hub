@@ -25,7 +25,8 @@ def _fake_catalogs() -> dict[str, list[CatalogEntry]]:
         "opencode": [
             CatalogEntry("opencode-go/muse-spark-1.3-contributor", display_name="Muse Spark 1.3 Contributor",
                          vendor="Meta", plan=PlanKind.GO, price_in=0.1, price_out=0.2, price_cache=0.01,
-                         context=1_000_000, reasoning=("low", "high", "xhigh"), status="active"),
+                         context=1_000_000, reasoning=("minimal", "low", "medium", "high", "xhigh"),
+                         status="active"),
             CatalogEntry("opencode/muse-spark-1.3-contributor-free", display_name="Muse Spark 1.3 Free",
                          vendor="Meta", plan=PlanKind.FREE, price_in=0, price_out=0,
                          context=200_000, reasoning=(), status="active"),
@@ -44,6 +45,21 @@ def _fake_catalogs() -> dict[str, list[CatalogEntry]]:
                          plan=PlanKind.SUBSCRIPTION, reasoning=("low", "medium", "high")),
         ],
     }
+
+
+def _fake_buckets():
+    from ahub.providers.base import QuotaBucket
+
+    return [QuotaBucket("Gemini", "5h", 0.87, 0, lambda m: m.startswith("gemini")),
+            QuotaBucket("Gemini", "weekly", 0.31, 0, lambda m: m.startswith("gemini"))]
+
+
+class _FakeProviders:
+    def __init__(self, name="agy"):
+        self._name = name
+
+    def quota(self):
+        return _fake_buckets() if self._name == "agy" else []
 
 
 def test_infer_plan():
@@ -130,12 +146,18 @@ def test_reasoning_text():
     index = _catalog.index_by_id(_fake_catalogs())
     spark = _entry()
     info = index["opencode-go/muse-spark-1.3-contributor"]
-    assert _catalog.reasoning_text(spark, info, index) == "xhigh (low, high)"
+    assert _catalog.reasoning_text(spark, info, index) == "xhigh (minimal–xhigh)"
     free = _entry("spark-free", "opencode", "opencode/muse-spark-1.3-contributor-free", "xhigh")
     assert _catalog.reasoning_text(free, index["opencode/muse-spark-1.3-contributor-free"], index) == "xhigh"
     gemini = _entry("gemini", "agy", "gemini-3.8-flash-high", "")
     # agy siblings with the same base are the choice
-    assert _catalog.reasoning_text(gemini, index["gemini-3.8-flash-high"], index) == "high (low)"
+    assert _catalog.reasoning_text(gemini, index["gemini-3.8-flash-high"], index) == "high (low–high)"
+    deep = _entry("deepseek-flash", "opencode", "opencode-go/deepseek-v4.1-flash", "high")
+    deep_info = CatalogEntry("opencode-go/deepseek-v4.1-flash", plan=PlanKind.GO,
+                             price_in=0.15, price_out=0.6, reasoning=("low", "high", "max"))
+    assert _catalog.reasoning_text(deep, deep_info, {}) == "high (low–max)"
+    assert _catalog.reasoning_text(_entry("m", "opencode", "openrouter/x/test", ""),
+                                    index["openrouter/x/test"], index) == "low–medium"
     unknown = _entry("x", "opencode", "opencode/x", "")
     assert _catalog.reasoning_text(unknown, None, {}) == "—"
 
@@ -151,19 +173,23 @@ def test_price_cells(monkeypatch):
     _en(monkeypatch)
     free = _entry("spark-free", "opencode", "opencode/muse-spark-1.3-contributor-free", "")
     assert _catalog.price_text(free, None) == "free"
-    agy_e = _entry("gemini", "agy", "gemini-3.8-flash-high", "")
-    assert _catalog.price_text(agy_e, _fake_catalogs()["agy"][0], quota_pct=0.31) == "quota 31%"
-    assert _catalog.price_text(agy_e, _fake_catalogs()["agy"][0]) == "subscription"
+    # the catalog cost wins whatever the plan: go-plan rows show $ in / $ out too
     go_e = _entry()
-    assert _catalog.price_text(go_e, _fake_catalogs()["opencode"][0],
-                               go_pct=0.09, go_limit=60.0) == "Go 9% of $60"
+    assert _catalog.price_text(go_e, _fake_catalogs()["opencode"][0]) == "$0.1 / $0.2"
     payg_e = _entry("m", "opencode", "openrouter/x/test", "")
     assert _catalog.price_text(payg_e, _fake_catalogs()["opencode"][2]) == "$2 / $10"
+    # no catalog cost: subscription shows no money, free shows free
+    agy_e = _entry("gemini", "agy", "gemini-3.8-flash-high", "")
+    assert _catalog.price_text(agy_e, _fake_catalogs()["agy"][0]) == "—"
+    assert _catalog.price_text(agy_e, None) == "—"
+    assert _catalog.price_text(go_e, None) == "Go plan"
 
 
 def test_context_and_model_text():
     assert _catalog.context_text(_fake_catalogs()["opencode"][0]) == "1M"
-    assert _catalog.context_text(_fake_catalogs()["opencode"][1]) == "200k"
+    assert _catalog.context_text(_fake_catalogs()["opencode"][1]) == "200K"
+    assert _catalog.context_text(CatalogEntry("m", context=262144)) == "262K"
+    assert _catalog.context_text(CatalogEntry("m", context=1048576)) == "1M"
     assert _catalog.context_text(None) == "—"
     assert _catalog.model_text(_fake_catalogs()["opencode"][0]) == "Muse Spark 1.3 Contributor (Meta)"
     assert _catalog.model_text(_fake_catalogs()["opencode"][0], with_vendor=False) == "Muse Spark 1.3 Contributor"
@@ -174,28 +200,51 @@ def test_build_rows_with_fake_catalogs(monkeypatch):
     _en(monkeypatch)
     monkeypatch.setattr(_catalog, "get_catalogs", lambda refresh=False: _fake_catalogs())
     monkeypatch.setattr(_catalog, "_quota_pct_for", lambda entry, store=None: 0.31)
-    monkeypatch.setattr(_catalog, "_go_numbers", lambda: (0.09, 60.0))
+    monkeypatch.setattr(_catalog, "_go_numbers", lambda: (5.29, 60.0))
     store = Store()
     rows, _extra = _catalog.build_rows(store)
     by_alias = {r.entry.alias: r for r in rows}
-    assert by_alias["spark"].price == "Go 9% of $60"
+    assert by_alias["spark"].price == "$0.1 / $0.2"
     assert by_alias["spark-free"].price == "free"
-    assert by_alias["gemini"].price == "quota 31%"
+    assert by_alias["gemini"].price == "—"
     assert by_alias["spark"].roles  # spark is a role default
     assert by_alias["spark"].model == "Muse Spark 1.3 Contributor (Meta)"
 
 
-def test_models_table_grouped_role_json_narrow(monkeypatch, capsys):
+def test_group_headers_carry_plan_usage(monkeypatch):
+    _en(monkeypatch)
+    monkeypatch.setattr(_catalog, "_go_numbers", lambda: (5.29, 60.0))
+    monkeypatch.setattr("ahub.providers.get", lambda name: _FakeProviders(name))
+    assert _catalog.group_title("opencode") == "opencode · Go plan: $5.29 of $60 this month (9%)"
+    assert _catalog.group_title("agy") == "agy · Gemini quota: 5h 87% · week 31%"
+    monkeypatch.setattr(_catalog, "_go_numbers", lambda: (None, None))
+    monkeypatch.setattr("ahub.providers.get", lambda name: (_ for _ in ()).throw(KeyError(name)))
+    assert _catalog.group_title("opencode") == "opencode"
+    assert _catalog.group_title("codex") == "codex"
+
+
+def test_fake_provider_hidden_unless_enabled(monkeypatch):
+    entries = [_entry("spark"), _entry("fake", "fake", "fake/model", "")]
+    assert [e.alias for e in _catalog.visible_entries(entries)] == ["spark"]
+    monkeypatch.setenv("AHUB_FAKE_PROVIDER", "1")
+    assert [e.alias for e in _catalog.visible_entries(entries)] == ["spark", "fake"]
+
+
+def _wide_catalogs(monkeypatch):
+    """Fake catalogs with costs and full reasoning ranges, as on the owner's machine."""
     _en(monkeypatch)
     monkeypatch.setattr(_catalog, "get_catalogs", lambda refresh=False: _fake_catalogs())
-    monkeypatch.setattr(_catalog, "_quota_pct_for", lambda entry, store=None: 0.31)
-    monkeypatch.setattr(_catalog, "_go_numbers", lambda: (0.09, 60.0))
+    monkeypatch.setattr("ahub.providers.get", lambda name: _FakeProviders(name))
+    monkeypatch.setattr(_catalog, "_go_numbers", lambda: (5.29, 60.0))
+
+
+def test_models_table_grouped_role_json_narrow(monkeypatch, capsys):
+    _wide_catalogs(monkeypatch)
     monkeypatch.setattr("ahub.ui.width", lambda explicit=None: 200)
     assert cli.main(["models"]) == 0
     out = capsys.readouterr().out
     assert "opencode" in out and "agy" in out and "codex" in out  # grouped by provider
-    assert "spark" in out and "Muse Spark" in out and "go-plan" in out
-    assert "quota 31%" in out and "Go 9% of $60" in out
+    assert "spark" in out and "Muse Spark" in out and "Go plan" in out
     # --role: the same columns, only that menu
     assert cli.main(["models", "--role", Role.EXECUTOR.value]) == 0
     out_role = capsys.readouterr().out
@@ -211,9 +260,32 @@ def test_models_table_grouped_role_json_narrow(monkeypatch, capsys):
     monkeypatch.setattr("ahub.ui.width", lambda explicit=None: 60)
     assert cli.main(["models"]) == 0
     narrow = capsys.readouterr().out
-    assert "spark" in narrow and "go-plan" in narrow  # never dropped
+    assert "spark" in narrow and "Go plan" in narrow  # never dropped
     assert "context" not in narrow.lower()  # context column is gone
     assert "Meta" not in narrow  # vendor is gone too
+
+
+def test_models_table_at_140_and_80_columns(monkeypatch, capsys):
+    """At 140 cols nothing is clipped (names, ranges, Go plan); at 80 context/vendor go, alias/plan stay."""
+    _wide_catalogs(monkeypatch)
+    monkeypatch.setattr("ahub.ui.width", lambda explicit=None: 140)
+    assert cli.main(["models"]) == 0
+    out = capsys.readouterr().out
+    assert "opencode · Go plan: $5.29 of $60 this month (9%)" in out
+    assert "agy · Gemini quota: 5h 87% · week 31%" in out
+    assert "Muse Spark 1.3 Contributor (Meta)" in out  # name and vendor unclipped
+    assert "xhigh (minimal–xhigh)" in out
+    assert "$0.1 / $0.2" in out  # the price, whatever the plan
+    assert "Go plan" in out  # human plan labels…
+    assert "go-plan" not in out and "pay-as-you…" not in out \
+        and "Go pla…" not in out and "subscriptio…" not in out  # …never clipped
+    monkeypatch.setattr("ahub.ui.width", lambda explicit=None: 80)
+    assert cli.main(["models"]) == 0
+    narrow = capsys.readouterr().out
+    assert "spark" in narrow and "Go plan" in narrow  # never dropped
+    assert "context" not in narrow.lower()
+    assert "(Meta)" not in narrow and "(Google)" not in narrow  # vendor dropped…
+    assert "Muse Spark" in narrow  # …but the name column stays
 
 
 def test_models_refresh_flag(monkeypatch):
@@ -290,4 +362,4 @@ def test_console_models_same_columns(monkeypatch):
     app._say = lambda lines: said.append(list(lines))
     app.cmd_models([])
     text = "\n".join(said[0])
-    assert "spark" in text and "Muse Spark" in text and "go-plan" in text
+    assert "spark" in text and "Muse Spark" in text and "Go plan" in text

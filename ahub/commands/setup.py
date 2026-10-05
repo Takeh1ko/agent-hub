@@ -483,14 +483,15 @@ def _model_step(store, states, ask: bool, out: Steps) -> dict[str, str]:
 
     off = registry.disabled_providers()
     live = {st.name for st in states if st.found and st.logged_in}
-    entries = [e for e in registry.models(store)
-               if e.enabled and e.provider not in off and e.provider in live]
+    from ahub import catalog as _catalog
+
+    entries = _catalog.visible_entries(
+        [e for e in registry.models(store)
+         if e.enabled and e.provider not in off and e.provider in live])
     with ui.Live(t("setup.probing", n=len(entries)), total=len(entries)) as p:  # probes run at once
         results = doctor.probe_models(entries, timeout_s=doctor.PROBE_WIZARD_S, step=p.step)
     if not results:  # probing off or nothing to probe — the free-alias path knows better
         return _free_default_step(store, ask, out)
-    from ahub import catalog as _catalog
-
     try:
         cat_rows, _extra = _catalog.build_rows(store, entries)
     except (OSError, ValueError, RuntimeError):
@@ -510,7 +511,7 @@ def _model_step(store, states, ask: bool, out: Steps) -> dict[str, str]:
         price_cell = r.price if r is not None else _catalog.plan_label(plan)
         rows.append(["✓" if ok else "✗", entry.alias, model_cell, reasoning_cell,
                      _catalog.plan_label(plan), price_cell, body])
-    out.table(None, rows, max_width=[1, 16, 28, 16, 12, 14, None])
+    out.table(None, rows, max_width=[1, 16, 28, 24, 12, 14, None])
     recommended = doctor.recommend_model(entries, results)
     if not recommended:
         out.line("! " + doctor.probe_none_warning([e.alias for e in entries]))

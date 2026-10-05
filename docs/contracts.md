@@ -147,6 +147,7 @@ ahub prompts | prompts show <role> [--json] | prompts edit <role> [--global|--lo
 ahub service {run,install,status,pause,resume,start,stop} | setup [path] | providers | draft "…" | bot run | mcp
 ahub models [--role R] [--refresh] [--json] | models add … | models role … | models check | models enable|disable <alias>
    (the catalog table, grouped by provider: alias · model + vendor · reasoning · plan · price · context · roles;
+   the provider header carries plan-level usage — Go spend of the month limit, agy quota windows;
    --role — that role's menu with the same columns; it does not lift project bans)
 ```
 `ahub projects` and `ahub cost` are the owner's glance at the whole hub — they do not follow the directory's scope;
@@ -253,7 +254,11 @@ code tasks run in parallel and their acceptance runs wait for the lock one by on
 | codex-fast | codex / gpt-5.6-luna / — | (outside the menu — chosen explicitly; subscription, cheaper/faster) |
 ★ — the default in the role.
 
-Plans (`providers/base.py:PlanKind`, `registry.plan_kind`): free · go-plan (Go month limit) ·
+Plans (`providers/base.py:PlanKind`, `registry.plan_kind`): free · Go plan (Go month limit) ·
 pay-as-you-go (USD) · subscription (quota window). The catalog (`Provider.catalog() → CatalogEntry`:
 model_id, display name, vendor, plan, prices per 1M, context, reasoning levels, status) enriches
-every alias in `ahub models`, `ahub setup`, `ahub providers` and the console's /models.
+every alias in `ahub models`, `ahub setup`, `ahub providers` and the console's /models. The price
+column shows $ in / $ out per 1M whenever the catalog has a cost, whatever the plan (free → "free",
+a subscription without prices → "—"); reasoning is the alias level plus the compact available range
+("xhigh (minimal–xhigh)"), context is rounded ("200K", "1M"). The fake provider shows only with
+`AHUB_FAKE_PROVIDER=1`.

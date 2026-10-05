@@ -259,20 +259,20 @@ PROVIDERS = """\
 name      found  login  enabled
 opencode  ✓      ✓      on
   · bunny — opencode/space-bunny-free · — · free · free
-  · deepseek-flash — opencode-go/deepseek-v4.1-flash · high · go-plan · go-plan
-  · mimo-flash — opencode-go/mimo-v2.6-flash · — · go-plan · go-plan
-  · spark — opencode-go/muse-spark-1.3-contributor · xhigh · go-plan · go-plan
+  · deepseek-flash — opencode-go/deepseek-v4.1-flash · high · Go plan · Go plan
+  · mimo-flash — opencode-go/mimo-v2.6-flash · — · Go plan · Go plan
+  · spark — opencode-go/muse-spark-1.3-contributor · xhigh · Go plan · Go plan
   · spark-free — opencode/muse-spark-1.3-contributor-free · xhigh · free · free
-  · spark-high — opencode-go/muse-spark-1.3-contributor · high · go-plan · go-plan
-  · spark-medium — opencode-go/muse-spark-1.3-contributor · medium · go-plan · go-plan
+  · spark-high — opencode-go/muse-spark-1.3-contributor · high · Go plan · Go plan
+  · spark-medium — opencode-go/muse-spark-1.3-contributor · medium · Go plan · Go plan
   · opencode-go: paid Spark available
 agy       ✓      ✓      on
-  · gemini — gemini-3.8-flash-high · high · subscription · subscription
-  · gemini-low — gemini-3.8-flash-low · low · subscription · subscription
+  · gemini — gemini-3.8-flash-high · high · subscription · —
+  · gemini-low — gemini-3.8-flash-low · low · subscription · —
   · Gemini via Antigravity, window quota (no money)
 codex     ✗      –      on
-  · codex — gpt-5.6-terra · — · subscription · subscription
-  · codex-fast — gpt-5.6-luna · — · subscription · subscription
+  · codex — gpt-5.6-terra · — · subscription · —
+  · codex-fast — gpt-5.6-luna · — · subscription · —
   · uses your ChatGPT plan
   → install codex: npm i -g @openai/codex, then codex login
 """
@@ -285,6 +285,8 @@ def test_providers_table_with_a_note_and_a_hint_under_each_row(capsys, monkeypat
     monkeypatch.setattr("ahub.catalog.get_catalogs", lambda refresh=False: {})
     monkeypatch.setattr("ahub.catalog._quota_pct_for", lambda entry, store=None: None)
     monkeypatch.setattr("ahub.catalog._go_numbers", lambda: (None, None))
+    monkeypatch.setattr("ahub.catalog.go_summary", lambda: "")
+    monkeypatch.setattr("ahub.catalog.quota_summary", lambda provider: "")
     rc, out = run(capsys, "providers")
     assert rc == 0 and out == PROVIDERS
     assert run(capsys, "providers", "disable", "codex") == (0, "codex: off\nNext  ahub status\n")
@@ -295,20 +297,20 @@ MODELS = """\
 opencode
   alias                         model                         reasoning  plan     $ in / $ out  rol…
   bunny                         opencode/space-bunny-free     —          free     free          —
-  deepseek-flash(project-deni…  opencode-go/deepseek-v4.1-f…  high       go-plan  go-plan       —
-  mimo-flash                    opencode-go/mimo-v2.6-flash   —          go-plan  go-plan       —
-  spark                         opencode-go/muse-spark-1.3…   xhigh      go-plan  go-plan       exe…
+  deepseek-flash(project-deni…  opencode-go/deepseek-v4.1-f…  high       Go plan  Go plan       —
+  mimo-flash                    opencode-go/mimo-v2.6-flash   —          Go plan  Go plan       —
+  spark                         opencode-go/muse-spark-1.3…   xhigh      Go plan  Go plan       exe…
   spark-free                    opencode/muse-spark-1.3-con…  xhigh      free     free          —
-  spark-high                    opencode-go/muse-spark-1.3…   high       go-plan  go-plan       obs…
-  spark-medium                  opencode-go/muse-spark-1.3…   medium     go-plan  go-plan       —
+  spark-high                    opencode-go/muse-spark-1.3…   high       Go plan  Go plan       obs…
+  spark-medium                  opencode-go/muse-spark-1.3…   medium     Go plan  Go plan       —
 agy
   alias       model                  reasoning  plan          $ in / $ out  roles
-  gemini      gemini-3.8-flash-high  high       subscription  subscription  —
-  gemini-low  gemini-3.8-flash-low   low        subscription  subscription  —
+  gemini      gemini-3.8-flash-high  high       subscription  —             —
+  gemini-low  gemini-3.8-flash-low   low        subscription  —             —
 codex
   alias       model          reasoning  plan          $ in / $ out  roles
-  codex       gpt-5.6-terra  —          subscription  subscription  —
-  codex-fast  gpt-5.6-luna   —          subscription  subscription  —
+  codex       gpt-5.6-terra  —          subscription  —             —
+  codex-fast  gpt-5.6-luna   —          subscription  —             —
 """
 
 
@@ -319,6 +321,8 @@ def test_models_menus_and_the_full_list(capsys, monkeypatch, tmp_path):
     monkeypatch.setattr("ahub.catalog.get_catalogs", lambda refresh=False: {})
     monkeypatch.setattr("ahub.catalog._quota_pct_for", lambda entry, store=None: None)
     monkeypatch.setattr("ahub.catalog._go_numbers", lambda: (None, None))
+    monkeypatch.setattr("ahub.catalog.go_summary", lambda: "")
+    monkeypatch.setattr("ahub.catalog.quota_summary", lambda provider: "")
     rc, out = run(capsys, "models", "--all")
     assert rc == 0 and out == MODELS
 
