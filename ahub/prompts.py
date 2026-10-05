@@ -116,6 +116,14 @@ def nudge_prompt(text: str) -> str:
     return f"Message from the orchestrator:\n{(text or '').strip()}"
 
 
+def sync_conflict_prompt(project: ProjectConfig) -> str:
+    """One resolve turn after the hub's sync merge hit a conflict (same worker session)."""
+    branch = project.work_branch
+    return (f"Main moved while you worked. Merge `{branch}` into your branch, resolve the conflicts "
+            "keeping both sides, run the tests, commit by name, update `.ahub/result.json` "
+            "(commit = new HEAD).")
+
+
 def code_delivery(task: Task) -> str:
     paths = ", ".join(f"`{p}`" for p in task.limits.get("paths") or [])
     accept = task.limits.get("accept") or []
