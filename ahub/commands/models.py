@@ -63,11 +63,13 @@ def cmd_list(args) -> int:
     store = Store()
     project = _project_or_none(args)
     refresh = bool(getattr(args, "refresh", False))
+    role_refs: list[tuple[str, str, bool]] | None = None
     if getattr(args, "role", None):
         try:
-            wanted = {e.alias for e, _ in registry.menu(store, Role(args.role))}
+            role_refs = registry.menu_efforts(store, Role(args.role))
         except (registry.RegistryError, ValueError):
-            wanted = set()
+            role_refs = []
+        wanted = {alias for alias, _eff, _d in role_refs}
         entries = [e for e in registry.models(store) if e.alias in wanted]
     else:
         entries = registry.models(store)
@@ -101,36 +103,85 @@ def cmd_list(args) -> int:
         })
     for role in ([Role(args.role)] if getattr(args, "role", None) else list(Role)):
         try:
-            items = registry.menu(store, role)
+            refs = registry.menu_efforts(store, role)
         except (OSError, ValueError, RuntimeError):
             continue
-        data["roles"][role.value] = [{"alias": e.alias, "default": d} for e, d in items]
+        data["roles"][role.value] = [{"alias": a, "effort": e, "default": d,
+                                       "ref": registry.model_ref(a, e)} for a, e, d in refs]
     w = ui.width()
     with_vendor, with_context, maxw = _catalog.table_columns(w)
     lines: list[str] = []
-    for prov in _provider_order(entries):
-        group = [by_alias[e.alias] for e in entries if e.provider == prov and e.alias in by_alias]
-        if not group:
-            continue
-        lines.append(ui.section(_catalog.group_title(prov)))
-        head = [t("models.col_alias"), t("models.col_model"), t("models.col_reasoning"),
-                t("models.col_plan"), t("models.col_price")]
-        if with_context:
-            head.append(t("models.col_context"))
-        head.append(t("models.col_roles"))
-        body = []
-        for r in group:
-            alias_cell = r.entry.alias + _tags(r.entry, project)
-            model_cell = _catalog.model_text(r.info, with_vendor=with_vendor, fallback=r.entry.model_id)
-            reasoning_cell = r.reasoning or t("models.no_reasoning")
-            plan_cell = _catalog.plan_label(r.plan)
-            roles_cell = ", ".join(r.roles) if r.roles else t("models.no_roles")
-            row = [alias_cell, model_cell, reasoning_cell, plan_cell, r.price]
+    if role_refs is not None:
+        # --role: that role's menu with the same columns, effort in the alias cell (spark:high)
+        menu_rows: list = []
+        index = extra.get("index", {})
+        for alias, stored, _is_def in role_refs:
+            base_row = by_alias.get(alias)
+            if base_row is None:
+                continue
+            try:
+                base_entry = registry.get(store, alias)
+            except registry.RegistryError:
+                continue
+            eff_entry = registry.effective_entry(base_entry, stored, index)
+            info = base_row.info
+            try:
+                reasoning = _catalog.reasoning_text(eff_entry, info, index)
+            except (OSError, ValueError, RuntimeError, AttributeError):
+                reasoning = base_row.reasoning
+            menu_rows.append((eff_entry, stored, info, base_row, reasoning))
+        by_prov: dict[str, list] = {}
+        for eff_entry, stored, info, base_row, reasoning in menu_rows:
+            by_prov.setdefault(eff_entry.provider, []).append((eff_entry, stored, info, base_row, reasoning))
+        for prov in _catalog.provider_order(list(by_prov)):
+            lines.append(ui.section(_catalog.group_title(prov)))
+            head = [t("models.col_alias"), t("models.col_model"), t("models.col_reasoning"),
+                    t("models.col_plan"), t("models.col_price")]
             if with_context:
-                row.append(r.context)
-            row.append(roles_cell)
-            body.append(row)
-        lines.append(ui.table(head, body, max_width=maxw, indent=2))
+                head.append(t("models.col_context"))
+            head.append(t("models.col_roles"))
+            body = []
+            for eff_entry, stored, info, base_row, reasoning in by_prov[prov]:
+                alias_cell = registry.model_ref(eff_entry.alias, stored) + _tags(eff_entry, project)
+                model_cell = _catalog.model_text(info, with_vendor=with_vendor,
+                                                 fallback=eff_entry.model_id)
+                reasoning_cell = reasoning or t("models.no_reasoning")
+                plan_cell = _catalog.plan_label(base_row.plan)
+                roles_cell = ", ".join(base_row.roles) if base_row.roles else t("models.no_roles")
+                row = [alias_cell, model_cell, reasoning_cell, plan_cell, base_row.price]
+                if with_context:
+                    row.append(base_row.context)
+                row.append(roles_cell)
+                body.append(row)
+            lines.append(ui.table(head, body, max_width=maxw, indent=2))
+        if not lines:
+            lines.append(ui.table(None, [], indent=2))
+    else:
+        for prov in _provider_order(entries):
+            group = [by_alias[e.alias] for e in entries if e.provider == prov and e.alias in by_alias]
+            if not group:
+                continue
+            lines.append(ui.section(_catalog.group_title(prov)))
+            head = [t("models.col_alias"), t("models.col_model"), t("models.col_reasoning"),
+                    t("models.col_plan"), t("models.col_price")]
+            if with_context:
+                head.append(t("models.col_context"))
+            head.append(t("models.col_roles"))
+            body = []
+            for r in group:
+                alias_cell = r.entry.alias + _tags(r.entry, project)
+                model_cell = _catalog.model_text(r.info, with_vendor=with_vendor, fallback=r.entry.model_id)
+                reasoning_cell = r.reasoning or t("models.no_reasoning")
+                plan_cell = _catalog.plan_label(r.plan)
+                roles_cell = ", ".join(r.roles) if r.roles else t("models.no_roles")
+                row = [alias_cell, model_cell, reasoning_cell, plan_cell, r.price]
+                if with_context:
+                    row.append(r.context)
+                row.append(roles_cell)
+                body.append(row)
+            lines.append(ui.table(head, body, max_width=maxw, indent=2))
+        if not lines:
+            lines.append(ui.table(None, [], indent=2))
     if not lines:
         lines.append(ui.table(None, [], indent=2))
     bad = _config_error()
@@ -158,8 +209,16 @@ def cmd_role(args) -> int:
     from ahub.i18n import t
 
     store = Store()
+    notices: list[str] = []
+    for ref in [args.add, args.remove, args.default_to]:
+        if ref:
+            note = registry.legacy_notice(ref)
+            if note and note not in notices:
+                notices.append(note)
     try:
         if args.add:
+            alias_part, effort_part = registry.split_ref(args.add)
+            _base, stored, _notice = registry.map_legacy(alias_part, effort_part)
             registry.add_to_role(store, args.role, args.add, default=args.default)
         elif args.remove:
             registry.remove_from_role(store, args.role, args.remove)
@@ -170,23 +229,38 @@ def cmd_role(args) -> int:
     except registry.RegistryError as e:
         raise CliError(str(e), hint=t("hint.models_role", role=args.role, alias=args.add or args.default_to
                                                     or args.remove or "")) from e
-    items = registry.menu(store, args.role)
-    default = next((e.alias for e, d in items if d), "")
-    emit(args, {"role": args.role, "menu": [{"alias": e.alias, "default": d} for e, d in items]},
-         ui.kv([(args.role, [default or t("models.no_default"), ", ".join(e.alias for e, d in items if not d)])],
-               indent=2))
+    try:
+        refs = registry.menu_efforts(store, args.role)
+    except (OSError, ValueError, RuntimeError):
+        refs = []
+    default = next((registry.model_ref(a, e) for a, e, d in refs if d), "")
+    others = ", ".join(registry.model_ref(a, e) for a, e, d in refs if not d)
+    menu_json = [{"alias": a, "effort": e, "ref": registry.model_ref(a, e), "default": d}
+                 for a, e, d in refs]
+    text = ui.kv([(args.role, [default or t("models.no_default"), others])], indent=2)
+    if notices and not getattr(args, "json", False):
+        text = "\n".join(notices) + "\n" + text
+    data: dict = {"role": args.role, "menu": menu_json}
+    if notices:
+        data["notice"] = "; ".join(notices)
+    emit(args, data, text)
     return 0
 
 
 def _role_defaults(store) -> list[str]:
-    """The default alias of every role menu, in role order, without repeats."""
+    """Default refs (ALIAS[:EFFORT]) of every role menu, in role order, without repeats."""
     out: list[str] = []
     for role in Role:
         try:
-            items = registry.menu(store, role)
+            refs = registry.menu_efforts(store, role)
         except Exception:
             continue
-        out += [e.alias for e, d in items if d and e.alias not in out]
+        for alias, effort, is_def in refs:
+            if not is_def:
+                continue
+            ref = registry.model_ref(alias, effort)
+            if ref not in out:
+                out.append(ref)
     return out
 
 

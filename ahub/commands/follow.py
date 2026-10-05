@@ -69,7 +69,10 @@ def cmd_follow(args) -> int:
 
     out = sys.stdout
     writer = transcript.Writer(out, full=args.full, color=out.isatty())
-    out.write(_t("follow.session", label=t.label, role=session.role, model=session.model,
+    from ahub import registry as _reg
+
+    sref = _reg.model_ref(session.model or "", getattr(session, "effort", "") or "")
+    out.write(_t("follow.session", label=t.label, role=session.role, model=sref or "—",
                  round=session.round, sid=session.external_id or "—") + "\n")
     out.write(transcript.dim(_t("follow.log", path=session.log_path), out.isatty()) + "\n")
     reader = transcript.Reader(provider, log)
