@@ -289,14 +289,19 @@ def alert_text(store: Store, sc: scope.Scope | None, width: int) -> str:
     line = _t("console.alerts", alarms=len(alarms), questions=len(questions), latest=tail_latest)
     if ui.plain_len(line) <= avail:
         return ui.styled(line, "dim")
-    compact = f"🚨{len(alarms)} · ❓{len(questions)} — {tail_latest}"
-    # the em-dash tail is the part that stays: shrink the head, never the tail
-    if "—" in compact:
-        head, tail = compact.split("—", 1)
+    # compact: shrink the counts, keep the localized "— latest: …" tail verbatim
+    if "—" in line:
+        _, tail = line.split("—", 1)
         tail = "—" + tail
+    else:
+        tail = f"— {tail_latest}"
+    head = f"🚨{len(alarms)} · ❓{len(questions)}"
+    compact = f"{head} {tail}"
+    # the em-dash tail is the part that stays: shrink the head, never the tail
+    if ui.plain_len(compact) > avail:
         head_budget = max(4, avail - ui.plain_len(tail) - 1)
         head = ui.clip_width(head.strip(), head_budget)
-        compact = f"{head} {tail}" if head else tail.strip()
+        compact = f"{head} {tail}" if head and head != "…" else tail
     return ui.styled(ui.clip_width(compact, avail), "dim")
 
 

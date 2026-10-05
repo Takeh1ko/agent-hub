@@ -158,47 +158,87 @@ def test_alert_keeps_latest_at_40_cols(store: Store):
     line = con.alert_text(store, scope.Scope(("P",)), 40)
     assert ui.plain_len(line) <= 38
     assert "—" in line
+    assert "latest:" in line  # compact keeps the localized "— latest: …" label, not just the dash
     assert "opencode" in line or "…" in line
 
 
-def test_stale_marker_never_clipped(store: Store):
-    app = ConsoleApp(store=store, all_projects=True)
-    app._last_w = 40
-    app._last_footer = "x" * 60
-    app._apply_stale(7)
-    # reserved room: the marker survives even when the old footer is long
+async def test_stale_marker_never_clipped(store: Store):
     from ahub.i18n import t
 
-    assert t("console.stale", n=7) in app._last_footer or True  # _apply_stale writes via widget
-    # pure part: footer_text + stale fits by construction
-    avail = 38
-    stale = t("console.stale", n=7)
-    need = ui.plain_len(stale) + 3
-    kept = ui.clip_width(app._last_footer, max(4, avail - need))
-    assert ui.plain_len(f"{kept} · {stale}") <= avail
-
-
-def test_safe_update_class_patch_keeps_app_alive(store: Store, monkeypatch):
-    from textual.widgets import Static
-
-    app = ConsoleApp(store=store, all_projects=True)
-    monkeypatch.setattr(Static, "update", lambda self, *a, **k: (_ for _ in ()).throw(ValueError("boom")))
-    # one fallback path that cannot raise: patching the class still leaves the app alive
-    app._safe_update("#welcome", "welcome", lambda: "hi")
-
-
-async def test_on_mount_reads_nothing_on_ui_thread(store: Store, monkeypatch):
-    from ahub.store import Store as _Store
-
-    def _boom(self):
-        raise AssertionError("store read on the UI thread")
-
-    monkeypatch.setattr(_Store, "last_event_id", _boom)
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test() as pilot:
         await pilot.pause(0.3)
-        # on_mount set no cursor synchronously; the worker records it later (caught above)
-        assert app._need_init in (True, False)
+        app._last_w = 40
+        app._last_footer = "x" * 60
+        stale = t("console.stale", n=7)
+        avail = 38
+        # capture what _apply_stale delivers to the footer widget
+        delivered: list[str] = []
+        orig = app._safe_update
+
+        def _capture(selector: str, widget_name: str, get_text, display: bool = True) -> None:
+            try:
+                delivered.append(get_text())
+            except Exception as e:
+                delivered.append(t("console.widget_error", widget=widget_name, hint=str(e)[:100]))
+            return orig(selector, widget_name, get_text, display=display)
+
+        app._safe_update = _capture  # type: ignore[method-assign]
+        app._apply_stale(7)
+        await pilot.pause(0.1)
+        assert delivered, "stale footer was never delivered to the widget"
+        text = delivered[-1]
+        # the stale note survives verbatim: its room was reserved, the old footer was clipped
+        assert stale in text
+        assert ui.plain_len(text) <= avail
+
+
+async def test_safe_update_class_patch_keeps_app_alive(store: Store, monkeypatch):
+    from textual.widgets import Static
+
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        calls: list[int] = []
+        orig = Static.update
+
+        def _flaky(self, *a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ValueError("boom")
+            return orig(self, *a, **k)
+
+        monkeypatch.setattr(Static, "update", _flaky)
+        # first update raises, the single fallback delivers the error text instead
+        app._safe_update("#welcome", "welcome", lambda: "hi")
+        await pilot.pause(0.1)
+        assert len(calls) == 2
+        assert app.is_running
+        rendered = str(app.query_one("#welcome", Static).render())
+        assert "✗ welcome:" in rendered
+
+
+async def test_on_mount_reads_nothing_on_ui_thread(store: Store, monkeypatch):
+    import threading
+
+    from ahub.store import Store as _Store
+
+    ui_thread = threading.current_thread().name
+    calls: list[str] = []
+    orig = _Store.last_event_id
+
+    def _recording(self):
+        calls.append(threading.current_thread().name)
+        return orig(self)
+
+    monkeypatch.setattr(_Store, "last_event_id", _recording)
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.6)
+        # the cursor is recorded off the UI thread by the first refresh, never on mount
+        assert calls, "expected the worker to record the event cursor"
+        assert all(name != ui_thread for name in calls)
+        assert app._need_init is False
         assert app.is_running
 
 
