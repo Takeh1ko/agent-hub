@@ -179,6 +179,8 @@ def test_quality_bar_in_builtin_worker_layer(tmp_path, monkeypatch):
         assert "dead code" in text
         assert "except Exception" in text
         assert "fails without it" in text
+        assert "linter, if it has one" in text
+        assert "ruff" not in text
         assert "No new dependencies" in text
 
     # Scout prompt does not carry the Quality bar
@@ -228,8 +230,8 @@ def test_reviewer_checks_quality_bar(tmp_path, monkeypatch):
 
 
 def test_assembly_order_and_headings(tmp_path, monkeypatch):
-    """Layers assemble in exact order: global all, project all, local all, then role global, project, local,
-    under their respective headings, followed by task spec and built-in hub layer LAST."""
+    """Layers assemble in scope-major order: global all, global role, project all, project role,
+    local all, local role, under their scope headings, followed by task spec and built-in hub layer LAST."""
     monkeypatch.setenv("AHUB_LANG", "en")
     from ahub import paths, prompts
     from ahub.store import Store
