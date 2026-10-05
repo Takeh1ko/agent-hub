@@ -762,18 +762,17 @@ async def test_a_reply_to_a_question_forgets_its_key(store, monkeypatch):
         async def answer(self, text: str, **_kw) -> None:
             self.answers.append(text)
 
-    monkeypatch.setattr(tgrun, "_QMSG", {})
     qid = comms.ask(store, "сливать?", ["да", "нет"])
-    tgrun._QMSG[(7, 1)] = qid
+    core.remember_question_message(store, 7, 1, qid)
     msg = FakeMsg(7, "да", reply_to=1)
     await handler(msg)
     assert msg.answers and comms.question(store, qid)["status"] == "answered"
-    assert tgrun._QMSG == {}  # the entry is gone with the answer
+    assert core.take_question_message(store, 7, 1) is None  # the entry is gone with the answer
 
-    # a plain message in the same chat is not an answer — the map stays empty
+    # a plain message in the same chat is not an answer — nothing is remembered
     plain = FakeMsg(7, "просто текст")
     await handler(plain)
-    assert tgrun._QMSG == {}
+    assert core.take_question_message(store, 7, 1) is None
 
 
 async def test_the_bot_writes_no_heartbeat_of_its_own(store, monkeypatch):
@@ -909,4 +908,102 @@ def test_alarms_for_tg_filters_non_alarms_and_sent_in_sql(store):
     # Mark them sent: nothing due
     comms.mark_tg_sent(store, [e.id for e in due_later], now=t0 + comms.ESCALATE_MS + 1)
     assert comms.alarms_for_tg(store, now=t0 + comms.ESCALATE_MS + 1) == []
+
+
+async def test_startup_fingerprint_failure_keeps_loop(store, monkeypatch, caplog):
+    """An OSError in the startup fingerprint must not kill background(): log once, retry on the next tick."""
+    import asyncio
+    import logging
+
+    from ahub import selfupdate
+    from ahub.tg import run as tgrun
+
+    core.remember_chat(store, 7)
+    comms.say(store, "hello")
+    monkeypatch.setattr(tgrun.launcher, "tick", lambda *a, **kw: "idle")
+    monkeypatch.setattr(selfupdate, "CODE_CHECK_S", 3600.0)
+    calls = []
+
+    def fp():
+        calls.append(1)
+        raise OSError("disk busy")
+
+    monkeypatch.setattr(selfupdate, "code_fingerprint", fp)
+    sleeps = []
+
+    async def sleep(_s):
+        sleeps.append(1)
+        if len(sleeps) >= 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(tgrun.asyncio, "sleep", sleep)
+    bot = FakeBot()
+    with caplog.at_level(logging.ERROR, logger="ahub.tg"):
+        with pytest.raises(asyncio.CancelledError):
+            await tgrun.background(bot, store)
+    assert [t for _, t, _ in bot.sent] == ["hello"]  # the pass ran despite the fingerprint failure
+    assert len(calls) == 3  # retried on every tick
+    assert len([r for r in caplog.records if "code fingerprint failed" in r.getMessage()]) == 1
+
+
+def test_nodir_report_survives_reexec(store, tmp_path, caplog):
+    """No in-memory dict: the second tick (a re-exec on the same store) does not re-announce."""
+    a, _b = two_projects(tmp_path)
+    comms.owner_message(store, "по Z: в никуда", project="Z")
+    sp = Spawner()
+    try:
+        with caplog.at_level("WARNING", logger="ahub.launcher"):
+            assert launcher.tick(store, projects=[a], spawn=sp, binary="claude") == "nodir:Z"
+            # a new process, same store — the announcement is not repeated
+            assert launcher.tick(store, projects=[a], spawn=sp, binary="claude") == "idle"
+        assert [r.message for r in caplog.records] == [
+            "cannot launch Claude: no directory for project Z — no such project in the hub config"]
+    finally:
+        for p in sp.procs:
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+
+async def test_question_reply_survives_reexec(store):
+    """The (chat, bot_msg_id) → qid mapping lives in meta: a reply after a re-exec still answers."""
+    from types import SimpleNamespace
+
+    from ahub.tg import run as tgrun
+
+    core.remember_chat(store, 7)
+    qid = comms.ask(store, "сливать?", ["да", "нет"])
+    # what background() does when it sends the question: remember the bot message id in the store
+    core.remember_question_message(store, 7, 41, qid)
+    core.mark_question_sent(store, qid)
+
+    # a re-exec: no process memory survives, only the store — a new dispatcher on the same store
+    dp = tgrun.build_dispatcher(store)
+    handler = next(h.callback for h in dp.sub_routers[0].message.handlers if h.callback.__name__ == "_text")
+
+    class FakeMsg:
+        def __init__(self, chat_id: int, text: str, reply_to: int | None = None) -> None:
+            self.chat = SimpleNamespace(id=chat_id)
+            self.text = text
+            self.reply_to_message = SimpleNamespace(message_id=reply_to) if reply_to else None
+            self.answers: list[str] = []
+
+        async def answer(self, text: str, **_kw) -> None:
+            self.answers.append(text)
+
+    msg = FakeMsg(7, "да", reply_to=41)
+    await handler(msg)
+    assert msg.answers and comms.question(store, qid)["status"] == "answered"
+    assert core.take_question_message(store, 7, 41) is None
+
+
+def test_answered_question_forgets_other_chats_mappings(store):
+    """One answer closes the question for every chat: no stale mapping survives a re-exec."""
+    qid = comms.ask(store, "сливать?", ["да", "нет"])
+    core.remember_question_message(store, 7, 1, qid)
+    core.remember_question_message(store, 8, 2, qid)
+    assert "передал" in core.on_answer_button(store, f"ans:{qid}:1")
+    assert core.take_question_message(store, 7, 1) is None
+    assert core.take_question_message(store, 8, 2) is None
 
