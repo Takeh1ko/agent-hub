@@ -45,7 +45,11 @@ def ensure_model(store: Store, alias: str, provider: str = "fake", model_id: str
     try:
         registry.add_model(store, alias, provider, model_id or alias)
     except registry.RegistryError:
-        pass
+        # A seeded alias (e.g. bunny → opencode) stays on its provider after a failed add:
+        # point it at the fake one, or the test runs a real session (slow, flaky, network).
+        with store.tx() as c:
+            c.execute("UPDATE model SET provider=?, model_id=? WHERE alias=?",
+                      (provider, model_id or alias, alias))
 
 
 def set_hub_quota(cfg_text: str) -> None:
@@ -477,6 +481,9 @@ def test_reviewer_quota_below_threshold_with_fallback(store, tmp_path, monkeypat
     ])
     ensure_model(store, "gemini-flash", "fake", "gemini-flash")
     ensure_model(store, "bunny", "fake", "bunny")
+    # The fallback must resolve to the fake provider (a seeded bunny → opencode
+    # would run a real session here: ~25 s and network in a unit test).
+    assert registry.get(store, "bunny").provider == "fake"
 
     set_hub_quota('[quota]\nfallback_reviewer = "bunny"\n')
 
@@ -494,6 +501,7 @@ def test_reviewer_quota_below_threshold_with_fallback(store, tmp_path, monkeypat
     settled = eng.run()
 
     assert settled.state is State.DONE
+    assert fake.calls, "the reviewer turn ran on the fake provider, not a real one"
     events = store.events(task_id=t.id)
     model_ev = next((e for e in events if e.kind == Ev.MODEL_CHANGED.value), None)
     assert model_ev is not None
