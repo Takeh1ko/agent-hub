@@ -21,7 +21,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ahub.i18n import t as _t
@@ -45,6 +45,7 @@ class Check:
     ok: bool | None
     detail: str = ""
     fix: str = ""
+    buckets: list[dict] = field(default_factory=list)
 
 
 def _fail(name: str, err: Exception) -> Check:
@@ -247,8 +248,20 @@ def check_agy() -> Check:
     if h.ok:
         ver = str(h.details.get("version", "")).strip()[:40]
         suffix = _t("doctor.health_version", version=ver) if ver else ""
-        return Check("agy", True, _t("doctor.agy_found", binary=binary) + suffix
-                     + provider_proxy_detail("agy"), "")
+        detail = _t("doctor.agy_found", binary=binary) + suffix + provider_proxy_detail("agy")
+        buckets = []
+        try:
+            prov = providers.get("agy")
+            if hasattr(prov, "quota"):
+                buckets = prov.quota()
+        except KeyError:
+            pass
+        if buckets:
+            from ahub import quota
+            groups = sorted(list({b.group for b in buckets}))
+            lines = [quota.format_bucket_group(g, buckets) for g in groups]
+            detail += "\n" + "\n".join(lines)
+        return Check("agy", True, detail, "", buckets=[b.to_dict() for b in buckets])
     problems = "; ".join(h.problems)[:500]
     fix = _t("doctor.agy_fix_login") if not agy_state_file().is_file() else ""
     return Check("agy", False, _t("doctor.health_bad", problems=problems), fix)

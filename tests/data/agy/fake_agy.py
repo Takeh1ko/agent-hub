@@ -25,6 +25,9 @@ def main(argv: list[str]) -> int:
     if "models" in argv:
         sys.stdout.write(sample("models.txt"))
         return 0
+    if "-p" in argv and "/usage" in argv:
+        sys.stdout.write(sample("usage.json"))
+        return 0
     if "--json-schema" in argv:
         sys.stdout.write(sample("structured.ndjson"))
         return 0

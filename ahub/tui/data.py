@@ -8,6 +8,7 @@ transcript screen is ahub/tui/live.py.
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass, field
 
 from ahub import archive, comms, config, cost, events, pulse, reasons, ui, views
@@ -121,6 +122,17 @@ def header(store: Store, now: int, *, go_limit: float | None | object = _UNSET,
         parts.append(_t("tui.paused"))
     if alarms:
         parts.append(_t("tui.alarms", n=alarms))
+    try:
+        from ahub import quota
+        for t in store.list_tasks(states=ACTIVE):
+            if quota.is_gemini_task(store, t):
+                _prov, buckets = quota.get_model_buckets(store, t.executor or "gemini-flash")
+                b_5h = next((b for b in buckets if b.group == "Gemini" and b.window == "5h"), None)
+                if b_5h:
+                    parts.append(quota.format_5h_line(b_5h))
+                    break
+    except (sqlite3.Error, KeyError, ValueError, OSError):
+        pass
     return " · ".join(parts) + "\n" + money
 
 

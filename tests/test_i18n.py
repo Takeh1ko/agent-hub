@@ -286,7 +286,6 @@ def test_step6_engine_gates_en(monkeypatch, tmp_path):
 
     from ahub import config, gates, reasons
     from ahub.engine import Engine
-    from ahub.model import State
     from ahub.providers.base import Outcome, RunResult
     from ahub.store import Store
 
@@ -296,8 +295,9 @@ def test_step6_engine_gates_en(monkeypatch, tmp_path):
     store = Store()
     project = config.parse_project({"schema_version": 2, "name": "P"}, str(tmp_path))
     eng = Engine(store, project, 999)
-    st, reason = eng._outcome_to_state(RunResult(Outcome.QUOTA, None, error="boom"))
-    assert st is State.NEEDS_DECISION and reason == '{"code":"quota","err":"boom"}'
+    from ahub import quota as quota_mod
+    reason, _event = quota_mod.describe_error("T1", [], "boom")  # no windows: the provider error itself
+    assert reason == '{"code":"quota","err":"boom"}'
     assert reasons.text(reason) == "provider quota: boom"
     st, reason = eng._outcome_to_state(RunResult(Outcome.TIMEOUT, None, error="60"))
     assert "task time limit" in reasons.text(reason)

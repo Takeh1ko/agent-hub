@@ -578,7 +578,7 @@ def test_cli_codes_and_json(capsys, monkeypatch):
     assert isinstance(data["checks"], list) and len(data["checks"]) == 14
     assert secret not in out
     for c in data["checks"]:
-        assert set(c) == {"name", "ok", "detail", "fix"}
+        assert set(c) == {"name", "ok", "detail", "fix", "buckets"}
         assert c["ok"] in (True, False, None)
     # forced all-ok -> exit 0, one fail -> exit 1 with marks and fix arrow
     monkeypatch.setattr(doctor, "run_all",

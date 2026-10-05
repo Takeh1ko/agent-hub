@@ -272,6 +272,8 @@ codex     ✗      –      on
 
 def test_providers_table_with_a_note_and_a_hint_under_each_row(capsys, monkeypatch):
     monkeypatch.setattr(doctor, "provider_states", lambda *a, **k: _provider_states())
+    # quota windows come from the live machine — the snapshot pins the layout, not the numbers
+    monkeypatch.setattr("ahub.providers.agy.AgyProvider.quota", lambda self, force=False: [])
     rc, out = run(capsys, "providers")
     assert rc == 0 and out == PROVIDERS
     assert run(capsys, "providers", "disable", "codex") == (0, "codex: off\nNext  ahub status\n")
@@ -424,7 +426,8 @@ def test_the_json_shape_did_not_change(capsys, monkeypatch):
     monkeypatch.setattr(doctor, "run_all", lambda *a, **k: CHECKS)
     assert run(capsys, "--json", "doctor")[0] == 1
     data = json.loads(run(capsys, "--json", "doctor")[1])
-    assert len(data["checks"]) == len(CHECKS) and set(data["checks"][0]) == {"name", "ok", "detail", "fix"}
+    assert len(data["checks"]) == len(CHECKS) and set(data["checks"][0]) == {"name", "ok", "detail", "fix",
+                                                                             "buckets"}
     assert run(capsys, "--json", "models", "--role", "executor")[0] == 0
     data = json.loads(run(capsys, "--json", "models", "--role", "executor")[1])
     assert data["roles"]["executor"][0] == {"alias": "spark", "default": True}

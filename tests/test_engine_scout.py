@@ -128,7 +128,7 @@ def test_silence_twice(store, project):
     assert res.state is State.NEEDS_DECISION and "молчал дважды" in res.reason
 
 
-@pytest.mark.parametrize("msg,state", [("invalid tool call", State.ERROR), ("quota exceeded", State.NEEDS_DECISION),
+@pytest.mark.parametrize("msg,state", [("invalid tool call", State.ERROR), ("quota exceeded", State.QUEUED),
                                        ("401 Unauthorized", State.ERROR)])
 def test_error_outcomes(store, project, msg, state):
     install_fake(store, [{"session": "s", "steps": [{"event": {"type": "error", "message": msg}}], "exit": 1}])

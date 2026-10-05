@@ -1,0 +1,45 @@
+{
+  "command": {
+    "name": "usage",
+    "data": {
+      "groups": [
+        {
+          "name": "Gemini Models",
+          "description": "Models within this group: Gemini Flash, Gemini Pro",
+          "buckets": [
+            {
+              "id": "gemini-weekly",
+              "window": "weekly",
+              "remaining_fraction": 0.60,
+              "reset_time": "2026-10-08T11:39:48Z"
+            },
+            {
+              "id": "gemini-5h",
+              "window": "5h",
+              "remaining_fraction": 0.29,
+              "reset_time": "2026-10-04T17:16:00Z"
+            }
+          ]
+        },
+        {
+          "name": "Claude and GPT models",
+          "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+          "buckets": [
+            {
+              "id": "3p-weekly",
+              "window": "weekly",
+              "remaining_fraction": 0.43,
+              "reset_time": "2026-10-11T14:17:38Z"
+            },
+            {
+              "id": "3p-5h",
+              "window": "5h",
+              "remaining_fraction": 0.0,
+              "reset_time": "2026-10-04T19:17:38Z"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
