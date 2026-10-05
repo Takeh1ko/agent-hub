@@ -445,6 +445,7 @@ MESSAGES: dict[str, str] = {
     "reason.gates_failed": "gates still failing after the fix: {problems}",
     "reason.gates_passed": "gates passed",
     "reason.gates_passed_tests": "gates passed, acceptance is green",
+    "reason.hub_locked": "hub database is busy — back in the queue",
     "reason.lease_lost": "lease lost",
     "reason.merge_conflict": "merge conflict: {files}",
     "reason.merged": "merged into {branch}{note}",

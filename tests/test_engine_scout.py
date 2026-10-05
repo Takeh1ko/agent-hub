@@ -236,3 +236,41 @@ def test_scout_report_that_disappears_after_the_check(store, project, monkeypatc
     res = run(store, project, t.id)
     assert res.state is State.NEEDS_DECISION
     assert "нет .ahub/report.md" in res.reason
+
+
+def test_lock_error_requeues_same_session(store, project, monkeypatch):
+    """A lock that survives the store retries → QUEUED (same session), never ERROR."""
+    import sqlite3
+
+    from ahub import reasons, transitions
+
+    install_fake(store, [scout_ok("ses_lock")])
+    t = new_scout(store, project)
+    transitions.move(store, t.id, State.PREPARING)
+    transitions.move(store, t.id, State.WORKING)
+
+    def _boom(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Engine, "_run", _boom)
+    res = run(store, project, t.id)
+    assert res.state is State.QUEUED
+    assert reasons.load(store.get_task(t.id).state_reason).get("code") == "hub_locked"
+    assert store.get_task(t.id).state is State.QUEUED
+    assert "fresh_session" not in (store.get_task(t.id).limits or {})
+
+
+def test_non_lock_error_is_still_error(store, project, monkeypatch):
+    from ahub import transitions
+
+    install_fake(store, [scout_ok()])
+    t = new_scout(store, project)
+    transitions.move(store, t.id, State.PREPARING)
+    transitions.move(store, t.id, State.WORKING)
+
+    def _boom(self):
+        raise RuntimeError("валится")
+
+    monkeypatch.setattr(Engine, "_run", _boom)
+    res = run(store, project, t.id)
+    assert res.state is State.ERROR and "hub failure" in store.get_task(t.id).state_reason

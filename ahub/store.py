@@ -12,7 +12,9 @@ Rules:
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
@@ -26,6 +28,24 @@ from ahub.time import now_ms
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 BUSY_TIMEOUT_MS = 15_000
+LOCK_RETRY_BUDGET_S = 30.0  # app-level wait for the write lock on top of busy_timeout
+LOCK_RETRY_BASE_S = 0.02  # first back-off, doubled every attempt
+LOCK_RETRY_CAP_S = 1.0  # one pause is never longer than this
+_LOCK_MSGS = ("database is locked", "database is busy")
+
+
+def is_lock_error(e: BaseException) -> bool:
+    """A SQLite lock contention: retry it, never fail a task on it."""
+    if not isinstance(e, sqlite3.OperationalError):
+        return False
+    msg = str(e).lower()
+    return any(m in msg for m in _LOCK_MSGS)
+
+
+def _lock_pause(attempt: int) -> None:
+    """Short jittered back-off between lock retries."""
+    delay = min(LOCK_RETRY_CAP_S, LOCK_RETRY_BASE_S * (2**attempt))
+    time.sleep(delay + random.uniform(0, delay * 0.5))
 
 
 def _dumps(obj: Any) -> str:
@@ -181,7 +201,18 @@ class Store:
 
     @contextmanager
     def read(self) -> Iterator[sqlite3.Connection]:
-        con = self._open()
+        # Reads never take the write lock: no BEGIN, plain autocommit SELECTs.
+        deadline = time.monotonic() + LOCK_RETRY_BUDGET_S
+        attempt = 0
+        while True:
+            try:
+                con = self._open()
+                break
+            except sqlite3.OperationalError as e:
+                if not is_lock_error(e) or time.monotonic() >= deadline:
+                    raise
+                _lock_pause(attempt)
+                attempt += 1
         try:
             yield con
         finally:
@@ -189,41 +220,79 @@ class Store:
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
-        """Write transaction: BEGIN IMMEDIATE … COMMIT, ROLLBACK on exception."""
-        con = self._open()
+        """Write transaction: BEGIN IMMEDIATE … COMMIT, ROLLBACK on exception.
+
+        BEGIN and COMMIT retry a lock error with back-off up to LOCK_RETRY_BUDGET_S;
+        any other error (and a lock that outlived the budget) raises at once.
+        """
+        deadline = time.monotonic() + LOCK_RETRY_BUDGET_S
+        attempt = 0
+        while True:
+            try:
+                con = self._open()
+                break
+            except sqlite3.OperationalError as e:
+                if not is_lock_error(e) or time.monotonic() >= deadline:
+                    raise
+                _lock_pause(attempt)
+                attempt += 1
         try:
-            con.execute("BEGIN IMMEDIATE")
+            while True:
+                try:
+                    con.execute("BEGIN IMMEDIATE")
+                    break
+                except sqlite3.OperationalError as e:
+                    if not is_lock_error(e) or time.monotonic() >= deadline:
+                        raise
+                    _lock_pause(attempt)
+                    attempt += 1
             try:
                 yield con
             except BaseException:
-                con.execute("ROLLBACK")
+                try:
+                    con.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
                 raise
-            con.execute("COMMIT")
+            while True:
+                try:
+                    con.execute("COMMIT")
+                    break
+                except sqlite3.OperationalError as e:
+                    if not is_lock_error(e) or time.monotonic() >= deadline:
+                        try:
+                            con.execute("ROLLBACK")
+                        except sqlite3.Error:
+                            pass
+                        raise
+                    _lock_pause(attempt)
+                    attempt += 1
         finally:
             con.close()
 
     def _migrate(self) -> None:
-        con = self._open()
+        # No write lock for the common case: read the version first, take
+        # BEGIN IMMEDIATE only when a migration follows; files are read before it.
+        files = sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql"))
+        probe = self._open()
         try:
-            con.execute("PRAGMA journal_mode=WAL")
-            files = sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql"))
-            con.execute("BEGIN IMMEDIATE")
-            try:
-                current = con.execute("PRAGMA user_version").fetchone()[0]
-                for f in files:
-                    num = int(f.name[:3])
-                    if num <= current:
-                        continue
-                    for stmt in _split_sql(f.read_text(encoding="utf-8")):
-                        con.execute(stmt)
-                    con.execute(f"PRAGMA user_version={num}")
-                    current = num
-            except BaseException:
-                con.execute("ROLLBACK")
-                raise
-            con.execute("COMMIT")
+            probe.execute("PRAGMA journal_mode=WAL")
+            current = probe.execute("PRAGMA user_version").fetchone()[0]
         finally:
-            con.close()
+            probe.close()
+        pending = [(int(f.name[:3]), f) for f in files if int(f.name[:3]) > current]
+        if not pending:
+            return
+        stmts = [(num, _split_sql(f.read_text(encoding="utf-8"))) for num, f in pending]
+        with self.tx() as con:
+            # Another process may have migrated meanwhile — re-check under the lock.
+            applied = con.execute("PRAGMA user_version").fetchone()[0]
+            for num, batch in stmts:
+                if num <= applied:
+                    continue
+                for stmt in batch:
+                    con.execute(stmt)
+                con.execute(f"PRAGMA user_version={num}")
 
     def schema_version(self) -> int:
         with self.read() as con:

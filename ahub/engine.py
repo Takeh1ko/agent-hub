@@ -41,7 +41,7 @@ from ahub.model import ACTIVE, Ev, Kind, Phase, Role, State
 from ahub.providers.base import Act, Activity, Outcome, RunResult, RunSpec
 from ahub.providers.runner import PollFailed
 from ahub.providers.runner import run as run_session
-from ahub.store import Store, Task
+from ahub.store import Store, Task, is_lock_error
 from ahub.time import now_ms
 
 LEASE_MS = 90_000
@@ -257,6 +257,14 @@ class Engine:
             self.log.error("worktree: %s", e)
             return self._settle(State.ERROR, reasons.dump("prepare_failed", err=e))
         except Exception as e:
+            if is_lock_error(e):
+                # Lock contention that survived the store retries: transient, same session.
+                self.log.warning("hub database is busy — back in the queue: %s", e)
+                try:
+                    return self._settle(State.QUEUED, reasons.dump("hub_locked"))
+                except Exception:
+                    self.log.exception("failed to requeue on lock")
+                    raise
             self.log.exception("engine crashed")
             try:
                 # an exception message is technical detail — stored as text, not as a reason code
