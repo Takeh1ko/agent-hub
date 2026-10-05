@@ -38,7 +38,10 @@ def get_catalogs(refresh: bool = False) -> dict[str, list[CatalogEntry]]:
     for name in _providers.names():
         try:
             prov = _providers.get(name)
-        except KeyError:
+        except (KeyError, AttributeError):
+            continue
+        if not hasattr(prov, "catalog"):
+            out[name] = []
             continue
         try:
             if refresh:
@@ -47,8 +50,11 @@ def get_catalogs(refresh: bool = False) -> dict[str, list[CatalogEntry]]:
                 except TypeError:
                     out[name] = list(prov.catalog())
             else:
-                out[name] = list(prov.catalog())
-        except (OSError, ValueError, RuntimeError):
+                try:
+                    out[name] = list(prov.catalog())
+                except TypeError:
+                    out[name] = list(prov.catalog(refresh))
+        except (OSError, ValueError, RuntimeError, AttributeError):
             out[name] = []
     return out
 
@@ -223,22 +229,25 @@ class ModelRow:
     go_pct: float | None = None
 
 
-def _quota_pct_for(entry: registry.ModelEntry, store: Store | None = None) -> float | None:
+def _quota_pct_for(entry, store: Store | None = None) -> float | None:
     """Remaining 0..1 of the matching quota window (5h first), None when unknown."""
     from ahub import providers as _providers
     from ahub.quota import get_model_buckets, pick_window
 
+    alias = getattr(entry, "alias", "") or ""
+    provider = getattr(entry, "provider", "") or ""
+    model_id = getattr(entry, "model_id", "") or ""
     buckets: list = []
-    if store is not None:
+    if store is not None and alias:
         try:
-            _prov_name, buckets = get_model_buckets(store, entry.alias)
+            _prov_name, buckets = get_model_buckets(store, alias)
         except (OSError, ValueError, RuntimeError):
             buckets = []
     if not buckets:
         try:
-            prov = _providers.get(entry.provider)
-            buckets = [b for b in prov.quota() if b.models(entry.model_id) or b.models(entry.alias)]
-        except (KeyError, OSError, ValueError, RuntimeError):
+            prov = _providers.get(provider)
+            buckets = [b for b in prov.quota() if b.models(model_id) or b.models(alias)]
+        except (KeyError, OSError, ValueError, RuntimeError, AttributeError):
             return None
         if not buckets:
             return None
@@ -284,19 +293,37 @@ def build_rows(store: Store, entries: list[registry.ModelEntry] | None = None,
     rows: list[ModelRow] = []
     for e in entries:
         info = match_entry(e, index)
-        plan = registry.plan_kind(e, info)
-        quota_pct = _quota_pct_for(e, store) if plan is PlanKind.SUBSCRIPTION and e.provider == "agy" else None
+        try:
+            plan = registry.plan_kind(e, info)
+        except (OSError, ValueError, RuntimeError, AttributeError):
+            plan = PlanKind.PAYG
+        provider = getattr(e, "provider", "") or ""
+        alias = getattr(e, "alias", "") or ""
+        model_id = getattr(e, "model_id", "") or alias
+        quota_pct = _quota_pct_for(e, store) if plan is PlanKind.SUBSCRIPTION and provider == "agy" else None
         gpct = go_pct if plan is PlanKind.GO and go_pct is not None and go_limit is not None else None
         glim = go_limit if plan is PlanKind.GO else None
+        try:
+            reasoning = reasoning_text(e, info, index)
+        except (OSError, ValueError, RuntimeError, AttributeError):
+            reasoning = ""
+        try:
+            price = price_text(e, info, quota_pct=quota_pct, go_pct=gpct, go_limit=glim)
+        except (OSError, ValueError, RuntimeError, AttributeError):
+            price = ""
+        try:
+            roles = roles_where_default(store, alias)
+        except (OSError, ValueError, RuntimeError, AttributeError):
+            roles = []
         rows.append(ModelRow(
             entry=e,
             info=info,
             plan=plan,
-            reasoning=reasoning_text(e, info, index),
-            price=price_text(e, info, quota_pct=quota_pct, go_pct=gpct, go_limit=glim),
+            reasoning=reasoning,
+            price=price,
             context=context_text(info),
-            model=model_text(info, fallback=e.model_id),
-            roles=roles_where_default(store, e.alias),
+            model=model_text(info, fallback=model_id),
+            roles=roles,
             quota_pct=quota_pct,
             go_pct=gpct,
         ))

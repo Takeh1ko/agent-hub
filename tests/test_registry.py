@@ -120,6 +120,7 @@ def test_cli_models_says_a_broken_global_config(capsys, monkeypatch, tmp_path):
 
     monkeypatch.setenv("AHUB_LANG", "en")
     _reset()
+    monkeypatch.setattr("ahub.ui.width", lambda explicit=None: 200)  # wide: no column is clipped
     p = paths.global_config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(b'lang = "\xff\xfe"')  # the bytes a cp1251 editor leaves behind

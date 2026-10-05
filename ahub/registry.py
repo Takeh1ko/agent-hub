@@ -213,14 +213,16 @@ def role_default(store: Store, role: Role | str) -> ModelEntry | None:
     return next((e for e, d in items if d), None)
 
 
-def is_free(entry: ModelEntry) -> bool:
+def is_free(entry) -> bool:
     """A model that answers without an opencode-go login: a known free alias or a free model id."""
-    if entry.alias in FREE_ALIASES:
+    alias = getattr(entry, "alias", "") or ""
+    model_id = getattr(entry, "model_id", "") or ""
+    if alias in FREE_ALIASES:
         return True
-    return "free" in entry.model_id.lower().rsplit("/", 1)[-1] or "free" in entry.alias.lower()
+    return "free" in model_id.lower().rsplit("/", 1)[-1] or "free" in alias.lower()
 
 
-def plan_kind(entry: ModelEntry, info=None) -> PlanKind:
+def plan_kind(entry, info=None) -> PlanKind:
     """Plan for the alias from the provider + catalog (free · go-plan · pay-as-you-go · subscription).
 
     info — the catalog entry for this model id, when the provider has one: its plan wins,
@@ -242,7 +244,7 @@ def plan_kind(entry: ModelEntry, info=None) -> PlanKind:
             return info.plan
         except AttributeError:
             pass
-    return _infer(entry.provider, entry.model_id, None, None)
+    return _infer(getattr(entry, "provider", "") or "", getattr(entry, "model_id", "") or "", None, None)
 
 
 def cost_kind(entry: ModelEntry) -> str:
