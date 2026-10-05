@@ -1,13 +1,12 @@
-"""ahub models — model registry and role menus (view / edit), plus `check`: a live probe of the aliases.
+"""ahub models — model catalog: every alias with provider, real name, reasoning, plan and prices.
 
-The menus are a table (role, default, other models); `check` probes the aliases one by one with a live
-line on a terminal. Never lifts project denies.
+One table, grouped by provider; `--role R` shows that role's menu with the same columns.
+`check` probes the aliases one by one with a live line. Never lifts project denies.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict
-
+from ahub import catalog as _catalog
 from ahub import registry, ui
 from ahub.cliutil import CliError, add_project_arg, emit
 from ahub.model import Role
@@ -53,32 +52,96 @@ def _config_error() -> str:
     return ""
 
 
+def _provider_order(entries) -> list[str]:
+    """Hub providers in registration order, then any others alphabetically."""
+    from ahub import providers as _providers
+
+    known = _providers.names()
+    seen = [e.provider for e in entries]
+    ordered = [n for n in known if n in seen]
+    return ordered + sorted({p for p in seen if p not in ordered})
+
+
 def cmd_list(args) -> int:
     from ahub.i18n import t
 
     store = Store()
     project = _project_or_none(args)
-    roles = [Role(args.role)] if args.role else list(Role)
-    data = {"roles": {}, "models": [asdict(m) for m in registry.models(store)]}
-    head = [t("models.col_role"), t("models.col_default"), t("models.col_other")]
-    rows = []
-    for role in roles:
-        items = registry.menu(store, role)
+    refresh = bool(getattr(args, "refresh", False))
+    if getattr(args, "role", None):
+        try:
+            wanted = {e.alias for e, _ in registry.menu(store, Role(args.role))}
+        except (registry.RegistryError, ValueError):
+            wanted = set()
+        entries = [e for e in registry.models(store) if e.alias in wanted]
+    else:
+        entries = registry.models(store)
+    rows, extra = _catalog.build_rows(store, entries, refresh=refresh)
+    by_alias = {r.entry.alias: r for r in rows}
+    # --json: every field raw (registry + catalog + derived); roles kept for old readers
+    data: dict = {"models": [], "roles": {}}
+    for e in entries:
+        r = by_alias.get(e.alias)
+        info = r.info if r is not None else None
+        avail = _catalog.available_levels(e, info, extra["index"]) if r is not None else []
+        data["models"].append({
+            "alias": e.alias, "provider": e.provider, "model_id": e.model_id, "variant": e.variant,
+            "enabled": e.enabled, "note": e.note,
+            "display_name": info.display_name if info else "",
+            "vendor": info.vendor if info else "",
+            "plan": (r.plan.value if r is not None else registry.plan_kind(e).value),
+            "price_in": info.price_in if info else None,
+            "price_out": info.price_out if info else None,
+            "price_cache": info.price_cache if info else None,
+            "context": info.context if info else None,
+            "reasoning": list(info.reasoning) if info else [],
+            "alias_level": _catalog.alias_level(e),
+            "available": avail,
+            "price": r.price if r is not None else "",
+            "context_text": r.context if r is not None else "",
+            "roles": r.roles if r is not None else [],
+            "quota_pct": r.quota_pct if r is not None else None,
+            "go_pct": r.go_pct if r is not None else None,
+        })
+    for role in ([Role(args.role)] if getattr(args, "role", None) else list(Role)):
+        try:
+            items = registry.menu(store, role)
+        except (OSError, ValueError, RuntimeError):
+            continue
         data["roles"][role.value] = [{"alias": e.alias, "default": d} for e, d in items]
-        default = next((e for e, d in items if d), None)
-        others = [e.alias + _tags(e, project) for e, d in items if not d]
-        rows.append([role.value,
-                     (default.alias + _tags(default, project)) if default is not None else t("models.no_default"),
-                     ", ".join(others) or t("models.no_other")])
-    lines = [ui.table(head, rows, max_width=[10, 18, None], indent=2)]
-    if args.all:
-        lines.append("")
-        lines.append(ui.table([t("models.col_model"), t("models.col_provider"), t("models.col_model_id")],
-                              [[m.alias + ("" if m.enabled else t("models.flag_off")), m.provider,
-                                m.model_id + (f" [{m.variant}]" if m.variant else "")
-                                + (t("models.flag_denied") if registry.denied_by(m, project) else "")]
-                               for m in registry.models(store)],
-                              max_width=[20, 10, None], indent=2))
+    w = ui.width()
+    with_vendor = w >= 100
+    with_context = w >= 120
+    lines: list[str] = []
+    for prov in _provider_order(entries):
+        group = [by_alias[e.alias] for e in entries if e.provider == prov and e.alias in by_alias]
+        if not group:
+            continue
+        lines.append(ui.section(prov))
+        head = [t("models.col_alias"), t("models.col_model"), t("models.col_reasoning"),
+                t("models.col_plan"), t("models.col_price")]
+        if with_context:
+            head.append(t("models.col_context"))
+        head.append(t("models.col_roles"))
+        body = []
+        for r in group:
+            alias_cell = r.entry.alias + _tags(r.entry, project)
+            model_cell = _catalog.model_text(r.info, with_vendor=with_vendor, fallback=r.entry.model_id)
+            reasoning_cell = r.reasoning or t("models.no_reasoning")
+            plan_cell = _catalog.plan_label(r.plan)
+            roles_cell = ", ".join(r.roles) if r.roles else t("models.no_roles")
+            row = [alias_cell, model_cell, reasoning_cell, plan_cell, r.price]
+            if with_context:
+                row.append(r.context)
+            row.append(roles_cell)
+            body.append(row)
+        maxw: list[int | None] = [32, 28, 16, 12, 14]
+        if with_context:
+            maxw.append(7)
+        maxw.append(None)
+        lines.append(ui.table(head, body, max_width=maxw, indent=2))
+    if not lines:
+        lines.append(ui.table(None, [], indent=2))
     bad = _config_error()
     if bad:
         lines.append(ui.styled(t("cli.error", msg=bad), "dim"))  # the models are shown, the config is not read
@@ -195,6 +258,7 @@ def register(subparsers) -> None:
     add_project_arg(p)
     p.add_argument("--role", choices=[r.value for r in Role])
     p.add_argument("--all", action="store_true", help=t("help.models_all"))
+    p.add_argument("--refresh", action="store_true", help=t("help.models_refresh"))
     p.set_defaults(func=cmd_list)
     sub = p.add_subparsers(dest="models_cmd")
     a = sub.add_parser("add", help=t("help.models_add"))

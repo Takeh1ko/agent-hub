@@ -23,12 +23,18 @@ def _cells(state, enabled: bool) -> list[str]:
 
 
 def cmd_providers(args) -> int:
+    from ahub import catalog as _catalog
     from ahub import providers as provider_mod
     from ahub import quota
     from ahub.i18n import t
 
     store = Store()
     off = registry.disabled_providers()
+    try:
+        model_rows, _extra = _catalog.build_rows(store)
+    except (OSError, ValueError, RuntimeError):
+        model_rows = []
+    by_alias = {r.entry.alias: r for r in model_rows}
     rows = []
     for state in doctor.provider_states():
         aliases = [e.alias for e in registry.models(store) if e.provider == state.name]
@@ -43,13 +49,23 @@ def cmd_providers(args) -> int:
     head = [t(f"providers.col_{c}") for c in ("name", "found", "login", "enabled")]
     table = ui.table(head, [cells for cells, _s, _a, _b in rows], max_width=None).split("\n")
     # the table is a table; the models of a provider, its note and its install/login hint are text under
-    # its row — all of them, wrapped (a cell would be clipped at the end of a long list)
+    # its row — one short catalog line per model (alias — display · reasoning · plan · price)
     out: list[str] = [table[0]]
     all_buckets = []
     for i, (_row, state, aliases, buckets) in enumerate(rows, start=1):
         out.append(table[i])
-        out.append(ui.kv([(t("providers.lbl_models"),
-                           ", ".join(aliases) if aliases else t("providers.no_models"))], indent=2))
+        if aliases:
+            for alias in aliases:
+                r = by_alias.get(alias)
+                if r is None:
+                    out.append(ui.para(f"· {alias}", indent=2))
+                    continue
+                out.append(ui.para("· " + t("providers.model_line", alias=alias,
+                                           model=_catalog.model_text(r.info, fallback=r.entry.model_id),
+                                           reasoning=r.reasoning or t("models.no_reasoning"),
+                                           plan=_catalog.plan_label(r.plan), price=r.price), indent=2))
+        else:
+            out.append(ui.kv([(t("providers.lbl_models"), t("providers.no_models"))], indent=2))
         if buckets:
             all_buckets.extend(buckets)
             groups = sorted(list({b.group for b in buckets}))
@@ -62,10 +78,26 @@ def cmd_providers(args) -> int:
     data = {"providers": [{"name": st.name, "found": st.found, "logged_in": st.logged_in,
                            "enabled": st.name not in off, "detail": st.detail, "note": st.note,
                            "hint": st.hint, "models": aliases,
+                           "models_detail": [_catalog_row_json(by_alias.get(a)) for a in aliases],
                            "buckets": [b.to_dict() for b in buckets]} for _cells, st, aliases, buckets in rows],
             "buckets": [b.to_dict() for b in all_buckets]}
     emit(args, data, "\n".join(out))
     return 0
+
+
+def _catalog_row_json(r) -> dict:
+    """Enriched model row for --json (None — the alias has no catalog entry yet)."""
+    if r is None:
+        return {}
+    info = r.info
+    return {
+        "alias": r.entry.alias, "provider": r.entry.provider, "model_id": r.entry.model_id,
+        "variant": r.entry.variant, "display_name": info.display_name if info else "",
+        "vendor": info.vendor if info else "", "plan": r.plan.value,
+        "price_in": info.price_in if info else None, "price_out": info.price_out if info else None,
+        "price_cache": info.price_cache if info else None, "context": info.context if info else None,
+        "reasoning": list(info.reasoning) if info else [], "price": r.price, "roles": list(r.roles),
+    }
 
 
 def cmd_switch(args, on: bool) -> int:

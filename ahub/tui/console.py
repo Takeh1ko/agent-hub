@@ -1523,23 +1523,38 @@ class ConsoleApp(App):
     def cmd_models(self, args: list[str]) -> None:
         del args
         try:
-            from ahub.model import Role as _Role
+            from ahub import catalog as _catalog
 
             w = self._width()
             project = self._current_project()
-            head = [_t("models.col_role"), _t("models.col_default"), _t("models.col_other")]
-            rows = []
-            for role in _Role:
-                try:
-                    items = registry.menu(self.store, role)
-                except (OSError, ValueError, RuntimeError):
-                    continue
-                default = next((e for e, d in items if d), None)
-                others = [e.alias + self._model_tags(e, project) for e, d in items if not d]
-                dflt = ((default.alias + self._model_tags(default, project))
-                        if default is not None else _t("models.no_default"))
-                rows.append([role.value, dflt, ", ".join(others) or _t("models.no_other")])
-            self._say(ui.table(head, rows, max_width=[10, 18, None], indent=2, w=w).splitlines())
+            try:
+                rows, _extra = _catalog.build_rows(self.store)
+            except (OSError, ValueError, RuntimeError):
+                rows = []
+            with_vendor = w >= 100
+            with_context = w >= 120
+            head = [_t("models.col_alias"), _t("models.col_model"), _t("models.col_reasoning"),
+                    _t("models.col_plan"), _t("models.col_price")]
+            if with_context:
+                head.append(_t("models.col_context"))
+            head.append(_t("models.col_roles"))
+            body = []
+            for r in rows:
+                alias_cell = r.entry.alias + self._model_tags(r.entry, project)
+                model_cell = _catalog.model_text(r.info, with_vendor=with_vendor,
+                                                 fallback=r.entry.model_id)
+                roles_cell = ", ".join(r.roles) if r.roles else _t("models.no_roles")
+                row = [alias_cell, model_cell, r.reasoning or _t("models.no_reasoning"),
+                       _catalog.plan_label(r.plan), r.price]
+                if with_context:
+                    row.append(r.context)
+                row.append(roles_cell)
+                body.append(row)
+            maxw: list[int | None] = [32, 28, 16, 12, 14]
+            if with_context:
+                maxw.append(7)
+            maxw.append(None)
+            self._say(ui.table(head, body, max_width=maxw, indent=2, w=w).splitlines() or [""])
         except (OSError, ValueError, RuntimeError) as e:
             self._say([_t("console.widget_error", widget="models", hint=str(e)[:100])])
 

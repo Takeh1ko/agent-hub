@@ -489,14 +489,28 @@ def _model_step(store, states, ask: bool, out: Steps) -> dict[str, str]:
         results = doctor.probe_models(entries, timeout_s=doctor.PROBE_WIZARD_S, step=p.step)
     if not results:  # probing off or nothing to probe — the free-alias path knows better
         return _free_default_step(store, ask, out)
-    kinds = {e.alias: t(f"setup.wizard_model_{registry.cost_kind(e)}") for e in entries}
+    from ahub import catalog as _catalog
+
+    try:
+        cat_rows, _extra = _catalog.build_rows(store, entries)
+    except (OSError, ValueError, RuntimeError):
+        cat_rows, _extra = [], {}
+    by_alias = {r.entry.alias: r for r in cat_rows}
+    index = _extra.get("index", {}) if isinstance(_extra, dict) else {}
     rows = []
     for entry in entries:
         ok, detail = results.get(entry.alias, (False, ""))
         body = doctor.probe_detail(detail, entry.alias)
-        rows.append(["✓" if ok else "✗", entry.alias, kinds[entry.alias],
-                     body + (f" — {entry.note}" if entry.note else "")])
-    out.table(None, rows, max_width=[1, 16, 5, None])
+        r = by_alias.get(entry.alias)
+        info = r.info if r is not None else None
+        plan = registry.plan_kind(entry, info)
+        model_cell = _catalog.model_text(info, fallback=entry.model_id)
+        reasoning_cell = _catalog.reasoning_text(entry, info, index) if r is not None \
+            else (_catalog.alias_level(entry) or "—")
+        price_cell = r.price if r is not None else _catalog.plan_label(plan)
+        rows.append(["✓" if ok else "✗", entry.alias, model_cell, reasoning_cell,
+                     _catalog.plan_label(plan), price_cell, body])
+    out.table(None, rows, max_width=[1, 16, 28, 16, 12, 14, None])
     recommended = doctor.recommend_model(entries, results)
     if not recommended:
         out.line("! " + doctor.probe_none_warning([e.alias for e in entries]))
