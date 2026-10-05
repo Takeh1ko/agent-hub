@@ -227,15 +227,23 @@ async def test_app_history_toggle(store):
     a, b = fill(store)
     c = accepted(store)
     app = TopApp(store=store, projects=[])
+
+    async def until(cond, timeout: float = 15.0) -> None:
+        # the refresh runs in a worker thread: wait for the state, not a fixed pause (slow under parallel suites)
+        for _ in range(int(timeout / 0.05)):
+            if cond():
+                return
+            await pilot.pause(0.05)
+
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
+        await until(lambda: set(app._ids) == {a, b})
         assert set(app._ids) == {a, b}
         await pilot.press("h")
-        await pilot.pause(0.4)
+        await until(lambda: set(app._ids) == {a, b, c})
         assert set(app._ids) == {a, b, c}
         assert "история" in str(app.query_one("#header").render())
         await pilot.press("h")
-        await pilot.pause(0.4)
+        await until(lambda: set(app._ids) == {a, b})
         assert set(app._ids) == {a, b} and "текущие" in str(app.query_one("#header").render())
 
 
