@@ -56,12 +56,29 @@ A provider that is off is a hard switch: naming one of its models in a task is a
 (`ahub providers enable <name>`).
 
 ```
-ahub models                         # the menu of every role, ★ = the default of the role
-ahub models --all                   # every alias with its provider and model id
+ahub models                         # one table grouped by provider: alias · model + vendor · reasoning ·
+                                    # plan · price ($0.60 / $0.10) · context · roles (effort next to each default)
+ahub models --role observer         # that role's menu, effort in the alias cell (spark:high)
 ahub models role reviewer --add mimo-flash --default
+ahub models role observer --set-default spark:medium
 ahub models add mymodel --provider opencode --model-id opencode-go/mimo-v2.6-flash
 ahub models check                   # one tiny live request per role default
 ```
+
+A model choice is provider route + model + reasoning level, shown as the alias plus the dim identity:
+`spark  Muse Spark 1.3 · Go plan · xhigh`. Reasoning is its own choice — `low|medium|high|xhigh|max`,
+validated against the catalog's levels for that model (unknown → refusal listing the valid ones):
+
+```
+ahub task new --kind code --title "…" --model spark --effort high
+ahub models role observer --set-default spark:medium
+ahub model T12 mimo-flash           # console: /model T12 alias[:effort]
+```
+
+The default level per alias stays (spark = xhigh); the task stores alias + effort and `ahub status T12`
+shows it. One alias per model+plan (`spark` paid, `spark-free` free); `spark-high`/`spark-medium`/
+`gemini-low` are legacy names — still accepted everywhere with one line `spark-high is spark:high`,
+hidden from the tables.
 
 Roles:
 
@@ -99,10 +116,11 @@ ahub task new --kind code --title "add retry to the payment client" \
 | `routine` | changes + a report | a commit exists, the diff ⊆ `--paths` |
 
 Flags worth knowing: `--paths` (allowed files, comma-separated globs), `--accept` (pytest nodes that must pass),
-`--model` (an alias, otherwise the role default), `--budget` (Go dollars for the whole task) and `--budget-usd`
-(real money), `--after T3,T4` (start only after those tasks are accepted), `--review` / `--rounds` / `--no-review`
-(the panel), `--time-limit` (minutes), `--input` (what a `review` task looks at: a branch, a sha, `a..b` or files),
-`--resources` (make the task exclusive), `--draft` (file a draft instead of a task).
+`--model` (an alias, otherwise the role default) and `--effort` (reasoning level for it), `--budget` (Go dollars
+for the whole task) and `--budget-usd` (real money), `--after T3,T4` (start only after those tasks are accepted),
+`--review` / `--rounds` / `--no-review` (the panel, models as ALIAS[:EFFORT]), `--time-limit` (minutes),
+`--input` (what a `review` task looks at: a branch, a sha, `a..b` or files), `--resources` (make the task
+exclusive), `--draft` (file a draft instead of a task).
 
 A task is validated before anything is paid for: the allowed files must be inside the project's `allowed_paths`,
 the files to read must exist, the acceptance must collect, the model must be available. A refusal comes with the
@@ -126,7 +144,7 @@ ahub continue T12                     # after an error or a stop
 ahub stop T12                         # ask the worker to wrap up
 ahub extend T12 --paths "docs/**"     # allow more files
 ahub budget T12 --add 1               # more money, a budget-blocked task resumes
-ahub model T12 mimo-flash             # another model for the next round
+ahub model T12 mimo-flash             # another model for the next round (alias[:effort])
 ahub task edit T12 --spec-file spec2.md   # a new specification, in a new session
 ```
 
