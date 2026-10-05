@@ -64,7 +64,8 @@ def test_providers_table_shows_every_provider(capsys, monkeypatch):
     assert "gemini" in _under(out, "agy")
     # codex is not found: the mark, the note and the one-line install hint
     assert rows[3].split()[:4] == ["codex", "\u2717", "\u2013", "включён"]
-    assert "codex, codex-fast" in _under(out, "codex")
+    under_codex = _under(out, "codex")
+    assert "codex —" in under_codex and "codex-fast —" in under_codex  # a short line per model
     assert "npm i -g @openai/codex" in out
     # nothing is switched off yet — the switch is the hub config, and it is not touched by a view
     assert all(_on(n) for n in ("opencode", "agy", "codex"))
@@ -86,8 +87,8 @@ def test_providers_json(capsys, monkeypatch):
     data = json.loads(capsys.readouterr().out)
     assert [p["name"] for p in data["providers"]] == ["opencode", "agy", "codex"]
     first = data["providers"][0]
-    assert set(first) == {"name", "found", "logged_in", "enabled", "detail", "note", "hint", "models",
-                          "buckets"}
+    assert {"name", "found", "logged_in", "enabled", "detail", "note", "hint", "models",
+            "buckets"} <= set(first) and "models_detail" in first
     assert first["enabled"] is True and "spark" in first["models"]
     codex = data["providers"][2]
     assert codex["found"] is False and codex["logged_in"] is False and codex["enabled"] is True

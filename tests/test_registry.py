@@ -98,11 +98,12 @@ def test_menu_edits(store):
 def test_cli_models(tmp_path, monkeypatch, capsys):
     write(tmp_path / "p" / ".hub.toml", 'schema_version = 2\nname = "P"\n[models]\ndeny = ["deepseek"]\n')
     monkeypatch.chdir(tmp_path / "p")
+    monkeypatch.setattr("ahub.ui.width", lambda explicit=None: 200)  # wide: no column is clipped
     assert cli.main(["models", "--role", "executor"]) == 0
     out = capsys.readouterr().out
-    # the menus are a table: role, default, the other models of the role
-    assert out.splitlines()[0].split() == ["роль", "по", "умолчанию", "остальные"]
-    assert "executor" in out and "spark" in out and "deepseek-flash(запрет проекта)" in out
+    # the catalog table, grouped by provider: alias, model, reasoning, plan, price, roles
+    assert "алиас" in out and "уровень" in out and "план" in out and "роли" in out
+    assert "spark" in out and "deepseek-flash(запрет проекта)" in out
     assert cli.main(["models", "role", "scout", "--add", "mimo-flash", "--default"]) == 0
     assert "mimo-flash" in capsys.readouterr().out
     assert cli.main(["--json", "models", "--role", "scout"]) == 0
