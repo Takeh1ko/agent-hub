@@ -143,7 +143,7 @@ def test_home_screen_with_work_and_a_decision(capsys, monkeypatch, tmp_path):
     assert lines[2].split() == ["task", "kind", "title", "state", "model", "idle"]  # the table head
     row = lines[3].split()
     assert row[1:7] == ["T1", "code", "Setup", "wizard:", "choose", "providers"]  # the title, word by word
-    assert row[-3:] == ["spark", "0", "min"]  # the model and the idle age (main's _age: minutes)
+    assert row[-3:] == ["spark:xhigh", "0", "min"]  # the model:effort and the idle age
     assert lines[4] == "Waiting for your decision"
     assert " ".join(lines[5].split()) == "T2 done review rounds exhausted (2 findings, high: 1)"
     assert "ahub accept T2" in lines[6]
@@ -263,12 +263,9 @@ opencode  ✓      ✓      on
   · mimo-flash — opencode-go/mimo-v2.6-flash · — · Go plan · Go plan
   · spark — opencode-go/muse-spark-1.3-contributor · xhigh · Go plan · Go plan
   · spark-free — opencode/muse-spark-1.3-contributor-free · xhigh · free · free
-  · spark-high — opencode-go/muse-spark-1.3-contributor · high · Go plan · Go plan
-  · spark-medium — opencode-go/muse-spark-1.3-contributor · medium · Go plan · Go plan
   · opencode-go: paid Spark available
 agy       ✓      ✓      on
   · gemini — gemini-3.8-flash-high · high · subscription · —
-  · gemini-low — gemini-3.8-flash-low · low · subscription · —
   · Gemini via Antigravity, window quota (no money)
 codex     ✗      –      on
   · codex — gpt-5.6-terra · — · subscription · —
@@ -301,12 +298,9 @@ opencode
   mimo-flash                    opencode-go/mimo-v2.6-flash   —          Go plan  Go plan       —
   spark                         opencode-go/muse-spark-1.3…   xhigh      Go plan  Go plan       exe…
   spark-free                    opencode/muse-spark-1.3-con…  xhigh      free     free          —
-  spark-high                    opencode-go/muse-spark-1.3…   high       Go plan  Go plan       obs…
-  spark-medium                  opencode-go/muse-spark-1.3…   medium     Go plan  Go plan       —
 agy
-  alias       model                  reasoning  plan          $ in / $ out  roles
-  gemini      gemini-3.8-flash-high  high       subscription  —             —
-  gemini-low  gemini-3.8-flash-low   low        subscription  —             —
+  alias   model                  reasoning  plan          $ in / $ out  roles
+  gemini  gemini-3.8-flash-high  high       subscription  —             —
 codex
   alias       model          reasoning  plan          $ in / $ out  roles
   codex       gpt-5.6-terra  —          subscription  —             —
@@ -446,7 +440,8 @@ def test_the_json_shape_did_not_change(capsys, monkeypatch):
                                                                              "buckets"}
     assert run(capsys, "--json", "models", "--role", "executor")[0] == 0
     data = json.loads(run(capsys, "--json", "models", "--role", "executor")[1])
-    assert data["roles"]["executor"][0] == {"alias": "spark", "default": True}
+    assert data["roles"]["executor"][0] == {"alias": "spark", "effort": "", "ref": "spark",
+                                                    "default": True}
     rc, out = run(capsys, "--json", "providers", "enable", "opencode")
     assert (rc, json.loads(out)) == (0, {"ok": True, "name": "opencode", "enabled": True})
 
