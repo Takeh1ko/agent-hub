@@ -237,7 +237,7 @@ MESSAGES: dict[str, str] = {
     "help.task_new_time_limit": "минут",
     "help.task_new_title": "цель, одна фраза",
     "help.top": "экран: задачи, пульс, деньги, события",
-    "help.top_control": "сразу в режиме управления",
+    "help.top_control": "фокус на задачах при запуске",
     "help.version": "версия",
     "help.wait": "ждать события для оркестратора",
     "help.watch": "поток событий для Monitor",

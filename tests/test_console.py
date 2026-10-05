@@ -86,6 +86,21 @@ def test_alert_strip_only_when_non_empty(store: Store):
     assert "🚨" in line
 
 
+async def test_alert_strip_appears_without_restart(store: Store):
+    from textual.widgets import Static
+
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        assert app.query_one("#alerts", Static).display is False
+        comms.raise_alarm(store, "opencode down", critical=True)
+        snap = con.snapshot(store, app.scope, app._width(), now_ms())
+        app._apply(snap, [])
+        await pilot.pause(0.1)
+        assert app.query_one("#alerts", Static).display is True
+        assert "🚨" in str(app.query_one("#alerts", Static).render())
+
+
 def test_live_view_lines_capped(tmp_path: Path, store: Store):
     from ahub.providers.fake import FakeProvider
     from ahub.tui.live import MAX_LINES, Feed
@@ -275,12 +290,12 @@ async def test_only_the_console_footer_is_rendered(store: Store):
     async with app.run_test() as pilot:
         await pilot.pause(0.3)
         assert len(app.query("#footer")) == 1
-        assert not app.query(Footer)
+        assert all(not f.display for f in app.query(Footer))
 
         app.run_command(f"/follow T{tid}")
         await pilot.pause(0.4)
         assert app.screen.__class__.__name__ == "Transcript"
-        assert not app.screen.query(Footer)
+        assert all(not f.display for f in app.screen.query(Footer))
 
 
 def test_pipe_and_json_byte_identical(capsys, monkeypatch, tmp_path):
@@ -373,7 +388,7 @@ async def test_console_app_pushes_transcript_and_prompt_without_extra_footer(sto
         app.push_screen(tr)
         await pilot.pause(0.3)
         assert app.screen == tr
-        assert not app.screen.query(Footer)
+        assert all(not f.display for f in app.screen.query(Footer))
 
         pr = Prompt("Question?")
         app.push_screen(pr)
@@ -390,6 +405,8 @@ async def test_console_app_pushes_transcript_and_prompt_without_extra_footer(sto
 async def test_snapshot_deadline_timeout_enforced(store: Store, monkeypatch):
     import time
 
+    from ahub.i18n import t
+
     def _slow_snapshot(*args, **kwargs):
         time.sleep(0.3)
         return con.Snapshot(welcome="SLOW")
@@ -403,6 +420,8 @@ async def test_snapshot_deadline_timeout_enforced(store: Store, monkeypatch):
         assert app._stale_s > 0
         welcome_text = str(app.query_one("#welcome").render())
         assert "SLOW" not in welcome_text
+        footer_text = str(app.query_one("#footer").render())  # the old view stays, footer says stale
+        assert t("console.stale", n=app._stale_s) in footer_text
 
 
 async def test_question_mark_toggles_shortcuts_without_inserting(store: Store):
@@ -530,13 +549,15 @@ def test_footer_text_behaviour(store: Store):
     transitions.move(store, tid, State.PREPARING)
     transitions.move(store, tid, State.WORKING)
 
-    text = con.footer_text(store, scope.Scope(), 80, stale_s=0)
+    text = con.footer_text(store, scope.Scope(), 80)
     assert "1 working" in text or "1 в работе" in text
     assert "Go $" in text and "USD $" in text
-    assert "stale" not in text
+    assert "  " in text  # the left/right split is padded, not collapsed
+    assert ui.plain_len(text) <= 78  # #footer has margin 0 1, no border
 
-    stale_text = con.footer_text(store, scope.Scope(), 80, stale_s=5)
-    assert "stale 5s" in stale_text or "устарело 5" in stale_text
+    narrow = con.footer_text(store, scope.Scope(), 40)
+    assert ui.plain_len(narrow) <= 38
+    assert "1 working" in narrow or "1 в работе" in narrow  # the count survives at 40 cols
 
 
 def test_feed_lines_filters_foreign_project_events(store: Store):
@@ -560,23 +581,80 @@ def test_feed_lines_filters_foreign_project_events(store: Store):
 
 
 @pytest.mark.parametrize("cols", [40, 80, 120])
-async def test_console_app_runs_at_narrow_and_wide_terminals(store: Store, cols: int):
-    tid = _task(store, "P", "terminal width task test")
+async def test_console_rows_fit_their_panes(store: Store, cols: int):
+    """Every task/transcript/welcome/footer row fits its pane, not just the terminal.
+
+    A long title plus a waiting Next line plus a long event summary overflows
+    a terminal-width budget inside the bordered panes (margin + border).
+    """
     from textual.widgets import Static
 
     from ahub import transitions
+    from ahub.model import Ev
+
+    tid = _task(store, "P", "a very long title " + "word " * 40)
     transitions.move(store, tid, State.PREPARING)
+    transitions.move(store, tid, State.WORKING)
+    transitions.move(store, tid, State.NEEDS_DECISION)
 
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test(size=(cols, 24)) as pilot:
         await pilot.pause(0.5)
+        assert app._width() == cols
+        store.add_event(Ev.DONE, task_id=tid, project="P",
+                        payload={"summary": "a very long summary " + "word " * 40})
+        snap = con.snapshot(store, app.scope, cols, now_ms())
+        for _key, block in snap.blocks:
+            for ln in block.splitlines():
+                assert ui.plain_len(ln) <= cols - 6, (cols, ln)
+        app._apply(snap, app._feed_lines(cols))
+        await pilot.pause(0.2)
+        feed_text = str(app.query_one("#transcript-inner", Static).render())
+        assert "DONE" in feed_text and "very long summary" in feed_text
+        for selector in ("#tasks-inner", "#transcript-inner", "#welcome", "#footer"):
+            inner_w = app.query_one(selector).size.width
+            text = str(app.query_one(selector, Static).render())
+            assert text.strip(), (cols, selector)
+            for ln in text.splitlines():
+                assert ui.plain_len(ln) <= inner_w, (cols, selector, ln)
+
+
+def test_welcome_box_clips_a_long_project_path(store: Store, monkeypatch):
+    import types
+
+    from ahub import config
+
+    long_root = "/srv/repos/" + "deep/" * 30
+    monkeypatch.setattr(config, "load_projects",
+                        lambda: ([types.SimpleNamespace(name="P", root=long_root)], []))
+    box = con.welcome_box(store, scope.Scope(("P",)), now_ms(), 40)
+    assert box.splitlines()[0].startswith("╭")
+    for ln in box.splitlines():
+        assert ui.plain_len(ln) <= 40, ln
+
+
+async def test_safe_update_renders_a_build_error_in_place(store: Store):
+    """A widget build failure (the real fault: the store/data call raising) renders
+    "✗ <widget>: <hint>" in place and the app keeps running."""
+    from textual.widgets import Static
+
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.4)
+
+        def _boom():
+            raise RuntimeError("db gone")
+
+        app._safe_update("#welcome", "welcome", _boom)
+        await pilot.pause(0.1)
         assert app.is_running
-        tasks_text = str(app.query_one("#tasks-inner", Static).render())
-        for ln in tasks_text.splitlines():
-            assert ui.plain_len(ln) <= cols
+        rendered = str(app.query_one("#welcome", Static).render())
+        assert "✗ welcome:" in rendered
+        assert "db gone" in rendered
 
 
-async def test_widget_update_error_renders_in_place(store: Store, monkeypatch):
+async def test_safe_update_failure_keeps_the_app_running(store: Store, monkeypatch):
+    """Even when update() itself rejects the renderable, the app survives the refresh."""
     from textual.widgets import Static
 
     app = ConsoleApp(store=store, all_projects=True)
@@ -593,9 +671,6 @@ async def test_widget_update_error_renders_in_place(store: Store, monkeypatch):
         app._apply(snap, [])
         await pilot.pause(0.2)
         assert app.is_running
-        # Error is rendered in place in welcome widget
-        rendered = str(app.query_one("#welcome", Static).render())
-        assert "✗ welcome:" in rendered
 
 
 async def test_top_control_focuses_tasks_pane(store: Store):
@@ -612,3 +687,112 @@ async def test_top_control_focuses_tasks_pane(store: Store):
         assert app.focus_mode == "tasks"
         pane = str(app.query_one("#tasks-inner", Static).render())
         assert "▌" in pane
+
+
+def test_waiting_task_lines_carry_the_exact_next_commands(store: Store):
+    from ahub import transitions, views
+    from ahub.i18n import t
+
+    tid = _task(store, "P", "waiting")
+    transitions.move(store, tid, State.PREPARING)
+    transitions.move(store, tid, State.WORKING)
+    transitions.move(store, tid, State.NEEDS_DECISION)
+    task = store.get_task(tid)
+    lines = con.task_lines(task, None, now_ms(), 80)
+    expected = t(views.next_key(task), label=task.label)
+    assert any(expected in ln for ln in lines), lines
+
+
+def test_non_green_pulse_adds_a_second_spine_line(store: Store):
+    from ahub import transitions
+    from ahub.pulse import Pulse
+
+    tid = _task(store, "P", "working")
+    transitions.move(store, tid, State.PREPARING)
+    transitions.move(store, tid, State.WORKING)
+    task = store.get_task(tid)
+    green = con.task_lines(task, Pulse(task_id=tid, state="working", reason="busy"), now_ms(), 80)
+    assert sum("⎿" in ln for ln in green) == 1
+    stalled = con.task_lines(task, Pulse(task_id=tid, state="waiting", reason="stalling badly"),
+                             now_ms(), 80)
+    assert sum("⎿" in ln for ln in stalled) == 2
+    assert "stalling badly" in "\n".join(stalled)
+
+
+def test_feed_kinds_and_refresh_tick():
+    from ahub.model import Ev
+
+    assert con.REFRESH_S == 2.0
+    assert con.FEED_KINDS == {Ev.DONE.value, Ev.NEEDS_DECISION.value, Ev.ERROR.value,
+                              Ev.ANSWER.value, Ev.OWNER_MESSAGE.value}
+
+
+def test_alert_store_failure_renders_a_widget_error(store: Store, monkeypatch):
+    from ahub import comms
+
+    def _boom(*args, **kwargs):
+        raise OSError("db gone")
+
+    monkeypatch.setattr(comms, "alarms", _boom)
+    snap = con.snapshot(store, scope.Scope(), 80, now_ms())
+    assert "✗ alerts:" in snap.alerts
+    assert "db gone" in snap.alerts
+
+
+def test_console_chrome_uses_the_accent_for_borders():
+    css = ConsoleApp.CSS
+    assert "#ff8700" in css  # ui accent 38;5;208: ✻, box borders, the product name
+    for pane in ("#tasks", "#transcript", "#input"):
+        line = next(ln for ln in css.splitlines() if ln.strip().startswith(pane))
+        assert "#ff8700" in line, line
+
+
+async def test_ctrl_o_cycles_the_project(store: Store):
+    app = ConsoleApp(store=store, project="P")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        assert not app.scope.all
+        await pilot.press("ctrl+o")
+        await pilot.pause(0.3)
+        assert app.scope.all
+
+
+async def test_ctrl_c_twice_quits(store: Store):
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.2)
+        assert app.is_running
+        await pilot.press("ctrl+c")
+        await pilot.pause(0.3)
+        assert not app.is_running
+
+
+async def test_status_lands_its_text_in_the_transcript(store: Store):
+    from ahub import transitions
+
+    tid = _task(store, "P", "status-visible-task")
+    transitions.move(store, tid, State.PREPARING)
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        app.run_command("/status")
+        await pilot.pause(1.0)
+        assert "status-visible-task" in "\n".join(app._transcript)
+
+
+async def test_help_shows_the_shortcuts_block(store: Store):
+    from textual.widgets import Static
+
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        app.run_command("/help")
+        await pilot.pause(0.2)
+        assert app._show_shortcuts is True
+        assert app.query_one("#shortcuts", Static).display is True
+        app.run_command("/help")  # /help shows, only "?" toggles
+        await pilot.pause(0.2)
+        assert app._show_shortcuts is True
+        assert app.query_one("#shortcuts", Static).display is True
