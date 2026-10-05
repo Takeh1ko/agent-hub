@@ -82,8 +82,9 @@ def filled(store: Store) -> dict[str, int]:
 # --- ahub projects ---
 
 
-def test_projects_one_row_per_project_with_counts_and_money(hub, store, capsys):
+def test_projects_one_row_per_project_with_counts_and_money(hub, store, capsys, monkeypatch):
     filled(store)
+    monkeypatch.setenv("COLUMNS", "100")  # the path cell is cut to the width; xdist workers see 80, not 100
     rc, out, err = ahub(capsys, "projects")
     assert rc == 0, err
     lines = {ln.split()[0]: ln for ln in out.splitlines()[1:]}

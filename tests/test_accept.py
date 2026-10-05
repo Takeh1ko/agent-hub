@@ -553,12 +553,12 @@ def test_two_accepts_started_together_merge_one_after_another(store, project, mo
 
 
 @pytest.mark.parametrize("tty", [True, False])
-def test_second_accept_waits_and_names_the_holder_on_a_tty(store, project, monkeypatch, tty):
+def test_second_accept_waits_and_names_the_holder_on_a_tty(store, project, monkeypatch, tty, caplog):
     """A second accept waits for the project lock; on a terminal it names the accept it waits for."""
     import io
+    import logging
     import sys
     import threading
-    import time
 
     from ahub import gates as g
     from ahub.i18n import _reset
@@ -569,18 +569,27 @@ def test_second_accept_waits_and_names_the_holder_on_a_tty(store, project, monke
     t1, t2 = two_done_tasks(store, project, b_text="B = 2\n", c_text="C = 2\n")
     first_in = threading.Event()
     heads = []
+    line = f"waiting for the accept of T{t1.id}…\n"
+    wait_msg = f"accept T{t2.id}: waiting for the project accept lock"
+    out = io.StringIO()
+    out.isatty = lambda: tty  # type: ignore[assignment]
+    caplog.set_level(logging.INFO, logger="ahub.accept")
+
+    def waiting() -> bool:
+        return any(wait_msg in r.getMessage() for r in caplog.records)
 
     def slow_acceptance(project_, cwd, nodes, **kw):
         if kw.get("task_label") == f"T{t1.id}":
             head = git_out(cwd, "rev-parse", "HEAD").strip()
             first_in.set()
-            time.sleep(0.5)
+            # Hold the lock until the second accept is seen waiting on it: under load it may
+            # take a while to reach the lock, and a fixed sleep would release too early.
+            # Bounded below the join timeout below, so a stuck waiter fails fast.
+            wait_until(waiting, timeout=20)
             heads.append((head, git_out(cwd, "rev-parse", "HEAD").strip()))
         return True, "", "pytest"
 
     monkeypatch.setattr(g, "run_acceptance", slow_acceptance)
-    out = io.StringIO()
-    out.isatty = lambda: tty  # type: ignore[assignment]
     monkeypatch.setattr(sys, "stdout", out)
 
     threads = [threading.Thread(target=accept.accept, args=(store, project, tid)) for tid in (t1.id, t2.id)]
@@ -592,7 +601,7 @@ def test_second_accept_waits_and_names_the_holder_on_a_tty(store, project, monke
 
     assert [store.get_task(t.id).state for t in (t1, t2)] == [State.ACCEPTED, State.ACCEPTED]
     assert heads and heads[0][0] == heads[0][1]  # nothing merged into the root while the tests ran
-    line = f"waiting for the accept of T{t1.id}…\n"
+    assert waiting()  # the second accept really contended for the lock (without the flock it never waits)
     if tty:
         assert out.getvalue().count(line) == 1  # one line, naming the holder, printed once
     else:
