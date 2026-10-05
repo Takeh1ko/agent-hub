@@ -214,7 +214,8 @@ the tokens per step in `ahub follow` — what they cost is the quota of the acco
 
 Quota windows are not money: a Gemini task waits (`waiting for Gemini quota: 5h 12%, resets 17:16`) or moves to the
 fallback model, and one quota group is shared by at most `ceil(remaining_5h * 6)` tasks at once. A quota error
-mid-turn requeues the task in the same session — it resumes by itself after the reset.
+mid-turn requeues the task — it restarts in a fresh session by itself after the reset (the session that hit the
+error is abandoned: resuming it would repeat the error).
 
 The README has real numbers from this repository's own tasks, with the tariffs that paid for them.
 
