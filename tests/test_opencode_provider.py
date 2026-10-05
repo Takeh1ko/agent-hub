@@ -8,7 +8,14 @@ import os
 import pytest
 
 from ahub.providers.base import Act, Cap, Outcome, RunSpec
-from ahub.providers.opencode import OpencodeProvider, classify_error, extract_json, parse_models_verbose, prompt_arg
+from ahub.providers.opencode import (
+    OpencodeProvider,
+    _short_output,
+    classify_error,
+    extract_json,
+    parse_models_verbose,
+    prompt_arg,
+)
 
 SID = "ses_f0d672de7ffesY3E6FxBC7787R"
 REAL = {
@@ -111,6 +118,18 @@ def test_extract_json():
         "verdict": "approve", "findings": []}
     assert extract_json('{"a": 1}') == {"a": 1}
     assert extract_json("просто текст") is None
+
+
+def test_short_output_cuts_and_unwraps():
+    """A tool output of any shape becomes 300 characters of text (the transcript shows them)."""
+    assert _short_output("hello") == "hello"
+    assert _short_output("x" * 500) == "x" * 300  # the cut
+    assert _short_output({"output": "from output"}) == "from output"
+    assert _short_output({"text": "from text"}) == "from text"
+    assert _short_output({"other": "nothing known"}) == ""
+    assert _short_output(["a", {"output": "b"}, 3, "c"]) == "a b"  # the list, only the first three
+    assert _short_output("y" * 400) in _short_output([{"output": "y" * 400}])  # and the cut recurses
+    assert _short_output(None) == "" and _short_output(7) == ""
 
 
 def test_parse_models_verbose():

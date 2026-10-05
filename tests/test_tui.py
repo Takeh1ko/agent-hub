@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
+from textual.widgets import Static
 
-from ahub import comms, events, transcript, transitions
+from ahub import comms, config, drafts, events, transcript, transitions
+from ahub.i18n import t
 from ahub.model import State
 from ahub.service import PAUSE_KEY
 from ahub.store import Store
@@ -15,6 +18,7 @@ from ahub.time import now_ms
 from ahub.tui import data
 from ahub.tui.app import TopApp
 from ahub.tui.live import LiveView
+from tests.conftest import rows_ready, write
 
 
 @pytest.fixture
@@ -47,7 +51,7 @@ def test_screen_data(store):
     assert marks[a] == "⏳" and marks[b] == "✅"
     assert any("DONE" in f for f in screen.feed) and any("→ готово" in f for f in screen.feed)
     events.touch(store)
-    assert "Claude на связи" in data.header(store, {}, __import__("ahub.time", fromlist=["now_ms"]).now_ms())
+    assert "Claude на связи" in data.header(store, now_ms())
 
 
 def _fake_totals(day_go: float, month_go: float):
@@ -69,10 +73,10 @@ def test_money_with_limit(store, monkeypatch):
     from ahub.time import now_ms
 
     monkeypatch.setattr(opencode_db, "totals", _fake_totals(5.0, 30.0))
-    head = data.header(store, {}, now_ms(), go_limit=60.0)
+    head = data.header(store, now_ms(), go_limit=60.0)
     assert "месяц $30.00 из $60" in head and "50 %" in head
     assert "лимит превышен" not in head
-    over = data.header(store, {}, now_ms(), go_limit=20.0)
+    over = data.header(store, now_ms(), go_limit=20.0)
     assert "лимит превышен" in over
 
 
@@ -81,24 +85,64 @@ def test_money_without_limit(store, monkeypatch):
     from ahub.time import now_ms
 
     monkeypatch.setattr(opencode_db, "totals", _fake_totals(5.0, 30.0))
-    head = data.header(store, {}, now_ms(), go_limit=None)
+    head = data.header(store, now_ms(), go_limit=None)
     assert "месяц $30.00" in head and "из $" not in head and "%" not in head
 
 
 def test_money_limit_from_config(store, tmp_path, monkeypatch):
-    from ahub import config, paths
+    from ahub import paths
     from ahub.providers import opencode_db
-    from ahub.time import now_ms
     from ahub.tui import data as tuidata
-    from tests.conftest import write
 
     monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
     monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
     monkeypatch.setattr(opencode_db, "totals", _fake_totals(5.0, 30.0))
-    assert "из $" not in tuidata.header(store, {}, now_ms())
+    assert "из $" not in tuidata.header(store, now_ms())
     write(paths.global_config_path(), "[usage]\ngo_month_limit = 60.0\n")
     assert config.load_hub().go_month_limit == 60.0
-    assert "из $60" in tuidata.header(store, {}, now_ms())
+    assert "из $60" in tuidata.header(store, now_ms())
+
+
+def test_a_broken_money_source_is_logged(store, monkeypatch, caplog):
+    """The screen says "money unknown" — the log must say why, or a corrupt db stays invisible forever."""
+    from ahub.providers import opencode_db
+
+    def boom(*_a, **_kw):
+        raise sqlite3.DatabaseError("file is not a database")
+
+    monkeypatch.setattr(opencode_db, "totals", boom)
+    with caplog.at_level("WARNING", logger="tui"):
+        head = data.header(store, now_ms())
+    assert "траты: нет данных" in head
+    assert [r.message for r in caplog.records] == ["opencode totals are unknown: file is not a database"]
+
+
+async def test_app_transcript_screen_uses_the_width_of_its_pane(tmp_path, store):
+    """A result line is clipped to the pane: on an 80-column terminal it must not be cut at 120 and
+    then re-wrapped by the widget."""
+    tid = store.create_task(project="P", kind="code", title="починить")
+    log = tmp_path / "executor.log"
+    log.write_text(json.dumps({"type": "thread.started", "thread_id": "th-1"}) + "\n" + json.dumps(
+        {"type": "item.completed", "item": {"id": "i1", "type": "command_execution",
+                                            "command": "/bin/bash -lc 'pytest -q'",
+                                            "aggregated_output": "x" * 400,
+                                            "exit_code": 0, "status": "completed"}}) + "\n",
+        encoding="utf-8")
+    row = store.add_session(task_id=tid, provider="codex", role="executor", model="codex", round=1,
+                            external_id="th-1", log_path=str(log))
+    store.update_session(row, status="running", ended_at=None)
+    app = TopApp(store=store, projects=[])
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause(0.5)
+        await rows_ready(app, pilot)
+        app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
+        await pilot.press("t")
+        await pilot.pause(0.3)
+        screen = app.screen
+        width = screen.query_one("#live-log", Static).size.width
+        assert screen.view.width == width and width < 120
+        longest = max(len(ln) for ln in screen.view.lines)
+        assert longest <= width
 
 
 async def test_app_view_mode_blocks_actions(store):
@@ -107,6 +151,7 @@ async def test_app_view_mode_blocks_actions(store):
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
         assert "ПРОСМОТР" in str(app.query_one("#mode").render())
+        await rows_ready(app, pilot, want=2)  # the first refresh runs in a thread — a pause is not a wait
         assert len(app._ids) == 2
         await pilot.press("s")  # in view mode it does nothing
         await pilot.pause(0.2)
@@ -120,6 +165,7 @@ async def test_app_stop_with_confirm(store):
     app = TopApp(store=store, projects=[], control=True)
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(a))
         await pilot.press("s")
         await pilot.pause(0.2)
@@ -138,6 +184,7 @@ async def test_app_nudge_message(store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(a))
         await pilot.press("m")  # view mode: nothing happens
         await pilot.pause(0.2)
@@ -263,6 +310,7 @@ async def test_app_transcript_screen(tmp_path, store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
         await pilot.pause(0.3)
@@ -302,6 +350,7 @@ async def test_transcript_screen_nudges_the_worker(tmp_path, store):
     app = TopApp(store=store, projects=[], control=True)
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
         await pilot.pause(0.3)
@@ -326,6 +375,7 @@ async def test_transcript_tail_holds_when_scrolled_up(tmp_path, store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.pause(0.5)
+        await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=0)
         await pilot.press("t")
         await pilot.pause(0.3)
@@ -364,7 +414,7 @@ def test_screen_data_en(store, monkeypatch):
     assert by_id[a].state == "queued" and by_id[b].state == "done"
     assert not _re.search(r"[а-яА-ЯёЁ]", screen.header + by_id[a].state + by_id[b].state)
     events.touch(store)
-    assert "Claude is here" in data.header(store, {}, now_ms())
+    assert "Claude is here" in data.header(store, now_ms())
     _reset()
 
 
@@ -382,3 +432,93 @@ async def test_app_detail_shows_brackets_and_colours_as_text(store, monkeypatch)
         text = str(app.query_one("#detail").render())
         assert "[--all? (оставить)]" in text
         assert "\x1b[" not in text
+
+
+# --- a draft offer, a project header row and the `o` key ---
+
+
+def _project_config(root: Path, name: str) -> config.ProjectConfig:
+    write(root / ".hub.toml", f'schema_version = 2\nname = "{name}"\n')
+    return config.load_project(root)
+
+
+def _draft(store: Store, project: str, status: str, task_json: str = "") -> int:
+    with store.tx() as c:
+        return int(c.execute("INSERT INTO draft(ts, project, text, task_json, status) VALUES(?,?,?,?,?)",
+                             (now_ms(), project, "просто текст", task_json, status)).lastrowid)
+
+
+async def test_offer_decides_by_the_status_code_not_by_the_preview_text(tmp_path, store):
+    """A draft whose own words contain ': failed' is a ready draft — readiness is the status of the row."""
+    project = _project_config(tmp_path / "P", "P")
+    did = _draft(store, "P", drafts.READY, '{"kind": "scout", "title": "чиним CI",'
+                                           ' "spec": "почини CI: failed в tests/x.py", "result_format": ""}')
+    preview = drafts.preview(store, did)
+    assert ": failed" in preview  # the words of the spec, not a status
+    app = TopApp(store=store, projects=[project])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        app._offer(project, did, preview, drafts.status(store, did))
+        await pilot.pause(0.2)
+        assert app.screen.__class__.__name__ == "Confirm"  # offered, not refused as an error
+        await pilot.press("n")
+        await pilot.pause(0.2)
+        assert drafts.status(store, did) == "cancelled"  # declined — the draft is not started
+
+    bad = _draft(store, "P", "failed")
+    app = TopApp(store=store, projects=[project])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        app._offer(project, bad, drafts.preview(store, bad), drafts.status(store, bad))
+        await pilot.pause(0.2)
+        assert app.screen.__class__.__name__ != "Confirm"  # not offered — the error goes to the notifications
+        said = [n.message for n in app._notifications]
+        assert len(said) == 1 and "failed" in said[0]
+
+
+async def test_a_group_header_row_shows_the_group_in_the_detail(tmp_path, store):
+    """The cursor on a project header row (no task under it): the pane says which project and how many."""
+    a = store.create_task(project="A", kind="scout", title="разведка")
+    store.create_task(project="B", kind="code", title="кнопка")
+    app = TopApp(store=store, projects=[_project_config(tmp_path / "A", "A"),
+                                        _project_config(tmp_path / "B", "B")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        await rows_ready(app, pilot)
+        assert app._ids[0] == 0  # the first row opens the group of project A
+        app.query_one("#tasks").move_cursor(row=0)
+        await pilot.pause(0.2)
+        text = str(app.query_one("#detail").render())
+        assert "нет задач" not in text and "A" in text and str(t("tui.group_tasks", n=1)) in text
+        assert app.selected() is None  # a group row has no task to act on
+        assert app._ids[1] == a  # the task of A is the row under its header
+
+
+async def test_the_o_key_narrows_the_table_and_the_feed(tmp_path, store):
+    """`o` — one project: the table, the header and the feed below it are all of that project."""
+    a = store.create_task(project="A", kind="scout", title="разведка A")
+    b = store.create_task(project="B", kind="code", title="кнопка B")
+    comms.owner_message(store, "сообщение A", project="A")
+    comms.owner_message(store, "сообщение B", project="B")
+    comms.owner_message(store, "сообщение всем", project="")
+    # two projects — a header row opens each group; one project — the task alone
+    whole, one_a, one_b = [0, a, 0, b], [a], [b]
+    app = TopApp(store=store, projects=[_project_config(tmp_path / "A", "A"),
+                                        _project_config(tmp_path / "B", "B")])
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        await rows_ready(app, pilot, want=whole)
+        assert "сообщение B" in str(app.query_one("#feed").render())  # the whole feed at first
+        await pilot.press("o")
+        await rows_ready(app, pilot, want=one_a)
+        assert app.project == "A" and "проект: A" in str(app.query_one("#mode").render())
+        assert {r.project for r in data.snapshot(app.store, projects=[], only=app.project)[0].rows} == {"A"}
+        feed = str(app.query_one("#feed").render())
+        assert "сообщение B" not in feed and "сообщение A" in feed and "сообщение всем" in feed
+        await pilot.press("o")
+        await rows_ready(app, pilot, want=one_b)
+        assert app.project == "B"
+        assert "сообщение A" not in str(app.query_one("#feed").render())
+        await pilot.press("o")
+        await rows_ready(app, pilot, want=whole)
+        assert app.project == ""  # after the last project back to all

@@ -74,6 +74,17 @@ def test_failed_command_is_not_a_turn_error(codex):
     assert out is Outcome.OK
 
 
+def test_tool_output_is_cut_for_the_transcript(codex):
+    """T107/14: the transcript keeps the first 300 characters of what a command printed."""
+    item = {"id": "item_1", "type": "command_execution", "command": "/bin/bash -lc 'yes'",
+            "aggregated_output": "y" * 1000, "exit_code": 0, "status": "completed"}
+    acts = codex.parse_line(json.dumps({"type": "item.completed", "item": item}), 1)
+    assert acts[0].data["output"] == "y" * 300
+    empty = {"id": "item_2", "type": "command_execution", "command": "ls", "status": "completed"}
+    acts = codex.parse_line(json.dumps({"type": "item.completed", "item": empty}), 1)
+    assert "output" not in acts[0].data  # nothing printed — no empty key
+
+
 def test_parse_resume_sample(codex):
     acts = acts_of(codex, "resume.ndjson")
     assert acts[0].kind is Act.SESSION and acts[0].text == SID  # the same thread

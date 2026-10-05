@@ -333,11 +333,14 @@ def test_bare_tty_opens_console_not_home(monkeypatch, tmp_path):
     assert cli.main(["--all"]) == 7
     assert called == {"all": True, "project": None, "control": False}
 
-    assert cli.main(["--project", "myproj"]) == 7
+    proj = tmp_path / "myproj"  # main refuses unknown --project names: a repo path is a project
+    (proj).mkdir()
+    (proj / ".hub.toml").write_text('schema_version = 2\nname = "myproj"\n', encoding="utf-8")
+    assert cli.main(["--project", str(proj)]) == 7
     assert called == {"all": False, "project": "myproj", "control": False}
 
 
-def test_top_opens_console(monkeypatch):
+def test_top_opens_console(monkeypatch, tmp_path):
     called = {}
 
     def _fake(*, all_projects=False, project=None, control=False):
@@ -357,7 +360,10 @@ def test_top_opens_console(monkeypatch):
     assert cli.main(["top", "--all"]) == 0
     assert called == {"ok": True, "all": True, "project": None, "control": False}
 
-    assert cli.main(["top", "--project", "other"]) == 0
+    proj = tmp_path / "other"  # main refuses unknown --project names: a repo path is a project
+    (proj).mkdir()
+    (proj / ".hub.toml").write_text('schema_version = 2\nname = "other"\n', encoding="utf-8")
+    assert cli.main(["top", "--project", str(proj)]) == 0
     assert called == {"ok": True, "all": False, "project": "other", "control": False}
 
 

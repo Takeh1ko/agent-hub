@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 
 import pytest
 
@@ -57,6 +58,35 @@ def test_pipe_gets_no_ansi(monkeypatch):
     monkeypatch.delenv("NO_COLOR")
 
 
+def test_plain_is_per_thread(monkeypatch):
+    """The observer and the TG launcher build their prompts on their own threads.
+
+    While such a thread is inside `plain()`, the terminal output of the main thread still belongs to a
+    human — a process-global flag muted it (and the whole ui suite with it, in whatever order it ran).
+    """
+    monkeypatch.setattr(ui.sys, "stdout", _Stream(tty=True))
+    inside = threading.Event()
+    release = threading.Event()
+
+    def _worker():
+        with ui.plain():
+            assert ui.styled("prompt", "bold") == "prompt"  # its own thread: plain
+            inside.set()
+            release.wait(5)
+
+    th = threading.Thread(target=_worker, daemon=True)
+    th.start()
+    try:
+        assert inside.wait(5)
+        assert ui.styled("terminal", "bold") == "\033[1mterminal\033[0m"  # this thread: colour
+    finally:
+        release.set()
+        th.join(timeout=5)
+    with ui.plain():
+        assert ui.styled("here", "bold") == "here"  # and plain() still works in this thread
+    assert ui.styled("terminal", "bold") == "\033[1mterminal\033[0m"
+
+
 def test_kv_aligns_a_block():
     block = ui.kv([("State", "done · merged into main"), ("Model", "bunny"), ("Age", "4 h 0 min")])
     assert block == ("State  done · merged into main\n"
@@ -96,6 +126,16 @@ def test_table_ellipsis_only_in_a_cell():
     out = ui.table(head, rows, max_width=[6, 12], w=30)
     assert out.split("\n") == ["task  title", "T1    a rather…"]  # cut at a word, in the cell only
     assert all(len(ln) <= 30 for ln in out.split("\n"))
+
+
+def test_table_tolerates_short_head():
+    """A head with fewer columns than the rows does not raise IndexError."""
+    head = ["col1", "col2"]
+    rows = [["a", "b", "c", "d"]]
+    out = ui.table(head, rows)
+    lines = out.split("\n")
+    assert lines[0].startswith("col1  col2")
+    assert lines[1] == "a     b     c  d"
 
 
 def test_fit_cuts_at_a_sentence_and_points_to_the_rest():
@@ -496,9 +536,8 @@ def test_home_screen_tty_snapshot(tmp_path, monkeypatch):
     assert lines[0] == "\x1b[2m╭───────────────────────────────────────╮\x1b[0m"
     assert lines[1] == f"│ \x1b[38;5;208m✻ ahub\x1b[0m \x1b[2m{ahub.__version__} · demo · service stopped\x1b[0m │"
     assert lines[2] == "\x1b[2m╰───────────────────────────────────────╯\x1b[0m"
-    assert lines[3] == "\x1b[38;5;208m⏺\x1b[0m the hub is not configured yet"
-    assert lines[4] == "  \x1b[2m⎿\x1b[0m \x1b[2mRun `ahub setup` to get started\x1b[0m"
-    assert lines[5] == "\x1b[2mahub setup · ahub doctor · ahub models\x1b[0m"
+    assert lines[3] == "\x1b[38;5;208m⏺\x1b[0m the hub is not configured yet — run `ahub setup` to get started"
+    assert lines[4] == "\x1b[2mahub setup · ahub doctor · ahub models\x1b[0m"
 
 
 def test_action_result_and_error_tty(monkeypatch):

@@ -4,9 +4,11 @@ Transport — stdio, line-delimited JSON-RPC 2.0 (MCP protocol 2025-06-18: initi
 No outside deps. Each tool calls a CLI handle in this process and returns its text
 (same L0–L3 limits, same savings). Wiring: `ahub mcp` as a stdio server in agent settings.
 
-Scope (ahub/scope.py): the server resolves the scope once from its own cwd at start, so its tools see and
-write only that project; a call may pass `project` (or `all`) to look at another one. A tool on one task id belongs
-to that task's project — a task of another project comes back as an error with the way out.
+Scope (ahub/scope.py): every tool is the CLI command, and the CLI takes the scope of the directory the
+server runs in — the project of that repository, resolved by the same `scope.resolve()` the shell uses.
+There is no list of scoped commands to keep here: a new tool is scoped from its first day, and a tool call
+may pass `project` (or `all`) to look at another one. A tool on one task id belongs to that task's project —
+a task of another project comes back as an error with the way out.
 """
 
 from __future__ import annotations
@@ -15,38 +17,14 @@ import contextlib
 import io
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
-from ahub import __version__, scope
+from ahub import __version__
 
 PROTOCOL = "2025-06-18"
 
-# The commands that take a scope; the server passes its own one to them (ahub/scope.py). A command on one
-# task is here too: a task of another project is refused unless the call names its project or asks for all.
-SCOPED = frozenset({"status", "wait", "watch", "ack", "inbox", "say", "ask", "questions", "alarms", "history",
-                    "result", "nudge", "budget", "accept", "reject", "rework", "continue", "stop"})
-
 # name → (description, param schema, how to build CLI argv)
 TOOLS: dict[str, tuple[str, dict, Any]] = {}
-
-_server_scope: scope.Scope | None = None
-
-
-def server_scope(cwd: str | Path | None = None) -> scope.Scope:
-    """The scope of this server — the project of its cwd, resolved once (the cwd does not change)."""
-    global _server_scope
-    if _server_scope is None:
-        _server_scope = scope.of_dir(Path(cwd) if cwd is not None else Path.cwd())
-    return _server_scope
-
-
-def _scoped(argv: list[str]) -> list[str]:
-    """The server's scope on a scoped command, unless the call named a project or asked for everything."""
-    if len(argv) < 2 or argv[0] not in SCOPED or "--project" in argv or "--all" in argv:
-        return argv
-    sc = server_scope()
-    return argv[:1] + (["--project", sc.name] if sc.name else []) + argv[1:]
 
 
 def tool(name: str, description: str, props: dict, required: list[str] | None = None):
@@ -148,10 +126,16 @@ def _ask(a: dict) -> list[str]:
     return _project_flag(a, argv)
 
 
-@tool("budget", "Extend the task budget (a budget-blocked task resumes).",
-      {"task": S, "add": {"type": "number"}, "project": S, "all": {"type": "boolean"}}, ["task", "add"])
+@tool("budget", "Extend the task budget, or set the real-money one (a budget-blocked task resumes).",
+      {"task": S, "add": {"type": "number"}, "set_usd": {"type": "number"}, "project": S,
+       "all": {"type": "boolean"}}, ["task"])
 def _budget(a: dict) -> list[str]:
-    return _project_flag(a, ["budget", a["task"], "--add", str(a["add"]), "--by", "mcp"])
+    argv = ["budget", a["task"]]
+    if a.get("add") is not None:
+        argv += ["--add", str(a["add"])]
+    if a.get("set_usd") is not None:
+        argv += ["--set-usd", str(a["set_usd"])]
+    return _project_flag(a, argv + ["--by", "mcp"])
 
 
 def call_cli(argv: list[str]) -> tuple[int, str]:
@@ -194,7 +178,7 @@ def handle(req: dict) -> dict | None:
         missing = [k for k in TOOLS[name][1]["required"] if k not in args]
         if missing:
             return ok({"content": [{"type": "text", "text": f"missing params: {', '.join(missing)}"}], "isError": True})
-        rc, text = call_cli(_scoped(TOOLS[name][2](args)))
+        rc, text = call_cli(TOOLS[name][2](args))  # the CLI resolves the scope from the cwd
         return ok({"content": [{"type": "text", "text": text or ("ok" if rc == 0 else f"code {rc}")}],
                    "isError": rc not in (0, 3)})
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"unknown method {method}"}}

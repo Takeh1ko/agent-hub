@@ -128,7 +128,16 @@ class Transcript(Screen[None]):
 
     def on_mount(self) -> None:
         self.set_interval(self.POLL_S, self.refresh_live)
+        self._fit_width()
         self._paint(True)
+
+    def on_resize(self) -> None:
+        self._fit_width()
+
+    def _fit_width(self) -> None:
+        """The lines are rendered for the width of the pane, not for a fixed 120 columns."""
+        box = self.query_one("#live-log", Static)
+        self.view.set_width(box.size.width or self.app.size.width)
 
     @work(thread=True, exclusive=True, group="live")
     def refresh_live(self) -> None:
@@ -233,6 +242,7 @@ class TopApp(App):
         self._live: dict = {}
         self._pulses: dict = {}
         self._ids: list[int] = []
+        self._rows: list[data.Row] = []  # the rows of the last refresh — the cursor's row, header too
         self._names: list[str] = []  # the projects of the last refresh — the order of the `o` key
 
     def pulses(self) -> dict:
@@ -292,6 +302,7 @@ class TopApp(App):
         cur = self.selected()
         table.clear()
         self._ids = []
+        self._rows = list(screen.rows)
         for r in screen.rows:
             table.add_row(r.mark, r.label, r.kind, r.title[:40], r.state, r.phase, r.model,
                           "" if r.header else str(r.round), r.age, r.cost)
@@ -308,14 +319,20 @@ class TopApp(App):
             self.set_timer(REFRESH_GAP_S, self.refresh_data)
 
     def selected(self) -> int | None:
+        row = self._row_at_cursor()
+        return row.task_id if row is not None and not row.header else None
+
+    def _row_at_cursor(self) -> data.Row | None:
+        """The row under the cursor — a project header row too (it carries the name of the group)."""
         table = self.query_one("#tasks", DataTable)
         if not self._ids or table.cursor_row is None or table.cursor_row >= len(self._ids):
             return None
-        return self._ids[table.cursor_row]
+        return self._rows[table.cursor_row] if table.cursor_row < len(self._rows) else None
 
     def _show_detail(self) -> None:
-        tid = self.selected()
-        text = data.detail(self.store, tid, self._live, self._pulses) if tid else _t("tui.no_tasks")
+        row = self._row_at_cursor()
+        text = data.detail(self.store, row.task_id, self._live, self._pulses) if row and not row.header else (
+            _t("tui.group_header", name=row.label, tasks=row.title) if row else _t("tui.no_tasks"))
         self.query_one("#detail", Static).update(_plain(text))
 
     def on_data_table_row_highlighted(self, ev) -> None:
@@ -487,17 +504,19 @@ class TopApp(App):
     def _make_draft(self, project: config.ProjectConfig, text: str) -> None:
         did = drafts.create(self.store, project, text, source="top")
         preview = drafts.preview(self.store, did)
-        self.call_from_thread(self._offer, project, did, preview)
+        status = drafts.status(self.store, did)
+        self.call_from_thread(self._offer, project, did, preview, status)
 
-    def _offer(self, project: config.ProjectConfig, did: int, preview: str) -> None:
+    def _offer(self, project: config.ProjectConfig, did: int, preview: str, status: str) -> None:
         def done(ok: bool | None) -> None:
             if ok:
                 self._do(lambda: _t("draft.queued", tid=drafts.start(self.store, project, did)))
             else:
                 drafts.cancel(self.store, did)
                 self.notify(_t("tui.draft_cancelled"))
-        # drafts preview text may be localized: readiness — by status code, not by text
-        if ": failed" in preview or ": drafting" in preview or ": cancelled" in preview:
+        # the preview text may be localized and may quote the words themselves — readiness by the status
+        # code of the row, never by the text of the preview
+        if status != drafts.READY:
             self.notify(preview[:300], severity="error", timeout=10)
             return
         self.push_screen(Confirm(preview + "\n\n" + _t("tui.confirm_run")), done)

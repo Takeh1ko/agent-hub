@@ -77,6 +77,7 @@ Example .hub.toml v2:
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -202,7 +203,7 @@ class HubConfig:
 
     def provider(self, name: str) -> ProviderSettings:
         """A provider's own settings; no section — the proxy keys stay inherited, the sandbox default."""
-        return self.provider_settings.get(name) or ProviderSettings()
+        return self.provider_settings.get(name.strip().lower()) or ProviderSettings()
 
     def provider_enabled(self, name: str) -> bool:
         """Provider switch ([providers.<name>] enabled): no section or no key — the provider is on."""
@@ -322,8 +323,9 @@ def _provider_settings(r: _Reader, raw: dict) -> dict[str, ProviderSettings]:
             r.errors.append(_t("config.bad_sandbox", name=name, got=sandbox))
             sandbox = ""
         enabled = r.bool_(spec, "enabled", True, where)
+        norm = name.strip().lower()
         if proxy is not None or no_proxy is not None or sandbox or not enabled:
-            out[name] = ProviderSettings(proxy=proxy, no_proxy=no_proxy, sandbox=sandbox, enabled=enabled)
+            out[norm] = ProviderSettings(proxy=proxy, no_proxy=no_proxy, sandbox=sandbox, enabled=enabled)
     return out
 
 
@@ -424,11 +426,19 @@ def find_project_file(start: str | Path) -> Path | None:
 
 
 def load_project_file(path: str | Path) -> ProjectConfig:
+    """A project file read as UTF-8; no file — FileNotFoundError (the caller names the entry).
+
+    A file in another encoding — ConfigError, so a cp1251 .hub.toml is a message, not a traceback.
+    """
     p = Path(path)
     try:
-        data = tomllib.loads(p.read_text(encoding="utf-8"))
+        data = tomllib.loads(p.read_text(encoding="utf-8-sig"))
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(str(p), [_t("config.bad_toml", err=e)]) from e
+    except FileNotFoundError:
+        raise  # no file is not an encoding problem — the caller answers for it
+    except (UnicodeDecodeError, OSError) as e:
+        raise ConfigError(str(p), [_t("config.bad_encoding", err=e)]) from e
     return parse_project(data, p.parent, str(p))
 
 
@@ -534,11 +544,119 @@ def load_hub(path: str | Path | None = None) -> HubConfig:
         if not p.is_file():
             continue
         try:
-            data = tomllib.loads(p.read_text(encoding="utf-8"))
+            data = tomllib.loads(p.read_text(encoding="utf-8-sig"))
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(str(p), [_t("config.bad_toml", err=e)]) from e
+        except (UnicodeDecodeError, OSError) as e:
+            raise ConfigError(str(p), [_t("config.bad_encoding", err=e)]) from e
         return _parse_hub_data(data, str(p))
     return _parse_hub_data({}, "")
+
+
+# --- writing the hub config (set_global) — one writer, the rest of the file (comments, sections) stays ---
+
+
+def toml_str(v) -> str:
+    """A TOML value as text (bool, number, list, string)."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_str(x) for x in v) + "]"
+    return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _render_projects(items: list[str]) -> str:
+    """Single projects line for the global config."""
+    return "projects = [" + ", ".join(toml_str(x) for x in items) + "]"
+
+
+_PROJECTS_KEY = re.compile(r"^projects\s*=\s*\[[^\]]*\][^\n]*\n?", re.MULTILINE)
+
+
+def _refused(key: str = "setup_global"):
+    """A refusal from the writer: a CliError, not a ConfigError — the config parses, the write did not land.
+    Imported here (cliutil imports config) so the two modules stay independent at import time."""
+    from ahub.cliutil import CliError
+
+    return CliError(_t(f"err.{key}", path=paths.global_config_path()))
+
+
+def _replace_top_key(text: str, key: str, value) -> str:
+    """Top-level key replace, rest (sections, comments) stays; no key — insert first."""
+    if key == "projects":
+        line = _render_projects(list(value)) + "\n"
+        pat = _PROJECTS_KEY
+    else:
+        line = f"{key} = {toml_str(value)}\n"
+        pat = re.compile(rf"^{re.escape(key)}\s*=.*\n?", re.MULTILINE)
+    m = pat.search(text)
+    new = text[:m.start()] + line + text[m.end():] if m else line + text
+    try:
+        parsed = tomllib.loads(new)
+    except tomllib.TOMLDecodeError:
+        raise _refused() from None
+    if key == "projects":
+        if tuple(parsed.get("projects", ())) != tuple(value):
+            raise _refused("setup_projects")
+    elif parsed.get(key) != value:
+        raise _refused()
+    return new
+
+
+def provider_lookup(parsed: dict, name: str):
+    """`enabled` from [providers.<name>] — the nested table key, not a dotted path."""
+    table = parsed.get("providers")
+    spec = table.get(name) if isinstance(table, dict) else None
+    return spec.get("enabled") if isinstance(spec, dict) else None
+
+
+def _replace_section_key(text: str, section: str, key: str, value, lookup=None) -> str:
+    """Key inside [section]; section missing — append; rest (comments, other sections) stays."""
+    rendered = f"{key} = {toml_str(value)}\n"
+    head = re.compile(rf"^\[{re.escape(section)}\][^\n]*\n?", re.MULTILINE)
+    m = head.search(text)
+    if m is None:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        new = text + f"[{section}]\n" + rendered
+    else:
+        nxt = re.compile(r"^\[.*\][^\n]*\n?", re.MULTILINE)
+        nm = nxt.search(text, m.end())
+        end = nm.start() if nm else len(text)
+        body = text[m.end():end]
+        kpat = re.compile(rf"^{re.escape(key)}\s*=.*\n?", re.MULTILINE)
+        km = kpat.search(body)
+        if km:
+            body = body[:km.start()] + rendered + body[km.end():]
+        else:
+            if body and not body.endswith("\n"):
+                body += "\n"
+            body = body + rendered
+        new = text[:m.end()] + body + text[end:]
+    try:
+        parsed = tomllib.loads(new)
+    except tomllib.TOMLDecodeError:
+        raise _refused() from None
+    try:
+        got = lookup(parsed) if lookup else parsed.get(section, {}).get(key)
+    except AttributeError:
+        got = None
+    if got != value:
+        raise _refused()
+    return new
+
+
+def set_global(key: str, value, *, section: str | None = None, lookup=None) -> Path:
+    """Single global-config writer: top-level key or [section] key, rest of file stays."""
+    gp = paths.global_config_path()
+    gp.parent.mkdir(parents=True, exist_ok=True)
+    text = gp.read_text(encoding="utf-8") if gp.exists() else ""
+    new = (_replace_section_key(text, section, key, value, lookup) if section
+           else _replace_top_key(text, key, value))
+    gp.write_text(new, encoding="utf-8")
+    return gp
 
 
 def load_projects(hub: HubConfig | None = None) -> tuple[list[ProjectConfig], list[str]]:

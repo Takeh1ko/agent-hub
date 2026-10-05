@@ -269,3 +269,10 @@ def test_dead_pid_marked_and_snapshot_live(store):
             assert "мёртвый" not in line
     snap = observer.snapshot(store, now=now)
     assert f"сервис {os.getpid()}" in snap
+
+
+def test_the_verdict_vocabulary_is_one_list():
+    """The prompt asks for exactly the words the code accepts, and only alarm/critical raise an event."""
+    for verdict in observer.VERDICTS:
+        assert verdict in observer.TRIAGE_PROMPT
+    assert observer.ALARMING <= set(observer.VERDICTS) and observer.ALARMING == {"alarm", "critical"}

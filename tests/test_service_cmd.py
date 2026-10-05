@@ -209,3 +209,31 @@ def test_service_status_json_keeps_the_reason_and_renders_it(capsys):
     row = _json.loads(out.out)["queued"][0]
     assert row["reason"] == '{"code":"wait_accept","task":"T1","state":"queued"}'  # the code, as stored
     assert row["reason_text"] == "ждёт принятия T1 (в очереди)"  # and the sentence, in the reader's language
+
+
+class _InstantClock:
+    """A clock that jumps a second per reading — the 10 s stop deadline must not cost the test 10 s."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        self.now += 1.0
+        return self.now
+
+    def sleep(self, _s) -> None:
+        pass
+
+
+def test_a_stop_that_does_not_stop_points_at_the_pid(monkeypatch, capsys):
+    """SIGTERM ignored: the refusal names the pid to kill — starting the service is not the way out."""
+    _fake_sleep(monkeypatch)
+    assert cli.main(["service", "start"]) == 0
+    pid = int(paths.service_pid_path().read_text(encoding="utf-8").strip())
+    capsys.readouterr()
+    monkeypatch.setattr(procs, "alive", lambda _pid: True)  # the process survives SIGTERM
+    monkeypatch.setattr(svccmd, "time", _InstantClock())
+    assert cli.main(["service", "stop"]) == 2
+    err = capsys.readouterr().err
+    assert f"kill -9 {pid}" in err, err
+    assert paths.service_pid_path().exists()  # a running service keeps its pid file

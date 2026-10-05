@@ -16,6 +16,7 @@ from ahub import paths, procs, tasks, worker, workspace
 from ahub.engine import POLL_FAIL_MAX, Engine, PollFailed
 from ahub.model import Kind, State
 from ahub.store import Store
+from tests.conftest import wait_until
 from tests.enginekit import install_fake, make_project
 
 REPO = Path(__file__).resolve().parents[1]
@@ -50,15 +51,6 @@ def kill_agents(worktree: str) -> None:
             pass
 
 
-def wait_agent(worktree: str, timeout: float = 20.0) -> bool:
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if agent_of(worktree):
-            return True
-        time.sleep(0.1)
-    return False
-
-
 def test_poll_tolerates_two_failures_then_gives_up(store, project, monkeypatch):
     """The stop poll cannot read the row: two failures are tolerated, the third one ends the process."""
     install_fake(store, [])
@@ -79,6 +71,49 @@ def test_poll_tolerates_two_failures_then_gives_up(store, project, monkeypatch):
     assert boom["n"] == POLL_FAIL_MAX
 
 
+def test_worker_exit_3_is_a_flag_not_a_text_match(store, project, monkeypatch):
+    """Exit code 3 (busy) is a flag on the settled result, not a comparison of rendered text.
+
+    The engine settles under one language and the worker reads the result under another (a `--lang en`
+    or an edited template): the code must not depend on the text.
+    """
+    from ahub import i18n, reasons, transitions
+    install_fake(store, [])
+    t = scout(store, project)
+    transitions.move(store, t.id, State.PREPARING)
+    assert transitions.acquire(store, t.id, "other_owner", pid=99999)  # the task is held
+    settled = Engine(store, project, t.id).run()
+    assert settled.busy is True
+    i18n.set_lang("en")
+    assert settled.reason != reasons.text(reasons.dump("busy"))  # the two languages differ here
+
+    class _Settled:
+        def __init__(self, *args, **kw):
+            pass
+
+        def run(self):
+            return settled
+
+    monkeypatch.setattr(worker, "Engine", _Settled)
+    monkeypatch.setattr(worker, "find_project", lambda name: project)
+    assert worker.main([f"T{t.id}"]) == 3
+
+
+def test_poll_first_failure_logs_warning(store, project, monkeypatch):
+    """First poll failure logs at warning level, not debug."""
+    import sqlite3
+    install_fake(store, [])
+    t = scout(store, project)
+    eng = Engine(store, project, t.id)
+    eng._budget_at = time.monotonic()
+    warnings = []
+    monkeypatch.setattr(eng.log, "warning", lambda msg, *args: warnings.append(msg % args if args else msg))
+    monkeypatch.setattr(eng, "task", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("database locked")))
+    assert eng.stop_requested() is False
+    assert len(warnings) == 1
+    assert "request poll failed (1/" in warnings[0]
+
+
 def test_poll_failure_stops_provider_and_exits_nonzero(store, project, monkeypatch, own_signals):
     """Old code on a newer schema: the worker stops the provider session, leaves the task and exits 4."""
     install_fake(store, [{"session": "ses_p", "steps": [{"sleep": 60}]}])
@@ -97,8 +132,7 @@ def test_poll_failure_stops_provider_and_exits_nonzero(store, project, monkeypat
         assert worker.main([f"T{t.id}"]) == 4
         s = store.list_sessions(t.id)[0]
         assert s.status == "killed" and s.outcome == "killed" and s.ended_at
-        time.sleep(0.5)
-        assert not agent_of(wt), "процесс провайдера пережил отказ опроса"
+        assert wait_until(lambda: not agent_of(wt)), "процесс провайдера пережил отказ опроса"
         left = store.get_task(t.id)
         assert left.state is State.WORKING and not left.owner  # left to the service (orphan pickup)
     finally:
@@ -124,11 +158,10 @@ def test_sigterm_takes_the_provider_process_group_with_it(store, tmp_path, monke
                          env={**os.environ, "PYTHONPATH": str(REPO)},
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
     try:
-        assert wait_agent(wt), "процесс провайдера не стартовал"
+        assert wait_until(lambda: agent_of(wt)), "процесс провайдера не стартовал"
         p.send_signal(signal.SIGTERM)
         assert p.wait(timeout=30) == 0
-        time.sleep(0.5)
-        assert not agent_of(wt), "процесс провайдера остался сиротой после SIGTERM"
+        assert wait_until(lambda: not agent_of(wt)), "процесс провайдера остался сиротой после SIGTERM"
         assert store.get_task(t.id).state is State.WORKING  # the task is left for the service
     finally:
         if p.poll() is None:

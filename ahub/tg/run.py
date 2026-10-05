@@ -1,7 +1,7 @@
 """TG bot v2: aiogram 3, long polling via HTTPS_PROXY. Logic — ahub.tg.core, Claude launch — ahub.tg.launcher.
 
 Blocking (sqlite, /proc) goes via asyncio.to_thread. Background loops: Claude outbox, questions,
-observer alarms, launched-Claude supervision.
+observer alarms, launched-Claude supervision, the code check.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import asyncio
 import os
 import sys
 
-from ahub import comms, config
+from ahub import comms, config, selfupdate
 from ahub import log as hublog
 from ahub.i18n import t as _t
 from ahub.store import Store
@@ -18,9 +18,11 @@ from ahub.tg import core, launcher
 
 LOOP_S = 5
 LAUNCH_S = 10
-HEARTBEAT_KEY = "tg_heartbeat"
+FAIL_MAX = 3  # the same failure in a row — the owner hears about it once, the loop slows down
+FAIL_BACKOFF_S = 60.0
 _log = hublog.get("tg")
 _QMSG: dict[tuple[int, int], int] = {}  # (chat, bot_msg_id) → question_id — reply answers
+_NODIR: dict[str, int] = {}  # project → when it was last reported (this process, one bot for weeks)
 
 
 def _markup(rows):
@@ -63,9 +65,30 @@ async def _send(bot, store: Store, reply: core.Reply) -> list[tuple[int, int]]:
     return sent
 
 
+async def _alarm(bot, store: Store, err: str) -> None:
+    """The owner-visible alarm of a loop that keeps failing: the store first (Claude, `ahub alarms`, the outbox),
+    then the chats by hand — the pass that would deliver it is the one that keeps failing. Nothing here may
+    escape: this runs inside the loop's except, and an exception from it kills the loop for good.
+    """
+    text = _t("tg.alarm_loop", err=err)
+    event = None
+    try:
+        event = await asyncio.to_thread(comms.raise_alarm, store, text, critical=True)
+    except Exception as e:
+        _log.error("the bot cannot raise its alarm: %s", e)
+    try:
+        if await _send(bot, store, core.Reply(text)) and event is not None:
+            await asyncio.to_thread(comms.mark_tg_sent, store, [event])  # sent by hand — not again by the outbox
+    except Exception as e:
+        _log.error("the bot cannot send its alarm: %s", e)
+
+
 async def background(bot, store: Store) -> None:
     last_launch = 0.0
     loop = asyncio.get_running_loop()
+    code0 = await asyncio.to_thread(selfupdate.code_fingerprint)
+    last_code_check = loop.time()
+    fail_n, reported = 0, False
     while True:
         try:
             for m in await asyncio.to_thread(comms.outbox, store):
@@ -81,17 +104,39 @@ async def background(bot, store: Store) -> None:
             await asyncio.to_thread(comms.mark_tg_sent, store, [e.id for e in alarms])
             if loop.time() - last_launch >= LAUNCH_S:
                 last_launch = loop.time()
-                res = await asyncio.to_thread(launcher.tick, store)
+                res = await asyncio.to_thread(launcher.tick, store, no_dir=_NODIR)
                 if res == "limit":
                     _log.warning("Claude launch hourly limit exhausted")
                 elif res.startswith("nodir:"):  # the launcher says it once — the owner hears it once
                     name = res.split(":", 1)[1]
                     await _send(bot, store, core.Reply(_t("tg.launch_no_dir", name=name) if name
                                                        else _t("tg.launch_no_dir_hub")))
-            await asyncio.to_thread(store.meta_set, HEARTBEAT_KEY, str(int(loop.time())))
-        except Exception:
-            _log.exception("bot background loop crashed")
-        await asyncio.sleep(LOOP_S)
+            fail_n, reported = 0, False
+        except Exception as e:
+            fail_n += 1  # the kind is in the log and the alarm: a loop that alternates two kinds is still failing
+            if fail_n < FAIL_MAX:
+                _log.exception("bot background loop crashed (%d/%d: %s)", fail_n, FAIL_MAX, type(e).__name__)
+            elif not reported:  # failing for minutes: one log line, one alarm, then a slow retry
+                reported = True
+                _log.exception("bot background loop failed %d times in a row (%s) — retry in %d s",
+                               fail_n, type(e).__name__, FAIL_BACKOFF_S)
+                await _alarm(bot, store, f"{type(e).__name__}: {str(e)[:200]}")
+        if loop.time() - last_code_check >= selfupdate.CODE_CHECK_S:
+            # outside the try, like the service's: a pass that keeps failing is exactly when new code is wanted
+            last_code_check = loop.time()
+            try:
+                code = await asyncio.to_thread(selfupdate.code_fingerprint)
+                if code != code0:  # a merge is in — the new code runs from here, not from the next restart
+                    ok, why = await asyncio.to_thread(selfupdate.new_code_healthy)
+                    if ok:
+                        _log.info("hub code changed — the bot restarts on it (the messages of this pass are sent)")
+                        selfupdate.restart_self()
+                    else:
+                        _log.error("hub code changed but fails check — staying on old: %s", why)
+                        code0 = code  # do not re-check every CODE_CHECK_S; the next change is checked again
+            except Exception:
+                _log.exception("the bot's code check failed — the next pass tries again")
+        await asyncio.sleep(FAIL_BACKOFF_S if reported else LOOP_S)
 
 
 def build_dispatcher(store: Store):
@@ -152,8 +197,10 @@ def build_dispatcher(store: Store):
     @r.message(F.text)
     async def _text(msg: Message) -> None:
         if msg.reply_to_message is not None:
-            qid = _QMSG.get((msg.chat.id, msg.reply_to_message.message_id))
+            key = (msg.chat.id, msg.reply_to_message.message_id)
+            qid = _QMSG.get(key)
             if qid is not None:
+                _QMSG.pop(key, None)  # the question is closed — a bot that runs for weeks must not keep every one
                 await msg.answer(await asyncio.to_thread(core.on_reply_to_question, store, qid, msg.text))
                 return
         rep = await asyncio.to_thread(core.on_text, store, msg.chat.id, msg.text, projects=_projects())

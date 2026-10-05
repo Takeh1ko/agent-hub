@@ -72,6 +72,9 @@ class LiveView:
 
     By default it follows the latest session of the task and takes over a newer one; `r`, `[` and `]`
     pin the human's choice (no more auto-switch). No actions, no writes — the screen is a reader.
+
+    The width the lines are rendered for is the width of the pane: the screen tells it at mount
+    (`set_width`), a narrow terminal must not get lines cut at 120 columns and re-wrapped.
     """
 
     def __init__(self, store: Store, task_id: int, *, width: int = WIDTH) -> None:
@@ -86,6 +89,20 @@ class LiveView:
         self._note: list[str] = []  # why there are no lines (no session, no log)
         self._pinned = False
         self._load(self._latest())
+
+    def set_width(self, width: int) -> None:
+        """The width of the pane the lines go into (a result line is clipped to it).
+
+        A width that is not the one the lines were rendered for means another pane (the screen mounted,
+        the terminal was resized): the history is read again, so nothing is left cut at the old width.
+        """
+        if width <= 0 or width == self.width:
+            return
+        self.width = width
+        if self.session is not None:
+            self._load(self.session)
+        elif self.feed is not None:
+            self.feed.writer.width = width
 
     @property
     def lines(self) -> list[str]:

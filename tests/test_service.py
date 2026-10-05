@@ -221,9 +221,18 @@ def test_end_to_end_real_worker(store, tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
     install_fake(store, [])  # the "fake" model in the shared registry
     t = scout(store, project)
-    s = service.Service(store)
-    r = s.tick()
-    assert r.spawned == [t.id]
+    (tmp_path / "proc").mkdir()
+    # its own /proc: the task processes of this machine (another hub, another suite) are not its business —
+    # a live `ahub.worker T1` of somebody else would look like this task already running
+    s = service.Service(store, proc_root=tmp_path / "proc")
+    spawned: list[int] = []
+    for _ in range(25):  # a spawn can fail under load (fork) — the service retries it on the next tick
+        r = s.tick()
+        spawned = r.spawned
+        if spawned:
+            break
+        time.sleep(0.2)
+    assert spawned == [t.id], f"nothing was spawned: {r.waiting}"
     for _ in range(200):
         if store.get_task(t.id).state in (State.DONE, State.ERROR, State.NEEDS_DECISION):
             break
@@ -301,11 +310,43 @@ def test_accepting_with_a_live_owner_process_is_not_an_orphan(store, tmp_path):
     assert "orphan" not in [e.kind for e in store.events(task_id=tid)]
 
 
+def test_accepting_with_recycled_pid_is_orphan(store, tmp_path):
+    """The accept process died, its lease expired, and the OS recycled the PID: reap as orphan."""
+    project = make_project(tmp_path)
+    install_fake(store, [])
+    tid = _orphan_task(store, project, state=State.ACCEPTING, owner_pid=os.getpid())
+    s, rec = svc(store, project, tmp_path)
+    fake_proc(tmp_path / "proc", os.getpid(), ["/bin/bash"])
+    s.tick()
+    assert store.get_task(tid).state is State.NEEDS_DECISION
+    assert "orphan" in [e.kind for e in store.events(task_id=tid)]
+
+
 def test_code_fingerprint_and_health(tmp_path):
+    from ahub import selfupdate
+
     a = service.code_fingerprint()
     assert a == service.code_fingerprint()
+    assert "ahub.tg.run" in selfupdate._PROBE  # the bot restarts on this verdict too, not only the service
     ok, why = service.new_code_healthy()
     assert ok, why
+
+
+def test_restart_self_execs_with_the_hub_on_pythonpath(monkeypatch):
+    """A process of `ahub service install` starts as `python -m ahub bot run`, so argv[0] is
+    `.../ahub/__main__.py`: the new process runs that file and must still find the package (without an install
+    it dies with ModuleNotFoundError — the same reason hub_env exists for the processes the hub starts)."""
+    from ahub import selfupdate
+
+    calls = []
+    monkeypatch.setattr(os, "execv", lambda *a: calls.append(a))
+    monkeypatch.setattr(os, "execve", lambda *a: calls.append(a))
+    service.restart_self()
+    assert len(calls) == 1 and len(calls[0]) == 3, "execve with our environment, not execv"
+    exe, argv, env = calls[0]
+    assert exe == sys.executable and argv[1] == sys.argv[0]
+    root = Path(selfupdate.__file__).resolve().parents[1]
+    assert Path(env["PYTHONPATH"].split(os.pathsep)[0]) == root
 
 
 def test_self_update_triggers_restart(store, tmp_path, monkeypatch):

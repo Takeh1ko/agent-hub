@@ -12,7 +12,7 @@ import time
 from ahub import log as hublog
 from ahub import model, paths, procs, reasons, ui, views
 from ahub.cliutil import CliError, emit
-from ahub.service import HEARTBEAT_KEY, PAUSE_KEY, Service, live_workers
+from ahub.service import HEARTBEAT_KEY, LABELS, PAUSE_KEY, PLIST_FILES, UNIT_BOT, UNIT_SERVICE, Service, live_workers
 from ahub.store import Store
 from ahub.time import fmt_local, now_ms
 
@@ -44,7 +44,7 @@ def cmd_status(args) -> int:
             rows.append([f"T{tid}", str(pid), views.state_word(tsk.state)])
     if rows:
         out.append(ui.section(t("service.sec_tasks")))
-        out.append(ui.table([t("views.col_id"), "pid", t("views.col_state")], rows,
+        out.append(ui.table([t("views.col_id"), t("service.col_pid"), t("views.col_state")], rows,
                             max_width=[6, 7, 16], indent=2))
     if queued:
         out.append(ui.section(t("service.sec_queue")))
@@ -87,10 +87,8 @@ KillMode=process
 [Install]
 WantedBy=default.target
 """
-UNITS = {"ahub.service": ("agent-hub: service (queue, task processes, observer)", "service run"),
-         "ahub-bot.service": ("agent-hub: Telegram bot (link to Claude)", "bot run")}
-LABELS = {"ahub.service": "dev.ahub.service", "ahub-bot.service": "dev.ahub.bot"}
-PLIST_FILES = {"ahub.service": "dev.ahub.service.plist", "ahub-bot.service": "dev.ahub.bot.plist"}
+UNITS = {UNIT_SERVICE: ("agent-hub: service (queue, task processes, observer)", "service run"),
+         UNIT_BOT: ("agent-hub: Telegram bot (link to Claude)", "bot run")}
 _ENV_KEYS = ("PATH", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "LANG",
              "AHUB_LANG", "AHUB_TZ", "AHUB_HOME")
 
@@ -115,7 +113,7 @@ def _env_dict() -> dict[str, str]:
 
 
 def _log_names(name: str) -> tuple[str, str]:
-    stem = "bot" if name == "ahub-bot.service" else "service"
+    stem = "bot" if name == UNIT_BOT else "service"
     return f"{stem}.out.log", f"{stem}.err.log"
 
 
@@ -144,9 +142,9 @@ def _want_units() -> list[str]:
     """Service always; bot only when Telegram is enabled."""
     from ahub import config
 
-    names = ["ahub.service"]
+    names = [UNIT_SERVICE]
     if config.load_hub().telegram_enabled:
-        names.append("ahub-bot.service")
+        names.append(UNIT_BOT)
     return names
 
 
@@ -368,7 +366,7 @@ def cmd_stop(args) -> int:
     while procs.alive(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
     if procs.alive(pid):
-        raise CliError(t("err.service_not_stopped", pid=pid), hint=t("service.next_down"))
+        raise CliError(t("err.service_not_stopped", pid=pid), hint=t("hint.kill_pid", pid=pid))
     pf.unlink(missing_ok=True)
     emit(args, {"pid": pid, "stopped": True},
          t("service.stopped", pid=pid) + "\n"

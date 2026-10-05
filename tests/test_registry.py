@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from ahub import cli, config, registry
+from ahub import cli, config, paths, registry
 from ahub.model import Role
 from ahub.store import Store
 from tests.conftest import write
@@ -28,6 +28,10 @@ def test_fake_provider_from_env(store, monkeypatch):
         assert registry.pick(store, role, None).alias == "fake"
         assert ("fake" in [e.alias for e, _ in registry.menu(store, role)])
     assert registry.check(store, "fake", None).model_id == "fake/model"
+    monkeypatch.delenv("AHUB_FAKE_PROVIDER", raising=False)
+    assert registry.pick(store, Role.SCOUT, None).alias == "spark"
+    for role in Role:
+        assert registry.pick(store, role, None).alias != "fake"
 
 
 def test_seed_once(store):
@@ -109,6 +113,23 @@ def test_cli_models(tmp_path, monkeypatch, capsys):
     assert "opencode-go/mimo-v2.6-flash" in capsys.readouterr().out
 
 
+def test_cli_models_says_a_broken_global_config(capsys, monkeypatch, tmp_path):
+    """T107: a config in the wrong encoding must not hide the models silently — one line, no traceback."""
+    from ahub.i18n import _reset
+
+    monkeypatch.setenv("AHUB_LANG", "en")
+    _reset()
+    p = paths.global_config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b'lang = "\xff\xfe"')  # the bytes a cp1251 editor leaves behind
+    assert cli.main(["models", "--role", "executor"]) == 0
+    out = capsys.readouterr().out
+    assert "executor" in out and "spark" in out  # the menu is still there
+    assert f"error: {p}: not UTF-8 text" in out  # and the reason is on the same screen
+    assert cli.main(["--json", "models", "--role", "executor"]) == 0
+    assert str(p) in json.loads(capsys.readouterr().out)["config_error"]
+
+
 def test_free_candidates_order(store):
     """The probe tries the free aliases in the registry order: spark-free, then bunny."""
     assert registry.get(store, "bunny").model_id == "opencode/space-bunny-free"
@@ -155,3 +176,50 @@ def test_cli_models_check_probes(capsys, monkeypatch):
     assert cli.main(["models", "check"]) == 1
     assert tried[-2:] == ["spark", "spark-high"]
     assert cli.main(["models", "check", "nope"]) == 2
+
+
+def test_role_default_raises_on_db_error(store, monkeypatch):
+    """Finding 9: role_default must raise on DB failure instead of swallowing it and returning None."""
+    import sqlite3
+
+    def _broken_read():
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(store, "read", _broken_read)
+    with pytest.raises(sqlite3.DatabaseError):
+        registry.role_default(store, Role.EXECUTOR)
+
+
+def test_disabled_providers_mtime_cached(tmp_path, monkeypatch):
+    """Finding 11: disabled_providers caches by mtime and does not re-parse on every query."""
+    calls = 0
+    orig_load = config.load_hub
+
+    def _counting_load(*a, **k):
+        nonlocal calls
+        calls += 1
+        return orig_load(*a, **k)
+
+    monkeypatch.setattr(registry, "load_hub", _counting_load)
+    cfg_file = paths.global_config_path()
+    write(cfg_file, '[providers.codex]\nenabled = false\n')
+
+    # first call parses
+    res1 = registry.disabled_providers()
+    assert "codex" in res1
+    count1 = calls
+
+    # second call with untouched file hits cache
+    res2 = registry.disabled_providers()
+    assert res2 == res1
+    assert calls == count1
+
+    # file change updates cache
+    import time
+    time.sleep(0.01)
+    write(cfg_file, '[providers.agy]\nenabled = false\n')
+    res3 = registry.disabled_providers()
+    assert "agy" in res3
+    assert "codex" not in res3
+    assert calls > count1
+

@@ -44,7 +44,10 @@ def _under(out: str, name: str) -> str:
 
 
 def _on(name: str) -> bool:
-    return config.load_hub().provider_enabled(name)
+    hub = config.load_hub()
+    on = hub.provider_enabled(name)
+    assert on == registry.provider_enabled(name, hub)
+    return on
 
 
 def test_providers_table_shows_every_provider(capsys, monkeypatch):
@@ -64,6 +67,14 @@ def test_providers_table_shows_every_provider(capsys, monkeypatch):
     # nothing is switched off yet — the switch is the hub config, and it is not touched by a view
     assert all(_on(n) for n in ("opencode", "agy", "codex"))
     assert not paths.global_config_path().exists()
+
+
+def test_providers_table_in_english(capsys, monkeypatch):
+    _states(monkeypatch)
+    assert cli.main(["--lang", "en", "providers"]) == 0
+    out = capsys.readouterr().out
+    rows = _rows(out)
+    assert rows[0].split() == ["name", "found", "login", "enabled"]
 
 
 def test_providers_json(capsys, monkeypatch):
@@ -201,3 +212,34 @@ def test_hub_config_reads_the_switch(capsys, monkeypatch):
     assert cli.main(["providers"]) == 0
     out = capsys.readouterr().out
     assert "выключен" in out and "включён" in out
+
+
+def test_non_lowercase_provider_section(capsys, monkeypatch):
+    """Finding 5 & 20: non-lowercase section name like [providers.Codex] is recognized by both accessors."""
+    _states(monkeypatch)
+    write(paths.global_config_path(), '[providers.Codex]\nenabled = false\nproxy = "http://127.0.0.1:8080"\n')
+    hub = config.load_hub()
+    assert hub.provider_enabled("codex") is False
+    assert registry.provider_enabled("codex", hub) is False
+    assert registry.provider_enabled("codex") is False
+    assert hub.provider("codex").proxy == "http://127.0.0.1:8080"
+    assert "codex" in hub.providers_off
+    assert "codex" in registry.disabled_providers(hub)
+    assert cli.main(["providers"]) == 0
+    out = capsys.readouterr().out
+    assert "codex" in out and "выключен" in out
+
+
+def test_the_provider_switch_lives_in_the_registry_not_in_a_command(tmp_path):
+    """`ahub providers enable` and the setup wizard write the switch through one place — no command import."""
+    from ahub import config, registry
+    from ahub.commands import setup as setupecmd
+
+    assert not hasattr(setupecmd, "set_provider_enabled")  # the switch is not the setup command's
+    registry.set_provider_enabled("codex", False)
+    assert "codex" in registry.disabled_providers()
+    registry.set_provider_enabled("codex", True)
+    assert "codex" not in registry.disabled_providers()
+    # the same [providers.<name>] enabled key the wizard writes, the rest of the file untouched
+    hub = config.load_hub()
+    assert hub.provider_enabled("codex") is True
