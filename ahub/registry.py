@@ -18,6 +18,7 @@ from ahub import paths
 from ahub.config import ConfigError, HubConfig, ProjectConfig, load_hub, provider_lookup, set_global
 from ahub.i18n import t as _t
 from ahub.model import Role
+from ahub.providers.base import PlanKind
 from ahub.providers.fake import selectable_from_env
 from ahub.store import Store
 
@@ -219,11 +220,42 @@ def is_free(entry: ModelEntry) -> bool:
     return "free" in entry.model_id.lower().rsplit("/", 1)[-1] or "free" in entry.alias.lower()
 
 
-def cost_kind(entry: ModelEntry) -> str:
-    """free | paid | plan — what the user pays for the model (a note in the setup wizard)."""
+def plan_kind(entry: ModelEntry, info=None) -> PlanKind:
+    """Plan for the alias from the provider + catalog (free · go-plan · pay-as-you-go · subscription).
+
+    info — the catalog entry for this model id, when the provider has one: its plan wins,
+    except a free alias/model id is always free (a cost-0 catalog row for a paid alias stays paid).
+    Without a catalog the provider name decides (agy/codex → subscription, opencode-go → go-plan,
+    openrouter/opencode → pay-as-you-go).
+    """
+    from ahub.providers.base import PlanKind as _Plan
+    from ahub.providers.base import infer_plan as _infer
+
     if is_free(entry):
+        return _Plan.FREE
+    if info is not None:
+        pin = info.price_in if isinstance(getattr(info, "price_in", None), (int, float)) else None
+        pout = info.price_out if isinstance(getattr(info, "price_out", None), (int, float)) else None
+        if pin == 0 and pout == 0:
+            return _Plan.FREE
+        try:
+            return info.plan
+        except AttributeError:
+            pass
+    return _infer(entry.provider, entry.model_id, None, None)
+
+
+def cost_kind(entry: ModelEntry) -> str:
+    """free | paid | plan — what the user pays for the model (a note in the setup wizard).
+
+    Kept for its callers; new code uses plan_kind() (one enum with i18n labels).
+    """
+    from ahub.providers.base import PlanKind as _Plan
+
+    plan = plan_kind(entry)
+    if plan is _Plan.FREE:
         return "free"
-    return "plan" if entry.provider in PLAN_PROVIDERS else "paid"
+    return "plan" if plan is _Plan.SUBSCRIPTION else "paid"
 
 
 def free_candidates(store: Store, hub: HubConfig | None = None) -> list[ModelEntry]:
