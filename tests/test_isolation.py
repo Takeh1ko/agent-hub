@@ -72,6 +72,30 @@ def test_child_process_cannot_open_live_db(tmp_path):
     assert "refusing live hub DB" in r.stderr
 
 
+def test_session_backstop_reports_test_shaped_rows(tmp_path, monkeypatch):
+    """The session backstop names new live 'P' rows and lock touches (attribution by content)."""
+    from tests.conftest import _live_traces, _lock_stat
+
+    home = tmp_path / "livehome"
+    db = home / ".local/share/ahub/ahub.db"
+    p_lock = home / ".local/share/ahub/accept-P.lock"
+    monkeypatch.delenv(UNDER_TEST, raising=False)  # disarm tripwires to plant rows hermetically
+    store = Store(db)
+    tid = store.create_task(project="P", kind="scout", title="planted")
+    from ahub import transitions
+    from ahub.model import State
+
+    transitions.move(store, tid, State.PREPARING, now=5)
+    traces = _live_traces(db, p_lock, (0, 0, 0, 0, 0), 0, 0, True, None)
+    assert any("task" in t and "planted" in t for t in traces)
+    assert any(t.startswith("event:") for t in traces)
+    p_lock.write_text("T1\n")
+    only_lock = _live_traces(db, p_lock, (0, 0, 0, 0, 0), 10 ** 9, 10 ** 9, True, None)
+    assert only_lock == ["accept-P.lock created in the live hub dir"]
+    assert _live_traces(db, p_lock, (0, 0, 0, 0, 0), 10 ** 9, 10 ** 9, True,
+                        _lock_stat(p_lock)) == []
+
+
 def test_child_envs_keep_isolation(tmp_path):
     """Every place that builds a child env keeps the isolation vars (audit of the T151 leak)."""
     from ahub import prepare

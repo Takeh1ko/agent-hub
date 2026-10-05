@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+import warnings
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -68,11 +69,13 @@ def _isolated_env(tmp_path, monkeypatch):
 
 @pytest.fixture(scope="session", autouse=True)
 def _real_db_untouched():
-    """Suite guard: tests leave the live hub database and its dirs alone (T151).
+    """Session backstop: report test-shaped traces that reached the live hub (T151).
 
-    The live hub keeps working while the suite runs, so only test-shaped traces fail the run: rows
-    of the fake project "P" (tasks and events — an event leak once slipped past a tasks-only check)
-    and the accept lock of that project (no real project is named "P").
+    Live opens from this suite fail loudly at open time instead — the sqlite refusal above fires in
+    this process, and Store refuses live paths in every child through the inherited AHUB_UNDER_TEST
+    flag — so rows found here are never silently ours. The live DB is shared by concurrent suites,
+    and failing this run for another suite's rows blamed T144/T129 before: report with content
+    (table, ids, titles) for manual attribution, do not fail.
     """
     from ahub import paths as _paths
 
@@ -91,42 +94,72 @@ def _real_db_untouched():
         finally:
             con.close()
 
-    def leaked(table: str, after_id: int) -> int:
-        """Test rows of the fake project 'P' written to the live hub while we ran (0 — cannot read it)."""
-        if not real.exists():
-            return 0
-        con = _real_connect(f"file:{real}?mode=ro", uri=True, timeout=5)
-        try:
-            return con.execute(f"SELECT COUNT(*) FROM {table} WHERE project='P' AND id > ?",
-                               (after_id,)).fetchone()[0]
-        except sqlite3.Error:  # a locked live database is doctor/speak, not a failed guard
-            return 0
-        finally:
-            con.close()
-
-    def lock_stat():
-        try:
-            st = p_lock.stat()
-        except OSError:
-            return None
-        return (st.st_size, st.st_mtime_ns)
-
     before = counts()
     task_max, event_max = (before[0], before[4]) if before is not None else (0, 0)
-    lock_before = lock_stat()
+    existed = real.exists()
+    lock_before = _lock_stat(p_lock)
     yield
-    after = counts()
-    if before is not None and after is not None:
-        # the live hub may have added rows of its own while we ran — tests only write to tmp; make sure
-        # no test row leaked out (fake project "P")
-        assert leaked("task", task_max) == 0, "тесты записали задачи в боевую базу хаба"
-        assert leaked("event", event_max) == 0, "тесты записали события в боевую базу хаба"
-    lock_after = lock_stat()
-    if lock_before is None:
-        assert lock_after is None, "тесты создали accept-P.lock в живом каталоге хаба"
-    elif lock_after is not None:
-        # removed meanwhile (cleanup) is fine; created-or-touched by tests is not
-        assert lock_after == lock_before, "тесты трогали accept-P.lock в живом каталоге хаба"
+    for line in _live_traces(real, p_lock, before, task_max, event_max, existed, lock_before):
+        warnings.warn(f"live hub gained test-shaped traces during this run: {line} "
+                      f"(shared dev DB — this suite refuses live opens, see refusal errors above if any)",
+                      stacklevel=2)
+
+
+def _lock_stat(path):
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
+
+
+def _live_traces(real, p_lock, before, task_max, event_max, existed, lock_before) -> list[str]:
+    """New test-shaped rows/locks in the live hub since session start (empty — none)."""
+    out: list[str] = []
+    after = _counts(real) if real.exists() else None
+    if after is not None and before is not None:
+        for table, base, col in (("task", task_max, "title"), ("event", event_max, "kind")):
+            rows = _leaked_rows(real, table, base, col)
+            if rows:
+                shown = ", ".join(f"#{i} {v}" for i, v in rows[:3])
+                more = f" +{len(rows) - 3} more" if len(rows) > 3 else ""
+                out.append(f"{table}: {len(rows)} new 'P' rows ({shown}{more})")
+    elif not existed and real.exists():
+        out.append("live hub DB appeared mid-run")
+    lock_after = _lock_stat(p_lock)
+    if lock_before is None and lock_after is not None:
+        out.append("accept-P.lock created in the live hub dir")
+    elif lock_before is not None and lock_after is not None and lock_after != lock_before:
+        out.append("accept-P.lock touched in the live hub dir")
+    return out
+
+
+def _counts(real):
+    if not real.exists():
+        return None
+    con = _real_connect(f"file:{real}?mode=ro", uri=True, timeout=5)
+    try:
+        return tuple(con.execute(f"SELECT COALESCE(MAX(id), 0) FROM {t}").fetchone()[0]
+                      for t in ("task", "message", "question", "draft", "event"))
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+
+
+def _leaked_rows(real, table: str, after_id: int, col: str) -> list[tuple[int, str]]:
+    """Test rows of the fake project 'P' (id, title/kind) — [] when the live DB is unreadable."""
+    if not real.exists():
+        return []
+    con = _real_connect(f"file:{real}?mode=ro", uri=True, timeout=5)
+    try:
+        return [(r[0], str(r[1])[:60]) for r in
+                con.execute(f"SELECT id, {col} FROM {table} WHERE project='P' AND id > ? ORDER BY id",
+                            (after_id,))]
+    except sqlite3.Error:  # a locked live database is doctor/speak, not a failed guard
+        return []
+    finally:
+        con.close()
 
 
 WAIT_S = 60.0  # a deadline for what a thread or a process of its own is about to do: under load no pause is a promise
