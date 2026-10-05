@@ -8,8 +8,9 @@ timeline shares the loop length T, so the whole piece stays in sync on every rep
 The story, in five scenes:
   A  Claude Code gets a big task and files four `ahub task new` commands;
   B  the window steps aside, the hub dispatches the tasks to four worker cards;
-  C  the workers write the code — tool calls, test runs, line counters, the money ticker;
-  D  gates and the review panel pass, DONE wakes Claude, Claude accepts each task;
+  C  the workers write the code — tool calls, test runs, line counters, the money ticker — while Claude's own
+     context meter stays flat;
+  D  gates pass, a reviewer model joins each card (one sends a finding back), DONE wakes Claude, Claude accepts;
   E  the bill: Claude writing every line itself vs. Claude orchestrating cheap workers.
 
 Run: python3 tools/readme_motion/build.py  (needs fonttools + brotli; writes the SVG next to the README assets).
@@ -28,7 +29,7 @@ from fontTools.ttLib import TTFont
 HERE = Path(__file__).resolve().parent
 OUT = HERE.parent.parent / "docs" / "assets" / "agent-hub-motion.svg"
 
-T = 26.0                      # loop length, seconds
+T = 24.5                      # loop length, seconds
 W, H = 1200, 675
 EASE = "cubic-bezier(.22,.8,.24,1)"
 EASE_IO = "cubic-bezier(.65,0,.35,1)"
@@ -228,12 +229,13 @@ class Term:
                 move = A.add([(0, "transform:translate(0px,0px)"),
                               (ln.t, "transform:translate(0px,0px)", f"steps({n},end)"),
                               (ln.t + ln.typing, f"transform:translate({n * cw:.2f}px,0px)")])
-                blink = A.add([(0, "opacity:1"), (ln.t + ln.typing + 0.5, "opacity:1"),
-                               (ln.t + ln.typing + 0.5 + EPS, "opacity:0")])
+                blink = A.add([(0, "opacity:1"), (ln.t + ln.typing + 0.06, "opacity:1"),
+                               (ln.t + ln.typing + 0.06 + EPS, "opacity:0")])
+                # the whole cover leaves once the line is typed: under a scale transform its edge would
+                # otherwise shave the last glyph
                 body += (f'<svg x="{self.x:.2f}" y="{top:.2f}" width="{(n + 1) * cw + 1:.2f}" height="{hgt:.2f}" '
-                         f'overflow="hidden"><g class="{move}">'
-                         f'<rect x="0" y="1" width="{cw:.2f}" height="{hgt - 2:.2f}" fill="{cursor}" '
-                         f'class="{blink}"/>'
+                         f'overflow="hidden" class="{blink}"><g class="{move}">'
+                         f'<rect x="0" y="1" width="{cw:.2f}" height="{hgt - 2:.2f}" fill="{cursor}"/>'
                          f'<rect x="{cw:.2f}" y="0" width="{n * cw + 1:.2f}" height="{hgt:.2f}" fill="{ln.cover}"/>'
                          f'</g></svg>')
             parts.append(f'<g class="{appear(ln.t, 0.18 if ln.typing else 0.3, 0 if ln.typing else 4)}">{body}</g>')
@@ -262,6 +264,7 @@ class Worker:
     short: str
     review: str
     review_col: str
+    review_grad: str
     added: int
     removed: int
     cost: float
@@ -270,9 +273,19 @@ class Worker:
     rework: list = field(default_factory=list)  # lines after a review finding (W3)
 
 
-WORK_START = 8.6
+# the timeline, seconds
+TYPE_AT = 0.7            # the prompt starts typing
+MOVE = (5.05, 5.85)      # the Claude window steps aside
+HUB_AT = 5.55            # the hub node appears
+CARDS_AT = 5.85          # the worker cards slide in
+DISPATCH = 6.1           # the tasks travel out
+WORK_START = 6.75        # workers start
+STAGE_OUT = 16.55        # the stage fades out
+FINALE = 17.2            # the bill
+
 WORKERS = [
-    Worker("web-w1", "T165", "server + JSON API", "server + JSON API", "gemini", BLUE, 1284, 96, 0.31, 13.4, [
+    Worker("web-w1", "T165", "server + JSON API", "server + JSON API", "gemini", BLUE, "gGemini", 1284, 96, 0.31,
+           11.55, [
         [("✎ write ", DIM), ("ahub/web/server.py", SOFT)],
         [("✎ write ", DIM), ("ahub/web/api.py", SOFT)],
         [("▶ bash  ", DIM), ("pytest -q tests/test_web_server.py", SOFT)],
@@ -280,39 +293,37 @@ WORKERS = [
         [("✎ edit  ", DIM), ("ahub/web/server.py", SOFT)],
         [("▶ bash  ", DIM), ("pytest -q tests/test_web_server.py", SOFT)],
         [("  11 passed", GREEN), (" in 1.84s", DIM)],
-        [("✎ write ", DIM), ("ahub/commands/web.py", SOFT)],
         [("▶ bash  ", DIM), ("git commit -m \"ahub web: server\"", SOFT)],
     ]),
-    Worker("web-w2", "T166", "live task board", "task board", "bunny", PINK, 836, 12, 0.19, 14.3, [
+    Worker("web-w2", "T166", "live task board", "task board", "bunny", PINK, "gBunny", 836, 12, 0.19, 12.45, [
         [("✎ write ", DIM), ("ahub/web/pages/board.py", SOFT)],
         [("✎ write ", DIM), ("ahub/web/static/board.js", SOFT)],
         [("✎ write ", DIM), ("ahub/web/static/board.css", SOFT)],
         [("▶ bash  ", DIM), ("pytest -q tests/test_web_board.py", SOFT)],
         [("  7 passed", GREEN), (" in 0.92s", DIM)],
-        [("✎ edit  ", DIM), ("ahub/web/static/board.js", SOFT)],
         [("▶ bash  ", DIM), ("git commit -m \"board: live task board\"", SOFT)],
     ]),
-    Worker("web-w3", "T167", "task page + live transcript", "task page + transcript", "gemini", BLUE, 1102, 41,
-           0.33, 15.6, [
+    Worker("web-w3", "T167", "task page + live transcript", "task page + transcript", "gemini", BLUE, "gGemini",
+           1102, 41, 0.33, 13.75, [
         [("✎ write ", DIM), ("ahub/web/pages/task.py", SOFT)],
         [("✎ write ", DIM), ("ahub/web/static/task.js", SOFT)],
         [("▶ bash  ", DIM), ("pytest -q tests/test_web_task.py", SOFT)],
         [("  9 passed", GREEN), (" in 1.12s", DIM)],
         [("▶ bash  ", DIM), ("git commit -m \"task page\"", SOFT)],
     ], rework=[
-        [("✗ review gemini: ", RED), ("innerHTML on model text", SOFT)],
+        [("✗ gemini: ", RED), ("innerHTML on model text", SOFT)],
         [("✎ edit  ", DIM), ("ahub/web/static/task.js:88", SOFT)],
         [("▶ bash  ", DIM), ("pytest -q tests/test_web_task.py", SOFT)],
         [("  10 passed", GREEN), (" in 1.15s", DIM)],
     ]),
-    Worker("web-w4", "T168", "actions, money panel, docs", "actions + money", "bunny", PINK, 996, 58, 0.21, 16.4, [
+    Worker("web-w4", "T168", "actions, money panel, docs", "actions + money", "bunny", PINK, "gBunny", 996, 58,
+           0.21, 14.55, [
         [("✎ write ", DIM), ("ahub/web/pages/actions.py", SOFT)],
         [("✎ write ", DIM), ("ahub/web/pages/money.py", SOFT)],
         [("✎ write ", DIM), ("ahub/web/static/actions.js", SOFT)],
         [("▶ bash  ", DIM), ("pytest -q tests/test_web_actions.py", SOFT)],
         [("  12 passed", GREEN), (" in 2.03s", DIM)],
-        [("✎ edit  ", DIM), ("docs/ARCHITECTURE.md", SOFT)],
-        [("✎ edit  ", DIM), ("README.md", SOFT)],
+        [("✎ edit  ", DIM), ("docs/ARCHITECTURE.md, README.md", SOFT)],
         [("▶ bash  ", DIM), ("git commit -m \"actions + money\"", SOFT)],
     ]),
 ]
@@ -320,43 +331,58 @@ SHAS = ["4c1d9e2", "8e21f0a", "b07a3d5", "19fd6c8"]
 TOTAL_ADDED = sum(w.added for w in WORKERS)
 TOTAL_COST = sum(w.cost for w in WORKERS)
 CLAUDE_ONLY = 130          # the same tokens at Claude API list prices, rounded (README footnote)
-STAGE_OUT = 18.6
-FINALE = 19.2
+JITTER = (0.0, 0.42, -0.25, 0.3, -0.12, 0.38, -0.3, 0.18, 0.05, -0.2)   # a human, uneven rhythm of tool calls
+
+
+def hline(x1: float, x2: float, y: float, attrs: str) -> str:
+    """A horizontal stroke as a <path> — pathLength on <line> is not reliable in Safari."""
+    return f'<path d="M{x1:.1f} {y:.1f}H{x2:.1f}" fill="none" {attrs}/>'
 
 
 def worker_schedule(w: Worker, i: int) -> dict:
     """Times of a worker's phases: working → checking → reviewing (→ fixing → reviewing) → done → merged."""
-    start = WORK_START + i * 0.18
-    s = {"start": start, "done": w.done, "merged": w.done + 1.25}
+    start = WORK_START + i * 0.17
+    s = {"start": start, "done": w.done, "merged": w.done + 1.2}
     if w.rework:
         s["check"] = w.done - 4.0
-        s["review"] = w.done - 3.3
+        s["review"] = w.done - 3.35
         s["fix"] = w.done - 2.6
         s["review2"] = w.done - 0.9
-        s["work_end"] = s["check"] - 0.2
     else:
-        s["check"] = w.done - 1.8
+        s["check"] = w.done - 1.75
         s["review"] = w.done - 0.95
-        s["work_end"] = s["check"] - 0.2
+    s["work_end"] = s["check"] - 0.2
     return s
+
+
+def avatar(cx: float, cy: float, r: float, grad: str, letter: str, ring: str = CARD) -> str:
+    """A model monogram (not a logo)."""
+    return (f'<circle cx="{cx}" cy="{cy}" r="{r + 2}" fill="{ring}"/><circle cx="{cx}" cy="{cy}" r="{r}" '
+            f'fill="url(#{grad})"/>' + sans(cx, cy + r * 0.36, letter, r * 0.95, "#fff", 800, "middle"))
 
 
 def card(w: Worker, i: int, x: float, y: float, cw: float, ch: float) -> str:
     s = worker_schedule(w, i)
-    out = [f'<g transform="translate({x},{y})">']
-    inner = []
-    inner.append(f'<rect x="0" y="0" width="{cw}" height="{ch}" rx="11" fill="{CARD}" stroke="{WIN_EDGE}"/>')
-    # done: the edge turns green, a soft glow
-    inner.append(f'<rect x="0.5" y="0.5" width="{cw - 1}" height="{ch - 1}" rx="11" fill="none" stroke="{GREEN}" '
-                 f'stroke-opacity=".55" class="{appear(s["done"], 0.4)}"/>')
-    # model badge (a monogram, not a logo)
-    inner.append(f'<circle cx="24" cy="25" r="13" fill="url(#gSpark)"/>')
-    inner.append(sans(24, 29.5, "S", 13, "#fff", 800, "middle"))
-    inner.append(f'<text x="46" y="24" font-family="{SANS}" font-size="14" font-weight="600" fill="{TEXT}">'
-                 f'{esc("Spark 1.3")}<tspan font-family="{MONO}" font-size="11" font-weight="400" fill="{DIM}">'
-                 f'{esc(f"  {w.task} · review ")}</tspan><tspan font-family="{MONO}" font-size="11" '
-                 f'fill="{w.review_col}">{esc(w.review)}</tspan></text>')
-    inner.append(sans(46, 42, f"ahub web: {w.title}", 12, SOFT, 400))
+    inner = [f'<rect x="0" y="0" width="{cw}" height="{ch}" rx="12" fill="{CARD}" stroke="{WIN_EDGE}" '
+             f'filter="url(#shadow)"/>']
+    # done: a flash of green along the edge that settles into a quiet green border
+    flash = A.add([(0, "opacity:0"), (s["done"], "opacity:0", "ease-out"), (s["done"] + 0.18, "opacity:1", EASE),
+                   (s["done"] + 1.1, "opacity:.5")])
+    inner.append(f'<rect x="0.5" y="0.5" width="{cw - 1}" height="{ch - 1}" rx="12" fill="none" stroke="{GREEN}" '
+                 f'stroke-opacity=".75" stroke-width="1.3" filter="url(#glow)" class="{flash}"/>')
+    # header: the executor, the task, its title
+    inner.append(avatar(26, 27, 14, "gSpark", "S"))
+    inner.append(f'<text x="50" y="27" font-family="{SANS}" font-size="15.5" font-weight="600" fill="{TEXT}">'
+                 f'{esc("Spark 1.3")}<tspan font-family="{MONO}" font-size="12" font-weight="400" fill="{DIM}">'
+                 f'{esc(f"  {w.task}")}</tspan></text>')
+    inner.append(sans(50, 47, f"ahub web: {w.title}", 13, SOFT, 400))
+    # the reviewer joins when the review starts: a second monogram slides in next to the chip
+    rx = cw - 118
+    rev_in = A.add([(0, "opacity:0;transform:translate(-14px,0px)"),
+                    (s["review"], "opacity:0;transform:translate(-14px,0px)", EASE),
+                    (s["review"] + 0.45, "opacity:1;transform:translate(0px,0px)")])
+    inner.append(f'<g class="{rev_in}">{avatar(rx, 23, 11, w.review_grad, w.review[0].upper())}'
+                 f'{mono(rx - 16, 27, w.review, 11.5, w.review_col, 400, "end")}</g>')
     # state chip
     states = [(s["start"], "working", SOFT), (s["check"], "checking", YELLOW), (s["review"], "reviewing", BLUE)]
     if w.rework:
@@ -365,13 +391,13 @@ def card(w: Worker, i: int, x: float, y: float, cw: float, ch: float) -> str:
 
     def chip(v):
         label, col = v
-        wdt = len(label) * 6.6 + 18
-        return (f'<rect x="{cw - 14 - wdt:.1f}" y="12" width="{wdt:.1f}" height="20" rx="10" fill="{col}" '
-                f'fill-opacity=".12" stroke="{col}" stroke-opacity=".35"/>'
-                + mono(cw - 14 - wdt / 2, 26, label, 11, col, 400, "middle"))
+        wdt = len(label) * 7.2 + 18
+        return (f'<rect x="{cw - 14 - wdt:.1f}" y="12" width="{wdt:.1f}" height="22" rx="11" fill="{col}" '
+                f'fill-opacity=".12" stroke="{col}" stroke-opacity=".38"/>'
+                + mono(cw - 14 - wdt / 2, 27.5, label, 12, col, 400, "middle"))
     inner.append(discrete([(t, (lb, c)) for t, lb, c in states], None, chip))
     # line counter, right of the title
-    steps = 9
+    steps = 10
     vals = []
     for k in range(steps + 1):
         f = k / steps
@@ -382,184 +408,202 @@ def card(w: Worker, i: int, x: float, y: float, cw: float, ch: float) -> str:
 
     def counter(v):
         a, r = v
-        return (f'<text x="{cw - 16}" y="42" font-family="{MONO}" font-size="11.5" text-anchor="end">'
+        return (f'<text x="{cw - 16}" y="48" font-family="{MONO}" font-size="12.5" text-anchor="end">'
                 f'<tspan fill="{GREEN}">{esc(f"+{a:,}")}</tspan><tspan fill="{RED}" fill-opacity=".8">'
                 f'{esc(f" −{r}")}</tspan></text>')
     inner.append(f'<g class="{appear(s["start"] + 0.4, 0.3)}">' + discrete(vals, None, counter) + "</g>")
-    # the transcript
+    # the transcript, in the uneven rhythm of real tool calls
     lines: list[Line] = []
     n = len(w.work)
-    span = s["work_end"] - s["start"] - 0.3
+    gap = (s["work_end"] - s["start"] - 0.3) / max(1, n - 1)
     for k, sp in enumerate(w.work):
-        lines.append(Line(s["start"] + 0.3 + span * k / max(1, n - 1) * 0.97, sp, cover=CARD))
+        j = JITTER[(k + i * 3) % len(JITTER)] * gap if 0 < k < n - 1 else 0
+        lines.append(Line(s["start"] + 0.3 + gap * k + j, sp, cover=CARD))
     lines.append(Line(s["check"] + 0.15, [("✓ gates ", GREEN), ("commit · diff ⊆ paths · tests", DIM)], cover=CARD))
     if w.rework:
+        lines.append(Line(s["review"] + 0.15, [("◆ review ", DIM), (w.review, w.review_col),
+                                               (" · fresh session", DIM)], cover=CARD))
         lines.append(Line(s["fix"] - 0.05, w.rework[0], cover=CARD))
         for k, sp in enumerate(w.rework[1:]):
-            lines.append(Line(s["fix"] + 0.35 + k * 0.42, sp, cover=CARD))
+            lines.append(Line(s["fix"] + 0.4 + k * 0.45, sp, cover=CARD))
         lines.append(Line(s["review2"] + 0.1, [("◆ review ", DIM), (w.review, w.review_col), (" · round 2", DIM)],
                           cover=CARD))
     else:
-        lines.append(Line(s["review"] + 0.1, [("◆ review ", DIM), (w.review, w.review_col),
-                                              (" · fresh session", DIM)], cover=CARD))
+        lines.append(Line(s["review"] + 0.15, [("◆ review ", DIM), (w.review, w.review_col),
+                                               (" · fresh session", DIM)], cover=CARD))
     lines.append(Line(s["done"] - 0.1, [("✓ approve", GREEN), (" · no findings", DIM)], cover=CARD))
-    term = Term(16, 56, cw - 32, 4, 11.5, 15.6, f"w{i}")
-    inner.append(term.render(lines))
-    # progress bar
+    inner.append(Term(16, 62, cw - 32, 3, 12.5, 17.5, f"w{i}").render(lines))
+    # progress
     pts = [(s["start"] + 0.3, 0.04), (s["work_end"], 0.72), (s["check"] + 0.6, 0.82), (s["done"], 1.0)]
     if w.rework:
         pts = [(s["start"] + 0.3, 0.04), (s["work_end"], 0.66), (s["review"], 0.74), (s["fix"] + 1.2, 0.86),
                (s["done"], 1.0)]
-    y_bar = ch - 9
-    inner.append(f'<line x1="16" y1="{y_bar}" x2="{cw - 16}" y2="{y_bar}" stroke="#1f1f26" stroke-width="2" '
-                 f'stroke-linecap="round"/>')
-    inner.append(f'<line x1="16" y1="{y_bar}" x2="{cw - 16}" y2="{y_bar}" stroke="url(#gBar)" stroke-width="2" '
-                 f'stroke-linecap="round" pathLength="100" stroke-dasharray="100 100" class="{progress(pts)}"/>')
-    inner.append(f'<line x1="16" y1="{y_bar}" x2="{cw - 16}" y2="{y_bar}" stroke="{GREEN}" stroke-width="2" '
-                 f'stroke-linecap="round" class="{appear(s["done"], 0.4)}"/>')
-    out.append(f'<g class="{appear(7.7 + i * 0.12, 0.5, 0, None, 0.35, 24)}">{"".join(inner)}</g>')
-    out.append("</g>")
-    return "".join(out)
+    yb = ch - 10
+    inner.append(hline(16, cw - 16, yb, 'stroke="#1f1f26" stroke-width="2.5" stroke-linecap="round"'))
+    inner.append(hline(16, cw - 16, yb, f'stroke="{ACCENT}" stroke-width="2.5" stroke-linecap="round" '
+                                        f'pathLength="100" stroke-dasharray="100 100" class="{progress(pts)}"'))
+    inner.append(hline(16, cw - 16, yb, f'stroke="{GREEN}" stroke-width="2.5" stroke-linecap="round" '
+                                        f'class="{appear(s["done"], 0.4)}"'))
+    slide = appear(CARDS_AT + i * 0.1, 0.55, 0, None, 0.35, 28)
+    return f'<g transform="translate({x},{y})"><g class="{slide}">{"".join(inner)}</g></g>'
 
 
 def claude_window() -> str:
-    x, y, w, h = 36, 74, 480, 568
-    parts = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="12" fill="{WIN}" stroke="{WIN_EDGE}"/>',
-             f'<rect x="{x}" y="{y}" width="{w}" height="30" rx="12" fill="#18181d"/>',
-             f'<rect x="{x}" y="{y + 18}" width="{w}" height="12" fill="#18181d"/>',
-             f'<line x1="{x}" y1="{y + 30}" x2="{x + w}" y2="{y + 30}" stroke="{WIN_EDGE}"/>']
+    x, y, w, h = 32, 72, 500, 576
+    parts = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="12" fill="{WIN}" stroke="{WIN_EDGE}" '
+             f'filter="url(#shadow)"/>',
+             f'<path d="M{x} {y + 31}V{y + 12}a12 12 0 0 1 12-12H{x + w - 12}a12 12 0 0 1 12 12V{y + 31}Z" '
+             f'fill="#18181d"/>',
+             hline(x, x + w, y + 31, f'stroke="{WIN_EDGE}"')]
     for k, c in enumerate(("#ff5f57", "#febc2e", "#28c840")):
-        parts.append(f'<circle cx="{x + 18 + k * 17}" cy="{y + 15}" r="5.2" fill="{c}" fill-opacity=".85"/>')
-    parts.append(mono(x + w / 2, y + 19.5, "claude — ~/Projects/agent-hub", 11, DIM, 400, "middle"))
+        parts.append(f'<circle cx="{x + 19 + k * 18}" cy="{y + 15.5}" r="5.5" fill="{c}" fill-opacity=".85"/>')
+    parts.append(mono(x + w / 2, y + 20, "claude — ~/Projects/agent-hub", 11.5, DIM, 400, "middle"))
 
-    tx, ty, size, lh = x + 20, y + 46, 13.0, 19.0
+    tx, ty, size, lh = x + 20, y + 48, 13.6, 20.0
     L: list[Line] = []
 
     def add(t, spans, typing=0.0, cover=WIN):
         L.append(Line(t, spans, typing, cover))
 
-    add(0.45, [("✻ ", CLAUDE, True), ("Claude Code", TEXT, True)])
-    add(0.45, [("  ~/Projects/agent-hub", DIM)])
-    add(0.45, [])
+    add(0.35, [("✻ ", CLAUDE, True), ("Claude Code", TEXT, True)])
+    add(0.35, [("  ~/Projects/agent-hub", DIM)])
+    add(0.35, [])
     p0 = len(L)
-    add(0.9, [("› ", DIM), ("Big task: add ", TEXT), ("ahub web", BLUE), (" — a local web", TEXT)], 0.7, PROMPT_BG)
-    add(1.65, [("  dashboard: live task board, task page", TEXT)], 0.7, PROMPT_BG)
-    add(2.4, [("  with the live transcript, accept/reject,", TEXT)], 0.7, PROMPT_BG)
-    add(3.15, [("  money panel. Delegate it through ahub.", TEXT)], 0.65, PROMPT_BG)
-    add(3.9, [])
-    add(4.05, [("⏺ ", TEXT), ("Four independent tasks. Workers write", TEXT)])
-    add(4.05, [("  the code; I keep the decisions.", TEXT)])
-    reviews = [("gemini", BLUE), ("bunny", PINK), ("gemini", BLUE), ("bunny", PINK)]
+    t = TYPE_AT
+    for k, (sp, dur) in enumerate((
+            ([("› ", DIM), ("Big task: add ", TEXT), ("ahub web", BLUE), (" — a local web", TEXT)], 0.5),
+            ([("  dashboard: live task board, task page", TEXT)], 0.48),
+            ([("  with the live transcript, accept/reject,", TEXT)], 0.48),
+            ([("  money panel. Delegate it through ahub.", TEXT)], 0.45))):
+        add(t, sp, dur, PROMPT_BG)
+        t += dur + 0.08
+    add(t + 0.25, [])
+    add(t + 0.35, [("⏺ ", TEXT), ("Four independent tasks. Workers write", TEXT)])
+    add(t + 0.35, [("  the code; I keep the decisions.", TEXT)])
+    t0 = t + 0.7
     for k, wk in enumerate(WORKERS):
-        t = 4.5 + k * 0.5
-        add(t, [("⏺ ", GREEN), ("Bash", TEXT, True), (f"(ahub task new --key {wk.key} …)", SOFT)], 0.28)
-        add(t + 0.36, [("  ⎿ ", DIM), (wk.task, TEXT), (" queued (code, spark, review ", DIM),
-                       (reviews[k][0], reviews[k][1]), ("×1)", DIM)])
-    add(6.6, [])
-    add(8.7, [("⏺ ", GREEN), ("Monitor", TEXT, True), ("(ahub watch)", SOFT)])
-    add(8.85, [("  ⎿ ", DIM), ("waiting — 0 tokens on the code", DIM)])
+        tk = t0 + k * 0.36
+        add(tk, [("⏺ ", GREEN), ("Bash", TEXT, True), (f"(ahub task new --key {wk.key} …)", SOFT)], 0.2)
+        add(tk + 0.27, [("  ⎿ ", DIM), (wk.task, TEXT), (" queued (code, spark, review ", DIM),
+                        (wk.review, wk.review_col), ("×1)", DIM)])
+    add(MOVE[0] + 0.2, [])
+    add(WORK_START + 0.1, [("⏺ ", GREEN), ("Monitor", TEXT, True), ("(ahub watch)", SOFT)])
+    add(WORK_START + 0.25, [("  ⎿ ", DIM), ("waiting — 0 tokens on the code", DIM)])
     for k, wk in enumerate(WORKERS):
         d = wk.done
         add(d + 0.3, [("  ⎿ ", DIM), ("DONE ", GREEN, True), (f"{wk.task} code «{wk.short}»", SOFT),
                       (f" — ${wk.cost:.2f}", ACCENT)])
-        add(d + 0.7, [("⏺ ", GREEN), ("Bash", TEXT, True), (f"(ahub accept {wk.task})", SOFT)], 0.25)
-        add(d + 1.15, [("  ⎿ ", DIM), (f"{wk.task} merged into main ({SHAS[k]})", DIM)])
-    # the prompt block sits behind its lines
-    pb = (f'<rect x="{x + 10}" y="{ty + p0 * lh - 5}" width="{w - 20}" height="{4 * lh + 8}" rx="6" '
-          f'fill="{PROMPT_BG}" class="{appear(0.85, 0.25)}"/>')
-    term = Term(tx, ty, w - 40, 25, size, lh, "claude")
-    parts.append(term.render(L, cursor=CLAUDE, under=pb))
-    # Claude's live status line (bottom of the window), with the spinner Claude Code uses
+        add(d + 0.68, [("⏺ ", GREEN), ("Bash", TEXT, True), (f"(ahub accept {wk.task})", SOFT)], 0.22)
+        add(d + 1.1, [("  ⎿ ", DIM), (f"{wk.task} merged into main ({SHAS[k]})", DIM)])
+    # the prompt block sits behind its lines and scrolls with them
+    pb = (f'<rect x="{x + 10}" y="{ty + p0 * lh - 5}" width="{w - 20}" height="{4 * lh + 8}" rx="7" '
+          f'fill="{PROMPT_BG}" class="{appear(TYPE_AT - 0.05, 0.25)}"/>')
+    rows = 23
+    parts.append(Term(tx, ty, w - 40, rows, size, lh, "claude").render(L, cursor=CLAUDE, under=pb))
+    # the footer: Claude Code's spinner while it waits, and its context — flat while the workers write
+    yb = y + h - 17
+    parts.append(hline(x + 1, x + w - 1, yb - 20, f'stroke="{WIN_EDGE}" class="{appear(WORK_START, 0.4)}"'))
     frames = "·✢✳✶✻✽✻✶✳✢"
-    spin = []
     per = 0.11
+    spin = []
     for k, g in enumerate(frames):
         cls = A.add([(0, "opacity:0"), (k * per, "opacity:0"), (k * per + 0.001, "opacity:1"),
                      ((k + 1) * per, "opacity:1"), ((k + 1) * per + 0.001, "opacity:0")], period=len(frames) * per)
-        spin.append(f'<g class="{cls}">{mono(tx, y + h - 16, g, 13, CLAUDE)}</g>')
-    status = (f'<g class="{appear(8.8, 0.4, 0, 17.9, 0.4)}">{"".join(spin)}'
-              f'<text x="{tx + 18}" y="{y + h - 16}" font-family="{MONO}" font-size="12.5" xml:space="preserve" '
-              f'style="white-space:pre"><tspan fill="{SOFT}">{esc("Waiting on ahub watch…")}</tspan>'
-              f'<tspan fill="{DIM}">{esc("  (4 workers · Claude idle)")}</tspan></text></g>')
-    parts.append(status)
+        spin.append(f'<g class="{cls}">{mono(tx, yb, g, 13.5, CLAUDE)}</g>')
+    last = WORKERS[-1].done + 1.15
+    parts.append(f'<g class="{appear(WORK_START + 0.1, 0.4, 0, last, 0.3)}">{"".join(spin)}'
+                 f'{mono(tx + 18, yb, "Waiting on ahub watch…", 13, SOFT)}</g>')
+    parts.append(f'<g class="{appear(last + 0.05, 0.3)}">{mono(tx, yb, "✻", 13.5, GREEN)}'
+                 f'{mono(tx + 18, yb, "4 merged · 0 lines by Claude", 13, SOFT)}</g>')
+    ctx = [(WORK_START, 5)] + [(wk.done + 0.35, 5 + (k + 1) * 0.5) for k, wk in enumerate(WORKERS)]
+    mx = x + w - 20
+
+    def meter(v):
+        pct = v
+        fill = 70 * pct / 100
+        return (mono(mx - 78, yb, f"{pct:g}%", 12.5, TEXT, 700, "end")
+                + f'<rect x="{mx - 72}" y="{yb - 8}" width="72" height="7" rx="3.5" fill="#24242c"/>'
+                + f'<rect x="{mx - 72}" y="{yb - 8}" width="{max(7, fill):.1f}" height="7" rx="3.5" fill="{CLAUDE}"/>')
+    parts.append(f'<g class="{appear(WORK_START + 0.1, 0.4)}">'
+                 + mono(mx - 118, yb, "context", 12, DIM, 400, "end")
+                 + discrete(ctx, None, meter) + "</g>")
     # A: big and centred; B: steps aside (transform-origin is the SVG origin)
-    s = 1.12
+    s = 1.15
     tx0 = (W / 2 - w * s / 2) - s * x
-    ty0 = 20 - s * y
+    ty0 = 6 - s * y
     move = A.add([(0, f"transform:translate({tx0:.1f}px,{ty0:.1f}px) scale({s})"),
-                  (6.7, f"transform:translate({tx0:.1f}px,{ty0:.1f}px) scale({s})", EASE_IO),
-                  (7.6, "transform:translate(0px,0px) scale(1)")])
+                  (MOVE[0], f"transform:translate({tx0:.1f}px,{ty0:.1f}px) scale({s})", EASE_IO),
+                  (MOVE[1], "transform:translate(0px,0px) scale(1)")])
     return f'<g class="{move}">{"".join(parts)}</g>'
 
 
 def hub_and_wires(cards_xy: list[tuple[float, float, float]]) -> str:
-    hx, hy = 608, 358
+    hx, hy = 622, 362
+    wx = 532                  # the Claude window's right edge
     out = []
-    # wires
     wires_out, wires_in = [], []
-    d0 = f"M516 {hy} H{hx - 36}"
+    d0 = f"M{wx} {hy}H{hx - 38}"
     out.append(f'<path d="{d0}" stroke="{FAINT}" stroke-width="1.2" fill="none" pathLength="100" '
-               f'stroke-dasharray="100 100" class="{draw(7.5, 8.0)}"/>')
+               f'stroke-dasharray="100 100" class="{draw(HUB_AT + 0.1, HUB_AT + 0.5)}"/>')
     for k, (cx, cy, _) in enumerate(cards_xy):
-        d = f"M{hx + 36} {hy} C{hx + 70} {hy} {cx - 40} {cy} {cx} {cy}"
+        d = f"M{hx + 38} {hy}C{hx + 72} {hy} {cx - 42} {cy} {cx} {cy}"
         wires_out.append(d)
         out.append(f'<path d="{d}" stroke="{FAINT}" stroke-width="1.2" fill="none" pathLength="100" '
-                   f'stroke-dasharray="100 100" class="{draw(7.8 + k * 0.08, 8.5 + k * 0.08)}"/>')
-        wires_in.append(f"M{cx} {cy} C{cx - 40} {cy} {hx + 70} {hy} {hx + 36} {hy}")
-    # dispatch: Claude → hub → each worker
-    out.append(f'<path d="{d0}" stroke="{CLAUDE}" stroke-width="2.4" fill="none" pathLength="100" '
-               f'stroke-dasharray="10 110" stroke-linecap="round" filter="url(#glow)" class="{pulse(8.0, 0.45)}"/>')
+                   f'stroke-dasharray="100 100" class="{draw(HUB_AT + 0.3 + k * 0.07, HUB_AT + 0.9 + k * 0.07)}"/>')
+        wires_in.append(f"M{cx} {cy}C{cx - 42} {cy} {hx + 72} {hy} {hx + 38} {hy}")
+    glow = 'fill="none" pathLength="100" stroke-dasharray="10 110" stroke-linecap="round" filter="url(#glow)"'
+    out.append(f'<path d="{d0}" stroke="{CLAUDE}" stroke-width="2.6" {glow} class="{pulse(DISPATCH, 0.4)}"/>')
     for k, d in enumerate(wires_out):
         for r in range(2):
-            out.append(f'<path d="{d}" stroke="{ACCENT}" stroke-width="2.4" fill="none" pathLength="100" '
-                       f'stroke-dasharray="10 110" stroke-linecap="round" filter="url(#glow)" '
-                       f'class="{pulse(8.4 + k * 0.1 + r * 0.55, 0.7)}"/>')
-    # results: worker → hub → Claude
-    rev = f"M{hx - 36} {hy} H516"
-    for k, (w, d) in enumerate(zip(WORKERS, wires_in)):
-        out.append(f'<path d="{d}" stroke="{GREEN}" stroke-width="2.4" fill="none" pathLength="100" '
-                   f'stroke-dasharray="10 110" stroke-linecap="round" filter="url(#glow)" '
-                   f'class="{pulse(w.done - 0.05, 0.5)}"/>')
-        out.append(f'<path d="{rev}" stroke="{GREEN}" stroke-width="2.4" fill="none" pathLength="100" '
-                   f'stroke-dasharray="10 110" stroke-linecap="round" filter="url(#glow)" '
-                   f'class="{pulse(w.done + 0.42, 0.3)}"/>')
-    # the hub node
-    node = [f'<circle cx="{hx}" cy="{hy}" r="46" fill="url(#gHalo)"/>',
-            f'<circle cx="{hx}" cy="{hy}" r="34" fill="#141016" stroke="{ACCENT}" stroke-opacity=".7" '
+            out.append(f'<path d="{d}" stroke="{ACCENT}" stroke-width="2.6" {glow} '
+                       f'class="{pulse(DISPATCH + 0.35 + k * 0.09 + r * 0.5, 0.65)}"/>')
+    rev = f"M{hx - 38} {hy}H{wx}"
+    for wk, d in zip(WORKERS, wires_in):
+        out.append(f'<path d="{d}" stroke="{GREEN}" stroke-width="2.6" {glow} class="{pulse(wk.done - 0.05, 0.5)}"/>')
+        out.append(f'<path d="{rev}" stroke="{GREEN}" stroke-width="2.6" {glow} class="{pulse(wk.done + 0.42, 0.3)}"/>')
+    # the hub node: a slow orbit while anything runs, a beat on every DONE
+    beat = [(0, "transform:scale(1)")]
+    for wk in WORKERS:
+        beat += [(wk.done + 0.35, "transform:scale(1)", "ease-out"), (wk.done + 0.5, "transform:scale(1.08)", EASE),
+                 (wk.done + 0.9, "transform:scale(1)")]
+    beat_cls = A.add(beat)
+    orbit = A.add([(0, "stroke-dashoffset:0"), (2.4, "stroke-dashoffset:-100")], period=2.4)
+    node = [f'<circle cx="{hx}" cy="{hy}" r="54" fill="url(#gHalo)"/>',
+            f'<g style="transform-origin:{hx}px {hy}px" class="{beat_cls}">',
+            f'<circle cx="{hx}" cy="{hy}" r="36" fill="#141016" stroke="{ACCENT}" stroke-opacity=".55" '
             f'stroke-width="1.4"/>',
-            f'<circle cx="{hx}" cy="{hy}" r="34" fill="none" stroke="{ACCENT}" stroke-width="1.4" '
-            f'stroke-opacity=".9" pathLength="100" stroke-dasharray="18 82" class="{A.add([(0, "stroke-dashoffset:0"), (2.4, "stroke-dashoffset:-100")], period=2.4)}"/>',
-            mono(hx, hy + 9, "✻", 26, ACCENT, 400, "middle"),
-            sans(hx, hy + 58, "ahub", 14, TEXT, 600, "middle"),
-            mono(hx, hy + 75, "queue · gates · review", 10, DIM, 400, "middle")]
-    out.append(f'<g class="{appear(7.4, 0.5)}">{"".join(node)}</g>')
+            f'<circle cx="{hx}" cy="{hy}" r="36" fill="none" stroke="{ACCENT}" stroke-width="1.8" '
+            f'stroke-linecap="round" pathLength="100" stroke-dasharray="16 84" class="{orbit}"/>',
+            mono(hx, hy + 10, "✻", 28, ACCENT, 400, "middle"), "</g>",
+            sans(hx, hy + 62, "ahub", 15, TEXT, 600, "middle"),
+            mono(hx, hy + 80, "queue · gates · review", 10.5, DIM, 400, "middle")]
+    out.append(f'<g class="{appear(HUB_AT, 0.5)}">{"".join(node)}</g>')
     return "".join(out)
 
 
 def top_bar() -> str:
-    out = [f'<g class="{appear(7.6, 0.5)}">',
-           mono(40, 46, "✻", 16, ACCENT),
-           sans(60, 46, "agent-hub", 15, TEXT, 600),
-           sans(152, 46, "Claude orchestrates · cheap models write the code", 13, DIM, 400)]
-    # ticker: running · lines · money, summed from the cards
-    sched = [worker_schedule(w, i) for i, w in enumerate(WORKERS)]
-    ts = [WORK_START + k * 0.45 for k in range(int((16.6 - WORK_START) / 0.45) + 1)]
+    out = [f'<g class="{appear(CARDS_AT, 0.5)}">',
+           mono(36, 44, "✻", 17, ACCENT),
+           sans(58, 44, "agent-hub", 16, TEXT, 600),
+           sans(152, 44, "Claude orchestrates · cheap models write the code", 13.5, DIM, 400)]
+    sched = [worker_schedule(wk, i) for i, wk in enumerate(WORKERS)]
+    end = sched[-1]["done"]
+    ts = [WORK_START + k * 0.4 for k in range(int((end - WORK_START) / 0.4) + 1)]
     vals = []
     for t in ts:
-        lines = money = 0
-        running = 0
-        for w, s in zip(WORKERS, sched):
+        lines = money = running = 0
+        for wk, s in zip(WORKERS, sched):
             f = min(1.0, max(0.0, (t - s["start"]) / (s["work_end"] - s["start"])))
-            lines += int(w.added * f ** 1.15)
-            money += w.cost * min(1.0, max(0.0, (t - s["start"]) / (s["done"] - s["start"])))
+            lines += int(wk.added * f ** 1.15)
+            money += wk.cost * min(1.0, max(0.0, (t - s["start"]) / (s["done"] - s["start"])))
             running += t < s["done"]
         vals.append((t, (running, lines, money)))
-    vals.append((sched[-1]["done"], (0, TOTAL_ADDED, TOTAL_COST)))
+    vals.append((end, (0, TOTAL_ADDED, TOTAL_COST)))
 
     def tick(v):
         running, lines, money = v
         state = f"{running} running" if running else "4 done"
-        return (f'<text x="1160" y="46" font-family="{MONO}" font-size="13" text-anchor="end" '
+        return (f'<text x="1164" y="44" font-family="{MONO}" font-size="13.5" text-anchor="end" '
                 f'xml:space="preserve" style="white-space:pre"><tspan fill="{SOFT}">{esc(state)}</tspan>'
                 f'<tspan fill="{FAINT}">{esc("  ·  ")}</tspan><tspan fill="{GREEN}">{esc(f"+{lines:,}")}</tspan>'
                 f'<tspan fill="{DIM}">{esc(" lines")}</tspan><tspan fill="{FAINT}">{esc("  ·  ")}</tspan>'
@@ -574,48 +618,49 @@ def finale() -> str:
     x0, x1 = 170, 1030
     out = []
     out.append(f'<g class="{appear(t0, 0.6, 10)}">'
-               + sans(W / 2, 132, f"THE SAME FEATURE  ·  4 TASKS  ·  +{TOTAL_ADDED:,} LINES  ·  4 REVIEWS",
+               + sans(W / 2, 132, f"THE SAME FEATURE  ·  4 TASKS  ·  +{TOTAL_ADDED:,} LINES  ·  1 ORCHESTRATOR",
                       13, DIM, 600, "middle", 'letter-spacing="2.5"') + "</g>")
     # row 1: Claude writes everything itself
     r1 = 236
-    out.append(f'<g class="{appear(t0 + 0.3, 0.5, 8)}">' + sans(x0, r1, "Claude writes every line itself", 17,
-                                                                 SOFT, 400) + "</g>")
-    out.append(f'<line x1="{x0}" y1="{r1 + 26}" x2="{x1}" y2="{r1 + 26}" stroke="#1d1d24" stroke-width="12" '
-               f'stroke-linecap="round" class="{appear(t0 + 0.3, 0.4)}"/>')
-    out.append(f'<line x1="{x0}" y1="{r1 + 26}" x2="{x1}" y2="{r1 + 26}" stroke="url(#gGrey)" stroke-width="12" '
-               f'stroke-linecap="round" pathLength="100" stroke-dasharray="100 100" '
-               f'class="{draw(t0 + 0.45, t0 + 1.7)}"/>')
+    out.append(f'<g class="{appear(t0 + 0.3, 0.5, 8)}">'
+               + sans(x0, r1, "Claude writes every line itself", 18, SOFT, 400) + "</g>")
+    out.append(hline(x0, x1, r1 + 26, f'stroke="#1d1d24" stroke-width="12" stroke-linecap="round" '
+                                      f'class="{appear(t0 + 0.3, 0.4)}"'))
+    out.append(hline(x0, x1, r1 + 26, f'stroke="url(#gGrey)" stroke-width="12" stroke-linecap="round" '
+                                      f'pathLength="100" stroke-dasharray="100 100" class="{draw(t0 + 0.45, t0 + 1.7)}"'))
     big1 = [(t0 + 0.45 + k * 0.125, v) for k, v in enumerate((4, 13, 27, 44, 61, 79, 96, 111, 122, 130))]
-    out.append(discrete(big1, None, lambda v: sans(x1, r1, f"≈ ${v}", 40, TEXT, 800, "end")))
-    out.append(f'<line x1="{x1 - 150}" y1="{r1 - 13}" x2="{x1 + 4}" y2="{r1 - 13}" stroke="{RED}" stroke-width="3" '
-               f'stroke-linecap="round" pathLength="100" stroke-dasharray="100 100" '
-               f'class="{draw(t0 + 2.9, t0 + 3.25)}"/>')
+    dim1 = A.add([(0, f"fill:{TEXT}"), (t0 + 2.9, f"fill:{TEXT}", EASE), (t0 + 3.4, "fill:#6f6f79")])
+    out.append(f'<g class="{dim1}">'
+               + discrete(big1, None, lambda v: sans(x1, r1, f"≈ ${v}", 42, "inherit", 800, "end")) + "</g>")
+    out.append(hline(x1 - 156, x1 + 4, r1 - 14, f'stroke="{RED}" stroke-width="3" stroke-linecap="round" '
+                                                f'pathLength="100" stroke-dasharray="100 100" '
+                                                f'class="{draw(t0 + 2.9, t0 + 3.25)}"'))
     # row 2: Claude orchestrates through ahub
     r2 = 372
-    out.append(f'<g class="{appear(t0 + 1.6, 0.5, 8)}">' + sans(x0, r2, "Claude orchestrates · workers write the code",
-                                                                 17, ACCENT, 600) + "</g>")
+    out.append(f'<g class="{appear(t0 + 1.6, 0.5, 8)}">'
+               + sans(x0, r2, "Claude orchestrates · workers write the code", 18, ACCENT, 600) + "</g>")
     bar2 = x0 + max(10, (x1 - x0) * TOTAL_COST / CLAUDE_ONLY)
-    out.append(f'<line x1="{x0}" y1="{r2 + 30}" x2="{x1}" y2="{r2 + 30}" stroke="#1d1d24" stroke-width="12" '
-               f'stroke-linecap="round" class="{appear(t0 + 1.6, 0.4)}"/>')
-    out.append(f'<line x1="{x0}" y1="{r2 + 30}" x2="{bar2:.1f}" y2="{r2 + 30}" stroke="{ACCENT}" stroke-width="12" '
-               f'stroke-linecap="round" filter="url(#glow)" class="{appear(t0 + 1.9, 0.3)}"/>')
+    out.append(hline(x0, x1, r2 + 30, f'stroke="#1d1d24" stroke-width="12" stroke-linecap="round" '
+                                      f'class="{appear(t0 + 1.6, 0.4)}"'))
+    out.append(hline(x0, bar2, r2 + 30, f'stroke="{ACCENT}" stroke-width="12" stroke-linecap="round" '
+                                        f'filter="url(#glow)" class="{appear(t0 + 1.9, 0.3)}"'))
     small = [(t0 + 1.9 + k * 0.11, v) for k, v in enumerate((0.0, 0.12, 0.31, 0.52, 0.74, 0.91, TOTAL_COST))]
-    out.append(discrete(small, None, lambda v: sans(x1, r2 + 8, f"${v:.2f}", 64, ACCENT, 800, "end",
+    out.append(discrete(small, None, lambda v: sans(x1, r2 + 8, f"${v:.2f}", 66, ACCENT, 800, "end",
                                                     'filter="url(#glowSoft)"')))
     # the punchline
     ratio = round(CLAUDE_ONLY / TOTAL_COST / 5) * 5
-    pill_w = 430
+    pill_w = 452
     out.append(f'<g class="{appear(t0 + 3.3, 0.5, 10)}">'
-               f'<rect x="{W / 2 - pill_w / 2}" y="462" width="{pill_w}" height="44" rx="22" fill="{ACCENT}" '
+               f'<rect x="{W / 2 - pill_w / 2}" y="462" width="{pill_w}" height="46" rx="23" fill="{ACCENT}" '
                f'fill-opacity=".1" stroke="{ACCENT}" stroke-opacity=".45"/>'
-               + sans(W / 2, 490, f"~{ratio}× cheaper  ·  Claude's context goes to decisions", 16, TEXT, 600,
+               + sans(W / 2, 491, f"~{ratio}× cheaper  ·  Claude's context goes to decisions", 16.5, TEXT, 600,
                       "middle") + "</g>")
     out.append(f'<g class="{appear(t0 + 3.8, 0.6)}">'
-               + mono(W / 2 - 150, 585, "✻", 20, ACCENT)
-               + sans(W / 2 - 126, 585, "agent-hub", 20, TEXT, 600)
-               + f'<rect x="{W / 2 + 4}" y="564" width="150" height="30" rx="7" fill="#16161b" stroke="{WIN_EDGE}"/>'
-               + mono(W / 2 + 79, 584, "pip install ahub", 13.5, SOFT, 400, "middle")
-               + sans(W / 2, 628, "Workers' bill (Spark 1.3 on opencode Go) vs. the same tokens at Claude API list "
+               + mono(W / 2 - 152, 585, "✻", 20, ACCENT)
+               + sans(W / 2 - 128, 585, "agent-hub", 20, TEXT, 600)
+               + f'<rect x="{W / 2 + 2}" y="563" width="156" height="31" rx="7" fill="#16161b" stroke="{WIN_EDGE}"/>'
+               + mono(W / 2 + 80, 583.5, "pip install ahub", 14, SOFT, 400, "middle")
+               + sans(W / 2, 630, "Workers' bill (Spark 1.3 on opencode Go) vs. the same tokens at Claude API list "
                                   "prices. Rounded, from real agent-hub runs.", 11.5, FAINT, 400, "middle")
                + "</g>")
     return f'<g class="{appear(t0, 0.01)}">{"".join(out)}</g>'
@@ -665,7 +710,7 @@ def fonts() -> str:
 
 def build() -> str:
     cards_xy = []
-    cw, ch, gap, cx, cy0 = 452, 132, 12, 708, 82
+    cw, ch, gap, cx, cy0 = 456, 134, 12, 712, 76
     card_svg = []
     for i, w in enumerate(WORKERS):
         y = cy0 + i * (ch + gap)
@@ -679,7 +724,10 @@ def build() -> str:
 
     defs = f"""<defs>
 <linearGradient id="gSpark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8b5cf6"/><stop offset="1" stop-color="#06b6d4"/></linearGradient>
-<linearGradient id="gBar" gradientUnits="userSpaceOnUse" x1="16" x2="436" y1="0" y2="0"><stop offset="0" stop-color="{CLAUDE}"/><stop offset="1" stop-color="{ACCENT}"/></linearGradient>
+<linearGradient id="gGemini" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#a855f7"/></linearGradient>
+<linearGradient id="gBunny" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f472b6"/><stop offset="1" stop-color="#fb923c"/></linearGradient>
+<clipPath id="cRoot"><rect width="{W}" height="{H}" rx="18"/></clipPath>
+<filter id="shadow" filterUnits="userSpaceOnUse" x="0" y="0" width="{W}" height="{H}"><feGaussianBlur in="SourceAlpha" stdDeviation="10"/><feOffset dy="8" result="o"/><feFlood flood-color="#000" flood-opacity=".55"/><feComposite in2="o" operator="in" result="s"/><feMerge><feMergeNode in="s"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
 <linearGradient id="gGrey" gradientUnits="userSpaceOnUse" x1="170" x2="1030" y1="0" y2="0"><stop offset="0" stop-color="#3b3b45"/><stop offset="1" stop-color="#6b6b76"/></linearGradient>
 <radialGradient id="gHalo"><stop offset="0" stop-color="{ACCENT}" stop-opacity=".28"/><stop offset="1" stop-color="{ACCENT}" stop-opacity="0"/></radialGradient>
 <radialGradient id="gBg" cx=".5" cy=".42" r=".7"><stop offset="0" stop-color="#1a1210"/><stop offset=".55" stop-color="{BG}"/><stop offset="1" stop-color="#050506"/></radialGradient>
@@ -687,14 +735,20 @@ def build() -> str:
 <filter id="glow" filterUnits="userSpaceOnUse" x="0" y="0" width="{W}" height="{H}"><feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
 <filter id="glowSoft" filterUnits="userSpaceOnUse" x="0" y="0" width="{W}" height="{H}"><feGaussianBlur stdDeviation="9" result="b"/><feColorMatrix in="b" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 .45 0" result="c"/><feMerge><feMergeNode in="c"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
 </defs>"""
-    css = fonts() + "text{font-kerning:normal}" + "".join(A.css)
+    still = WORKERS[-1].done + 1.6
+    css = (fonts() + "text{font-kerning:normal;text-rendering:geometricPrecision}" + "".join(A.css)
+           + f"@media (prefers-reduced-motion:reduce){{*{{animation-play-state:paused!important;"
+             f"animation-delay:-{still:.2f}s!important}}}}")
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
             f'role="img" aria-label="Claude Code hands a big task to agent-hub; four cheap worker models write and '
             f'test the code in parallel, reviewers approve, Claude accepts — about $1 instead of about $130.">'
             f"<title>agent-hub: Claude orchestrates, cheap models write the code</title>"
             f"{defs}<style>{css}</style>"
-            f'<rect width="{W}" height="{H}" fill="url(#gBg)"/><rect width="{W}" height="{H}" fill="url(#pDots)"/>'
-            f'<g class="{root_fade}">{stage}{fin}</g></svg>')
+            f'<g clip-path="url(#cRoot)"><rect width="{W}" height="{H}" fill="url(#gBg)"/>'
+            f'<rect width="{W}" height="{H}" fill="url(#pDots)"/>'
+            f'<g class="{root_fade}">{stage}{fin}</g></g>'
+            f'<rect x=".5" y=".5" width="{W - 1}" height="{H - 1}" rx="17.5" fill="none" stroke="#ffffff" '
+            f'stroke-opacity=".08"/></svg>')
 
 
 def main() -> None:
