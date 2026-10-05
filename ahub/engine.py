@@ -452,7 +452,7 @@ class Engine:
         return max(1, int((self._deadline_ms - now_ms()) / 1000))
 
     def _session_row(self, provider: str, role: Role, alias: str, round_no: int, session_id: str | None,
-                     log_path: str) -> int:
+                     log_path: str, prompts_summary: str = "") -> int:
         """Session row: resume — same row (provider id is unique), new — new row."""
         if session_id:
             for s in self.store.list_sessions(self.task_id):
@@ -460,7 +460,8 @@ class Engine:
                     self.store.update_session(s.id, status="running", outcome="", ended_at=None, log_path=log_path)
                     return s.id
         return self.store.add_session(task_id=self.task_id, provider=provider, role=role.value, model=alias,
-                                      round=round_no, external_id=session_id or "", log_path=log_path)
+                                       round=round_no, external_id=session_id or "", log_path=log_path,
+                                       prompts=prompts_summary)
 
     def _close_session(self, row: int) -> None:
         """The provider group is gone and the turn is lost — the row must not stay 'running'."""
@@ -490,12 +491,14 @@ class Engine:
     def session(self, role: Role, alias: str, prompt: str, *, session_id: str | None = None,
                 keep_session_on_retry: bool = True, log_name: str = "", schema: dict | None = None,
                 cwd: str | None = None, prompt_kind: str = "start",
-                stop_predicate: Callable[[], bool] | None = None) -> RunResult:
+                stop_predicate: Callable[[], bool] | None = None, prompts_summary: str = "") -> RunResult:
         """One worker step with retries on network failure (architecture §6.3).
 
         `prompt_kind` says what the prompt is (start | continue | repair | rework | stop | review | nudge) and goes
         into the prompts sidecar, which is what `ahub follow` shows as the turn header. One call is one
         turn: a network retry repeats the run of the same prompt, not the turn.
+
+        `prompts_summary` — the canonical prompt-layers summary, stored on a new session row (reviewers).
 
         `stop_predicate` — what interrupts this turn. By default a nudge does (a worker turn carries the
         message); a reviewer or a save-and-stop turn passes `self.stop_requested` and waits for its turn.
@@ -512,7 +515,7 @@ class Engine:
         attempt = 0
         while True:
             self._check_lease()
-            row = self._session_row(prov.name, role, alias, t.round, session_id, log_path)
+            row = self._session_row(prov.name, role, alias, t.round, session_id, log_path, prompts_summary)
 
             def on_session(sid: str, _row=row) -> None:
                 try:
@@ -691,7 +694,11 @@ class Engine:
         prev = [s for s in self.store.list_sessions(t.id) if s.role == Role.SCOUT.value and s.external_id]
         resume_sid = prev[-1].external_id if prev and not t.limits.get("fresh_session") else None  # resume
         self._clear_fresh(t)
-        prompt = prompts.CONTINUE_PROMPT if resume_sid else prompts.scout_prompt(self.project, t)
+        if resume_sid:
+            prompt = prompts.CONTINUE_PROMPT
+        else:
+            prompt, summary, _ = prompts.scout_prompt(self.project, t)
+            self._record_prompts(t, summary)
         r, final = self._step_with_continue(Role.SCOUT, t.executor, prompt, session_id=resume_sid,
                                             log_name="scout",
                                             prompt_kind="continue" if resume_sid else "start")
@@ -784,10 +791,13 @@ class Engine:
         round_no = max(1, t.round)
         rework_notes = str(t.limits.get("rework_notes") or "")
         if rework_notes:
-            lim = dict(t.limits)
+            t.limits.pop("rework_notes", None)
+            lim = dict(self.task().limits)
             lim.pop("rework_notes", None)
             self.store.update_task(t.id, limits=lim)
         self.set_phase(Phase.STUDYING)
+        _, rev_summary, _ = prompts.assemble_guidance(self.project, "review")
+        self._record_prompts(t, rev_summary)
         t = self.move(State.REVIEWING, reasons.dump("review_round", round=round_no))
         # no gates of a code task here: an empty result, so nothing pretends a test ran
         decision, reason, findings = self._review_round(t, gates.GateResult(base="", head=""), models, round_no,
@@ -868,11 +878,14 @@ class Engine:
         notes = str(t.limits.get("rework_notes") or "")
         fresh = bool(t.limits.get("fresh_session")) or not sid
         if notes:
-            lim = dict(t.limits)
+            t.limits.pop("rework_notes", None)
+            lim = dict(self.task().limits)
             lim.pop("rework_notes", None)
             self.store.update_task(t.id, limits=lim)
         if fresh:  # new session (different model/brief, or no session before): full brief + instructions
-            prompt, kind = prompts.code_prompt(self.project, t), "start"
+            prompt, summary, _ = prompts.code_prompt(self.project, t)
+            self._record_prompts(t, summary)
+            kind = "start"
             if notes:
                 prompt += f"\n\n{prompts.orchestrator_heading(rework=True)}\n" + notes
                 kind = "rework"
@@ -896,6 +909,12 @@ class Engine:
             if blocked:
                 return self._settle(State.NEEDS_DECISION, reasons.dump("blocked", summary=blocked[:400]))
             t = self.move(State.CHECKING, reasons.dump("gates"))
+            sid, sync_final = self._sync_before_gates(t, role, t.executor, sid)
+            if sync_final is not None:
+                if self.budget_hit:
+                    return self._budget_stop(role, t.executor, sid)
+                return self._settle(*sync_final)
+            t = self.task()
             g = self._gate(t)
             fixed_once = False
             while True:
@@ -944,8 +963,15 @@ class Engine:
             t = self.move(State.FIXING, reason, fields={"round": round_no})
             prompt, kind = review.fix_prompt(findings), "rework"
 
+    def _record_prompts(self, t: Task, summary: str) -> None:
+        lim = dict(self.task().limits)
+        lim["prompts"] = summary
+        t.limits["prompts"] = summary
+        self.store.update_task(t.id, limits=lim)
+
     def _clear_fresh(self, t: Task) -> None:
         if t.limits.get("fresh_session"):
+            t.limits.pop("fresh_session", None)
             lim = dict(self.task().limits)
             lim.pop("fresh_session", None)
             self.store.update_task(t.id, limits=lim)
@@ -962,6 +988,68 @@ class Engine:
 
         orch = bool(t.limits.get("orch_edit"))
         return gates.check(self.project, t, orch_edit=orch, on_wait=on_wait, should_stop=self.stop_requested)
+
+    def _sync_before_gates(self, t: Task, role: Role, alias: str,
+                            sid: str | None) -> tuple[str | None, tuple[State, str] | None]:
+        """Merge the work branch into the task copy before the gates (each round).
+
+        Clean merge (or already up to date) — continue, the merge commit is the task's and the gates
+        read the new merge-base. Conflict — abort and run one resolve turn in the same session,
+        then the gates. Returns (new session id, final to settle or None).
+        """
+        wt = t.worktree
+        if not wt or not Path(wt).is_dir():
+            return sid, None
+        work = workspace.git(self.project.root, "rev-parse", "--verify", self.project.work_branch,
+                             check=False)
+        ref = work.stdout.strip()
+        if work.returncode != 0 or not ref:
+            self.log.warning("sync: no work branch %s", self.project.work_branch)
+            return sid, None
+        if workspace.git(wt, "merge-base", "--is-ancestor", ref, "HEAD", check=False).returncode == 0:
+            return sid, None
+        m = workspace.git(wt, "merge", "--no-edit", ref, check=False)
+        if m.returncode == 0:
+            self.log.info("synced %s into %s", self.project.work_branch, t.label)
+            self._refresh_result_commit(t)
+            return sid, None
+        unmerged = workspace.git(wt, "diff", "--name-only", "--diff-filter=U",
+                                 check=False).stdout.split()
+        workspace.git(wt, "merge", "--abort", check=False)
+        if not unmerged:
+            self.log.warning("sync merge failed (not a conflict): %s", (m.stderr or m.stdout)[-300:])
+            return sid, None
+        self.log.info("sync conflict, asking worker to resolve: %s", ", ".join(unmerged[:5]))
+        prompt = prompts.sync_conflict_prompt(self.project)
+        r, final = self._step_with_continue(role, alias, prompt, session_id=sid, log_name=role.value,
+                                            prompt_kind="rework")
+        new_sid = r.session_id or sid
+        if final is not None:
+            return new_sid, final
+        blocked = self._blocked(self.task())
+        if blocked:
+            return new_sid, (State.NEEDS_DECISION, reasons.dump("blocked", summary=blocked[:400]))
+        return new_sid, None
+
+    def _refresh_result_commit(self, t: Task) -> None:
+        """Point result.json at the sync merge commit, so the gates see the hub's merge as the task's."""
+        try:
+            path = Path(t.worktree) / workspace.AHUB_DIR / "result.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict) or not str(data.get("commit", "")).strip():
+            return
+        try:
+            head = workspace.head(t.worktree)
+        except workspace.WorkspaceError:
+            return
+        if str(data.get("commit")) != head:
+            data["commit"] = head
+            try:
+                path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            except OSError as e:
+                self.log.warning("result commit not refreshed: %s", e)
 
     def _review_round(self, t: Task, g: gates.GateResult, models: list[str], round_no: int,
                       max_rounds: int, *, material: str | None = None,
@@ -1012,12 +1100,19 @@ class Engine:
         for m in models:
             review.review_path(t.worktree, round_no, m).unlink(missing_ok=True)
 
+        prompts_by_model: dict[str, str] = {}
+        summaries_by_model: dict[str, str] = {}
+        for m in models:
+            p, s, _ = review.review_prompt(self.project, t, diff, g, round_no, m, notes=notes)
+            prompts_by_model[m] = p
+            summaries_by_model[m] = s
+
         def one(m: str):
-            prompt = review.review_prompt(self.project, t, diff, g, round_no, m, notes=notes)
+            prompt = prompts_by_model[m]
             # a reviewer is not interrupted by a nudge: the message waits for the executor's next turn
             return self.session(Role.REVIEWER, m, prompt, keep_session_on_retry=False,
                                 log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review",
-                                stop_predicate=self.stop_requested)
+                                stop_predicate=self.stop_requested, prompts_summary=summaries_by_model[m])
 
         with ThreadPoolExecutor(max_workers=len(models)) as ex:
             results = list(ex.map(one, models))

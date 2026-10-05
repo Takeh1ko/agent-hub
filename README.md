@@ -63,6 +63,7 @@ drop a "done".
 | Observer | code checks every 5 min, a model review every 30 min, escalation to Claude, then to you |
 | Human | `ahub top`; optional Telegram bot that talks to Claude (and starts Claude if no session is live) |
 | Other agents | the same handles over MCP (`ahub mcp`) |
+| Prompts | global, project, and local guidance per role on top of a lean built-in layer (`ahub prompts`) |
 | Languages | English and Russian (`AHUB_LANG`, `lang` in config, or the locale) |
 
 ## Supported providers

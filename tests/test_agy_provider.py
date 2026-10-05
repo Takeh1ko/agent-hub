@@ -170,6 +170,13 @@ def test_build_command(agy, tmp_path):
     assert edged[-2:] == ["--mode", "accept-edits"] and "--dangerously-skip-permissions" not in edged
 
 
+def test_env_isolates_the_hub(agy, tmp_path):
+    """A reviewer session must not see the live hub: its own AHUB_HOME, the real HOME for the login."""
+    env = agy.env(RunSpec(prompt="hi", cwd=str(tmp_path), model_id="m", env={"X": "1"}))
+    assert env.get("AHUB_HOME") == str(tmp_path / ".ahub" / "home") and env["X"] == "1"
+    assert "HOME" not in env  # agy needs the real one for the login
+
+
 def test_long_prompt_goes_to_file(tmp_path):
     long = "x" * 70_000
     arg = prompt_arg(long, str(tmp_path))

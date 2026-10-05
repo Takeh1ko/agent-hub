@@ -323,13 +323,39 @@ def test_accepting_with_recycled_pid_is_orphan(store, tmp_path):
 
 
 def test_code_fingerprint_and_health(tmp_path):
-    from ahub import selfupdate
-
     a = service.code_fingerprint()
     assert a == service.code_fingerprint()
-    assert "ahub.tg.run" in selfupdate._PROBE  # the bot restarts on this verdict too, not only the service
     ok, why = service.new_code_healthy()
     assert ok, why
+
+
+def test_probe_reports_unhealthy_when_tg_run_broken(tmp_path, monkeypatch):
+    """Behaviour, not a literal: a tree where ahub.tg.run fails to import must not pass the health check
+    (the bot restarts on this verdict too, not only the service)."""
+    import os
+
+    from ahub import selfupdate
+
+    tree = tmp_path / "broken-tree"
+    (tree / "ahub" / "tg").mkdir(parents=True)
+    (tree / "ahub" / "__init__.py").write_text("")
+    for mod in ("service", "engine", "worker", "cli"):
+        (tree / "ahub" / f"{mod}.py").write_text("OK = True\n")
+    (tree / "ahub" / "tg" / "__init__.py").write_text("")
+    (tree / "ahub" / "tg" / "run.py").write_text("raise ImportError('tg-run-broken-for-test')\n")
+    (tree / "ahub" / "store.py").write_text("class Store:\n    pass\n")
+    # `-c` puts cwd first on sys.path: run from a dir without ahub, so PYTHONPATH decides
+    monkeypatch.chdir(tmp_path)
+
+    def fake_env():
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(tree)
+        return env
+
+    monkeypatch.setattr(selfupdate, "hub_env", fake_env)
+    ok, why = selfupdate.new_code_healthy()
+    assert not ok
+    assert "tg-run-broken-for-test" in why
 
 
 def test_restart_self_execs_with_the_hub_on_pythonpath(monkeypatch):

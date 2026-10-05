@@ -62,6 +62,22 @@ def test_config_ok_and_bad():
     assert c.ok is False and c.detail and c.fix
 
 
+def test_check_prompts_broken_hub_toml(tmp_path):
+    write(tmp_path / ".hub.toml", "this is not valid toml = [[{\n")
+    c = doctor.check_prompts(tmp_path)
+    assert c.name == "prompts"
+    assert c.ok is False
+    assert c.fix
+    assert ".hub.toml" in c.fix
+
+
+def test_broken_hub_toml_reported_once(tmp_path):
+    """A broken .hub.toml is reported by exactly one doctor check (the prompts area)."""
+    write(tmp_path / ".hub.toml", "this is not valid toml = [[{\n")
+    mentions = [c for c in doctor.run_all(tmp_path) if ".hub.toml" in c.detail or ".hub.toml" in c.fix]
+    assert len(mentions) == 1 and mentions[0].name == "prompts"
+
+
 def test_service_alive_dead_unit(monkeypatch):
     c = doctor.check_service()
     assert c.ok is False and "install" in c.fix  # no heartbeat, no unit in tmp HOME
@@ -943,7 +959,7 @@ def test_cli_codes_and_json(capsys, monkeypatch):
     assert cli.main(["--json", "doctor"]) in (0, 1)
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert isinstance(data["checks"], list) and len(data["checks"]) == 16
+    assert isinstance(data["checks"], list) and len(data["checks"]) == 17
     assert secret not in out
     for c in data["checks"]:
         assert set(c) == {"name", "ok", "detail", "fix", "buckets"}

@@ -465,9 +465,9 @@ def test_reviewer_quota_below_threshold_with_fallback(store, tmp_path, monkeypat
     """Reviewer model below quota threshold switches to fallback."""
     from ahub import engine
 
-    project = make_project(tmp_path, max_parallel=2)
-    # Load-safe: slow fake startup under parallel suites is not silence.
-    project = dataclasses.replace(project, timeouts=dataclasses.replace(project.timeouts, idle_s=120))
+    # not a silence test: a fake reviewer that starts slowly under parallel suites must not count as silent
+    project = make_project(tmp_path, max_parallel=2,
+                           timeouts={"idle_s": 120, "retry_max": 2, "retry_pause_s": 0})
     fake = install_fake(store, [
         {"session": "ses_rv", "steps": [
             {"write": {"path": ".ahub/review_r1_bunny.json",

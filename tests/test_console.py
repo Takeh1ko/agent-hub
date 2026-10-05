@@ -1,4 +1,4 @@
-"""Console K1 shell: layout, focus model, follow, clipping, bare-TTY gate (textual pilot)."""
+"""Console K1 shell + K3 projects/alerts/money: layout, focus, follow, scope, strip, footer."""
 
 from __future__ import annotations
 
@@ -802,3 +802,166 @@ async def test_help_shows_the_shortcuts_block(store: Store):
         await pilot.pause(0.2)
         assert app._show_shortcuts is True
         assert app.query_one("#shortcuts", Static).display is True
+
+
+# --- K3: projects, alert strip, money ---
+
+
+@pytest.fixture
+def hub_ab(tmp_path, monkeypatch):
+    """Two configured projects A and B; cwd is A."""
+    from ahub import paths as _paths
+    from tests.conftest import write as _write
+
+    roots = {}
+    for name in ("A", "B"):
+        root = tmp_path / name.lower()
+        _write(root / ".hub.toml", f'schema_version = 2\nname = "{name}"\nmax_parallel = 2\n')
+        roots[name] = root
+    _write(_paths.global_config_path(), f'projects = ["{roots["A"]}", "{roots["B"]}"]\n')
+    monkeypatch.chdir(roots["A"])
+    return roots
+
+
+def _working(store: Store, project: str, title: str) -> int:
+    from ahub import transitions
+
+    tid = _task(store, project, title)
+    transitions.move(store, tid, State.PREPARING)
+    transitions.move(store, tid, State.WORKING)
+    return tid
+
+
+def _session(store: Store, tid: int, go: float, usd: float = 0.0) -> None:
+    sid = store.add_session(task_id=tid, provider="opencode", role="executor", model="spark",
+                            round=1, external_id=f"ses_{tid}_{len(store.list_sessions())}")
+    store.update_session(sid, status="ok", cost_go=go, cost_usd=usd)
+
+
+def test_welcome_box_has_go_month_line(store: Store):
+    """Header Go month line is machine-wide data.header logic, not per-project cost."""
+    from ahub.tui import data as topdata
+
+    now = now_ms()
+    box = con.welcome_box(store, scope.Scope(("P",)), now, 80)
+    money = topdata.header(store, now).split("\n")[-1].strip()
+    assert money  # the header always has a money line (zeros when no opencode.db)
+    assert money in box or money.split("·")[0].strip()[:10] in box
+
+
+def test_snapshot_all_mode_shows_project_headings(store: Store):
+    a = _working(store, "A", "a work")
+    b = _working(store, "B", "b work")
+    snap = con.snapshot(store, scope.Scope(), 80, now_ms())
+    keys = [k for k, _ in snap.blocks]
+    assert keys == ["head:A", f"T{a}", "head:B", f"T{b}"]
+    assert snap.task_ids == [a, b]
+    single = con.snapshot(store, scope.Scope(("A",)), 80, now_ms())
+    assert single.task_ids == [a]
+    assert all(not k.startswith("head:") for k, _ in single.blocks)
+
+
+def test_empty_project_shows_no_tasks(store: Store):
+    from ahub.i18n import t
+
+    _working(store, "A", "a work")
+    snap = con.snapshot(store, scope.Scope(("Empty",)), 80, now_ms())
+    assert snap.task_ids == []
+    assert len(snap.blocks) == 1 and snap.blocks[0][0] == "empty"
+    assert t("console.no_tasks") in snap.blocks[0][1]
+
+
+def test_hub_alarm_shows_in_every_scope(store: Store):
+    comms.raise_alarm(store, "hub fire", critical=True, project="")
+    for sc in (scope.Scope(("A",)), scope.Scope(("B",)), scope.Scope()):
+        line = con.alert_text(store, sc, 80)
+        assert "🚨" in line
+        assert "1 alarms" in line or "1 трев" in line or "🚨 1" in line
+
+
+def test_question_of_other_project_only_in_all(store: Store):
+    comms.ask(store, "why B?", project="B")
+    a_line = con.alert_text(store, scope.Scope(("A",)), 80)
+    assert a_line == ""  # no alarms, no A questions, B question is out of scope
+    b_line = con.alert_text(store, scope.Scope(("B",)), 80)
+    assert "❓" in b_line
+    all_line = con.alert_text(store, scope.Scope(), 80)
+    assert "❓" in all_line
+    # hub-wide question is in every scope
+    comms.ask(store, "hub-wide?", project="")
+    assert "❓" in con.alert_text(store, scope.Scope(("A",)), 80)
+
+
+def test_footer_money_per_scope_never_summed(store: Store):
+    a = _working(store, "A", "a work")
+    b = _working(store, "B", "b work")
+    _session(store, a, 0.30, 0.05)
+    _session(store, b, 0.02)
+    fa = con.footer_text(store, scope.Scope(("A",)), 80)
+    fb = con.footer_text(store, scope.Scope(("B",)), 80)
+    fall = con.footer_text(store, scope.Scope(), 80)
+    assert "Go $0.30" in fa and "USD $0.05" in fa
+    assert "Go $0.02" in fb and "USD $0.00" in fb
+    assert "Go $0.32" in fall and "USD $0.05" in fall
+    for line in (fa, fb, fall):  # Go and USD stay separate, never one summed number
+        assert "Go $" in line and "USD $" in line
+    assert "Go $0.35" not in fa and "Go $0.37" not in fall
+
+
+async def test_project_command_switches_scope(hub_ab, store: Store):
+    a = _working(store, "A", "a work")
+    b = _working(store, "B", "b work")
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        assert set(con.snapshot(store, app.scope, 80, now_ms()).task_ids) == {a, b}
+        app.run_command("/project A")
+        assert app.scope == scope.Scope(("A",))
+        assert con.snapshot(store, app.scope, 80, now_ms()).task_ids == [a]
+        app.run_command("/all")
+        assert app.scope.all
+        assert set(con.snapshot(store, app.scope, 80, now_ms()).task_ids) == {a, b}
+        app.run_command("/project all")
+        assert app.scope.all
+
+
+async def test_project_command_rejects_unknown_keeps_scope(hub_ab, store: Store):
+    _working(store, "A", "a work")
+    app = ConsoleApp(store=store, project="A")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        assert app.scope == scope.Scope(("A",))
+        app.run_command("/project NOPE")
+        await pilot.pause(0.2)
+        assert app.scope == scope.Scope(("A",))  # typo never becomes a silent empty scope
+        assert any("NOPE" in ln for ln in app._transcript)
+        app.run_command("/project")
+        await pilot.pause(0.2)
+        assert app.scope == scope.Scope(("A",))
+        assert any("/project" in ln for ln in app._transcript)
+
+
+async def test_ctrl_o_cycles_config_projects_including_empty(hub_ab, store: Store):
+    from ahub.i18n import t as _t
+
+    a = _working(store, "A", "a work")  # B stays empty
+    app = ConsoleApp(store=store, project="A")
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        assert app.scope == scope.Scope(("A",))
+        app._selected = 3  # a stale selection must not survive the switch
+        await pilot.press("ctrl+o")
+        await pilot.pause(0.3)
+        assert app.scope == scope.Scope(("B",))
+        assert app._selected == 0
+        snap = con.snapshot(store, app.scope, 80, now_ms())
+        assert snap.task_ids == []
+        assert snap.blocks[0][0] == "empty"
+        assert _t("console.no_tasks") in snap.blocks[0][1]
+        await pilot.press("ctrl+o")
+        await pilot.pause(0.3)
+        assert app.scope.all
+        assert set(con.snapshot(store, app.scope, 80, now_ms()).task_ids) == {a}
+        await pilot.press("ctrl+o")
+        await pilot.pause(0.3)
+        assert app.scope == scope.Scope(("A",))
