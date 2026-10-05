@@ -263,6 +263,17 @@ class AgyProvider(Provider):
             cmd += ["--mode", "accept-edits"]
         return cmd
 
+    def env(self, spec: RunSpec) -> dict[str, str]:
+        """Isolation: the hub inside a worker session writes to its own dir, not the live storage.
+
+        HOME stays real — agy reads the login from ~/.gemini there (same as for opencode).
+        """
+        home = Path(spec.cwd) / ".ahub" / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        env = {"AHUB_HOME": str(home), "AGENT_HUB_HOME": str(home / "v1")}
+        env.update(spec.env)
+        return env
+
     def parse_line(self, line: str, now: int) -> list[Activity]:
         s = line.strip()
         if not s.startswith("{"):
