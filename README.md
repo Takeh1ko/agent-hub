@@ -1,4 +1,4 @@
-<p align="center"><img src="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/assets/agent-hub-motion.svg" alt="Claude Code hands a big task to agent-hub: four cheap worker models write and test the code in parallel, reviewers approve, Claude accepts — about $1 instead of about $130" width="100%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/assets/agent-hub-motion.svg" alt="Claude Code hands a big task to agent-hub: four cheap worker models write and test the code in parallel, reviewers approve, Claude reads one line per task and accepts — about $2 instead of about $80" width="100%"></p>
 
 <p align="center"><a href="https://github.com/Takeh1ko/agent-hub/actions/workflows/ci.yml"><img src="https://github.com/Takeh1ko/agent-hub/actions/workflows/ci.yml/badge.svg" alt="CI"></a> <a href="https://pypi.org/project/ahub/"><img src="https://img.shields.io/pypi/v/ahub" alt="PyPI"></a> <img src="https://img.shields.io/badge/python-3.11%E2%80%933.13-blue" alt="Python 3.11–3.13"> <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT"></p>
 

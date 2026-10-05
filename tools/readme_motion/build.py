@@ -10,8 +10,10 @@ The story, in five scenes:
   B  the window steps aside, the hub dispatches the tasks to four worker cards;
   C  the workers write the code — tool calls, test runs, line counters, the money ticker — while Claude's own
      context meter stays flat;
-  D  gates pass, a reviewer model joins each card (one sends a finding back), DONE wakes Claude, Claude accepts;
-  E  the bill: Claude writing every line itself vs. Claude orchestrating cheap workers.
+  D  gates pass, a reviewer model joins each card (one sends a finding back), DONE wakes Claude with one line
+     (the worker's diff → one line: brief by default), Claude accepts;
+  E  the bill: the workers' tokens at Claude API list prices vs. their real bill plus Claude's orchestration.
+A numbered chapter line on top says what each scene is.
 
 Run: python3 tools/readme_motion/build.py  (needs fonttools + brotli; writes the SVG next to the README assets).
 """
@@ -330,7 +332,12 @@ WORKERS = [
 SHAS = ["4c1d9e2", "8e21f0a", "b07a3d5", "19fd6c8"]
 TOTAL_ADDED = sum(w.added for w in WORKERS)
 TOTAL_COST = sum(w.cost for w in WORKERS)
-CLAUDE_ONLY = 130          # the same tokens at Claude API list prices, rounded (README footnote)
+CLAUDE_ONLY = 80           # the workers' tokens at Claude API list prices (Opus tier), rounded
+ORCHESTRATION = 0.90       # Claude's own orchestration of the four tasks, estimated (event lines, briefs, accepts)
+CHAPTERS = [(0.0, "01", "You give Claude Code one big task"),
+            (5.05, "02", "ahub hands the parts to cheap models"),
+            (7.4, "03", "Workers write and test · reviewer models check"),
+            (11.5, "04", "Claude reads one line per task — and accepts")]
 JITTER = (0.0, 0.42, -0.25, 0.3, -0.12, 0.38, -0.3, 0.18, 0.05, -0.2)   # a human, uneven rhythm of tool calls
 
 
@@ -498,11 +505,39 @@ def claude_window() -> str:
     # the prompt block sits behind its lines and scrolls with them
     pb = (f'<rect x="{x + 10}" y="{ty + p0 * lh - 5}" width="{w - 20}" height="{4 * lh + 8}" rx="7" '
           f'fill="{PROMPT_BG}" class="{appear(TYPE_AT - 0.05, 0.25)}"/>')
-    rows = 23
+    rows = 21
     parts.append(Term(tx, ty, w - 40, rows, size, lh, "claude").render(L, cursor=CLAUDE, under=pb))
-    # the footer: Claude Code's spinner while it waits, and its context — flat while the workers write
-    yb = y + h - 17
-    parts.append(hline(x + 1, x + w - 1, yb - 20, f'stroke="{WIN_EDGE}" class="{appear(WORK_START, 0.4)}"'))
+    # the footer — brief by default: what reached Claude (event lines) against what the workers wrote,
+    # then Claude Code's spinner while it waits and its context, flat while the workers write
+    y1, yb = y + h - 37, y + h - 14
+    parts.append(hline(x + 1, x + w - 1, y + h - 58, f'stroke="{WIN_EDGE}" class="{appear(WORK_START, 0.4)}"'))
+    read = [(WORK_START, (0, 0))]
+    n = size_b = 0
+    for t, add_b in [(WORK_START + 0.25, 31)] + [e for wk in WORKERS for e in ((wk.done + 0.3, 58), (wk.done + 1.1, 36))]:
+        n += 1
+        size_b += add_b
+        read.append((t, (n, size_b)))
+    sched = [worker_schedule(wk, i) for i, wk in enumerate(WORKERS)]
+    wrote = []
+    for k in range(int((WORKERS[-1].done - WORK_START) / 0.4) + 1):
+        t = WORK_START + k * 0.4
+        wrote.append((t, sum(int(wk.added * min(1.0, max(0.0, (t - sc["start"]) / (sc["work_end"] - sc["start"])))
+                                 ** 1.15) for wk, sc in zip(WORKERS, sched))))
+    wrote.append((WORKERS[-1].done, TOTAL_ADDED))
+
+    def read_txt(v):
+        n, size_b = v
+        return (f'<text x="{tx}" y="{y1}" font-family="{MONO}" font-size="12.5" xml:space="preserve" '
+                f'style="white-space:pre"><tspan fill="{DIM}">{esc("Claude read ")}</tspan>'
+                f'<tspan fill="{CLAUDE}" font-weight="700">{esc(f"{n} line" + ("" if n == 1 else "s"))}</tspan>'
+                f'<tspan fill="{DIM}">{esc(f" · {size_b} B")}</tspan></text>')
+
+    def wrote_txt(v):
+        return (f'<text x="{x + w - 20}" y="{y1}" font-family="{MONO}" font-size="12.5" text-anchor="end" '
+                f'xml:space="preserve" style="white-space:pre"><tspan fill="{DIM}">{esc("workers wrote ")}</tspan>'
+                f'<tspan fill="{GREEN}" font-weight="700">{esc(f"+{v:,} lines")}</tspan></text>')
+    parts.append(f'<g class="{appear(WORK_START, 0.4)}">{discrete(read, None, read_txt)}'
+                 f'{discrete(wrote, None, wrote_txt)}</g>')
     frames = "·✢✳✶✻✽✻✶✳✢"
     per = 0.11
     spin = []
@@ -519,18 +554,17 @@ def claude_window() -> str:
     mx = x + w - 20
 
     def meter(v):
-        pct = v
-        fill = 70 * pct / 100
-        return (mono(mx - 78, yb, f"{pct:g}%", 12.5, TEXT, 700, "end")
+        fill = 70 * v / 100
+        return (mono(mx - 78, yb, f"{v:g}%", 12.5, TEXT, 700, "end")
                 + f'<rect x="{mx - 72}" y="{yb - 8}" width="72" height="7" rx="3.5" fill="#24242c"/>'
                 + f'<rect x="{mx - 72}" y="{yb - 8}" width="{max(7, fill):.1f}" height="7" rx="3.5" fill="{CLAUDE}"/>')
     parts.append(f'<g class="{appear(WORK_START + 0.1, 0.4)}">'
                  + mono(mx - 118, yb, "context", 12, DIM, 400, "end")
                  + discrete(ctx, None, meter) + "</g>")
     # A: big and centred; B: steps aside (transform-origin is the SVG origin)
-    s = 1.15
+    s = 1.04
     tx0 = (W / 2 - w * s / 2) - s * x
-    ty0 = 6 - s * y
+    ty0 = 62 - s * y
     move = A.add([(0, f"transform:translate({tx0:.1f}px,{ty0:.1f}px) scale({s})"),
                   (MOVE[0], f"transform:translate({tx0:.1f}px,{ty0:.1f}px) scale({s})", EASE_IO),
                   (MOVE[1], "transform:translate(0px,0px) scale(1)")])
@@ -581,11 +615,18 @@ def hub_and_wires(cards_xy: list[tuple[float, float, float]]) -> str:
     return "".join(out)
 
 
+def chapter_row(num: str, title: str) -> str:
+    return (mono(176, 44, num, 14, ACCENT, 700)
+            + sans(202, 44, title, 15.5, TEXT, 600))
+
+
 def top_bar() -> str:
-    out = [f'<g class="{appear(CARDS_AT, 0.5)}">',
-           mono(36, 44, "✻", 17, ACCENT),
-           sans(58, 44, "agent-hub", 16, TEXT, 600),
-           sans(152, 44, "Claude orchestrates · cheap models write the code", 13.5, DIM, 400)]
+    out = [mono(36, 44, "✻", 17, ACCENT), sans(58, 44, "agent-hub", 16, TEXT, 600),
+           f'<path d="M158 30V50" stroke="{FAINT}"/>']
+    # chapters: each slides up into place, the previous one leaves upward
+    for k, (t, num, title) in enumerate(CHAPTERS):
+        t_out = CHAPTERS[k + 1][0] - 0.3 if k + 1 < len(CHAPTERS) else None
+        out.append(f'<g class="{appear(t + 0.15, 0.45, 8, t_out, 0.3)}">{chapter_row(num, title)}</g>')
     sched = [worker_schedule(wk, i) for i, wk in enumerate(WORKERS)]
     end = sched[-1]["done"]
     ts = [WORK_START + k * 0.4 for k in range(int((end - WORK_START) / 0.4) + 1)]
@@ -605,65 +646,94 @@ def top_bar() -> str:
         state = f"{running} running" if running else "4 done"
         return (f'<text x="1164" y="44" font-family="{MONO}" font-size="13.5" text-anchor="end" '
                 f'xml:space="preserve" style="white-space:pre"><tspan fill="{SOFT}">{esc(state)}</tspan>'
-                f'<tspan fill="{FAINT}">{esc("  ·  ")}</tspan><tspan fill="{GREEN}">{esc(f"+{lines:,}")}</tspan>'
-                f'<tspan fill="{DIM}">{esc(" lines")}</tspan><tspan fill="{FAINT}">{esc("  ·  ")}</tspan>'
+                f'<tspan fill="{FAINT}">{esc("  ·  ")}</tspan><tspan fill="{DIM}">{esc("workers ")}</tspan>'
                 f'<tspan fill="{ACCENT}" font-weight="700">{esc(f"${money:.2f}")}</tspan></text>')
-    out.append(discrete(vals, None, tick))
-    out.append("</g>")
+    out.append(f'<g class="{appear(CARDS_AT, 0.5)}">{discrete(vals, None, tick)}</g>')
+    return "".join(out)
+
+
+def handoff() -> str:
+    """At every DONE: the worker's whole diff becomes one line for Claude — brief by default."""
+    out = []
+    for k, wk in enumerate(WORKERS):
+        t_out = WORKERS[k + 1].done - 0.05 if k + 1 < len(WORKERS) else wk.done + 1.6
+        pill = (f'<rect x="548" y="262" width="148" height="42" rx="10" fill="#0d1a12" stroke="{GREEN}" '
+                f'stroke-opacity=".45"/>'
+                + mono(622, 279, f"+{wk.added:,} lines", 12.5, GREEN, 700, "middle")
+                + mono(622, 296, "→ 1 line to Claude", 11.5, SOFT, 400, "middle"))
+        out.append(f'<g class="{appear(wk.done + 0.05, 0.3, 6, t_out, 0.2)}">{pill}</g>')
     return "".join(out)
 
 
 def finale() -> str:
     t0 = FINALE
     x0, x1 = 170, 1030
-    out = []
-    out.append(f'<g class="{appear(t0, 0.6, 10)}">'
-               + sans(W / 2, 132, f"THE SAME FEATURE  ·  4 TASKS  ·  +{TOTAL_ADDED:,} LINES  ·  1 ORCHESTRATOR",
+    total = TOTAL_COST + ORCHESTRATION
+    out = [mono(36, 44, "✻", 17, ACCENT), sans(58, 44, "agent-hub", 16, TEXT, 600),
+           f'<path d="M158 30V50" stroke="{FAINT}"/>', chapter_row("05", "The bill")]
+    out.append(f'<g class="{appear(t0 + 0.1, 0.6, 10)}">'
+               + sans(W / 2, 138, f"THE SAME FEATURE  ·  4 TASKS  ·  +{TOTAL_ADDED:,} LINES  ·  4 REVIEWS PASSED",
                       13, DIM, 600, "middle", 'letter-spacing="2.5"') + "</g>")
-    # row 1: Claude writes everything itself
-    r1 = 236
+    # row 1: Claude writes and reviews everything itself
+    r1 = 232
     out.append(f'<g class="{appear(t0 + 0.3, 0.5, 8)}">'
-               + sans(x0, r1, "Claude writes every line itself", 18, SOFT, 400) + "</g>")
+               + sans(x0, r1, "Claude writes and reviews every line itself", 18, SOFT, 400) + "</g>")
     out.append(hline(x0, x1, r1 + 26, f'stroke="#1d1d24" stroke-width="12" stroke-linecap="round" '
                                       f'class="{appear(t0 + 0.3, 0.4)}"'))
     out.append(hline(x0, x1, r1 + 26, f'stroke="url(#gGrey)" stroke-width="12" stroke-linecap="round" '
-                                      f'pathLength="100" stroke-dasharray="100 100" class="{draw(t0 + 0.45, t0 + 1.7)}"'))
-    big1 = [(t0 + 0.45 + k * 0.125, v) for k, v in enumerate((4, 13, 27, 44, 61, 79, 96, 111, 122, 130))]
+                                      f'pathLength="100" stroke-dasharray="100 100" class="{draw(t0 + 0.45, t0 + 1.6)}"'))
+    big1 = [(t0 + 0.45 + k * 0.12, v) for k, v in enumerate((3, 9, 18, 29, 41, 53, 64, 73, 78, CLAUDE_ONLY))]
     dim1 = A.add([(0, f"fill:{TEXT}"), (t0 + 2.9, f"fill:{TEXT}", EASE), (t0 + 3.4, "fill:#6f6f79")])
     out.append(f'<g class="{dim1}">'
                + discrete(big1, None, lambda v: sans(x1, r1, f"≈ ${v}", 42, "inherit", 800, "end")) + "</g>")
-    out.append(hline(x1 - 156, x1 + 4, r1 - 14, f'stroke="{RED}" stroke-width="3" stroke-linecap="round" '
+    out.append(hline(x1 - 132, x1 + 4, r1 - 14, f'stroke="{RED}" stroke-width="3" stroke-linecap="round" '
                                                 f'pathLength="100" stroke-dasharray="100 100" '
                                                 f'class="{draw(t0 + 2.9, t0 + 3.25)}"'))
-    # row 2: Claude orchestrates through ahub
-    r2 = 372
-    out.append(f'<g class="{appear(t0 + 1.6, 0.5, 8)}">'
-               + sans(x0, r2, "Claude orchestrates · workers write the code", 18, ACCENT, 600) + "</g>")
-    bar2 = x0 + max(10, (x1 - x0) * TOTAL_COST / CLAUDE_ONLY)
+    # row 2: Claude orchestrates, cheap models write; the bar is two parts — workers, then Claude itself
+    r2 = 360
+    out.append(f'<g class="{appear(t0 + 1.5, 0.5, 8)}">'
+               + sans(x0, r2, "Claude orchestrates · cheap models write the code", 18, ACCENT, 600) + "</g>")
+    unit = (x1 - x0) / CLAUDE_ONLY
+    xa = x0 + max(8, TOTAL_COST * unit)
+    xb = xa + max(8, ORCHESTRATION * unit)
     out.append(hline(x0, x1, r2 + 30, f'stroke="#1d1d24" stroke-width="12" stroke-linecap="round" '
-                                      f'class="{appear(t0 + 1.6, 0.4)}"'))
-    out.append(hline(x0, bar2, r2 + 30, f'stroke="{ACCENT}" stroke-width="12" stroke-linecap="round" '
-                                        f'filter="url(#glow)" class="{appear(t0 + 1.9, 0.3)}"'))
-    small = [(t0 + 1.9 + k * 0.11, v) for k, v in enumerate((0.0, 0.12, 0.31, 0.52, 0.74, 0.91, TOTAL_COST))]
-    out.append(discrete(small, None, lambda v: sans(x1, r2 + 8, f"${v:.2f}", 66, ACCENT, 800, "end",
+                                      f'class="{appear(t0 + 1.5, 0.4)}"'))
+    out.append(hline(x0, xb, r2 + 30, f'stroke="{CLAUDE}" stroke-width="12" stroke-linecap="round" '
+                                      f'filter="url(#glow)" class="{appear(t0 + 2.1, 0.3)}"'))
+    out.append(hline(x0, xa, r2 + 30, f'stroke="{ACCENT}" stroke-width="12" stroke-linecap="round" '
+                                      f'class="{appear(t0 + 1.8, 0.3)}"'))
+    small = [(t0 + 1.8 + k * 0.1, f"${v:.2f}") for k, v in enumerate((0.0, 0.35, 0.71, 1.04, 1.38, 1.71))]
+    small.append((t0 + 2.5, f"≈ ${total:.0f}"))
+    out.append(discrete(small, None, lambda v: sans(x1, r2 + 8, v, 66, ACCENT, 800, "end",
                                                     'filter="url(#glowSoft)"')))
+    # what the right-hand bill is made of
+    legend = (f'<circle cx="{x0 + 5}" cy="{r2 + 61}" r="5" fill="{ACCENT}"/>'
+              + f'<text x="{x0 + 17}" y="{r2 + 66}" font-family="{SANS}" font-size="14" xml:space="preserve">'
+              f'<tspan fill="{SOFT}">{esc("workers write, test and review")}</tspan>'
+              f'<tspan fill="{ACCENT}" font-weight="600">{esc(f"  ${TOTAL_COST:.2f}")}</tspan></text>'
+              + f'<circle cx="{x0 + 345}" cy="{r2 + 61}" r="5" fill="{CLAUDE}"/>'
+              + f'<text x="{x0 + 357}" y="{r2 + 66}" font-family="{SANS}" font-size="14" xml:space="preserve">'
+              f'<tspan fill="{SOFT}">{esc("Claude: one line per task, decisions only")}</tspan>'
+              f'<tspan fill="{CLAUDE}" font-weight="600">{esc(f"  ≈ ${ORCHESTRATION:.2f}")}</tspan></text>')
+    out.append(f'<g class="{appear(t0 + 2.3, 0.4, 6)}">{legend}</g>')
     # the punchline
-    ratio = round(CLAUDE_ONLY / TOTAL_COST / 5) * 5
-    pill_w = 452
+    ratio = round(CLAUDE_ONLY / total / 5) * 5
+    pill_w = 470
     out.append(f'<g class="{appear(t0 + 3.3, 0.5, 10)}">'
-               f'<rect x="{W / 2 - pill_w / 2}" y="462" width="{pill_w}" height="46" rx="23" fill="{ACCENT}" '
+               f'<rect x="{W / 2 - pill_w / 2}" y="474" width="{pill_w}" height="46" rx="23" fill="{ACCENT}" '
                f'fill-opacity=".1" stroke="{ACCENT}" stroke-opacity=".45"/>'
-               + sans(W / 2, 491, f"~{ratio}× cheaper  ·  Claude's context goes to decisions", 16.5, TEXT, 600,
+               + sans(W / 2, 503, f"~{ratio}× cheaper  ·  brief answers keep Claude's context free", 16.5, TEXT, 600,
                       "middle") + "</g>")
     out.append(f'<g class="{appear(t0 + 3.8, 0.6)}">'
-               + mono(W / 2 - 152, 585, "✻", 20, ACCENT)
-               + sans(W / 2 - 128, 585, "agent-hub", 20, TEXT, 600)
-               + f'<rect x="{W / 2 + 2}" y="563" width="156" height="31" rx="7" fill="#16161b" stroke="{WIN_EDGE}"/>'
-               + mono(W / 2 + 80, 583.5, "pip install ahub", 14, SOFT, 400, "middle")
-               + sans(W / 2, 630, "Workers' bill (Spark 1.3 on opencode Go) vs. the same tokens at Claude API list "
-                                  "prices. Rounded, from real agent-hub runs.", 11.5, FAINT, 400, "middle")
+               + mono(W / 2 - 152, 590, "✻", 20, ACCENT)
+               + sans(W / 2 - 128, 590, "agent-hub", 20, TEXT, 600)
+               + f'<rect x="{W / 2 + 2}" y="568" width="156" height="31" rx="7" fill="#16161b" stroke="{WIN_EDGE}"/>'
+               + mono(W / 2 + 80, 588.5, "pip install ahub", 14, SOFT, 400, "middle")
+               + sans(W / 2, 634, "Top: the workers' tokens at Claude API list prices. Bottom: their real bill "
+                                  "(Spark 1.3 on opencode Go) plus Claude's orchestration, estimated. Rounded.",
+                      11.5, FAINT, 400, "middle")
                + "</g>")
-    return f'<g class="{appear(t0, 0.01)}">{"".join(out)}</g>'
+    return f'<g class="{appear(t0, 0.5)}">{"".join(out)}</g>'
 
 
 # --- fonts --------------------------------------------------------------------------------------------------
@@ -718,7 +788,7 @@ def build() -> str:
         card_svg.append(card(w, i, cx, y, cw, ch))
 
     stage = (f'<g class="{appear(0.0, 0.01, 0, STAGE_OUT, 0.55)}">'
-             + hub_and_wires(cards_xy) + "".join(card_svg) + claude_window() + top_bar() + "</g>")
+             + hub_and_wires(cards_xy) + handoff() + "".join(card_svg) + claude_window() + top_bar() + "</g>")
     fin = finale()
     root_fade = A.add([(0, "opacity:0"), (0.35, "opacity:1"), (T - 0.6, "opacity:1", EASE_IO), (T, "opacity:0")])
 
@@ -741,7 +811,7 @@ def build() -> str:
              f"animation-delay:-{still:.2f}s!important}}}}")
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
             f'role="img" aria-label="Claude Code hands a big task to agent-hub; four cheap worker models write and '
-            f'test the code in parallel, reviewers approve, Claude accepts — about $1 instead of about $130.">'
+            f'test the code in parallel, reviewers approve, Claude reads one line per task and accepts — about $2 instead of about $80.">'
             f"<title>agent-hub: Claude orchestrates, cheap models write the code</title>"
             f"{defs}<style>{css}</style>"
             f'<g clip-path="url(#cRoot)"><rect width="{W}" height="{H}" fill="url(#gBg)"/>'
