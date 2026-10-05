@@ -50,6 +50,9 @@ Example .hub.toml v2:
     max_parallel = 2
     test_resource = "test_db"                      # acceptance runs under this resource
 
+    [tests]                                          # extra args for the project's acceptance pytest runs
+    args = ["-n", "6", "--dist", "loadgroup"]        # default — no extra args
+
     [resources]                                    # shared resources: at most capacity tasks at once
     test_db = { lock = "/tmp/webapp_test_db.lock" }   # lock — external flock file, shared with other tools
     gpu = { capacity = 1 }
@@ -142,6 +145,7 @@ class ProjectConfig:
     max_parallel: int = 2
     resources: dict[str, Resource] = field(default_factory=dict)
     test_resource: str = ""
+    tests_args: tuple[str, ...] = ()  # [tests] args: extra pytest args for acceptance runs (default — none)
     hooks: Hooks = field(default_factory=Hooks)
     models_deny: tuple[str, ...] = ()
     budget_go: float = 1.5
@@ -384,6 +388,7 @@ def parse_project(data: dict, base_dir: str | Path, source: str = "") -> Project
     budget = r.table(data, "budget")
     secrets = r.table(data, "secrets")
     timeouts = r.table(data, "timeouts")
+    tests = r.table(data, "tests")
     retry_max = r.int_(timeouts, "retry_max", 3, "timeouts.", minimum=0)
     extra_excl = r.strs(secrets, "exclude", (), "secrets.")
     branch_prefix = r.str_(data, "branch_prefix", "ahub/")
@@ -404,6 +409,7 @@ def parse_project(data: dict, base_dir: str | Path, source: str = "") -> Project
         max_parallel=r.int_(data, "max_parallel", 2, minimum=1),
         resources=resources,
         test_resource=test_resource,
+        tests_args=r.strs(tests, "args", (), "tests."),
         hooks=Hooks(
             task_setup=r.str_(hooks, "task_setup", "", "hooks."),
             task_cleanup=r.str_(hooks, "task_cleanup", "", "hooks."),

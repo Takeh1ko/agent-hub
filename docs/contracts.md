@@ -223,7 +223,9 @@ after `MAX_POLL_FAILURES` poll failures in a row (§6, `ahub/commands/comms.py`)
 
 ## 8. Project resources
 
-`.hub.toml`: `max_parallel`, `[resources] name = {capacity, lock}`, `test_resource`. A task declares the resources it
+`.hub.toml`: `max_parallel`, `[resources] name = {capacity, lock}`, `test_resource`, `[tests] args`
+(extra pytest args for acceptance runs, e.g. `args = ["-n", "6", "--dist", "loadgroup"]`; default — no extra args).
+A task declares the resources it
 needs (`--resources`); the queue does not start a task while a resource is busy (busyness is the live task processes
 with that resource; `lock` is an external flock whose holder is visible in the pulse). Waiting for a slot or a resource
 is the phase `waiting` with a reason, not an alarm.
