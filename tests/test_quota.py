@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from datetime import datetime, timezone
@@ -262,6 +263,8 @@ def test_turn_quota_error_requeue_and_fresh_start_after_reset(store, tmp_path):
     from ahub import engine
 
     project = make_project(tmp_path, max_parallel=2)
+    # Load-safe: slow fake startup under parallel suites is not silence.
+    project = dataclasses.replace(project, timeouts=dataclasses.replace(project.timeouts, idle_s=120))
     res_json = '{"summary": "ok", "status": "done"}'
     fake = install_fake(store, [
         {"session": "ses_q", "steps": [
@@ -360,6 +363,8 @@ def test_turn_quota_error_moves_to_fallback(store, tmp_path, monkeypatch):
     from ahub import engine
 
     project = make_project(tmp_path, max_parallel=2)
+    # Load-safe: slow fake startup under parallel suites is not silence.
+    project = dataclasses.replace(project, timeouts=dataclasses.replace(project.timeouts, idle_s=120))
     fake = install_fake(store, [
         {"session": "ses_q", "steps": [
             {"event": {"type": "error", "message": "quota limit reached: 429 RESOURCE_EXHAUSTED"}}],
@@ -397,6 +402,8 @@ def test_turn_quota_error_without_buckets_requeues_with_error(store, tmp_path):
     from ahub import engine
 
     project = make_project(tmp_path, max_parallel=2)
+    # Load-safe: slow fake startup under parallel suites is not silence.
+    project = dataclasses.replace(project, timeouts=dataclasses.replace(project.timeouts, idle_s=120))
     install_fake(store, [
         {"session": "ses_a", "steps": [
             {"event": {"type": "error", "message": "quota limit reached: 429 RESOURCE_EXHAUSTED"}}],
@@ -459,6 +466,8 @@ def test_reviewer_quota_below_threshold_with_fallback(store, tmp_path, monkeypat
     from ahub import engine
 
     project = make_project(tmp_path, max_parallel=2)
+    # Load-safe: slow fake startup under parallel suites is not silence.
+    project = dataclasses.replace(project, timeouts=dataclasses.replace(project.timeouts, idle_s=120))
     fake = install_fake(store, [
         {"session": "ses_rv", "steps": [
             {"write": {"path": ".ahub/review_r1_bunny.json",
