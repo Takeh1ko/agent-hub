@@ -106,6 +106,7 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
         if not t.state_reason and ts - t.updated_at > QUEUE_STUCK_MS:
             sus.append(Suspicion(f"queue:{t.id}", _t("observer.queue_stuck", id=t.id,
                                                                      mins=(ts - t.updated_at) // 60000)))
+    sus += _loop_suspicions(store, now=ts)
     if not events.present(store, now=ts):
         old = [e for e in events.unacked(store) if ts - e.ts > UNACKED_MS and e.kind != "alarm"]
         if old:
@@ -128,6 +129,26 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
                                      critical=True))
     store.meta_set(LAST_QUICK, str(ts))
     return sus
+
+
+def _loop_suspicions(store: Store, now: int) -> list[Suspicion]:
+    """Cheap code rule (no model): a task re-picked more than M times per hour loops."""
+    from ahub import loops as _loops
+
+    try:
+        _, _, per_hour = _loops.limits_of()
+    except Exception:
+        per_hour = 6
+    out: list[Suspicion] = []
+    for t in store.list_tasks():
+        try:
+            n = _loops.re_picks_last_hour(store, t, now)
+        except Exception:
+            continue
+        if n > per_hour:
+            out.append(Suspicion(f"loop:{t.id}", _loops.loop_alarm_text(t, n),
+                                 data={"task": t.id, "picks": n}))
+    return out
 
 
 def proxy_problem(env: dict | None = None, timeout: float = 3.0) -> str:
@@ -318,6 +339,16 @@ def cycle(store: Store, *, now: int | None = None, deep_due: bool | None = None,
     win = window_since(store, deep=deep, now=ts)  # before quick_check: it moves LAST_QUICK
     sus = quick_check(store, projects=projects, now=ts)
     fresh = _fresh(store, sus, ts)
+    looped = [s for s in fresh if s.sig.startswith("loop:")]
+    if looped:
+        # cheap code rule, no model: too many re-picks — alarm at once
+        _mark_seen(store, looped, ts)
+        text = "; ".join(s.text for s in looped)[:400]
+        _report(store, "quick", "alarm", text, {"suspicions": [s.text for s in looped]}, 0.0, ts)
+        comms.raise_alarm(store, text, critical=False,
+                          details={"suspicions": [s.text for s in looped][:5]})
+        _log.warning("observer alarm (loop): %s", text[:200])
+        return "alarm"
     if not fresh and not deep:
         _report(store, "quick", "ok", _t("observer.clean") if not sus else _t("observer.known", n=len(sus)),
                 {}, 0.0, ts)

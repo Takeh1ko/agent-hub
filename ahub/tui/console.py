@@ -111,6 +111,15 @@ def _stage_word(task: Task) -> str:
             reason = reasons.text(task.state_reason)
         except Exception:
             reason = ""
+        try:
+            from ahub import loops as _loops
+            from ahub.time import now_ms as _now
+
+            suffix = _loops.hold_suffix(task, _now())
+            if suffix:
+                reason = (reason or "").strip() + suffix
+        except Exception:
+            pass
         return f"{base} · {reason}" if reason else base
     if task.state in WAITING_DECISION:
         return _t("console.stage_waiting")

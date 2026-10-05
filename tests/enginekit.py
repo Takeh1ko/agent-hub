@@ -62,9 +62,37 @@ def install_fake(store: Store, scenarios: list[dict]) -> ScriptedFake:
     providers.register("fake", fake)
     try:
         registry.add_model(store, "fake", "fake", "fake/model")
+    except registry.RegistryError as e:
+        entry = registry.get(store, "fake")
+        if entry.provider != "fake":
+            raise AssertionError(
+                f"alias 'fake' is on provider '{entry.provider}', not 'fake': "
+                f"re-point it explicitly with ensure_fake_model()") from e
+    return fake
+
+
+def ensure_fake_model(store: Store, alias: str, model_id: str = "") -> None:
+    """Point `alias` at the fake provider, loudly (never a silent no-op).
+
+    A seeded alias (e.g. bunny → opencode) on another provider is re-pointed
+    explicitly here; a fresh alias is added. An alias already on fake stays.
+    """
+    want = model_id or alias
+    try:
+        registry.add_model(store, alias, "fake", want)
+        return
     except registry.RegistryError:
         pass
-    return fake
+    entry = registry.get(store, alias)
+    if entry.provider == "fake" and entry.model_id == want:
+        return
+    if entry.provider != "fake":
+        with store.tx() as c:
+            c.execute("UPDATE model SET provider=?, model_id=? WHERE alias=?",
+                      ("fake", want, alias))
+        return
+    with store.tx() as c:
+        c.execute("UPDATE model SET model_id=? WHERE alias=?", (want, alias))
 
 
 def scout_ok(session: str = "ses_s", summary: str = "нашёл", report: str = "## Суть\nутечка в core/a.py:1\n",

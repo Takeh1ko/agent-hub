@@ -196,6 +196,15 @@ class QuotaConfig:
 
 
 @dataclass(frozen=True)
+class LimitsConfig:
+    """Busy-loop guard ([limits] in the hub config)."""
+
+    loop_settles: int = 3  # same reason N times in a row without progress → needs_decision loop
+    stuck_continues: int = 3  # K continue turns with no commit/tool activity → needs_decision stuck_session
+    picks_per_hour: int = 6  # re-picks per hour above this → observer ALARM
+
+
+@dataclass(frozen=True)
 class HubConfig:
     projects: tuple[str, ...] = ()  # paths to project roots (or to their .hub.toml)
     source: str = ""
@@ -209,6 +218,7 @@ class HubConfig:
     opencode_db: str = ""  # [paths] opencode_db; empty — XDG/known location
     provider_settings: dict[str, ProviderSettings] = field(default_factory=dict)  # [providers.<name>]
     quota: QuotaConfig = field(default_factory=QuotaConfig)
+    limits: LimitsConfig = field(default_factory=LimitsConfig)
 
     @property
     def telegram_enabled(self) -> bool:
@@ -546,6 +556,12 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
         fallback_executor=fallback_executor,
         fallback_reviewer=fallback_reviewer,
     )
+    limits_raw = r.table(data, "limits")
+    limits_cfg = LimitsConfig(
+        loop_settles=r.int_(limits_raw, "loop_settles", 3, "limits.", minimum=2),
+        stuck_continues=r.int_(limits_raw, "stuck_continues", 3, "limits.", minimum=2),
+        picks_per_hour=r.int_(limits_raw, "picks_per_hour", 6, "limits.", minimum=2),
+    )
     if r.errors:
         raise ConfigError(source or "<dict>", r.errors)
     return HubConfig(
@@ -561,6 +577,7 @@ def _parse_hub_data(data: dict, source: str) -> HubConfig:
         opencode_db=opencode_db,
         provider_settings=provider_settings,
         quota=quota_cfg,
+        limits=limits_cfg,
     )
 
 

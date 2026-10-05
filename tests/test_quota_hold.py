@@ -45,15 +45,16 @@ def set_hub_quota(cfg_text: str) -> None:
 
 def ensure_model(store: Store, alias: str, provider: str = "fake", model_id: str = "") -> None:
     from ahub import registry
+    from tests.enginekit import ensure_fake_model
 
-    try:
-        registry.add_model(store, alias, provider, model_id or alias)
-    except registry.RegistryError:
-        # A seeded alias (e.g. bunny/spark → opencode) stays on its provider after a failed
-        # add: point it at the fake one, or the test runs a real session (slow, flaky, network).
-        with store.tx() as c:
-            c.execute("UPDATE model SET provider=?, model_id=? WHERE alias=?",
-                      (provider, model_id or alias, alias))
+    if provider != "fake":
+        try:
+            registry.add_model(store, alias, provider, model_id or alias)
+        except registry.RegistryError as e:
+            raise AssertionError(
+                f"alias '{alias}' already exists for another provider: {e} — re-point explicitly") from e
+        return
+    ensure_fake_model(store, alias, model_id or alias)
 
 
 class Recorder:

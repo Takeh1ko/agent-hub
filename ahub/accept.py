@@ -76,6 +76,15 @@ def _expire_quota_hold(limits: dict) -> dict:
     return limits
 
 
+def _clear_loop(limits: dict) -> dict:
+    """Owner acted (continue/rework/edit): a loop/stuck episode is over, the task may spin again."""
+    if "loop" in limits or "stuck" in limits:
+        limits = dict(limits)
+        limits.pop("loop", None)
+        limits.pop("stuck", None)
+    return limits
+
+
 def _get(store: Store, task_id: int) -> Task:
     t = store.get_task(task_id)
     if t is None:
@@ -407,7 +416,7 @@ def rework(store: Store, task_id: int, notes: str, *, by: str = "orchestrator") 
         raise DecisionError(_t("accept.need_notes"))
     lim = dict(t.limits)
     lim["rework_notes"] = notes.strip()
-    store.update_task(t.id, limits=_expire_quota_hold(lim))
+    store.update_task(t.id, limits=_clear_loop(_expire_quota_hold(lim)))
     transitions.move(store, t.id, State.QUEUED, reason=reasons.dump("rework"), by=by, fields={"round": t.round + 1},
                      payload={"notes": notes[:500]})
     events.ack_task(store, t.id)
@@ -418,7 +427,7 @@ def continue_task(store: Store, task_id: int, *, by: str = "orchestrator") -> st
     t = _get(store, task_id)
     if t.state not in (State.STOPPED, State.ERROR, State.NEEDS_DECISION):
         raise DecisionError(_t("accept.continue_state", label=t.label, state=t.state.value))
-    lim = _expire_quota_hold(dict(t.limits))
+    lim = _clear_loop(_expire_quota_hold(dict(t.limits)))
     transitions.move(store, t.id, State.QUEUED, reason=reasons.dump("continue_task"), by=by,
                      fields={"limits": lim} if lim != t.limits else None)
     events.ack_task(store, t.id)
@@ -533,7 +542,7 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
         changes.append(_t("accept.edit_msg"))
     if not changes:
         return _t("accept.edit_nothing", label=t.label)
-    fields["limits"] = _expire_quota_hold(limits)
+    fields["limits"] = _clear_loop(_expire_quota_hold(limits))
     store.update_task(t.id, now=now_ms(), **fields)  # the parts of the one line the CLI prints
     store.add_event(Ev.STATE, task_id=t.id, project=t.project,
                     payload={"edit": ", ".join(changes), "by": by})
@@ -617,14 +626,14 @@ def change_model(store: Store, project: ProjectConfig, task_id: int, alias: str,
         new_review: dict = {"models": [checked.alias], "rounds": rounds}
         if registry.stored_effort(alias):
             new_review["efforts"] = [registry.stored_effort(alias)]
-        store.update_task(t.id, review=new_review, limits=_expire_quota_hold(dict(t.limits)))
+        store.update_task(t.id, review=new_review, limits=_clear_loop(_expire_quota_hold(dict(t.limits))))
         store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
                         payload={"from": ", ".join(panel), "to": ref, "by": by})
         return _t("accept.model_panel", label=t.label, old=", ".join(panel), new=ref)
     lim = dict(t.limits)
     lim["fresh_session"] = True  # never resume another model's session
     store.update_task(t.id, executor=checked.alias, effort=registry.stored_effort(alias),
-                      limits=_expire_quota_hold(lim))
+                      limits=_clear_loop(_expire_quota_hold(lim)))
     store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
                     payload={"from": cur_ref, "to": ref, "by": by})
     return _t("accept.model_msg", label=t.label, old=cur_ref or "—", new=ref)

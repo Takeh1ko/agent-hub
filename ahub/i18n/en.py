@@ -1207,4 +1207,10 @@ MESSAGES: dict[str, str] = {
     "console.stage_error": "error",
     "console.stage_stopped": "stopped",
     "console.stage_dead": "dead process",
+    "reason.loop": "loop: queued {n}× for {what} in {mins} min, no progress",
+    "reason.stuck_session": "stuck session: {n} continues with no commit or tool activity ({outcome})",
+    "loops.next_check": "next check {when}",
+    "observer.loop_picks": "{label} re-picked {n} times in the last hour — possible busy loop",
+    "views.lbl_picks": "Picks",
+    "views.picks": "picks {n}",
 }

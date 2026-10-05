@@ -161,9 +161,25 @@ def _item_details(t: Task, ts: int, cost: str = "", store: Store | None = None) 
     return " · ".join([x for x in (state_cell(t), display_ref(t, store), age(t.updated_at, ts), cost) if x])
 
 
+def _queued_reason(t: Task, now: int) -> str:
+    """Reason of a queued/waiting task with the hold suffix (count, next check)."""
+    try:
+        from ahub import loops as _loops
+
+        if t.state is State.QUEUED:
+            reason = reasons.text(t.state_reason)
+            suffix = _loops.hold_suffix(t, now)
+            return reason + suffix if reason else (t.state.value + suffix if suffix else reason)
+    except Exception:
+        pass
+    return reasons.text(t.state_reason)
+
+
 def _waiting_item(t: Task, w: int | None) -> str:
     """A task that waits a person: its state and reason on the item line, the exact commands under it."""
-    reason = reasons.text(t.state_reason)
+    from ahub.time import now_ms as _now
+
+    reason = _queued_reason(t, _now())
     head = f"{t.label}  {state_word(t.state)}" + (f" · {reason}" if reason else "")
     nxt = _t("views.hint_next", cmd=_t(next_key(t), label=t.label)) if _offers_next(t) else ""
     return ui.item(head, [nxt], w=w, status=_task_status(t))
@@ -263,7 +279,7 @@ def status_text(store: Store, *, scope: Scope | None = None, live: dict[int, int
             groups.append(("", [_waiting_item(t, w) for t in rest]))
         else:
             groups.append((ui.section(_t("views.sec_waiting")),
-                           ui.kv([(t.label, [state_word(t.state), reasons.text(t.state_reason)])
+                           ui.kv([(t.label, [state_word(t.state), _queued_reason(t, ts)])
                                   for t in rest], indent=2, w=w).split("\n")))
     if unacked:
         lines = events.lines(store, unacked[:UNREAD_LINES])
@@ -413,7 +429,7 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
     out = [title, ui.rule(min(ui.width(w), ui.plain_len(title.split("\n")[0])))]
 
     state = state_word(t.state)
-    reason = reasons.text(t.state_reason)
+    reason = _queued_reason(t, ts) if t.state is State.QUEUED else reasons.text(t.state_reason)
     if reason:
         state += " · " + reason
     if t.state in ACTIVE and t.phase:
@@ -435,6 +451,14 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
     since: list[Any] = [age(t.created_at, ts)]
     if t.after:
         since.append((_t("views.lbl_after"), ", ".join(f"T{a}" for a in t.after)))
+    try:
+        from ahub import loops as _loops
+
+        picks = _loops.picks_of(t)
+    except Exception:
+        picks = 0
+    if picks:
+        since.append((_t("views.lbl_picks"), _t("views.picks", n=picks)))
     groups.append([(_t("views.lbl_age"), since)])
     out.extend(_facts(groups, w))
 

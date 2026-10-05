@@ -305,6 +305,7 @@ class Engine:
         self._budget_at = 0.0
         self._soft_sent = False
         self._nudge_turns = 0
+        self._saw_tools = False
         self._code0 = _code_fingerprint()  # hub code as this worker started; stale imports compare against it
         self.log = hublog.get("engine", task=self.task_id, project=project.name)
 
@@ -313,6 +314,12 @@ class Engine:
             self.log.info("task owned by another owner — exiting")
             t = self.store.get_task(self.task_id)
             return Settled(t.state if t else State.ERROR, reasons.text(reasons.dump("busy")), busy=True)
+        try:
+            from ahub import loops as _loops
+
+            _loops.record_pick(self.store, self.task_id)
+        except Exception:
+            self.log.exception("pick not counted")
         try:
             with transitions.keep_lease(self.store, self.task_id, self.owner, lease_ms=self.lease_ms,
                                         on_lost=self.lost.set, name=f"engine-lease-T{self.task_id}"):
@@ -384,6 +391,10 @@ class Engine:
         if t.state not in ACTIVE and t.state is not State.QUEUED:
             return Settled(t.state, reasons.text(t.state_reason))  # already decided (e.g. stopped)
         stored = reason if reasons.load(reason) else reason[:500]  # free text is clipped, a code is not
+        if to is State.QUEUED:
+            looped = self._loop_guard(stored)
+            if looped is not None:
+                to, stored = looped
         cost = self.task_cost()
         body = {"cost_go": round(cost[0], 4), "cost_usd": round(cost[1], 4)}
         body.update(payload or {})
@@ -398,6 +409,74 @@ class Engine:
 
         archive.write_task(self.store, self.project, self.task_id)
         return Settled(to, reasons.text(stored))
+
+    def _loop_guard(self, stored: str) -> tuple[State, str] | None:
+        """Same QUEUED reason N times without progress → needs_decision `loop`, else None.
+
+        Progress is a new commit, a new review verdict or a forward round; anything
+        else grows the streak in limits["loop"]. The loop reason carries the evidence.
+        """
+        from ahub import loops as _loops
+
+        code = _loops.reason_code(stored)
+        if not code or code == _loops.LOOP_CODE:
+            return None
+        t = self.task()
+        try:
+            loop_n, _, _ = _loops.limits_of()
+        except Exception:
+            loop_n = 3
+        try:
+            head = _loops.task_head(t)
+            verdicts = _loops.verdict_count(t)
+            loop = _loops.note_settle(self.store, t, code, head=head, verdicts=verdicts)
+        except Exception:
+            self.log.exception("loop not recorded")
+            return None
+        n = int(loop.get("n") or 0)
+        if n < loop_n:
+            return None
+        self.log.warning("loop T%d: %s %d× without progress — needs decision", self.task_id, code, n)
+        return State.NEEDS_DECISION, _loops.loop_reason(code, n, int(loop.get("first") or 0))
+
+    def _stuck_guard(self, kind: str, sid: str | None, r) -> Settled | None:
+        """K continue turns with no commit and no tool activity → needs_decision `stuck_session`.
+
+        Only `continue` turns grow the streak; any other kind restarts it. Returns the
+        stuck settle, or None to continue normally.
+        """
+        from ahub import loops as _loops
+
+        try:
+            _, stuck_n, _ = _loops.limits_of()
+        except Exception:
+            stuck_n = 3
+        t = self.task()
+        try:
+            head = _loops.task_head(t)
+        except Exception:
+            head = ""
+        sess = sid or (r.session_id or "")
+        try:
+            if kind != "continue":
+                _loops.clear_stuck_progress(self.store, t, head=head, session=sess)
+                return None
+            stuck = _loops.note_continue(self.store, t, head, sess, bool(self._saw_tools))
+        except Exception:
+            self.log.exception("stuck not recorded")
+            return None
+        n = int(stuck.get("n") or 0)
+        if n < stuck_n:
+            return None
+        self.log.warning("stuck session T%d: %d continues without progress — needs decision",
+                         self.task_id, n)
+        outcome = getattr(r, "outcome", "")
+        try:
+            outcome_s = outcome.value if hasattr(outcome, "value") else str(outcome or "")
+        except Exception:
+            outcome_s = ""
+        return self._settle(State.NEEDS_DECISION,
+                            _loops.stuck_reason(n, outcome=outcome_s, session=sess))
 
     def stop_requested(self) -> bool:
         """The turn must stop: the lease is lost, the budget is spent, a stop was requested.
@@ -513,6 +592,7 @@ class Engine:
 
     def _on_activity(self, act: Activity) -> None:
         if act.kind in (Act.TOOL_START, Act.TOOL_END):
+            self._saw_tools = True
             tool = act.tool.lower()
             if tool in _WRITE_TOOLS:
                 self.set_phase(Phase.WRITING)
@@ -819,9 +899,13 @@ class Engine:
         else:
             prompt, summary, _ = prompts.scout_prompt(self.project, t)
             self._record_prompts(t, summary)
+        self._saw_tools = False
         r, final = self._step_with_continue(Role.SCOUT, self._exec_ref(t), prompt, session_id=resume_sid,
                                             log_name="scout",
                                             prompt_kind="continue" if resume_sid else "start")
+        stuck = self._stuck_guard("continue" if resume_sid else "start", r.session_id or resume_sid, r)
+        if stuck is not None:
+            return stuck
         if final is not None:
             return self._settle(*final)
         problems = self._check_scout(t)
@@ -1094,9 +1178,14 @@ class Engine:
                 t = self.move(State.CHECKING, reasons.dump("gates"))
             else:
                 self.set_phase(Phase.WRITING)
+                self._saw_tools = False
                 r, final = self._step_with_continue(role, self._exec_ref(t), prompt, session_id=sid,
                                                     log_name=role.value, prompt_kind=kind)
                 sid = r.session_id or sid
+                if kind == "continue" or kind in ("start", "rework"):
+                    stuck = self._stuck_guard(kind, sid, r)
+                    if stuck is not None:
+                        return stuck
                 if final is not None:
                     if self.budget_hit:
                         return self._budget_stop(role, self._exec_ref(), sid)

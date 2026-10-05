@@ -142,6 +142,19 @@ def _task_row(store: Store, t: Task, pl, now: int) -> Row:
              "queued": "⏳", "draft": "📝", "accepted": "✔", "rejected": "✖"}
     mark = pl.mark if pl else marks.get(t.state.value, " ")
     state_word = archive.STATE_WORDS.get(t.state.value, t.state.value)
+    if t.state is State.QUEUED:
+        try:
+            from ahub import loops as _loops
+            from ahub import reasons as _reasons
+
+            reason = _reasons.text(t.state_reason)
+            suffix = _loops.hold_suffix(t, now)
+            if reason:
+                state_word = f"{state_word} · {reason}{suffix}"
+            elif suffix:
+                state_word = f"{state_word}{suffix}"
+        except Exception:
+            pass
     try:
         from ahub import views as _views
 
