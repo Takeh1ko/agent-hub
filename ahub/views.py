@@ -112,10 +112,53 @@ def _pulse_detail(pl: pulse.Pulse | None) -> str:
     return ui.badge(pl.mark, pl.reason, pl.state)
 
 
-def _item_details(t: Task, ts: int, cost: str = "") -> str:
+def display_ref(t: Task, store: Store | None = None) -> str:
+    """Executor for display, always with the level when the model has one (spark:xhigh)."""
+    from ahub import registry as _reg
+
+    base = _reg.base_alias(t.executor or "")
+    if not base:
+        return "—"
+    stored = getattr(t, "effort", "") or _reg.stored_effort(t.executor or "")
+    if stored:
+        return _reg.model_ref(base, stored)
+    if store is not None:
+        try:
+            lvl = _reg.default_effort(_reg.get(store, base))
+            return _reg.model_ref(base, lvl) if lvl else base
+        except Exception:
+            pass
+    return base
+
+
+def display_review_refs(t: Task, store: Store | None = None) -> list[str]:
+    """Review panel for display, each with its level when it has one."""
+    from ahub import registry as _reg
+
+    models = list(t.review.get("models") or [])
+    efforts = list(t.review.get("efforts") or [])
+    out: list[str] = []
+    for i, m in enumerate(models):
+        base = _reg.base_alias(str(m))
+        stored = str(efforts[i]) if i < len(efforts) else _reg.stored_effort(str(m))
+        if stored:
+            out.append(_reg.model_ref(base, stored))
+            continue
+        if store is not None:
+            try:
+                lvl = _reg.default_effort(_reg.get(store, base))
+                out.append(_reg.model_ref(base, lvl) if lvl else base)
+                continue
+            except Exception:
+                pass
+        out.append(base)
+    return out
+
+
+def _item_details(t: Task, ts: int, cost: str = "", store: Store | None = None) -> str:
     """The details line of a task item: what it is doing · model · idle · cost. It is always this line and
     never a right-aligned tail on the title line — the item has one rhythm, whatever the width is."""
-    return " · ".join([x for x in (state_cell(t), t.executor or "—", age(t.updated_at, ts), cost) if x])
+    return " · ".join([x for x in (state_cell(t), display_ref(t, store), age(t.updated_at, ts), cost) if x])
 
 
 def _waiting_item(t: Task, w: int | None) -> str:
@@ -153,9 +196,9 @@ def _active_table(store: Store, active: list[Task], live: dict[int, int], pulses
         go, usd = archive.task_cost(store, t.id)
         pl = pulses.get(t.id)
         mark = ui.badge(pl.mark, "", pl.state) if pl else ("⚫" if t.id not in live else "")
-        rows.append([mark, t.label, t.kind.value, t.title, state_cell(t), t.executor or "—",
+        rows.append([mark, t.label, t.kind.value, t.title, state_cell(t), display_ref(t, store),
                      str(t.round), age(t.updated_at, ts), f"${go + usd:.3f}"])
-    lines = ui.table(head, rows, max_width=[1, 6, 7, None, 13, 10, 5, 8, 10], indent=2, w=w).split("\n")
+    lines = ui.table(head, rows, max_width=[1, 6, 7, None, 13, 14, 5, 8, 10], indent=2, w=w).split("\n")
     return lines[0], lines[1:]
 
 
@@ -165,7 +208,7 @@ def _active_items(store: Store, active: list[Task], pulses: dict, ts: int, w: in
     out = []
     for t in active:
         go, usd = archive.task_cost(store, t.id)
-        details = [_item_details(t, ts, f"${go + usd:.3f}"), _pulse_detail(pulses.get(t.id))]
+        details = [_item_details(t, ts, f"${go + usd:.3f}", store), _pulse_detail(pulses.get(t.id))]
         out.append(ui.item(f"{t.label}  {t.title}", details, w=w, status="working"))
     return out
 
@@ -254,10 +297,41 @@ def _cost_cell(go: float, usd: float, budget: float) -> str:
     return cell
 
 
-def _review_cell(t: Task) -> str:
-    models = ", ".join(str(m) for m in (t.review.get("models") or []))
+def _review_cell(t: Task, store: Store | None = None) -> str:
+    models = ", ".join(display_review_refs(t, store))
     rounds = int(t.review.get("rounds") or 0)
     return models + (_t("views.review_rounds", rounds=rounds) if rounds > 1 else "")
+
+
+def _model_choice(store: Store | None, t: Task) -> str:
+    """Model choice as "<alias>  <dim identity>" (level always shown when the model has one)."""
+    from ahub import registry as _reg
+
+    ref = display_ref(t, store)
+    if ref == "—" or store is None:
+        return ref
+    try:
+        base = _reg.base_alias(t.executor or "")
+        stored = getattr(t, "effort", "") or _reg.stored_effort(t.executor or "")
+        entry = _reg.get(store, base)
+        eff = _reg.effective_entry(entry, stored)
+        try:
+            from ahub import catalog as _catalog
+
+            try:
+                info = _catalog.match_entry(eff, _catalog.index_by_id(_catalog.get_catalogs()))
+            except (OSError, ValueError, RuntimeError, AttributeError):
+                info = None
+            if info is None or not info.display_name:
+                return ref
+            identity = _catalog.identity_text(eff, info)
+        except (ImportError, AttributeError):
+            return ref
+        if identity:
+            return f"{ref}  {ui.styled(identity, 'dim')}"
+    except Exception:
+        pass
+    return ref
 
 
 def open_findings(t: Task, limit: int = 5) -> tuple[list, int]:
@@ -350,9 +424,9 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
         pl = (pulses or {}).get(t.id) or pulse.task_pulse(store, t, live=live, now=ts)
         state = ui.styled(state, ui.PULSE_STYLE.get(pl.state, ""))
     groups: list[list[tuple[str, Value]]] = [[(_t("views.lbl_state"), state)]]
-    model: list[Any] = [t.executor or "—"]
+    model: list[Any] = [_model_choice(store, t)]
     if t.review.get("models"):
-        model.append((_t("views.lbl_review"), _review_cell(t)))
+        model.append((_t("views.lbl_review"), _review_cell(t, store)))
     if t.round > 1:
         model.append((_t("views.lbl_round"), str(t.round)))
     groups.append([(_t("views.lbl_model"), model)])
@@ -446,11 +520,14 @@ def result_text(store: Store, t: Task, *, full: bool = False, max_bytes: int = L
 
 def log_text(store: Store, t: Task, *, max_bytes: int = L3_DEFAULT) -> str:
     """L3: tail of raw logs from recent sessions."""
+    from ahub import registry as _reg
+
     out = []
     for s in store.list_sessions(t.id)[-3:]:
         if s.log_path and Path(s.log_path).exists():
             data = Path(s.log_path).read_bytes()[-max_bytes:].decode("utf-8", "replace")
-            out.append(f"=== {s.role} {s.model} {s.external_id} ({s.status}/{s.outcome})\n{data}")
+            ref = _reg.model_ref(s.model, getattr(s, "effort", "") or "")
+            out.append(f"=== {s.role} {ref} {s.external_id} ({s.status}/{s.outcome})\n{data}")
     return clip_bytes("\n".join(out) or _t("views.no_logs", label=t.label), max_bytes)
 
 

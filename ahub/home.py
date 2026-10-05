@@ -113,7 +113,8 @@ def text(*, w: int | None = None, all_projects: bool = False, project: str | Non
     if items:
         for task in shown:  # the task is the item line: the id and the title, the details under it
             out.append(ui.item(f"{task.label}  {task.title}",
-                               [views._item_details(task, now), views._pulse_detail(pulses.get(task.id))],
+                               [views._item_details(task, now, store=store),
+                                views._pulse_detail(pulses.get(task.id))],
                                w=w, status="working"))
         if rest:  # the screen is a glance — what does not fit is counted, not dropped
             out.append(ui.hint(_t("home.more_tasks", n=rest), w=w))
@@ -123,7 +124,8 @@ def text(*, w: int | None = None, all_projects: bool = False, project: str | Non
         out.append(ui.section(_t("home.sec_tasks")))
         out.append(ui.table(["", _t("views.col_id"), _t("views.col_kind"), _t("views.col_title"),
                              _t("views.col_state"), _t("views.col_model"), _t("views.col_idle")],
-                            _task_rows(shown, live, pulses, now), max_width=[1, 6, 7, None, 13, 10, 8],
+                            _task_rows(shown, live, pulses, now, store),
+                            max_width=[1, 6, 7, None, 13, 14, 8],
                             indent=2, w=w))
         if rest:  # the screen is a glance — what does not fit is counted, not dropped
             out.append(ui.para(_t("home.more_tasks", n=rest), indent=2, w=w))
@@ -174,7 +176,10 @@ def data(*, all_projects: bool = False, project: str | None = None) -> dict:
         pl = pulses.get(task.id)
         out["tasks"].append({"id": task.id, "label": task.label, "project": task.project,
                              "kind": task.kind.value, "title": task.title, "state": task.state.value,
-                             "phase": task.phase, "model": task.executor, "pulse": pl.mark if pl else ""})
+                             "phase": task.phase, "model": task.executor,
+                             "effort": getattr(task, "effort", "") or "",
+                             "model_ref": views.display_ref(task, store),
+                             "pulse": pl.mark if pl else ""})
     for task in store.list_tasks(states=WAITING_DECISION, projects=sc.projects or None)[:MAX_TASKS]:
         out["waiting"].append({"id": task.id, "label": task.label, "project": task.project,
                                "state": task.state.value, "state_reason_text": reasons.text(task.state_reason),
@@ -199,13 +204,14 @@ def _focus(waiting: list) -> Task:
     return next((t for t in waiting if t.state in DECISION_STATES), waiting[0])
 
 
-def _task_rows(tasks: list, live: dict[int, int], pulses: dict, now: int) -> list[list[str]]:
+def _task_rows(tasks: list, live: dict[int, int], pulses: dict, now: int,
+               store=None) -> list[list[str]]:
     rows = []
     for task in tasks:
         pl = pulses.get(task.id)
         mark = ui.badge(pl.mark, "", pl.state) if pl else ("⚫" if task.id not in live else "")
         rows.append([mark, task.label, task.kind.value, task.title, views.state_cell(task),
-                     task.executor or "—", views.age(task.updated_at, now)])
+                     views.display_ref(task, store), views.age(task.updated_at, now)])
     return rows
 
 

@@ -441,9 +441,16 @@ class TopApp(App):
     def action_model(self) -> None:
         tid = self.selected()
         if tid and self._guard():
+            from ahub import registry as _registry
+
             p = self._project_of(tid)
-            self._ask_then(_t("tui.ask_model", tid=tid),
-                           lambda v: accept.change_model(self.store, p, tid, v, by="human"),
+
+            def _change(v: str) -> str:
+                note = _registry.legacy_notice(v.strip())
+                msg = accept.change_model(self.store, p, tid, v, by="human")
+                return (note + "\n" + msg) if note else msg
+
+            self._ask_then(_t("tui.ask_model", tid=tid), _change,
                            "spark / mimo-flash / deepseek-flash")
 
     def ask_nudge(self, tid: int) -> None:

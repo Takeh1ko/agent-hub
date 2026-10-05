@@ -58,11 +58,20 @@ def task_cost(store: Store, task_id: int) -> tuple[float, float]:
 def _task_md(store: Store, t: Task) -> str:
     go, usd = task_cost(store, t.id)
     sessions = store.list_sessions(t.id)
+    from ahub import registry as _reg
+
+    exec_ref = _reg.model_ref(_reg.base_alias(t.executor or ""),
+                              getattr(t, "effort", "") or _reg.stored_effort(t.executor or ""))
+    panel = list(t.review.get("models") or [])
+    peff = list(t.review.get("efforts") or [])
+    prefs = [_reg.model_ref(_reg.base_alias(str(m)),
+                             str(peff[i]) if i < len(peff) else _reg.stored_effort(str(m)))
+             for i, m in enumerate(panel)]
     lines = [f"# {t.label} — {t.title}", "",
              _t("archive.type", kind=t.kind.value, state=STATE_WORDS.get(t.state.value, t.state.value))
              + (f" — {reasons.text(t.state_reason)}" if t.state_reason else ""),
-             _t("archive.model", executor=t.executor,
-               review=', '.join(t.review.get('models', [])) or _t("archive.no_review"))
+             _t("archive.model", executor=exec_ref,
+               review=', '.join(prefs) or _t("archive.no_review"))
              + (f" × {t.review.get('rounds')}" if t.review else ""),
              _t("archive.rounds", round=t.round, sessions=len(sessions)),
              _t("archive.cost", go=f"{go:.3f}") + (_t("archive.cost_real", usd=f"{usd:.3f}") if usd else ""),

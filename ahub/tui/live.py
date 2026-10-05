@@ -197,7 +197,10 @@ class LiveView:
         if self.session is None:
             parts.append(_t("tui.live.no_session"))
         else:
-            parts += [self.session.role, self.session.model or "—",
+            from ahub import registry as _reg
+
+            sref = _reg.model_ref(self.session.model or "", getattr(self.session, "effort", "") or "")
+            parts += [self.session.role, sref or "—",
                       f"{_t('tui.col_round')} {self.session.round}"]
         if t is not None and t.state in ACTIVE and t.phase:
             parts.append(PHASE.get(t.phase, t.phase))
