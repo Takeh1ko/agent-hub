@@ -1141,6 +1141,7 @@ MESSAGES: dict[str, str] = {
     "console.shortcuts": "Tab задачи · Up/Down выбор · Enter /follow · Esc ввод · Ctrl+O проект · ? помощь",
     "console.follow_usage": "использование: /follow T12",
     "console.no_task": "нет задачи {ref}",
+    "console.project_usage": "использование: /project ИМЯ|all",
     "console.quit": "пока",
     "console.quit_confirm": "нажмите Ctrl+C ещё раз или введите /quit для выхода",
     "console.draft_hint": "обычный текст не является командой — список в /help",

@@ -12,6 +12,7 @@ Rules:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -168,6 +169,9 @@ class Session:
 class Store:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path) if path is not None else paths.db_path()
+        if os.environ.get(paths.UNDER_TEST) == "1" and paths.is_live_hub_path(self.path):
+            raise RuntimeError(
+                f"refusing live hub DB in tests: {self.path} (HOME/AHUB_HOME was not isolated in this process)")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
 

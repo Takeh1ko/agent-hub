@@ -39,12 +39,18 @@ def scout(store, project, **kw):
 
 def agent_of(worktree: str) -> bool:
     """A live provider process of that work copy (the scenario file it runs lives in the copy)."""
-    return any(procs.alive(p) and worktree in " ".join(procs.cmdline(p)) for p in procs.pids())
+    # Match the provider only: `git worktree add <copy>` also carries the path while preparing.
+    for p in procs.pids():
+        cmd = " ".join(procs.cmdline(p))
+        if procs.alive(p) and "fake_agent" in cmd and worktree in cmd:
+            return True
+    return False
 
 
 def kill_agents(worktree: str) -> None:
     """Cleanup: no provider process of that copy outlives the test (a failure may leave one behind)."""
-    for pid in [p for p in procs.pids() if worktree in " ".join(procs.cmdline(p))]:
+    for pid in [p for p in procs.pids() if "fake_agent" in " ".join(procs.cmdline(p))
+                and worktree in " ".join(procs.cmdline(p))]:
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:
