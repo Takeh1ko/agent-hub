@@ -1,9 +1,10 @@
-"""Interactive console: shell for K1 (layout, focus model, follow, bare-TTY gate target).
+"""Interactive console: shell, commands, confirmations, the draft flow (K1+K2).
 
 Layout top to bottom: welcome box, alert strip, task blocks pane (diffed refresh),
 event transcript (capped), live status line, input box (always focused), footer.
-Read-only commands here: /follow /status /history /help /quit (+ /project /all to switch scope).
-Mutating commands (/accept etc.) arrive in the next task — unknown input shows /help.
+Every command calls the same functions the CLI calls (accept.*, transitions.*,
+drafts.*, comms.*, cost.*) — no copied logic. Mutating commands confirm through
+the Confirm/Ask modals. Plain text is a draft.
 
 Data comes from snapshots off the UI thread; a slow snapshot keeps the old view and
 marks the footer stale. Every widget renders through _safe() so one failure shows
@@ -22,10 +23,26 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
+from textual.suggester import Suggester
 from textual.widgets import Input, Static
 
 import ahub
-from ahub import comms, config, cost, events, pulse, reasons, scope, ui, views
+from ahub import (
+    accept,
+    comms,
+    config,
+    cost,
+    doctor,
+    drafts,
+    events,
+    pulse,
+    reasons,
+    registry,
+    scope,
+    transitions,
+    ui,
+    views,
+)
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, WAITING_DECISION, Ev, State, parse_task_id
 from ahub.service import HEARTBEAT_KEY, live_workers
@@ -39,6 +56,11 @@ QUIT_GAP_S = 2.0  # second Ctrl+C within this window exits
 CURRENT = ACTIVE | WAITING_DECISION | {State.QUEUED}
 FEED_KINDS = {Ev.DONE.value, Ev.NEEDS_DECISION.value, Ev.ERROR.value, Ev.ANSWER.value,
               Ev.OWNER_MESSAGE.value}
+COMMANDS = ("accept", "reject", "rework", "stop", "nudge", "model", "budget", "follow", "status",
+            "history", "inbox", "questions", "alarms", "models", "providers", "projects", "cost",
+            "doctor", "project", "all", "draft", "start", "help", "quit")
+TASK_COMMANDS = frozenset({"accept", "reject", "rework", "stop", "nudge", "model", "budget",
+                           "follow", "status"})
 
 
 def _pane_w(width: int) -> int:
@@ -330,6 +352,65 @@ def parse_command(text: str) -> tuple[str, list[str]]:
     return (parts[0].lower() if parts else "", parts[1:])
 
 
+def complete_input(value: str, task_labels: list[str]) -> str | None:
+    """Command-name and task-id completion for the input (pure, testable).
+
+    '/ac' → '/accept '; '/accept T1' → '/accept T12' (first label with that prefix).
+    A numeric rest ('1') matches the digits of the label ('T12'). Plain text → None.
+    """
+    raw = value or ""
+    stripped = raw.lstrip()
+    if not stripped.startswith("/"):
+        return None
+    gap = raw[: len(raw) - len(stripped)]
+    if " " not in stripped:
+        want = stripped.lower()
+        if want == "/":
+            return None
+        for cmd in COMMANDS:
+            cand = "/" + cmd
+            if cand.startswith(want) and cand != want:
+                return gap + cand + " "
+        # exact command without the trailing space — offer it
+        for cmd in COMMANDS:
+            if ("/" + cmd) == want:
+                return gap + "/" + cmd + " "
+        return None
+    parts = stripped.split(None, 1)
+    head = parts[0]
+    rest = parts[1] if len(parts) > 1 else ""
+    cmd = head[1:].lower()
+    if cmd not in TASK_COMMANDS:
+        return None
+    tail = rest.lstrip()
+    if not tail:
+        return (gap + head + " " + task_labels[0]) if task_labels else None
+    upper = tail.upper()
+    for label in task_labels:
+        if label.upper().startswith(upper):
+            return gap + head + " " + label
+    if tail.isdigit():
+        for label in task_labels:
+            if label[1:].startswith(tail):
+                return gap + head + " " + label
+    return None
+
+
+class ConsoleSuggester(Suggester):
+    """Completion for the console input: command names, then task ids of the scope."""
+
+    def __init__(self, app: ConsoleApp) -> None:
+        super().__init__(case_sensitive=False)
+        self._app = app
+
+    async def get_suggestion(self, value: str) -> str | None:
+        try:
+            labels = [f"T{tid}" for tid in (self._app._task_ids or [])]
+        except Exception:
+            labels = []
+        return complete_input(value, labels)
+
+
 # --- textual app ---
 
 def _plain(text: str):
@@ -414,6 +495,7 @@ class ConsoleApp(App):
         self._busy = False
         self._last_rendered_tasks = ""
         self._last_footer = ""
+        self._drafting = False  # a draft model run is in flight — the live line says so
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="console-snap")
 
     def on_unmount(self) -> None:
@@ -435,7 +517,8 @@ class ConsoleApp(App):
             yield Static("", id="transcript-inner", markup=False)
         yield Static("", id="live")
         yield Static("", id="shortcuts")
-        yield ConsoleInput(placeholder=_t("console.input_placeholder"), id="input")
+        yield ConsoleInput(placeholder=_t("console.input_placeholder"), id="input",
+                           suggester=ConsoleSuggester(self))
         yield Static("", id="footer")  # the dim console footer — the only one, no textual bar
 
     def on_mount(self) -> None:
@@ -579,6 +662,10 @@ class ConsoleApp(App):
                 pass
         return out
 
+    def _drafting_line(self) -> str:
+        """The live line while a draft model run is in flight: ✻ Drafting… ."""
+        return f"{ui.styled('✻', 'accent')} {ui.styled(_t('console.drafting'), 'dim')}"
+
     def _apply(self, snap: Snapshot, new_lines: list[str]) -> None:
         # never touches the input's focus or content
         try:
@@ -598,7 +685,10 @@ class ConsoleApp(App):
             if len(self._transcript) > TRANSCRIPT_CAP:
                 self._transcript = self._transcript[-TRANSCRIPT_CAP:]
         self._paint_transcript()
-        self._safe_update("#live", "live", lambda: snap.live, display=bool(snap.live))
+        if self._drafting:
+            self._safe_update("#live", "live", lambda: self._drafting_line(), display=True)
+        else:
+            self._safe_update("#live", "live", lambda: snap.live, display=bool(snap.live))
         self._frame += 1
         self._last_footer = snap.footer
         self._safe_update("#footer", "footer", lambda: snap.footer)
@@ -724,12 +814,119 @@ class ConsoleApp(App):
             self._hist_at = len(self._history)
         self.run_command(text)
 
+    def _say_ok(self, msg: str, next_key: str = "", label: str = "") -> None:
+        """A command result into the transcript: ⏺ statement + ⎿ Next."""
+        try:
+            nxt = _t("views.hint_next", cmd=_t(next_key, label=label)) if next_key else ""
+        except Exception:
+            nxt = ""
+        try:
+            text = ui.item(msg, [nxt] if nxt else [])
+        except Exception:
+            text = f"⏺ {msg}" + (f"\n  ⎿ {nxt}" if nxt else "")
+        self._say(text.splitlines() or [""])
+
+    def _say_err(self, msg: str, hint: str = "") -> None:
+        """A refusal into the transcript: ✗ what + ⎿ way out."""
+        try:
+            text = ui.failed(msg, hint) if hint else ui.failed(msg)
+        except Exception:
+            text = f"✗ {msg}" + (f"\n  ⎿ {hint}" if hint else "")
+        self._say(text.splitlines() or [""])
+
+    def _service_down(self) -> bool:
+        """True when the queue will not move: no fresh service heartbeat."""
+        try:
+            hb = self.store.meta_get(HEARTBEAT_KEY)
+            return not (hb and now_ms() - int(hb) < 30_000)
+        except Exception:  # a store failure is shown by the widgets; do not block the confirm
+            return False
+
+    def _confirm_text(self, base: str) -> str:
+        """A confirmation plus the queue note when the service is down."""
+        if self._service_down():
+            return base + _t("console.confirm_stalled")
+        return base
+
+    def _do(self, fn, next_key: str = "", label: str = "") -> None:
+        """Run a mutating function; the result (or the refusal) goes to the transcript."""
+        try:
+            msg = fn()
+        except (OSError, ValueError, RuntimeError) as e:
+            hint = getattr(e, "hint", "")
+            self._say_err(str(e)[:300], hint)
+            return
+        self._say_ok(str(msg)[:500], next_key, label)
+        self.refresh_data()
+
+    def _confirm_then(self, text: str, fn, next_key: str = "", label: str = "") -> None:
+        """Mutating commands confirm through the Confirm modal, never inline y/n."""
+        from ahub.tui.app import Confirm
+
+        def done(ok: bool | None) -> None:
+            if ok:
+                self._do(fn, next_key, label)
+            else:
+                self._say([ui.styled(_t("console.cancelled"), "dim")])
+
+        try:
+            self.push_screen(Confirm(text), done)
+        except Exception as e:  # a modal failure returns to the console
+            self._say([_t("console.widget_error", widget="confirm", hint=str(e)[:100])])
+
+    def _ask_then(self, prompt: str, fn, next_key: str = "", label: str = "",
+                  placeholder: str = "") -> None:
+        """A missing text (rework notes, nudge text, model, budget) is asked through Ask."""
+        from ahub.tui.app import Ask
+
+        def done(val: str | None) -> None:
+            if val:
+                self._do(lambda: fn(val), next_key, label)
+            else:
+                self._say([ui.styled(_t("console.cancelled"), "dim")])
+
+        try:
+            self.push_screen(Ask(prompt, placeholder), done)
+        except Exception as e:
+            self._say([_t("console.widget_error", widget="ask", hint=str(e)[:100])])
+
+    def _current_project(self):
+        """The project of the console scope; None in /all mode or without a config."""
+        if self.scope.all:
+            return None
+        try:
+            projects, _ = config.load_projects()
+        except Exception:
+            return None
+        return next((p for p in projects if p.name == self.scope.name), None)
+
+    def _project_of_task(self, t: Task):
+        """The project config of a task; None — the hub does not know it."""
+        try:
+            projects, _ = config.load_projects()
+        except Exception:
+            return None
+        return next((p for p in projects if p.name == t.project), None)
+
+    def _project_by_name(self, name: str):
+        try:
+            projects, _ = config.load_projects()
+        except Exception:
+            return None
+        return next((p for p in projects if p.name == name), None)
+
+    def _selected_task_id(self) -> int | None:
+        if not self._task_ids:
+            return None
+        idx = min(max(0, self._selected), len(self._task_ids) - 1)
+        return self._task_ids[idx]
+
     def run_command(self, text: str) -> None:
         cmd, args = parse_command(text)
         if cmd == "":
             return
         if cmd == "draft":
-            self._say([ui.styled(_t("console.draft_hint"), "dim")])
+            self.cmd_draft(args)
             return
         if cmd in ("quit", "exit", "q"):
             self._say([_t("console.quit")])
@@ -738,7 +935,7 @@ class ConsoleApp(App):
         if cmd == "help":
             self._show_shortcuts = True
             self._apply_shortcuts()
-            self._say([_t("console.help")])
+            self._say(_t("console.help").splitlines() or [""])
             return
         if cmd == "follow":
             self.cmd_follow(args)
@@ -752,7 +949,55 @@ class ConsoleApp(App):
         if cmd in ("project", "all"):
             self.cmd_project(cmd, args)
             return
-        self._say([_t("console.unknown", cmd="/" + cmd)])
+        if cmd == "accept":
+            self.cmd_accept(args)
+            return
+        if cmd == "reject":
+            self.cmd_reject(args)
+            return
+        if cmd == "rework":
+            self.cmd_rework(args)
+            return
+        if cmd == "stop":
+            self.cmd_stop(args)
+            return
+        if cmd == "nudge":
+            self.cmd_nudge(args)
+            return
+        if cmd == "model":
+            self.cmd_model(args)
+            return
+        if cmd == "budget":
+            self.cmd_budget(args)
+            return
+        if cmd == "inbox":
+            self.cmd_inbox(args)
+            return
+        if cmd == "questions":
+            self.cmd_questions(args)
+            return
+        if cmd == "alarms":
+            self.cmd_alarms(args)
+            return
+        if cmd == "models":
+            self.cmd_models(args)
+            return
+        if cmd == "providers":
+            self.cmd_providers(args)
+            return
+        if cmd == "projects":
+            self.cmd_projects(args)
+            return
+        if cmd == "cost":
+            self.cmd_cost(args)
+            return
+        if cmd == "doctor":
+            self.cmd_doctor(args)
+            return
+        if cmd == "start":
+            self.cmd_start(args)
+            return
+        self._say_err(_t("console.unknown", cmd="/" + cmd))
 
     def action_toggle_shortcuts(self) -> None:
         """Toggle the shortcuts pane ("?" on an empty input)."""
@@ -786,11 +1031,11 @@ class ConsoleApp(App):
 
     def cmd_follow(self, args: list[str]) -> None:
         if not args:
-            self._say([_t("console.follow_usage")])
+            self._say_err(_t("console.follow_usage"))
             return
         t = self._resolve_task(args[0])
         if t is None:
-            self._say([_t("console.no_task", ref=args[0])])
+            self._say_err(_t("console.no_task", ref=args[0]))
             return
         try:
             from ahub.tui.app import Transcript
@@ -806,7 +1051,7 @@ class ConsoleApp(App):
             if args:
                 t = self._resolve_task(args[0])
                 if t is None:
-                    self.call_from_thread(self._say, [_t("console.no_task", ref=args[0])])
+                    self.call_from_thread(self._say_err, _t("console.no_task", ref=args[0]))
                     return
                 text = views.task_text(self.store, t, live={}, w=w)
             else:
@@ -830,8 +1075,500 @@ class ConsoleApp(App):
             self.scope = scope.Scope()
         elif args:
             self.scope = scope.Scope((scope.name_of(args[0]),))
+        else:
+            self._say_err(_t("console.project_usage"))
+            return
         self._blocks, self._order = {}, []
         self.refresh_data()
+
+    # --- mutating commands (Confirm/Ask, same functions as the CLI) ---
+
+    def cmd_accept(self, args: list[str]) -> None:
+        if not args:
+            self._say_err(_t("console.accept_usage"))
+            return
+        t = self._resolve_task(args[0])
+        if t is None:
+            self._say_err(_t("console.no_task", ref=args[0]))
+            return
+        p = self._project_of_task(t)
+        if p is None:
+            self._say_err(_t("tui.no_project", name=t.project))
+            return
+        tid = t.id
+        self._confirm_then(self._confirm_text(_t("tui.confirm_accept", tid=tid)),
+                           lambda: accept.accept(self.store, p, tid, by="human"),
+                           "views.next_accept", t.label)
+
+    def cmd_reject(self, args: list[str]) -> None:
+        if not args:
+            self._say_err(_t("console.reject_usage"))
+            return
+        t = self._resolve_task(args[0])
+        if t is None:
+            self._say_err(_t("console.no_task", ref=args[0]))
+            return
+        p = self._project_of_task(t)
+        if p is None:
+            self._say_err(_t("tui.no_project", name=t.project))
+            return
+        keep = "--keep" in args[1:]
+        reason = " ".join(a for a in args[1:] if a != "--keep").strip()
+        tid = t.id
+        self._confirm_then(self._confirm_text(_t("tui.confirm_reject", tid=tid)),
+                           lambda: accept.reject(self.store, p, tid, reason=reason,
+                                                 by="human", keep=keep),
+                           "views.next_reject", t.label)
+
+    def cmd_rework(self, args: list[str]) -> None:
+        if not args:
+            self._say_err(_t("console.rework_usage"))
+            return
+        t = self._resolve_task(args[0])
+        if t is None:
+            self._say_err(_t("console.no_task", ref=args[0]))
+            return
+        notes = " ".join(args[1:]).strip()
+        if not notes:
+            self._ask_then(_t("tui.ask_rework", tid=t.id),
+                           lambda v: accept.rework(self.store, t.id, v, by="human"),
+                           "views.next_rework", t.label)
+            return
+        tid = t.id
+        self._confirm_then(self._confirm_text(f"{_t('tui.ask_rework', tid=tid)} {notes}"),
+                           lambda: accept.rework(self.store, tid, notes, by="human"),
+                           "views.next_rework", t.label)
+
+    def cmd_stop(self, args: list[str]) -> None:
+        if not args:
+            self._say_err(_t("console.stop_usage"))
+            return
+        t = self._resolve_task(args[0])
+        if t is None:
+            self._say_err(_t("console.no_task", ref=args[0]))
+            return
+        tid, label = t.id, t.label
+
+        def _fn() -> str:
+            how = transitions.request_stop(self.store, tid, by="human")
+            return _t("task.stopped", label=label) if how == "stopped" else _t(
+                "task.stop_requested", label=label)
+
+        self._confirm_then(self._confirm_text(_t("tui.confirm_stop", tid=tid)),
+                           _fn, "views.next_task", label)
+
+    def cmd_nudge(self, args: list[str]) -> None:
+        if not args:
+            self._say_err(_t("console.nudge_usage"))
+            return
+        t = self._resolve_task(args[0])
+        if t is None:
+            self._say_err(_t("console.no_task", ref=args[0]))
+            return
+        text = " ".join(args[1:]).strip()
+        if not text:
+            self._ask_then(_t("tui.ask_nudge", tid=t.id),
+                           lambda v: self._nudge(t.id, t.label, v))
+            return
+        tid, label = t.id, t.label
+        self._confirm_then(self._confirm_text(f"{_t('tui.ask_nudge', tid=tid)} {text}"),
+                           lambda: self._nudge(tid, label, text))
+
+    def _nudge(self, tid: int, label: str, text: str) -> str:
+        transitions.request_nudge(self.store, tid, text=text, by="human")
+        return _t("task.nudge_requested", label=label)
+
+    def cmd_model(self, args: list[str]) -> None:
+        if not args:
+            self._say_err(_t("console.model_usage"))
+            return
+        t = self._resolve_task(args[0])
+        if t is None:
+            self._say_err(_t("console.no_task", ref=args[0]))
+            return
+        alias = args[1].strip() if len(args) > 1 else ""
+        if not alias:
+            self._ask_then(_t("tui.ask_model", tid=t.id),
+                           lambda v: self._change_model(t, v),
+                           "views.next_task", t.label, placeholder="spark / mimo-flash")
+            return
+        self._confirm_then(self._confirm_text(f"{_t('tui.ask_model', tid=t.id)} {alias}"),
+                           lambda: self._change_model(t, alias),
+                           "views.next_task", t.label)
+
+    def _change_model(self, t: Task, alias: str) -> str:
+        p = self._project_of_task(t)
+        if p is None:
+            raise accept.DecisionError(_t("tui.no_project", name=t.project))
+        return accept.change_model(self.store, p, t.id, alias.strip(), by="human")
+
+    def cmd_budget(self, args: list[str]) -> None:
+        if not args:
+            self._say_err(_t("console.budget_usage"))
+            return
+        t = self._resolve_task(args[0])
+        if t is None:
+            self._say_err(_t("console.no_task", ref=args[0]))
+            return
+        raw = args[1].strip() if len(args) > 1 else ""
+        if not raw:
+            self._ask_then(_t("tui.ask_budget", tid=t.id),
+                           lambda v: self._extend_budget(t.id, v),
+                           "views.next_task", t.label, placeholder="0.5")
+            return
+        self._confirm_then(self._confirm_text(f"{_t('tui.ask_budget', tid=t.id)} {raw}"),
+                           lambda: self._extend_budget(t.id, raw),
+                           "views.next_task", t.label)
+
+    def _extend_budget(self, tid: int, raw: str) -> str:
+        try:
+            add = float(raw.lstrip("+").replace(",", "."))
+        except ValueError as e:
+            raise ValueError(_t("console.budget_usage")) from e
+        return accept.extend_budget(self.store, tid, add=add, by="human")
+
+    # --- read commands (same functions as the CLI, console scope) ---
+
+    def _row_num(self, ref: str) -> int | None:
+        try:
+            return int(ref.lstrip("#"))
+        except ValueError:
+            self._say_err(_t("err.bad_ref", ref=ref))
+            return None
+
+    def cmd_inbox(self, args: list[str]) -> None:
+        w = self._width()
+        if args:
+            num = self._row_num(args[0])
+            if num is None:
+                return
+            try:
+                row = comms.message(self.store, num)
+            except (OSError, ValueError, RuntimeError) as e:
+                self._say_err(str(e)[:200])
+                return
+            if row is None or scope.foreign(self.scope, str(row.get("project") or "")):
+                self._say_err(_t("err.no_message", ref=args[0]))
+                return
+            try:
+                self._say(views.message_text(row, w=w).splitlines() or [""])
+            except (OSError, ValueError, RuntimeError) as e:
+                self._say([_t("console.widget_error", widget="inbox", hint=str(e)[:100])])
+            return
+        try:
+            rows = comms.inbox(self.store, scope=self.scope)
+            self._say(views.inbox_text(rows, w=w).splitlines() or [""])
+        except (OSError, ValueError, RuntimeError) as e:
+            self._say([_t("console.widget_error", widget="inbox", hint=str(e)[:100])])
+
+    def cmd_questions(self, args: list[str]) -> None:
+        w = self._width()
+        if args:
+            num = self._row_num(args[0])
+            if num is None:
+                return
+            try:
+                row = comms.question(self.store, num)
+            except (OSError, ValueError, RuntimeError) as e:
+                self._say_err(str(e)[:200])
+                return
+            if row is None or scope.foreign(self.scope, str(row.get("project") or "")):
+                self._say_err(_t("err.no_question", ref=args[0]))
+                return
+            try:
+                self._say(views.question_text(row, w=w).splitlines() or [""])
+            except (OSError, ValueError, RuntimeError) as e:
+                self._say([_t("console.widget_error", widget="questions", hint=str(e)[:100])])
+            return
+        try:
+            rows = comms.open_questions(self.store, scope=self.scope)
+            self._say(views.questions_text(rows, w=w).splitlines() or [""])
+        except (OSError, ValueError, RuntimeError) as e:
+            self._say([_t("console.widget_error", widget="questions", hint=str(e)[:100])])
+
+    def cmd_alarms(self, args: list[str]) -> None:
+        try:
+            w = self._width()
+            unacked_only = "--acked" not in args
+            do_ack = "--ack" in args
+            al = comms.alarms(self.store, unacked_only=unacked_only, scope=self.scope)
+            if not al:
+                self._say([_t("comms.alarms_empty")])
+                return
+            now = now_ms()
+            head = [_t("alarms.col_id"), _t("alarms.col_age"), _t("alarms.col_what")]
+            try:
+                rendered = events.lines(self.store, al)
+            except (OSError, ValueError, RuntimeError):
+                rendered = ["" for _ in al]
+            body = [[f"#{e.id}", views.age(e.ts, now), line]
+                    for e, line in zip(al, rendered, strict=False)]
+            out = ui.table(head, body, max_width=[6, 8, None], indent=2, w=w)
+            lines = out.splitlines()
+            if do_ack:
+                try:
+                    events.ack(self.store, [e.id for e in al], scope=self.scope)
+                except (OSError, ValueError, RuntimeError) as e:
+                    self._say_err(str(e)[:200])
+                    return
+            self._say(lines or [""])
+        except (OSError, ValueError, RuntimeError) as e:
+            self._say([_t("console.widget_error", widget="alarms", hint=str(e)[:100])])
+
+    def cmd_models(self, args: list[str]) -> None:
+        del args
+        try:
+            from ahub.model import Role as _Role
+
+            w = self._width()
+            project = self._current_project()
+            head = [_t("models.col_role"), _t("models.col_default"), _t("models.col_other")]
+            rows = []
+            for role in _Role:
+                try:
+                    items = registry.menu(self.store, role)
+                except (OSError, ValueError, RuntimeError):
+                    continue
+                default = next((e for e, d in items if d), None)
+                others = [e.alias + self._model_tags(e, project) for e, d in items if not d]
+                dflt = ((default.alias + self._model_tags(default, project))
+                        if default is not None else _t("models.no_default"))
+                rows.append([role.value, dflt, ", ".join(others) or _t("models.no_other")])
+            self._say(ui.table(head, rows, max_width=[10, 18, None], indent=2, w=w).splitlines())
+        except (OSError, ValueError, RuntimeError) as e:
+            self._say([_t("console.widget_error", widget="models", hint=str(e)[:100])])
+
+    def _model_tags(self, entry, project) -> str:
+        try:
+            out = ""
+            if not entry.enabled:
+                out += _t("models.tag_off")
+            if project is not None and registry.denied_by(entry, project):
+                out += _t("models.tag_denied")
+            return out
+        except (OSError, ValueError, RuntimeError):
+            return ""
+
+    def cmd_providers(self, args: list[str]) -> None:
+        del args
+        try:
+            w = self._width()
+            off = registry.disabled_providers()
+            head = [_t(f"providers.col_{c}") for c in ("name", "found", "login", "enabled")]
+            marks = {True: "✓", False: "✗", None: "–"}
+            rows = []
+            for st in doctor.provider_states():
+                en = st.name not in off
+                rows.append([st.name, marks[st.found],
+                             marks[st.logged_in] if st.found else marks[None],
+                             _t("providers.enabled_on") if en else _t("providers.enabled_off")])
+            self._say(ui.table(head, rows, max_width=None, indent=2, w=w).splitlines() or [""])
+        except (OSError, ValueError, RuntimeError) as e:
+            self._say([_t("console.widget_error", widget="providers", hint=str(e)[:100])])
+
+    def cmd_projects(self, args: list[str]) -> None:
+        del args
+        try:
+            from ahub.commands import projects as _proj
+
+            w = self._width()
+            hub = config.load_hub()
+            plist, errors = config.load_projects(hub)
+            known = {p.name: p for p in plist}
+            month0 = cost.month_start()
+            every = _proj.stats(self.store, month0)
+            problems = {p.name: config.check_project(p) for p in plist}
+            for name in self.store.task_projects():
+                problems.setdefault(name, [_t("projects.not_in_hub", project=name)])
+            rows = [(name, _proj._row_cells(name, known[name].root if name in known else "—",
+                                            every.get(name, _proj.Stat()),
+                                            "!" if problems[name] else " "))
+                    for name in problems]
+            if not rows:
+                self._say([_t("projects.empty", source=hub.source or "—")])
+                return
+            keys = _proj._keys([cells for _name, cells in rows], w - 2)
+            caps = {k: c for k, c, _f in _proj.COLUMNS}
+            text = ui.table([_t(f"projects.col_{k}") for k in keys],
+                            [[cells[k] for k in keys] for _name, cells in rows],
+                            max_width=[caps[k] for k in keys], indent=2, w=w)
+            lines = text.splitlines()
+            for name, _cells in rows:
+                lines.extend(f"    {e}" for e in problems[name])
+            lines.extend(f"! {e}" for e in errors)
+            self._say(lines or [""])
+        except (OSError, ValueError, RuntimeError) as e:
+            self._say([_t("console.widget_error", widget="projects", hint=str(e)[:100])])
+
+    def cmd_cost(self, args: list[str]) -> None:
+        del args
+        try:
+            w = self._width()
+            since = cost.month_start()
+            models = cost.by_model(self.store, scope=self.scope, since=since)
+            total = cost.total(self.store, scope=self.scope, since=since)
+            sessions = sum(m.sessions for m in models)
+            head = [_t("cost.col_project"), _t("cost.col_model"), _t("cost.col_sessions"),
+                    _t("cost.col_go"), _t("cost.col_usd")]
+            body = [[m.project or _t("cost.hub"), m.model or "—", str(m.sessions),
+                     f"{m.go:.3f}", f"{m.usd:.3f}"] for m in models]
+            lines = []
+            if body:
+                lines.append(ui.table(head, body, max_width=[16, None, None, 9, 9], indent=2, w=w))
+            else:
+                lines.append(_t("cost.empty"))
+            lines.append(ui.styled(_t("cost.totals", go=f"{total.go:.3f}",
+                                       usd=f"{total.usd:.3f}", n=sessions), "dim"))
+            self._say("\n".join(lines).splitlines() or [""])
+        except (OSError, ValueError, RuntimeError) as e:
+            self._say([_t("console.widget_error", widget="cost", hint=str(e)[:100])])
+
+    @work(thread=True)
+    def cmd_doctor(self, args: list[str]) -> None:
+        del args
+        try:
+            from ahub.commands import doctor as _doc
+
+            checks = doctor.run_all()
+            w = self._width()
+            text = _doc.text(checks, w)
+        except (OSError, ValueError, RuntimeError) as e:
+            text = _t("console.widget_error", widget="doctor", hint=str(e)[:100])
+        self.call_from_thread(self._say, text.splitlines() or [""])
+
+    # --- drafts: plain text is a draft ---
+
+    def cmd_draft(self, args: list[str]) -> None:
+        text = " ".join(args).strip()
+        if not text:
+            self._say_err(_t("console.draft_usage"))
+            return
+        self._start_draft(text)
+
+    def _start_draft(self, text: str) -> None:
+        project = self._current_project()
+        if project is None:
+            self._say_err(_t("console.need_project"))
+            return
+        self._drafting = True
+        line = self._drafting_line()
+        self._say([line])
+        try:
+            self.query_one("#live", Static).update(_plain(line))
+            self.query_one("#live").display = True
+        except Exception:
+            pass
+        self._run_draft(project, text)
+
+    @work(thread=True)
+    def _run_draft(self, project, text: str) -> None:
+        try:
+            did = drafts.create(self.store, project, text, source="top")
+            preview = drafts.preview(self.store, did)
+            status = drafts.status(self.store, did)
+        except (OSError, ValueError, RuntimeError) as e:
+            self.call_from_thread(self._say_err, str(e)[:300])
+            self.call_from_thread(self._end_drafting)
+            return
+        self.call_from_thread(self._offer_draft, project, did, preview, status)
+
+    def _end_drafting(self) -> None:
+        self._drafting = False
+        self.refresh_data()
+
+    def _offer_draft(self, project, did: int, preview: str, status: str) -> None:
+        self._drafting = False
+        # readiness by the status code of the row, never by the text of the preview
+        # (the preview is localized and may quote the words themselves)
+        if status != drafts.READY:
+            self._say_err(preview[:300])
+            self.refresh_data()
+            return
+        lines = preview.splitlines() or [preview]
+        out = [f"{ui.status_mark('⏺', 'success')} {lines[0]}"]
+        out += [f"  {ui.styled('⎿', 'dim')} {ui.styled(ln, 'dim')}" for ln in lines[1:]]
+        out.append(f"  {ui.styled('⎿', 'dim')} {ui.styled(_t('console.start_hint', id=did), 'dim')}")
+        self._say(out)
+        self.refresh_data()
+
+    def _draft_project(self, did: int):
+        try:
+            with self.store.read() as c:
+                row = c.execute("SELECT project FROM draft WHERE id=?", (did,)).fetchone()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        return self._project_by_name(str(row["project"])) or self._current_project()
+
+    def cmd_start(self, args: list[str]) -> None:
+        if not args:
+            self._say_err(_t("console.start_usage"))
+            return
+        try:
+            did = int(args[0].lstrip("#"))
+        except ValueError:
+            self._say_err(_t("console.start_usage"))
+            return
+        try:
+            status = drafts.status(self.store, did)
+        except (OSError, ValueError, RuntimeError) as e:
+            self._say_err(str(e)[:200])
+            return
+        if not status:
+            self._say_err(_t("draft.no_draft", id=did))
+            return
+        if status != drafts.READY:
+            try:
+                preview = drafts.preview(self.store, did)
+            except (OSError, ValueError, RuntimeError) as e:
+                preview = str(e)[:200]
+            self._say_err(preview[:300])
+            return
+        project = self._draft_project(did)
+        if project is None:
+            self._say_err(_t("console.need_project"))
+            return
+        try:
+            preview = drafts.preview(self.store, did)
+        except (OSError, ValueError, RuntimeError) as e:
+            self._say_err(str(e)[:200])
+            return
+        from ahub.i18n import t as _tt
+
+        def _fn() -> str:
+            tid = drafts.start(self.store, project, did)
+            return _t("draft.queued", tid=tid)
+
+        # the label is known only after the start: the Next line is added by _do_done
+        def _done(ok: bool | None) -> None:
+            if not ok:
+                try:
+                    drafts.cancel(self.store, did)
+                except (OSError, ValueError, RuntimeError):
+                    pass
+                self._say([ui.styled(_t("console.cancelled"), "dim")])
+                return
+            try:
+                msg = _fn()
+            except (OSError, ValueError, RuntimeError) as e:
+                self._say_err(str(e)[:300], getattr(e, "hint", ""))
+                return
+            try:
+                tid = int(str(msg).split("T")[1].split()[0])
+                label = f"T{tid}"
+            except (IndexError, ValueError):
+                label = ""
+            self._say_ok(msg, "views.next_task" if label else "", label)
+            self.refresh_data()
+
+        from ahub.tui.app import Confirm
+
+        try:
+            self.push_screen(Confirm(self._confirm_text(preview + "\n\n" + _tt("tui.confirm_run"))),
+                             _done)
+        except Exception as e:
+            self._say([_t("console.widget_error", widget="confirm", hint=str(e)[:100])])
 
     # --- keys ---
 
@@ -857,7 +1594,7 @@ class ConsoleApp(App):
         return True
 
     def on_key(self, ev) -> None:  # noqa: N802 - textual hook
-        """Tasks-pane keys only (Tab/Esc travel through the priority BINDINGS above)."""
+        """Tasks-pane keys: Up/Down select, Enter follow, a/x/r/m act on the selected task."""
         if not self._on_main():
             return
         if self.focus_mode == "tasks":
@@ -871,9 +1608,22 @@ class ConsoleApp(App):
                 self._render_tasks()
                 ev.prevent_default()
             elif key == "enter":
-                if self._task_ids:
-                    idx = min(self._selected, len(self._task_ids) - 1)
-                    self.cmd_follow([f"T{self._task_ids[idx]}"])
+                tid = self._selected_task_id()
+                if tid is not None:
+                    self.cmd_follow([f"T{tid}"])
+                ev.prevent_default()
+            elif isinstance(key, str) and key.lower() in ("a", "x", "r", "m"):
+                tid = self._selected_task_id()
+                if tid is not None:
+                    ref = f"T{tid}"
+                    if key.lower() == "a":
+                        self.cmd_accept([ref])
+                    elif key.lower() == "x":
+                        self.cmd_reject([ref])
+                    elif key.lower() == "r":
+                        self.cmd_rework([ref])
+                    else:
+                        self.cmd_nudge([ref])
                 ev.prevent_default()
 
 
