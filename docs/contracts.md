@@ -61,7 +61,7 @@ A log event (`event`): `id, ts, task_id, project, kind, payload, needs_reaction,
 | done, needs_decision, error | yes | batched (grouping window) |
 | owner_message, answer | yes | at once |
 | alarm | yes | at once if `critical`; otherwise batched |
-| the rest (state, phase, session, retry, silence, budget_soft, orphan…) | no | the log only |
+| the rest (state, phase, session, retry, silence, nudge, model_changed, budget_soft, orphan…) | no | the log only |
 
 - The **grouping window** for non-critical ones is 120 s from the first unseen event (a hub-wide constant).
 - **Delivered** (`delivered_at`) — the event was handed to the stream/wait. **Acknowledged** (`acked_at`) — the
@@ -142,7 +142,8 @@ ahub nudge T12 "…" | task edit T12 [--spec|--spec-file|--title] [--review …]
 ahub extend T12 --paths "…" | budget T12 --add N [--set N] | model T12 <alias>
 ahub wait | watch | ack <id…|all> | inbox [<id>] [--peek] [--full] | questions [<id>] | alarms [--ack] [--acked]
 ahub say "text" | ask "question" --options "yes,no" [--task T12]
-ahub history [-n 20] | projects | cost [--project X|--all] [--since 30d] | doctor | top
+ahub history [-n 20] | projects | cost [--project X|--all] [--since 30d] | doctor | top [--control]
+ahub prompts | prompts show <role> [--json] | prompts edit <role> [--global|--local] | prompts check
 ahub service {run,install,status,pause,resume,start,stop} | setup [path] | providers | draft "…" | bot run | mcp
 ahub models [--role R] | models add … | models role … | models check | models enable|disable <alias>
    (the registry; it does not lift project bans)
@@ -219,7 +220,9 @@ go $0.310 · usd $0.000 · sessions 12
 ```
 
 Exit codes: 0 — success, 2 — refusal (`error: …` on stderr), 3 — a waiting timeout, 4 — `wait`/`watch` gave up
-after `MAX_POLL_FAILURES` poll failures in a row (§6, `ahub/commands/comms.py`).
+after `MAX_POLL_FAILURES` poll failures in a row (§6, `ahub/commands/comms.py`); the task process
+(`python -m ahub.worker T12`): 0 — the task reached a decision, 2 — no task/project, 3 — held by another
+owner, 4 — the owner poll keeps failing (the service re-picks the task as an orphan on the current code).
 
 ## 8. Project resources
 
