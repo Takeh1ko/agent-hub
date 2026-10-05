@@ -910,9 +910,13 @@ class Engine:
             return self._settle(*final)
         problems = self._check_scout(t)
         if problems and not any(p.code in UNFIXABLE_SCOUT for p in problems):
+            self._saw_tools = False
             r, final = self._step_with_continue(Role.SCOUT, self._exec_ref(t),
                                                 prompts.repair_prompt("; ".join(problems)),
                                                 session_id=r.session_id, log_name="scout", prompt_kind="repair")
+            stuck = self._stuck_guard("repair", r.session_id, r)
+            if stuck is not None:
+                return stuck
             if final is not None:
                 return self._settle(*final)
             problems = self._check_scout(t)
@@ -1222,10 +1226,15 @@ class Engine:
                 fixed_once = True
                 red_tests = g.tests_ok is False and not g.repairable
                 fix = (review.fix_prompt([], gate=g) if red_tests else prompts.repair_prompt(problem))
+                fix_kind = "rework" if red_tests else "repair"
+                self._saw_tools = False
                 r, final = self._step_with_continue(role, self._exec_ref(), fix, session_id=sid,
                                                     log_name=role.value,
-                                                    prompt_kind="rework" if red_tests else "repair")
+                                                    prompt_kind=fix_kind)
                 sid = r.session_id or sid
+                stuck = self._stuck_guard(fix_kind, sid, r)
+                if stuck is not None:
+                    return stuck
                 if final is not None:
                     if self.budget_hit:
                         return self._budget_stop(role, self._exec_ref(), sid)

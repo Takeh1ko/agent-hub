@@ -109,40 +109,95 @@ def test_loop_resets_on_progress_new_commit(store, project):
     assert loops.loop_of(store.get_task(t.id)).get("n") == 1
 
 
-def test_stuck_session_continues_without_progress(store, project):
-    """K continue turns with no commit/tool activity → needs_decision `stuck_session`."""
-    from ahub import engine
+def _silent(session: str) -> dict:
+    """A worker turn with no tools and no files: text only, nothing committed."""
+    return {"session": session, "steps": [{"event": {"type": "text", "text": "still thinking"}}]}
+
+
+def _seed_resume(store, project, session: str = "ses_stuck"):
+    """Code task parked in WORKING with a live session, so the next run resumes it with continue."""
+    from ahub import transitions, workspace
+    from ahub.model import Role
+
+    t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.CODE, title="stuck?",
+                                           model="plain", paths=["core/**"],
+                                           accept=["tests/test_a.py"], review_level=0),
+                     project, collect=False)
+    transitions.move(store, t.id, State.PREPARING)
+    ws = workspace.ensure(project, t.id)
+    transitions.move(store, t.id, State.WORKING,
+                     fields={"worktree": ws.path, "branch": ws.branch,
+                             "base_sha": ws.base_sha, "round": 1})
+    store.add_session(task_id=t.id, provider="fake", role=Role.EXECUTOR.value,
+                      model="plain", external_id=session)
+    return store.get_task(t.id)
+
+
+def test_stuck_session_continues_without_progress(store, project, monkeypatch):
+    """K continue turns with no commit/tool activity → needs_decision `stuck_session`.
+
+    Three real worker continue turns through the fake provider (silent text only —
+    no tool events, no commits), each re-picked after a hub lock: the third stops
+    with `stuck_session` instead of another continue.
+    """
+    import sqlite3
+
+    from ahub import engine, gates
 
     project = _load_safe(project)
-    install_fake(store, [])
+    install_fake(store, [_silent("ses_stuck"), _silent("ses_stuck"), _silent("ses_stuck")])
     ensure_fake_model(store, "plain", "plain")
-    t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.SCOUT, title="look",
-                                           model="plain"), project, collect=False)
-    # drive the streak directly: same session, same head, no tools
-    for _ in range(2):
-        loops.note_continue(store, store.get_task(t.id), "", "ses_stuck", False)
-    assert loops.stuck_of(store.get_task(t.id)).get("n") == 2
-    eng = engine.Engine(store, project, t.id, sleep=lambda s: None)
-    eng._saw_tools = False
-    from ahub.providers.base import Outcome, RunResult
 
-    stuck = eng._stuck_guard("continue", "ses_stuck", RunResult(Outcome.OK, "ses_stuck"))
-    assert stuck is not None
-    assert stuck.state is State.NEEDS_DECISION
-    assert '"code":"stuck_session"' in store.get_task(t.id).state_reason or \
-        "stuck" in stuck.reason.lower()
+    def _locked(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(gates, "check", _locked)
+    tid = _seed_resume(store, project).id
+    first = engine.Engine(store, project, tid, sleep=lambda s: None).run()
+    assert first.state is State.QUEUED
+    assert loops.stuck_of(store.get_task(tid)).get("n") == 1
+    second = engine.Engine(store, project, tid, sleep=lambda s: None).run()
+    assert second.state is State.QUEUED
+    assert loops.stuck_of(store.get_task(tid)).get("n") == 2
+    third = engine.Engine(store, project, tid, sleep=lambda s: None).run()
+    assert third.state is State.NEEDS_DECISION
+    assert '"code":"stuck_session"' in store.get_task(tid).state_reason
+    assert "stuck" in third.reason.lower()
 
 
-def test_stuck_resets_on_tool_activity(store, project):
-    """Tool activity restarts the stuck streak."""
+def test_stuck_resets_on_repair_with_tools(store, project, monkeypatch):
+    """A repair turn with tool activity resets the streak: no false `stuck_session` after a fix."""
+    from ahub import engine, gates
+
+    project = _load_safe(project)
+    repair = {"session": "ses_stuck", "steps": [
+        {"event": {"type": "tool_end", "tool": "read"}},
+        {"event": {"type": "text", "text": "fixing"}}]}
+    install_fake(store, [_silent("ses_stuck"), _silent("ses_stuck"), repair])
     ensure_fake_model(store, "plain", "plain")
-    t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.SCOUT, title="look",
-                                           model="plain"), project, collect=False)
-    head = "abc"
-    loops.note_continue(store, store.get_task(t.id), head, "ses1", False)
-    assert loops.stuck_of(store.get_task(t.id)).get("n") == 1
-    loops.note_continue(store, store.get_task(t.id), head, "ses1", True)
-    assert loops.stuck_of(store.get_task(t.id)).get("n") == 0
+
+    import sqlite3
+
+    def _locked(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(gates, "check", _locked)
+    tid = _seed_resume(store, project).id
+    assert engine.Engine(store, project, tid, sleep=lambda s: None).run().state is State.QUEUED
+    assert loops.stuck_of(store.get_task(tid)).get("n") == 1
+
+    calls = {"n": 0}
+
+    def _flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return gates.GateResult(base="b", head="h", repairable=["uncommitted changes: core/b.py"])
+        return gates.GateResult(base="b", head="h")
+
+    monkeypatch.setattr(gates, "check", _flaky)
+    done = engine.Engine(store, project, tid, sleep=lambda s: None).run()
+    assert done.state is State.DONE, done.reason
+    assert loops.stuck_of(store.get_task(tid)).get("n") == 0
 
 
 def test_visibility_held_task_shows_count_next_check_and_picks(store, project, tmp_path):
@@ -166,20 +221,33 @@ def test_visibility_held_task_shows_count_next_check_and_picks(store, project, t
     assert fresh.state is State.QUEUED
     l1 = views.status_text(store, now=now, w=200)
     assert "queued" in l1 and "2×" in l1
-    assert "checking" not in l1 or "queued" in l1.split("checking")[0]
+    assert "testing" not in l1  # the stale phase of the last attempt, not what the task is
     l2 = views.task_text(store, fresh, now=now, w=200)
     assert "queued" in l2 and "2×" in l2
+    assert "testing" not in l2
     assert "picks 3" in l2 or "Picks" in l2
     from ahub.tui import console as _console
 
     stage = _console._stage_word(fresh)
     assert stage.startswith("queued") and "2×" in stage
+    assert "testing" not in stage
 
 
-def test_observer_alarms_on_many_repicks(store):
+def test_observer_alarms_on_many_repicks(store, monkeypatch):
     """Re-picked more than M/hour → cheap ALARM without a model."""
     from ahub import comms, observer
+    from ahub.providers.base import Health
 
+    class _Healthy:
+        name = "opencode"
+
+        def health(self) -> Health:
+            return Health(True, ())
+
+    from ahub import providers
+
+    monkeypatch.setattr(providers, "names", lambda: ["opencode"])
+    monkeypatch.setitem(providers._cache, "opencode", _Healthy())
     store.meta_set("service_heartbeat", str(int(time.time() * 1000)))
     install_fake(store, [])
     ensure_fake_model(store, "plain", "plain")
