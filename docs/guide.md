@@ -130,6 +130,42 @@ ahub model T12 mimo-flash             # another model for the next round
 ahub task edit T12 --spec-file spec2.md   # a new specification, in a new session
 ```
 
+## Prompts
+
+Every worker or reviewer session receives guidance assembled in layers, followed by the task specification and the built-in hub layer:
+
+1. **User guidance** (optional Markdown files, one per role):
+   - **Global** — `~/.config/ahub/prompts/<role>.md` (`AHUB_HOME/config/prompts/`) — applies to all projects;
+   - **Project** — `<repo>/.hub/prompts/<role>.md` — committed to git, shared across contributors;
+   - **Local** — `~/.config/ahub/projects/<project-name>/prompts/<role>.md` — personal overrides, not in git.
+
+   Roles: `all` (prepended to every session), `code`, `routine`, `scout`, `review` (for reviewer panel sessions and `review` kind tasks).
+   Assembly order: scope-major — global (`all.md`, then `<role>.md`), then project (`all.md`, then `<role>.md`), then local (`all.md`, then `<role>.md`). Within each scope `all.md` precedes `<role>.md`, and later scopes refine earlier ones. Each non-empty scope appears under its heading (`## Global guidance`, `## Project guidance`, `## Local guidance`).
+2. **The task specification** — title, description, files to read first, and expected results.
+3. **Built-in hub layer LAST** — worktree boundary isolation, secrets protection, the short quality bar (code/routine tasks), submission contract (`.ahub/result.json`, report format, commit rules), and reply language. User guidance cannot override these constraints.
+
+Example `<repo>/.hub/prompts/review.md`:
+
+```markdown
+- blocker: any SQL built with string formatting; require parameterization.
+- blocker: broad `except Exception` without logging or re-raising.
+- taste / nit: prefer descriptive variable names over single letters.
+```
+
+Commands:
+
+```
+ahub prompts                      # table of prompt layers applying to the current project
+ahub prompts show code            # assembled prompt exactly as the model receives it (--json for parts)
+ahub prompts edit review          # open in $EDITOR, or create from template (default: project)
+ahub prompts edit scout --global  # edit global guidance
+ahub prompts edit code --local    # edit local project guidance
+ahub prompts check                # inspect sizes (>4 KB warn, >16 KB refuse), unknown files, legacy rules
+```
+
+`ahub status T12` shows the prompt layers used in a dim line (e.g. `prompts: built-in + global(code) + project(all, code)`). `ahub doctor` checks prompts directory health as well.
+Back-compat: `rules = "…"` in `.hub.toml` continues to work as project `all.md` if `.hub/prompts/all.md` is absent (`ahub prompts check` suggests migrating).
+
 ## Watching
 
 ```

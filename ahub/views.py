@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ahub import archive, events, pulse, reasons, ui, workspace
+from ahub import archive, events, prompts, pulse, reasons, ui, workspace
 from ahub.i18n import Words, plural
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, FINAL, WAITING_DECISION, State
@@ -349,6 +349,11 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
         since.append((_t("views.lbl_after"), ", ".join(f"T{a}" for a in t.after)))
     groups.append([(_t("views.lbl_age"), since)])
     out.extend(_facts(groups, w))
+
+    prompts_line = t.limits.get("prompts")
+    if prompts_line:
+        formatted_prompts = prompts.render_summary(prompts_line)
+        out.append(ui.styled(_t("views.lbl_prompts", summary=formatted_prompts), "dim"))
 
     rj, rp = _result_paths(t)
     if rj is not None and rj.exists():

@@ -130,6 +130,42 @@ ahub model T12 mimo-flash             # другая модель на след�
 ahub task edit T12 --spec-file spec2.md   # новое техзадание, в новой сессии
 ```
 
+## Промпты
+
+Для каждой сессии работника или ревьюера промпт собирается из слоёв пользовательских правил, за которыми следуют описание задачи и встроенный слой хаба:
+
+1. **Пользовательские правила** (необязательные Markdown-файлы, по одному на роль):
+   - **Глобальные** — `~/.config/ahub/prompts/<role>.md` (`AHUB_HOME/config/prompts/`) — действуют на все проекты;
+   - **Проектные** — `<repo>/.hub/prompts/<role>.md` — в git, общие для всех разработчиков;
+   - **Локальные** — `~/.config/ahub/projects/<project-name>/prompts/<role>.md` — личные, не в git.
+
+   Роли: `all` (добавляется ко всем сессиям), `code`, `routine`, `scout`, `review` (для сессий панели ревью и задач типа `review`).
+   Порядок сборки: по областям видимости — глобальные (`all.md`, затем `<role>.md`), проектные (`all.md`, затем `<role>.md`), локальные (`all.md`, затем `<role>.md`). Внутри каждой области `all.md` предшествует `<role>.md`, а более поздние области уточняют более ранние. Каждый непустой слой помещается под своим заголовком (`## Global guidance`, `## Project guidance`, `## Local guidance`).
+2. **Спецификация задачи** — название, описание, файлы для предварительного чтения и ожидаемый результат.
+3. **Встроенный слой хаба ПОСЛЕДНИМ** — границы рабочей копии, защита секретов, краткие требования к качеству (задачи code/routine), формат сдачи (`.ahub/result.json`, отчёт, правила коммитов) и язык ответа. Пользовательские правила не могут переопределить эти ограничения.
+
+Пример `<repo>/.hub/prompts/review.md`:
+
+```markdown
+- blocker: any SQL built with string formatting; require parameterization.
+- blocker: broad `except Exception` without logging or re-raising.
+- taste / nit: prefer descriptive variable names over single letters.
+```
+
+Команды:
+
+```
+ahub prompts                      # таблица слоёв правил для текущего проекта
+ahub prompts show code            # собранный промпт в точности так, как его видит модель (--json для частей)
+ahub prompts edit review          # открыть в $EDITOR или создать из шаблона (по умолчанию проект)
+ahub prompts edit scout --global  # редактировать глобальные правила
+ahub prompts edit code --local    # редактировать локальные правила проекта
+ahub prompts check                # проверка размеров (>4 КБ предупреждение, >16 КБ отказ), лишних файлов и старого rules
+```
+
+`ahub status T12` выводит использованные слои промпта тусклой строкой (например, `prompts: built-in + global(code) + project(all, code)`). `ahub doctor` также проверяет каталог промптов.
+Обратная совместимость: `rules = "…"` в `.hub.toml` продолжает работать как проектный `all.md`, если `.hub/prompts/all.md` отсутствует (`ahub prompts check` подсказывает перенести его).
+
 ## Наблюдение
 
 ```

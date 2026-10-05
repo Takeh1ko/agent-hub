@@ -18,7 +18,7 @@ _STYLES = {True: "green", False: "red", None: "dim"}
 # area title key → the checks of it, in display order (doctor.run_all returns all of them)
 _AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("doctor.area_system", ("python", "git")),
-    ("doctor.area_hub", ("config", "service", "models", "network")),
+    ("doctor.area_hub", ("config", "service", "models", "network", "prompts")),
     ("doctor.area_providers", ("opencode", "opencode_health", "opencode_auth", "provider_keys", "agy", "codex")),
     ("doctor.area_claude", ("claude", "claude_skill", "claude_rule")),
     ("doctor.area_optional", ("telegram",)),

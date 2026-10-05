@@ -17,7 +17,7 @@ from ahub import reasons, workspace
 from ahub.config import ProjectConfig
 from ahub.gates import GateResult
 from ahub.model import Kind
-from ahub.prompts import orchestrator_heading, reply_language_line, rules_text
+from ahub.prompts import BOUNDARY, PromptLayer, assemble_guidance, orchestrator_heading, reply_language_line
 from ahub.store import Task
 
 VERDICTS = ("approve", "changes", "dispute")
@@ -82,17 +82,19 @@ def verdict_repair_prompt(round_no: int, model: str) -> str:
 
 
 def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResult, round_no: int,
-                  model: str, *, notes: str = "") -> str:
+                  model: str, *, notes: str = "") -> tuple[str, str, list[PromptLayer]]:
     """The prompt of one reviewer.
 
     A review task has no allowed files, no acceptance and no gates — its input is what is under review, so
     those sections are replaced by the input itself (`gate` is then an empty result).
     """
     out = review_path(".", round_no, model).as_posix().removeprefix("./")
-    sections = [rules_text(project).strip(),
+    guidance_sections, summary, layers = assemble_guidance(project, "review")
+    sections = [*guidance_sections,
                 f"# Review of {task.label}: {task.title}\nYou are a reviewer in a fresh session; you have not seen "
                 "the worker's work. Do not change or commit project files.",
-                "## Task\n" + strip_arbiter(task.spec.strip() or "(empty description)")]
+                "## Task\n" + strip_arbiter(task.spec.strip() or "(empty description)"),
+                BOUNDARY]
     if task.kind is Kind.REVIEW:
         sections.append(f"## Under review\n`{task.limits.get('input') or ''}`")
         sections.append("## Material under review\n```\n" + diff + "\n```")
@@ -119,7 +121,7 @@ def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResul
         f"Each finding needs file, line, and a concrete fix. {reply_language_line()} "
         'Last message — one line: "done".',
     ]
-    return "\n\n".join(sections)
+    return "\n\n".join(sections), summary, layers
 
 
 def parse(path: Path, model: str) -> Review | None:

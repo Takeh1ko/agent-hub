@@ -23,7 +23,7 @@ GROUP_KEYS: dict[str, str] = {
     "ack": "watch", "inbox": "watch", "questions": "watch", "observer": "watch",
     # Setup
     "setup": "setup", "doctor": "setup", "service": "setup", "projects": "setup", "config": "setup",
-    "cost": "setup", "version": "setup",
+    "cost": "setup", "version": "setup", "prompts": "setup",
     # Models and providers
     "models": "models", "providers": "models",
     # Integrations
