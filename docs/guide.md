@@ -176,8 +176,29 @@ ahub diff T12              # the diff from the base
 ahub follow T12            # live readable transcript: prompts, text, tool calls, results
 ahub log T12               # the raw session log
 ahub history -n 20         # recent tasks with their outcome and cost
-ahub top                   # the terminal UI: tasks, pulse, money, events
+ahub top                   # the interactive console: tasks, pulse, money, events
+ahub                       # with no args on a TTY — the same console as `ahub top`
 ```
+
+`ahub` with no arguments opens the console when stdin and stdout are TTYs (a pipe or `--json` keeps
+the one-shot output byte-identical); `ahub top` opens the same console:
+
+```
+╭──────────────────────────────╮
+│ ✻ ahub 3.0.0 · demo          │
+│ project: demo · /srv/demo    │
+│ service running (tick 3s ago)│
+╰──────────────────────────────╯
+⏺ ✢ T12  add retry to payments
+  ⎿ writing code · spark · 2m 13s
+◦ T13  queued · waiting for T12
+⏺ T11  waiting for you
+  ⎿ Next: ahub accept T11 …
+> /accept T11
+```
+
+Stages read at a glance: `⏺` white + spinner — active (`writing code`, `studying`, `running tests`,
+`in review`); `◦` dim — queued; `⏺` yellow — waiting for you; `✗` red — error/dead; `⏸` dim — stopped.
 
 Real `ahub status` output (a `scout` and a reviewed `code` task on the free `bunny` model):
 
