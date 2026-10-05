@@ -53,7 +53,7 @@ from ahub.model import ACTIVE, Ev, Kind, Phase, Role, State
 from ahub.providers.base import Act, Activity, Outcome, RunResult, RunSpec
 from ahub.providers.runner import PollFailed
 from ahub.providers.runner import run as run_session
-from ahub.store import Store, Task
+from ahub.store import Store, Task, is_lock_error
 from ahub.time import now_ms
 
 LEASE_MS = 90_000
@@ -325,6 +325,14 @@ class Engine:
             self.log.error("worktree: %s", e)
             return self._settle(State.ERROR, reasons.dump("prepare_failed", err=e))
         except Exception as e:
+            if is_lock_error(e):
+                # Lock contention that survived the store retries: transient, same session.
+                self.log.warning("hub database is busy — back in the queue: %s", e)
+                try:
+                    return self._settle(State.QUEUED, reasons.dump("hub_locked"))
+                except Exception:
+                    self.log.exception("failed to requeue on lock")
+                    raise
             if _stale_code_error(e) and _code_changed_since(self._code0):
                 # the hub code changed under this worker: like the poll failure path — one log line,
                 # the provider group is stopped, the worker exits 4 and the service re-picks the task.
@@ -1016,6 +1024,12 @@ class Engine:
                 if blocked:
                     return self._settle(State.NEEDS_DECISION, reasons.dump("blocked", summary=blocked[:400]))
                 t = self.move(State.CHECKING, reasons.dump("gates"))
+            sid, sync_final = self._sync_before_gates(t, role, t.executor, sid)
+            if sync_final is not None:
+                if self.budget_hit:
+                    return self._budget_stop(role, t.executor, sid)
+                return self._settle(*sync_final)
+            t = self.task()
             try:
                 g = self._gate(t)
             except gates.LockTimeout as e:
@@ -1095,6 +1109,68 @@ class Engine:
 
         orch = bool(t.limits.get("orch_edit"))
         return gates.check(self.project, t, orch_edit=orch, on_wait=on_wait, should_stop=self.stop_requested)
+
+    def _sync_before_gates(self, t: Task, role: Role, alias: str,
+                            sid: str | None) -> tuple[str | None, tuple[State, str] | None]:
+        """Merge the work branch into the task copy before the gates (each round).
+
+        Clean merge (or already up to date) — continue, the merge commit is the task's and the gates
+        read the new merge-base. Conflict — abort and run one resolve turn in the same session,
+        then the gates. Returns (new session id, final to settle or None).
+        """
+        wt = t.worktree
+        if not wt or not Path(wt).is_dir():
+            return sid, None
+        work = workspace.git(self.project.root, "rev-parse", "--verify", self.project.work_branch,
+                             check=False)
+        ref = work.stdout.strip()
+        if work.returncode != 0 or not ref:
+            self.log.warning("sync: no work branch %s", self.project.work_branch)
+            return sid, None
+        if workspace.git(wt, "merge-base", "--is-ancestor", ref, "HEAD", check=False).returncode == 0:
+            return sid, None
+        m = workspace.git(wt, "merge", "--no-edit", ref, check=False)
+        if m.returncode == 0:
+            self.log.info("synced %s into %s", self.project.work_branch, t.label)
+            self._refresh_result_commit(t)
+            return sid, None
+        unmerged = workspace.git(wt, "diff", "--name-only", "--diff-filter=U",
+                                 check=False).stdout.split()
+        workspace.git(wt, "merge", "--abort", check=False)
+        if not unmerged:
+            self.log.warning("sync merge failed (not a conflict): %s", (m.stderr or m.stdout)[-300:])
+            return sid, None
+        self.log.info("sync conflict, asking worker to resolve: %s", ", ".join(unmerged[:5]))
+        prompt = prompts.sync_conflict_prompt(self.project)
+        r, final = self._step_with_continue(role, alias, prompt, session_id=sid, log_name=role.value,
+                                            prompt_kind="rework")
+        new_sid = r.session_id or sid
+        if final is not None:
+            return new_sid, final
+        blocked = self._blocked(self.task())
+        if blocked:
+            return new_sid, (State.NEEDS_DECISION, reasons.dump("blocked", summary=blocked[:400]))
+        return new_sid, None
+
+    def _refresh_result_commit(self, t: Task) -> None:
+        """Point result.json at the sync merge commit, so the gates see the hub's merge as the task's."""
+        try:
+            path = Path(t.worktree) / workspace.AHUB_DIR / "result.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict) or not str(data.get("commit", "")).strip():
+            return
+        try:
+            head = workspace.head(t.worktree)
+        except workspace.WorkspaceError:
+            return
+        if str(data.get("commit")) != head:
+            data["commit"] = head
+            try:
+                path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            except OSError as e:
+                self.log.warning("result commit not refreshed: %s", e)
 
     def _lock_wait(self, e: gates.LockTimeout) -> Settled:
         """A busy test lock is a wait, not a red acceptance: back to the queue, gates re-run."""

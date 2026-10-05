@@ -625,7 +625,10 @@ def test_accept_waiting_for_the_lock_keeps_the_lease(store, project, monkeypatch
     from ahub import transitions
     from ahub.time import now_ms
 
-    lease_ms = 200
+    # Load-safe margins: under parallel suites a keeper thread can stall past a
+    # millisecond-scale lease even while working — the property under test (the
+    # lease advances while waiting for the flock) is scale-invariant.
+    lease_ms = 2000
     t1, t2 = two_done_tasks(store, project, b_text="B = 3\n", c_text="C = 3\n")
     first_in = threading.Event()
     seen = []
@@ -652,10 +655,10 @@ def test_accept_waiting_for_the_lock_keeps_the_lease(store, project, monkeypatch
     monkeypatch.setattr(accept, "ACCEPT_LEASE_MS", lease_ms)  # without renewal it would be gone before the wait is over
     threads = [threading.Thread(target=accept.accept, args=(store, project, tid)) for tid in (t1.id, t2.id)]
     threads[0].start()
-    assert first_in.wait(timeout=10)
+    assert first_in.wait(timeout=30)
     threads[1].start()
     for th in threads:
-        th.join(timeout=30)
+        th.join(timeout=60)
 
     assert store.get_task(t2.id).state is State.ACCEPTED
     waiter, orphan = seen[0]

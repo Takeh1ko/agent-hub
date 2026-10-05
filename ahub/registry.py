@@ -81,7 +81,19 @@ def seed(store: Store) -> bool:
 
     AHUB_FAKE_PROVIDER=1 (tests, tools/smoke.sh): the fake provider becomes a normal entry — the model
     "fake" in every role menu and the default of every role, so a task runs with no network.
+
+    Reads first without the write lock: an already seeded hub never takes BEGIN IMMEDIATE here.
     """
+    from ahub.providers.fake import ALIAS as _fake_alias
+
+    with store.read() as c:
+        have = {r[0] for r in c.execute("SELECT alias FROM model")}
+        if have:
+            missing = [a for a in DEFAULT_MODELS if a not in have]
+            if selectable_from_env() and _fake_alias not in have:
+                missing.append(_fake_alias)
+            if not missing:
+                return False
     with store.tx() as c:
         seeded = not c.execute("SELECT COUNT(*) FROM model").fetchone()[0]
         for alias, (prov, mid, var, note) in DEFAULT_MODELS.items():

@@ -481,6 +481,7 @@ MESSAGES: dict[str, str] = {
     "reason.gates_failed": "ворота не пройдены после исправления: {problems}",
     "reason.gates_passed": "ворота пройдены",
     "reason.gates_passed_tests": "ворота пройдены, приёмка зелёная",
+    "reason.hub_locked": "база хаба занята — задача снова в очереди",
     "reason.lease_lost": "аренда потеряна",
     "reason.merge_conflict": "конфликт слияния: {files}",
     "reason.merged": "слита в {branch}{note}",
