@@ -82,19 +82,7 @@ def _real_db_untouched():
     real = _paths.live_home() / ".local/share/ahub/ahub.db"
     p_lock = _paths.live_home() / ".local/share/ahub/accept-P.lock"
 
-    def counts():
-        if not real.exists():
-            return None
-        con = _real_connect(f"file:{real}?mode=ro", uri=True, timeout=5)
-        try:
-            return tuple(con.execute(f"SELECT COALESCE(MAX(id), 0) FROM {t}").fetchone()[0]
-                          for t in ("task", "message", "question", "draft", "event"))
-        except sqlite3.Error:
-            return None
-        finally:
-            con.close()
-
-    before = counts()
+    before = _counts(real)
     task_max, event_max = (before[0], before[4]) if before is not None else (0, 0)
     existed = real.exists()
     lock_before = _lock_stat(p_lock)
