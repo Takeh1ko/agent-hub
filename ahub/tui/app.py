@@ -1,12 +1,7 @@
-"""`ahub top` — human screen (architecture §10). Data — ahub.tui.data; actions — ahub.accept/drafts.
+"""Dialogs shared with the console (Transcript/Prompt/Confirm/Ask/Help) and the TopApp table screen.
 
-"View / Control" toggle (c): no actions in view mode. Refresh every 2 s in the background
-(thread; a new refresh never starts before the previous one finishes). The table shows the current
-work, grouped by project (a header row opens each project — several repositories share one hub),
-`h` adds the history, `o` narrows the table to one project and back to all; `enter`/`t` — a live
-transcript of the task (ahub.tui.live): it reads the log and, in control mode, `m` messages the worker.
-Every table key waits behind that screen.
-"""
+`ahub top` opens the console (ahub.tui.console), not TopApp: --control starts it with the
+tasks pane focused. TopApp has no CLI entry; it stays covered by tests (test_tui, test_projects_cost)."""
 
 from __future__ import annotations
 
@@ -159,7 +154,7 @@ class Transcript(Screen[None]):
 
     def _pulses(self) -> dict:
         app = self.app
-        return app.pulses() if isinstance(app, TopApp) else {}
+        return app.pulses() if hasattr(app, "pulses") else {}
 
     def _paint(self, changed: bool) -> None:
         box = self.query_one("#live-box", VerticalScroll)

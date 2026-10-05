@@ -122,6 +122,17 @@ def _merge_root_scope(args) -> None:
         args.project = None
 
 
+def _both_tty() -> bool:
+    """True when a human sits at both ends: stdin and stdout are TTYs (the console gate).
+
+    A pipe (Claude reading through it) or --json keeps the one-shot output byte-identical.
+    """
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
 def command_names(ap=None) -> frozenset[str]:
     """Every subcommand name, the nested ones too (`task new`, `models role`).
 
@@ -161,6 +172,11 @@ def main(argv: list[str] | None = None) -> int:
             if getattr(args, "cmd", None):
                 ap.print_help()
                 return 2
+            if not getattr(args, "json", False) and _both_tty():
+                from ahub.tui.console import main as console_main
+
+                sc = scope.resolve(args)
+                return console_main(all_projects=sc.all, project=sc.name or None)
             sc = scope.resolve(args)
             if getattr(args, "json", False):
                 from ahub.home import data
