@@ -106,8 +106,10 @@ class LiveView:
 
     @property
     def lines(self) -> list[str]:
-        """The transcript so far: the lines of the session, or why there are none."""
-        return self.feed.lines if self.feed is not None else self._note
+        """The transcript so far: the lines of the session, or why there are none (capped)."""
+        if self.feed is not None:
+            return self.feed.lines[-MAX_LINES:]
+        return self._note[-MAX_LINES:]
 
     # --- picking a session ---
 

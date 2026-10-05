@@ -97,7 +97,7 @@ def text(*, w: int | None = None, all_projects: bool = False, project: str | Non
         pass
     out = [_head(_project_here(), alive, quota_line, w)] if items else [_line_head(_project_here(), alive, quota_line)]
     if not _configured():
-        out.append(ui.item(_t("home.unconfigured")) if items
+        out.append(ui.item(_t("home.unconfigured"), status="working") if items
                    else ui.para(_t("home.unconfigured"), indent=2, w=w))
         out.append(_suggestions("home.next_setup", "home.next_doctor", "home.next_models", w=w))
         return "\n".join(out)
@@ -113,11 +113,12 @@ def text(*, w: int | None = None, all_projects: bool = False, project: str | Non
     if items:
         for task in shown:  # the task is the item line: the id and the title, the details under it
             out.append(ui.item(f"{task.label}  {task.title}",
-                               [views._item_details(task, now), views._pulse_detail(pulses.get(task.id))], w=w))
+                               [views._item_details(task, now), views._pulse_detail(pulses.get(task.id))],
+                               w=w, status="working"))
         if rest:  # the screen is a glance — what does not fit is counted, not dropped
             out.append(ui.hint(_t("home.more_tasks", n=rest), w=w))
         if not shown:
-            out.append(ui.item(_t("home.no_tasks")))
+            out.append(ui.item(_t("home.no_tasks"), status="working"))
     elif shown:
         out.append(ui.section(_t("home.sec_tasks")))
         out.append(ui.table(["", _t("views.col_id"), _t("views.col_kind"), _t("views.col_title"),
@@ -131,7 +132,7 @@ def text(*, w: int | None = None, all_projects: bool = False, project: str | Non
     if waiting_shown:
         if items:
             lines = [_t(views.next_key(t), label=t.label) for t in waiting_shown if views._offers_next(t)]
-            out.append(ui.item(_t("home.waiting_you"), lines, w=w))
+            out.append(ui.item(_t("home.waiting_you"), lines, w=w, status="waiting"))
             if waiting_rest:  # capped like the list above — the screen is a glance, not a queue
                 out.append(ui.hint(_t("home.more_tasks", n=waiting_rest), w=w))
         else:

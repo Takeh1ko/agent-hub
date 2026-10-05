@@ -54,7 +54,7 @@ drop a "done".
 | Failures | network error → retry; silence → one continuation; quota → waits for the window (or the fallback model); timeout/budget → `needs_decision`; never a silent hang |
 | Budgets | per task (including review); at 100 % the worker is asked to save and stop, extension is one command |
 | Providers | opencode, Google Antigravity (`agy`), OpenAI Codex CLI (`codex`); `ahub providers` shows what is found, logged in and enabled, `ahub providers enable\|disable <name>` switches one |
-| Watching | `ahub status` — one line per task; `ahub status T12` — the task in detail; `ahub top` — current tasks, pulse, money and events in a terminal UI |
+| Watching | `ahub status` — one line per task; `ahub status T12` — the task in detail; `ahub` opens the console, `ahub top` — the same console: current tasks, pulse, money and events in a terminal UI |
 | Live transcript | `ahub follow T12` — the prompt, the worker's text, tool calls and results as they happen (`ahub log T12` stays raw) |
 | Talking to a worker | `ahub nudge T12 "…"` — a message into the running session; the turn is interrupted and the same session continues |
 | Waking Claude | `ahub watch` for Claude Code's Monitor, `ahub wait`; stable codes `DONE` `DECISION` `ERROR` `OWNER` `ANSWER` `ALARM` |
@@ -175,6 +175,29 @@ ahub reject T12 --reason "…"                   # drop it, worktree cleaned up
 
 Other agents talk to the same stdio server over MCP: `claude mcp add ahub -- ahub mcp`, and the same server in the
 Codex or Cursor config.
+
+## Interactive console
+
+`ahub` with no arguments opens the console when stdin and stdout are TTYs (a pipe or `--json` keeps the
+one-shot output byte-identical); `ahub top` opens the same console:
+
+```
+╭──────────────────────────────╮
+│ ✻ ahub 3.0.0 · demo          │
+│ project: demo · /srv/demo    │
+│ service running (tick 3s ago)│
+╰──────────────────────────────╯
+⏺ ✢ T12  add retry to payments
+  ⎿ writing code · spark · 2m 13s
+◦ T13  queued · waiting for T12
+⏺ T11  waiting for you
+  ⎿ Next: ahub accept T11 …
+> /accept T11
+```
+
+Stages read at a glance: `⏺` white + spinner — active (`writing code`, `studying`, `running tests`,
+`in review`); `◦` dim — queued; `⏺` yellow — waiting for you; `✗` red — error/dead; `⏸` dim — stopped.
+Every command calls the same functions as the CLI; `/help` lists them, `?` shows the shortcuts.
 
 ## Documentation
 

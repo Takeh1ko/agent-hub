@@ -7,7 +7,8 @@ Four rules keep it small:
 - every block takes the width explicitly or takes it from COLUMNS/the terminal (fallback 100), so the
   layout is deterministic in tests;
 - a long operation shows one live line only on a TTY (`Live`); a pipe gets nothing at all;
-- a terminal gets the item language (⏺ and its ⎿ spine, one accent colour), a pipe gets the compact
+- a terminal gets the item language (⏺ in its status colour and its ⎿ spine, the accent only
+  for ✻, box borders, the product name), a pipe gets the compact
   aligned text — the same words in a different shape (`plain()` says the text is not going to a terminal
   at all: a Telegram message, a prompt).
 
@@ -35,9 +36,11 @@ GAP = 2
 BULLET = "•"
 RULE = "─"
 ELLIPSIS = "…"
-MARK = "⏺"    # an item: the mark is the only accent on the line
+MARK = "⏺"    # an item: the mark takes the status colour, never the accent
 SPINE = "⎿"   # a detail under an item
 CROSS = "✗"    # the error mark
+QUEUED = "◦"   # queued: dim, waits for room/resource/dependency
+STOPPED = "⏸"  # stopped: dim
 SPINNER = "·✢✳✶✻✽"
 CLEAR_LINE = "\r\033[K"
 
@@ -195,14 +198,18 @@ def hint(text: Any, *, indent: int = 2, w: int | None = None) -> str:
     return "\n".join(pad + styled(ln, "dim") for ln in lines)
 
 
-def item(head: str, details: Iterable[Any] = (), *, indent: int = 0, w: int | None = None) -> str:
-    """One item the way a person reads it: ⏺ <head> (the mark alone is accent) and the details on their own
+def item(head: str, details: Iterable[Any] = (), *, indent: int = 0, w: int | None = None,
+         status: str = "working") -> str:
+    """One item the way a person reads it: the mark in its status colour and the details on their own
     lines under "  ⎿ ".
 
-    The details never move onto the title line to use the space that is left — the rhythm is the same for
-    every item, whatever the width and whatever the item is about.
+    The mark is never the accent (that one is for ✻, box borders, the product name only):
+    ⏺ white working, ⏺ green success, ⏺ yellow waiting for you, ✗ red error, ◦ dim queued,
+    ⏸ dim stopped. The details never move onto the title line to use the space that is left —
+    the rhythm is the same for every item, whatever the width and whatever the item is about.
     """
-    lines = [" " * indent + styled(MARK, "accent") + " " + head]
+    mark = _status_glyph(status)
+    lines = [" " * indent + status_mark(mark, status) + " " + head]
     lines += [hint(d, indent=indent + 2, w=w) for d in details if str(d or "").strip()]
     return "\n".join(lines)
 
@@ -213,7 +220,10 @@ def failed(what: str, way_out: str = "") -> str:
     return f"{out}\n{hint(way_out)}" if way_out else out
 
 
-STATUS_STYLE = {"working": "", "success": "green", "waiting": "yellow", "error": "red"}
+STATUS_STYLE = {"working": "", "success": "green", "waiting": "yellow", "error": "red",
+                "queued": "dim", "stopped": "dim"}
+STATUS_GLYPH = {"working": MARK, "success": MARK, "waiting": MARK, "error": CROSS,
+                "queued": QUEUED, "stopped": STOPPED}
 
 
 def elapsed(ms: int) -> str:
@@ -273,8 +283,14 @@ def clip_width(text: Any, w: int) -> str:
 
 
 def status_mark(mark: str, status: str) -> str:
-    """A console item mark in its status colour (white working, green success, yellow waiting, red error)."""
+    """A console item mark in its status colour: white working, green success, yellow waiting,
+    red error, dim queued/stopped."""
     return styled(mark, STATUS_STYLE.get(status, ""))
+
+
+def _status_glyph(status: str) -> str:
+    """The mark for a status: ⏺ working/success/waiting, ✗ error, ◦ queued, ⏸ stopped."""
+    return STATUS_GLYPH.get(status, MARK)
 
 
 def box(lines: Sequence[str], *, w: int | None = None, border: str = "dim") -> str:

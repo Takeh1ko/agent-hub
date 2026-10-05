@@ -1,7 +1,8 @@
 """Dialogs shared with the console (Transcript/Prompt/Confirm/Ask/Help) and the TopApp table screen.
 
 `ahub top` opens the console (ahub.tui.console), not TopApp: --control starts it with the
-tasks pane focused. TopApp has no CLI entry; it stays covered by tests (test_tui, test_projects_cost)."""
+tasks pane focused. TopApp is legacy with no CLI entry (kept for its tests in test_tui and
+test_projects_cost); the console in ahub.tui.console is the interactive UI."""
 
 from __future__ import annotations
 
@@ -201,22 +202,24 @@ class Transcript(Screen[None]):
 
 
 class TopApp(App):
+    """Legacy table screen, no CLI entry (the console in ahub.tui.console is the UI)."""
+
     CSS = """
-    #header { height: 2; background: $boost; }
-    #mode { height: 1; }
-    #body { height: 1fr; }
-    #tasks { width: 3fr; }
-    #detail { width: 2fr; border-left: solid $primary; padding: 0 1; }
-    #feed { height: 8; border-top: solid $primary; }
-    #dialog { width: 80; height: auto; border: thick $primary; background: $surface; padding: 1 2; }
-    #live-head { height: 1; background: $boost; }
-    #live-box { height: 1fr; border: round $primary; }
-    #live-log { width: 100%; }
-    #prompt-box { width: 90%; height: 80%; border: thick $primary; background: $surface; padding: 1 2; }
-    #prompt-text { width: 100%; }
-    Confirm, Ask, Help { align: center middle; }
-    Prompt { align: center middle; }
-    Transcript { align: center middle; }
+    #header { height: 2; background: ansi_default; }
+    #mode { height: 1; background: ansi_default; }
+    #body { height: 1fr; background: ansi_default; }
+    #tasks { width: 3fr; background: ansi_default; }
+    #detail { width: 2fr; border-left: solid #ff8700; padding: 0 1; background: ansi_default; }
+    #feed { height: 8; border-top: solid #ff8700; background: ansi_default; }
+    #dialog { width: 80; height: auto; border: thick #ff8700; background: ansi_default; padding: 1 2; }
+    #live-head { height: 1; background: ansi_default; }
+    #live-box { height: 1fr; border: round #ff8700; background: ansi_default; }
+    #live-log { width: 100%; background: ansi_default; }
+    #prompt-box { width: 90%; height: 80%; border: thick #ff8700; background: ansi_default; padding: 1 2; }
+    #prompt-text { width: 100%; background: ansi_default; }
+    Confirm, Ask, Help { align: center middle; background: ansi_default; }
+    Prompt { align: center middle; background: ansi_default; }
+    Transcript { align: center middle; background: ansi_default; }
     """
     BINDINGS = [("q", "quit", _t("tui.bind_quit")), ("question_mark", "help", _t("tui.bind_help")),
                 ("c", "toggle", _t("tui.bind_toggle")), ("n", "new", _t("tui.bind_new")),

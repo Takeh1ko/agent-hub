@@ -85,7 +85,7 @@ def result(args, data: Any, msg: str, nxt_key: str = "", label: str = "") -> Non
 
     if ui.colour_on():
         details = [_t("views.hint_next", cmd=_t(nxt_key, label=label))] if nxt_key else []
-        emit(args, data, ui.item(msg, details))
+        emit(args, data, ui.item(msg, details, status="success"))
         return
     nxt = views.next_line(nxt_key, label) if nxt_key else ""
     emit(args, data, f"{msg}\n{nxt}" if nxt else msg)

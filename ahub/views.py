@@ -123,11 +123,24 @@ def _waiting_item(t: Task, w: int | None) -> str:
     reason = reasons.text(t.state_reason)
     head = f"{t.label}  {state_word(t.state)}" + (f" · {reason}" if reason else "")
     nxt = _t("views.hint_next", cmd=_t(next_key(t), label=t.label)) if _offers_next(t) else ""
-    return ui.item(head, [nxt], w=w)
+    return ui.item(head, [nxt], w=w, status=_task_status(t))
 
 
 def _offers_next(t: Task) -> bool:
     return t.state in DECISION_STATES or t.state in RESUME_STATES
+
+
+def _task_status(t: Task) -> str:
+    """The ⏺ colour of a task title: white working, yellow waiting, red error, dim queued/stopped."""
+    if t.state is State.ERROR:
+        return "error"
+    if t.state in DECISION_STATES:
+        return "waiting"
+    if t.state is State.STOPPED:
+        return "stopped"
+    if t.state is State.QUEUED:
+        return "queued"
+    return "working"
 
 
 def _active_table(store: Store, active: list[Task], live: dict[int, int], pulses: dict, ts: int,
@@ -153,7 +166,7 @@ def _active_items(store: Store, active: list[Task], pulses: dict, ts: int, w: in
     for t in active:
         go, usd = archive.task_cost(store, t.id)
         details = [_item_details(t, ts, f"${go + usd:.3f}"), _pulse_detail(pulses.get(t.id))]
-        out.append(ui.item(f"{t.label}  {t.title}", details, w=w))
+        out.append(ui.item(f"{t.label}  {t.title}", details, w=w, status="working"))
     return out
 
 
@@ -321,7 +334,8 @@ def task_text(store: Store, t: Task, *, live: dict[int, int] | None = None, now:
     ts = now if now is not None else now_ms()
     go, usd = archive.task_cost(store, t.id)
     head_text = f"{t.label}  {t.kind.value}  {t.title}"
-    title = ui.item(head_text, w=w) if ui.colour_on() else ui.para(head_text, indent=0, w=w)
+    title = ui.item(head_text, w=w, status=_task_status(t)) if ui.colour_on() else ui.para(
+        head_text, indent=0, w=w)
     out = [title, ui.rule(min(ui.width(w), ui.plain_len(title.split("\n")[0])))]
 
     state = state_word(t.state)

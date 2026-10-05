@@ -193,7 +193,7 @@ Unread
 unread events 1"""
 
 DETAIL_TTY = """\
-\x1b[38;5;208m⏺\x1b[0m T3  code  Setup wizard: choose providers and per-role models
+\x1b[33m⏺\x1b[0m T3  code  Setup wizard: choose providers and per-role models
 \x1b[2m──────────────────────────────────────────────────────────────\x1b[0m
 \x1b[2mState\x1b[0m  done · gates passed, acceptance is green · process alive
 \x1b[2mModel\x1b[0m  bunny  \x1b[2mReview\x1b[0m  spark ×2  \x1b[2mRound\x1b[0m  3
@@ -211,12 +211,12 @@ DETAIL_TTY = """\
 
 OVERVIEW_TTY = (
     "\x1b[1mall projects · 1 active · 1 waiting · 2 queued\x1b[0m\n"
-    "\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers\n"
+    "⏺ T1  Setup wizard: choose providers\n"
     "  \x1b[2m⎿\x1b[0m \x1b[2mwriting · bunny · 2 min · $0.046\x1b[0m\n"
-    "\x1b[38;5;208m⏺\x1b[0m T3  done · gates passed, acceptance is green\n"
+    "\x1b[33m⏺\x1b[0m T3  done · gates passed, acceptance is green\n"
     '  \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub accept T3 · ahub rework T3 --notes "…" · ahub reject T3\x1b[0m\n'
-    "\x1b[38;5;208m⏺\x1b[0m T2  queued\n"
-    "\x1b[38;5;208m⏺\x1b[0m T4  queued · waiting for T3 to be accepted (queued)\n"
+    "\x1b[2m◦\x1b[0m T2  queued\n"
+    "\x1b[2m◦\x1b[0m T4  queued · waiting for T3 to be accepted (queued)\n"
     "\x1b[1mUnread\x1b[0m\n"
     "  \x1b[2m⎿\x1b[0m \x1b[2mDONE T3 code «Setup wizard: choose providers and per-role models» — "
     "report 2.1 KB; ready; $0.04\x1b[0m\n"
@@ -314,7 +314,7 @@ def test_status_overview_non_green_pulse_tty(tmp_path, monkeypatch):
                                          reason="child processes running (python -m pytest)")}
     text = views.status_text(store, live=live, now=NOW + 2 * 60_000, pulses=pulses, w=W)
     lines = text.splitlines()
-    assert lines[1] == "\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers"
+    assert lines[1] == "⏺ T1  Setup wizard: choose providers"
     assert lines[2] == "  \x1b[2m⎿\x1b[0m \x1b[2mwriting · bunny · 2 min · $0.046\x1b[0m"
     assert lines[3] == "  \x1b[2m⎿\x1b[0m \x1b[33m🟡 child processes running (python -m pytest)\x1b[0m"
 
@@ -329,7 +329,7 @@ def test_status_detail_active_task_keeps_pulse_colour_tty(tmp_path, monkeypatch)
     text = views.task_text(store, store.get_task(ids["active"]), live={ids["active"]: 42}, pulses=pulses,
                            now=NOW + 2 * 60_000, w=W)
     lines = text.splitlines()
-    assert lines[0] == "\x1b[38;5;208m⏺\x1b[0m T1  code  Setup wizard: choose providers"
+    assert lines[0] == "⏺ T1  code  Setup wizard: choose providers"
     assert lines[2] == "\x1b[2mState\x1b[0m  \x1b[32mworking · writing · process alive\x1b[0m"
     assert lines[3] == "\x1b[2mModel\x1b[0m  bunny  \x1b[2mReview\x1b[0m  spark ×2  \x1b[2mRound\x1b[0m  3"
     assert lines[4] == "\x1b[2mCost\x1b[0m   $0.046 Go of $1.50 budget"
@@ -494,9 +494,9 @@ def test_item_details_never_move_onto_the_title_line(monkeypatch):
     for w in (40, 100, 200):
         lines = ui.item(head, [detail], w=w).split("\n")
         assert len(lines) == 2, f"w={w}: the title line keeps nothing else"
-        assert lines[0] == f"\x1b[38;5;208m⏺\x1b[0m {head}"
+        assert lines[0] == f"⏺ {head}"  # working is white: the mark takes no colour
         assert lines[1] == f"  \x1b[2m⎿\x1b[0m \x1b[2m{detail}\x1b[0m"
-    assert ui.item(head, [], w=200) == f"\x1b[38;5;208m⏺\x1b[0m {head}"  # no details, no empty spine line
+    assert ui.item(head, [], w=200) == f"⏺ {head}"  # no details, no empty spine line
 
 
 def test_a_green_pulse_takes_no_line_of_its_own(monkeypatch):
@@ -536,14 +536,15 @@ def test_home_screen_tty_snapshot(tmp_path, monkeypatch):
     assert lines[0] == "\x1b[2m╭───────────────────────────────────────╮\x1b[0m"
     assert lines[1] == f"│ \x1b[38;5;208m✻ ahub\x1b[0m \x1b[2m{ahub.__version__} · demo · service stopped\x1b[0m │"
     assert lines[2] == "\x1b[2m╰───────────────────────────────────────╯\x1b[0m"
-    assert lines[3] == "\x1b[38;5;208m⏺\x1b[0m the hub is not configured yet — run `ahub setup` to get started"
+    assert lines[3] == "⏺ the hub is not configured yet — run `ahub setup` to get started"
     assert lines[4] == "\x1b[2mahub setup · ahub doctor · ahub models\x1b[0m"
 
 
 def test_action_result_and_error_tty(monkeypatch):
     monkeypatch.setattr(ui, "colour_on", lambda: True)
-    res = ui.item("T12 merged into main", [views._t("views.hint_next", cmd="ahub status")])
-    assert res == "\x1b[38;5;208m⏺\x1b[0m T12 merged into main\n  \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub status\x1b[0m"
+    res = ui.item("T12 merged into main", [views._t("views.hint_next", cmd="ahub status")],
+                  status="success")
+    assert res == "\x1b[32m⏺\x1b[0m T12 merged into main\n  \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub status\x1b[0m"
 
     err = ui.failed("something broke", "hint: ahub doctor")
     assert err == "\x1b[31m✗ something broke\x1b[0m\n  \x1b[2m⎿\x1b[0m \x1b[2mhint: ahub doctor\x1b[0m"
@@ -596,9 +597,9 @@ def test_home_screen_configured_tty_snapshot(tmp_path, monkeypatch):
         "\x1b[2m╭───────────────────────────────────────╮\x1b[0m",
         f"│ \x1b[38;5;208m✻ ahub\x1b[0m \x1b[2m{ahub.__version__} · demo · service running\x1b[0m │",
         "\x1b[2m╰───────────────────────────────────────╯\x1b[0m",
-        "\x1b[38;5;208m⏺\x1b[0m T1  Setup wizard: choose providers",
+        "⏺ T1  Setup wizard: choose providers",
         "  \x1b[2m⎿\x1b[0m \x1b[2mwriting · spark · 0 min\x1b[0m",
-        "\x1b[38;5;208m⏺\x1b[0m Waiting for you",
+        "\x1b[33m⏺\x1b[0m Waiting for you",
         '  \x1b[2m⎿\x1b[0m \x1b[2mahub accept T2 · ahub rework T2 --notes "…" · ahub reject T2\x1b[0m',
         '\x1b[2mahub status · ahub top · ahub doctor · ahub task new --kind scout --title "…"\x1b[0m',
     ])
@@ -622,7 +623,7 @@ def test_action_result_and_error_cli_tty(capsys, monkeypatch):
     assert rc == 0
     out = capsys.readouterr().out
     assert out == (
-        "\x1b[38;5;208m⏺\x1b[0m T12 merged into main\n"
+        "\x1b[32m⏺\x1b[0m T12 merged into main\n"
         '  \x1b[2m⎿\x1b[0m \x1b[2mNext: ahub status · ahub task new --kind scout --title "…"\x1b[0m\n'
     )
 
