@@ -245,13 +245,13 @@ def run_acceptance(project: ProjectConfig, cwd: str, nodes: list[str], *, task_l
                    on_wait: Callable[[], None] | None = None,
                    should_stop: Callable[[], bool] | None = None,
                    is_accept: bool = False) -> tuple[bool, str, str]:
-    """(green?, output tail, command). Under the project test resource.
+    """(green?, output tail, command). Under the project test resource, with its [tests] args.
 
     A busy test lock is a wait, not a red acceptance: LockTimeout propagates and the caller
     waits (the engine re-queues) or refuses (accept) — it never becomes a failing-test fix.
     """
     py = project.python_bin()
-    cmd = [py, "-m", "pytest", "-q", *nodes]
+    cmd = [py, "-m", "pytest", "-q", *project.tests_args, *nodes]
     env = scrub_env(dict(os.environ))
     env.update(task_env(task_label, cwd, project.root), PYTHONDONTWRITEBYTECODE="1")
     clear_pycache(cwd)  # stale .pyc (same-size edit within the same second) would give a false green

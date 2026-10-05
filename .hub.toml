@@ -17,3 +17,6 @@ usd = 0.0
 
 [secrets]
 exclude = []
+
+[tests]
+args = ["-n", "6", "--dist", "loadgroup"]  # the suite is xdist-safe (T160): ~3 min instead of ~12

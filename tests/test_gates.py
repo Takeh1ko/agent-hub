@@ -47,6 +47,20 @@ def test_acceptance_runs_serialized_by_lock(tmp_path):
     assert (root / "tests" / "marker.log").read_text().split() == ["start", "end", "start", "end"]
 
 
+def test_acceptance_passes_tests_args(tmp_path):
+    """[tests] args reach the acceptance pytest run (a -k filter that skips the red test)."""
+    root = tmp_path / "proj"
+    write(root / "tests" / "test_green.py", "def test_green():\n    assert True\n")
+    write(root / "tests" / "test_red.py", "def test_red():\n    assert False\n")
+    project = config.parse_project({
+        "schema_version": 2, "name": "P", "python": sys.executable,
+        "tests": {"args": ["-k", "test_green"]},
+    }, root)
+    ok, _tail, cmd = gates.run_acceptance(project, str(root), ["tests/"], task_label="T1")
+    assert ok
+    assert cmd == "pytest -q -k test_green tests/"
+
+
 def test_acceptance_without_test_resource_runs_unlocked(tmp_path):
     root = tmp_path / "proj"
     write(root / "tests" / "test_marker.py", "def test_marker():\n    assert True\n")

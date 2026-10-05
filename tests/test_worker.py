@@ -39,12 +39,18 @@ def scout(store, project, **kw):
 
 def agent_of(worktree: str) -> bool:
     """A live provider process of that work copy (the scenario file it runs lives in the copy)."""
-    return any(procs.alive(p) and worktree in " ".join(procs.cmdline(p)) for p in procs.pids())
+    # Match the provider only: `git worktree add <copy>` also carries the path while preparing.
+    for p in procs.pids():
+        cmd = " ".join(procs.cmdline(p))
+        if procs.alive(p) and "fake_agent" in cmd and worktree in cmd:
+            return True
+    return False
 
 
 def kill_agents(worktree: str) -> None:
     """Cleanup: no provider process of that copy outlives the test (a failure may leave one behind)."""
-    for pid in [p for p in procs.pids() if worktree in " ".join(procs.cmdline(p))]:
+    for pid in [p for p in procs.pids() if "fake_agent" in " ".join(procs.cmdline(p))
+                and worktree in " ".join(procs.cmdline(p))]:
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:
@@ -160,7 +166,8 @@ def test_sigterm_takes_the_provider_process_group_with_it(store, tmp_path, monke
     try:
         assert wait_until(lambda: agent_of(wt)), "процесс провайдера не стартовал"
         p.send_signal(signal.SIGTERM)
-        assert p.wait(timeout=30) == 0
+        # Generous bound: under parallel suites process startup and the group kill stretch.
+        assert p.wait(timeout=60) == 0
         assert wait_until(lambda: not agent_of(wt)), "процесс провайдера остался сиротой после SIGTERM"
         assert store.get_task(t.id).state is State.WORKING  # the task is left for the service
     finally:
