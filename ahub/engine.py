@@ -24,6 +24,7 @@ import os
 import re
 import socket
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -1261,20 +1262,22 @@ class Engine:
             return None
         try:
             head = workspace.head(wt)
-        except workspace.WorkspaceError:
-            return None
+            dirty = workspace.changed_files(wt)
+            work = workspace.git(self.project.root, "rev-parse", "--verify", self.project.work_branch,
+                                 check=False)
+            ref = work.stdout.strip()
+            synced = bool(ref) and workspace.git(wt, "merge-base", "--is-ancestor", ref, "HEAD",
+                                                 check=False).returncode == 0
+        except (workspace.WorkspaceError, OSError, subprocess.TimeoutExpired):
+            return None  # the copy is unreadable: the normal run reports it properly
         if not head or head != hold.get("head"):
             return None
         commit = str(self._result(t).get("commit", "") or "")
         if not commit or commit[:7] != head[:7] or commit[:7] != str(hold.get("commit", ""))[:7]:
             return None
-        if workspace.changed_files(wt):
+        if dirty:
             return None
-        work = workspace.git(self.project.root, "rev-parse", "--verify", self.project.work_branch,
-                             check=False)
-        ref = work.stdout.strip()
-        if not ref or workspace.git(wt, "merge-base", "--is-ancestor", ref, "HEAD",
-                                    check=False).returncode != 0:
+        if not synced:
             return None  # the work branch moved: the normal run syncs and re-runs the gates
         g = gates.GateResult(base=str(hold.get("base") or t.base_sha or ""), head=head,
                              diffstat=str(hold.get("diffstat") or ""), tests_ok=hold.get("tests_ok"),

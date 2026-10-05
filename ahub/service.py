@@ -321,13 +321,7 @@ class Service:
                                         rev.pop("efforts", None)
                                     self.store.update_task(t.id, review=rev)
                                 else:
-                                    self.store.update_task(t.id, executor=fb_base, effort=fb_stored,
-                                                           limits={**t.limits, "fresh_session": True})
-                                    t.executor = fb_base
-                                    try:
-                                        t.effort = fb_stored
-                                    except (AttributeError, TypeError):
-                                        pass
+                                    old_model = quota.swap_executor(self.store, t, qres.fallback_model)
                                 quota.clear_hold(self.store, t)  # a fresh model does the work from scratch
                                 self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
                                                      payload={"from": old_model, "to": qres.fallback_model,
