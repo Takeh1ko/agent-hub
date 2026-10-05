@@ -394,6 +394,33 @@ def test_every_literal_key_in_the_code_is_in_the_catalogues():
     assert not sorted(used - set(ru)), sorted(used - set(ru))
 
 
+def test_every_dumped_reason_code_has_a_template():
+    """`reasons.dump("code")` is data a reader renders through `reason.code`.
+
+    A code without that template is shown as the bare code in every status line, and its params (the git
+    error of a failed rollback, the branch of a foreign merge) are lost — the reader has nothing to say.
+    """
+    import ast
+    from pathlib import Path
+
+    from ahub.i18n.en import MESSAGES as en
+    from ahub.i18n.ru import MESSAGES as ru
+
+    dumped: set[str] = set()
+    src = Path(__file__).resolve().parents[1] / "ahub"  # the tests run from anywhere
+    for path in sorted(src.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "dump" and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "reasons"):
+                continue
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                dumped.add(node.args[0].value)  # a code built at run time has no literal to check
+    assert len(dumped) > 40, "the scan really found the dumps"
+    assert not sorted(f"reason.{c}" for c in dumped if f"reason.{c}" not in en)
+    assert not sorted(f"reason.{c}" for c in dumped if f"reason.{c}" not in ru)
+
+
 def _code_keys() -> tuple[set[str], set[str]]:
     """The keys the code asks for by name, and the prefixes it builds at run time —
     `t("setup.sum_" + k)`, `t(f"cli.group_{key}")`, `Words("archive.state_", …)`."""
@@ -467,7 +494,7 @@ def test_the_russian_count_has_three_forms(monkeypatch):
     _reset()
     try:
         set_lang("ru")
-        args = ("doctor.problem_one", "doctor.problems_few", "doctor.problems")
+        args = ("doctor.problems_one", "doctor.problems_few", "doctor.problems_many")
         assert plural(1, *args) == "1 проблема — исправление под проверкой"
         assert plural(2, *args) == "2 проблемы — исправление под каждой проверкой"
         assert plural(4, *args).startswith("4 проблемы")
@@ -477,12 +504,12 @@ def test_the_russian_count_has_three_forms(monkeypatch):
         assert plural(21, *args).startswith("21 проблема")
         assert plural(22, *args).startswith("22 проблемы")
 
-        alarms = ("alarms.acked", "alarms.acked_few", "alarms.acked_many")
+        alarms = ("alarms.acked_one", "alarms.acked_few", "alarms.acked_many")
         assert plural(1, *alarms) == "1 тревога отмечена прочитанной"
         assert plural(2, *alarms) == "2 тревоги отмечены прочитанными"
         assert plural(5, *alarms) == "5 тревог отмечено прочитанными"
 
-        found = ("views.findings_more_one", "views.findings_more_few", "views.findings_more")
+        found = ("views.findings_more_one", "views.findings_more_few", "views.findings_more_many")
         assert plural(2, *found, label="T1").startswith("ещё 2 находки")
         assert plural(5, *found, label="T1").startswith("ещё 5 находок")
     finally:

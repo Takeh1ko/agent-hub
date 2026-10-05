@@ -38,6 +38,21 @@ def _tags(entry, project) -> str:
     return out
 
 
+def _config_error() -> str:
+    """Why the global config was not read, "" — it was (or there is none).
+
+    The registry keeps every model visible when the config is broken (its provider switches are then
+    unknown), so the command says itself under the table instead of failing.
+    """
+    from ahub import config
+
+    try:
+        config.load_hub()
+    except config.ConfigError as e:
+        return str(e)
+    return ""
+
+
 def cmd_list(args) -> int:
     from ahub.i18n import t
 
@@ -64,6 +79,10 @@ def cmd_list(args) -> int:
                                 + (t("models.flag_denied") if registry.denied_by(m, project) else "")]
                                for m in registry.models(store)],
                               max_width=[20, 10, None], indent=2))
+    bad = _config_error()
+    if bad:
+        lines.append(ui.styled(t("cli.error", msg=bad), "dim"))  # the models are shown, the config is not read
+        data["config_error"] = bad
     emit(args, data, "\n".join(lines))
     return 0
 
@@ -140,7 +159,7 @@ def cmd_check(args) -> int:
             rows.append([_MARKS[ok], alias, _body(detail, alias)])
             p.step()
     ok_n = sum(1 for r in results if r["ok"])
-    key = "models.check_ok" if len(results) > 1 else "models.check_ok_one"  # "1 of 1 models" is not English
+    key = "models.check_ok_many" if len(results) > 1 else "models.check_ok_one"  # "1 of 1 models" is not English
     last = t(key, ok=ok_n, total=len(results)) if ok_n == len(results) \
         else t("models.check_bad", ok=ok_n, total=len(results))
     emit(args, {"checked": results},

@@ -26,10 +26,10 @@ from ahub import config, paths, ui
 from ahub.cliutil import CliError, emit
 from ahub.config import set_global
 from ahub.config import toml_str as _toml_str
+from ahub.doctor import BASH_RULE
 
 MARK_BEGIN = "<!-- ahub:begin -->"
 MARK_END = "<!-- ahub:end -->"
-BASH_RULE = "Bash(ahub:*)"  # the Claude Code permission rule for every `ahub …` command
 MCP_CMD = "claude mcp add ahub -- ahub mcp"  # the one-line hint for MCP, printed and never run
 CLAUDE_BLOCK = f"""{MARK_BEGIN}
 ## agent-hub
@@ -486,8 +486,7 @@ def _model_step(store, states, ask: bool, out: Steps) -> dict[str, str]:
     entries = [e for e in registry.models(store)
                if e.enabled and e.provider not in off and e.provider in live]
     with ui.Live(t("setup.probing", n=len(entries)), total=len(entries)) as p:  # probes run at once
-        results = doctor.probe_models(entries, timeout_s=doctor.PROBE_WIZARD_S)
-        p.step()
+        results = doctor.probe_models(entries, timeout_s=doctor.PROBE_WIZARD_S, step=p.step)
     if not results:  # probing off or nothing to probe — the free-alias path knows better
         return _free_default_step(store, ask, out)
     kinds = {e.alias: t(f"setup.wizard_model_{registry.cost_kind(e)}") for e in entries}

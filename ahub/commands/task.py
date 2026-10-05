@@ -195,7 +195,8 @@ def cmd_budget(args) -> int:
     from ahub import accept
 
     return _decide(args, lambda s, t: accept.extend_budget(s, t.id, add=args.add, set_to=args.set,
-                                                           add_usd=args.add_usd, by=args.by), "views.next_task")
+                                                           add_usd=args.add_usd, set_usd=args.set_usd,
+                                                           by=args.by), "views.next_task")
 
 
 def cmd_model(args) -> int:
@@ -273,10 +274,10 @@ def register(subparsers) -> None:
     g.add_argument("--spec", help=t("help.task_new_spec"))
     g.add_argument("--spec-file", help=t("help.task_new_spec_file"))
     n.add_argument("--format", help=t("help.task_new_format"))
-    n.add_argument("--model")
+    n.add_argument("--model", help=t("help.task_new_model"))
     n.add_argument("--level", type=int, help=t("help.task_new_level"))
     n.add_argument("--review", help=t("help.task_new_review"))
-    n.add_argument("--rounds", type=int)
+    n.add_argument("--rounds", type=int, help=t("help.task_new_rounds"))
     n.add_argument("--no-review", action="store_true")
     n.add_argument("--paths", help=t("help.task_new_paths"))
     n.add_argument("--accept", help=t("help.task_new_accept"))
@@ -354,7 +355,9 @@ def register(subparsers) -> None:
     gb = bu.add_mutually_exclusive_group()
     gb.add_argument("--add", type=float, help=t("help.budget_add"))
     gb.add_argument("--set", type=float, help=t("help.budget_set"))
-    bu.add_argument("--add-usd", type=float, help=t("help.budget_add_usd"))
+    ub = bu.add_mutually_exclusive_group()
+    ub.add_argument("--add-usd", type=float, help=t("help.budget_add_usd"))
+    ub.add_argument("--set-usd", type=float, help=t("help.budget_set_usd"))
     bu.add_argument("--by", default="orchestrator")
     add_scope_args(bu)
     bu.set_defaults(func=cmd_budget)

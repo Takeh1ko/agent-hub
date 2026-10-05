@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from ahub import paths
 from ahub.config import ConfigError, HubConfig, ProjectConfig, load_hub, provider_lookup, set_global
 from ahub.i18n import t as _t
 from ahub.model import Role
@@ -102,13 +103,13 @@ def _seed_fake(c) -> None:
     """The fake provider as a registry entry (env: AHUB_FAKE_PROVIDER=1). Idempotent."""
     from ahub.providers.fake import ALIAS, MODEL_ID
 
-    if not c.execute("SELECT 1 FROM model WHERE alias=?", (ALIAS,)).fetchone():
-        c.execute("INSERT INTO model(alias, provider, model_id, variant, note) VALUES(?,?,?,?,?)",
-                  (ALIAS, ALIAS, MODEL_ID, "", "fake provider (AHUB_FAKE_PROVIDER)"))
+    if c.execute("SELECT 1 FROM model WHERE alias=?", (ALIAS,)).fetchone():
+        return
+    c.execute("INSERT INTO model(alias, provider, model_id, variant, note) VALUES(?,?,?,?,?)",
+              (ALIAS, ALIAS, MODEL_ID, "", "fake provider (AHUB_FAKE_PROVIDER)"))
     for role in Role:
         c.execute("INSERT OR IGNORE INTO role_model(role, alias, position, is_default) VALUES(?,?,999,0)",
                   (role.value, ALIAS))
-        c.execute("UPDATE role_model SET is_default=(alias=?) WHERE role=?", (ALIAS, role.value))
 
 
 def _entry(row) -> ModelEntry:
@@ -131,22 +132,41 @@ def get(store: Store, alias: str) -> ModelEntry:
     return _entry(row)
 
 
+_cached_disabled: tuple[int, frozenset[str]] | None = None
+
+
 def disabled_providers(hub: HubConfig | None = None) -> frozenset[str]:
     """Providers switched off in the hub config ([providers.<name>] enabled = false).
 
     A broken global config must not hide every model: doctor/check_config reports it, here everything stays on.
     """
-    if hub is None:
-        try:
-            hub = load_hub()
-        except ConfigError:
-            return frozenset()
-    return frozenset(name.strip().lower() for name in hub.providers_off)
+    if hub is not None:
+        return frozenset(name.strip().lower() for name in hub.providers_off)
+    p = paths.global_config_path()
+    try:
+        mtime = p.stat().st_mtime_ns if p.is_file() else -1
+    except OSError:
+        mtime = -1
+    global _cached_disabled
+    if _cached_disabled is not None and _cached_disabled[0] == mtime:
+        return _cached_disabled[1]
+    try:
+        hub = load_hub()
+    except ConfigError:
+        return frozenset()
+    result = frozenset(name.strip().lower() for name in hub.providers_off)
+    _cached_disabled = (mtime, result)
+    return result
 
 
 def provider_enabled(name: str, hub: HubConfig | None = None) -> bool:
     """Is the provider on (the single place the switch lives: the hub config)."""
-    return name.strip().lower() not in disabled_providers(hub)
+    if hub is None:
+        try:
+            hub = load_hub()
+        except ConfigError:
+            return True
+    return hub.provider_enabled(name)
 
 
 def set_provider_enabled(name: str, enabled: bool) -> Path:
@@ -168,18 +188,15 @@ def _raw_menu(store: Store, role: Role | str) -> list[tuple[ModelEntry, bool]]:
     return [(_entry(r), bool(r["is_default"])) for r in rows]
 
 
-def menu(store: Store, role: Role | str) -> list[tuple[ModelEntry, bool]]:
+def menu(store: Store, role: Role | str, hub: HubConfig | None = None) -> list[tuple[ModelEntry, bool]]:
     """Role menu: [(model, default)] in display order; models of a switched-off provider are hidden."""
-    off = disabled_providers()
+    off = disabled_providers(hub)
     return [(e, d) for e, d in _raw_menu(store, role) if e.provider not in off]
 
 
 def role_default(store: Store, role: Role | str) -> ModelEntry | None:
     """The default model of a role menu as stored, None — no default (a switched-off provider included)."""
-    try:
-        items = _raw_menu(store, role)
-    except Exception:
-        return None
+    items = _raw_menu(store, role)
     return next((e for e, d in items if d), None)
 
 
@@ -197,10 +214,10 @@ def cost_kind(entry: ModelEntry) -> str:
     return "plan" if entry.provider in PLAN_PROVIDERS else "paid"
 
 
-def free_candidates(store: Store) -> list[ModelEntry]:
+def free_candidates(store: Store, hub: HubConfig | None = None) -> list[ModelEntry]:
     """Enabled free aliases to try, in order: FREE_ALIASES first, then any other free model."""
     entries = models(store)  # ordered by alias
-    off = disabled_providers()
+    off = disabled_providers(hub)
     known = {e.alias: e for e in entries if e.enabled and e.alias in FREE_ALIASES and e.provider not in off}
     out = [known[a] for a in FREE_ALIASES if a in known]
     return out + [e for e in entries if e.enabled and e.provider not in off
@@ -218,12 +235,12 @@ def denied_by(entry: ModelEntry, project: ProjectConfig | None) -> str | None:
     return None
 
 
-def check(store: Store, alias: str, project: ProjectConfig | None) -> ModelEntry:
+def check(store: Store, alias: str, project: ProjectConfig | None, hub: HubConfig | None = None) -> ModelEntry:
     """Model fit for a project task: exists, enabled, provider on, not denied by the project."""
     entry = get(store, alias)
     if not entry.enabled:
         raise RegistryError(_t("registry.disabled", alias=alias))
-    if not provider_enabled(entry.provider):
+    if not provider_enabled(entry.provider, hub):
         raise RegistryError(_t("registry.provider_off", alias=alias, provider=entry.provider))
     rule = denied_by(entry, project)
     if rule is not None:
@@ -231,11 +248,17 @@ def check(store: Store, alias: str, project: ProjectConfig | None) -> ModelEntry
     return entry
 
 
-def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit: str | None = None) -> ModelEntry:
+def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit: str | None = None,
+         hub: HubConfig | None = None) -> ModelEntry:
     """Model for a role: explicit (checked) or default; if the default is denied — first allowed menu entry."""
     if explicit:
-        return check(store, explicit, project)
-    off = disabled_providers()
+        return check(store, explicit, project, hub)
+    if selectable_from_env():
+        try:
+            return check(store, "fake", project, hub)
+        except RegistryError:
+            pass
+    off = disabled_providers(hub)
     items = _raw_menu(store, role)
     ordered = [e for e, d in items if d] + [e for e, d in items if not d]
     reasons = []

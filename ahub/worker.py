@@ -13,7 +13,7 @@ from __future__ import annotations
 import signal
 import sys
 
-from ahub import config, reasons
+from ahub import config
 from ahub import log as hublog
 from ahub.engine import Engine, PollFailed
 from ahub.i18n import t as _t
@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     except PollFailed:
         return 4  # the engine has logged it once; the task stays for the service to re-pick
     lg.info("task process done: %s %s", res.state.value, res.reason[:200])
-    return 3 if res.reason == reasons.text(reasons.dump("busy")) else 0
+    return 3 if res.busy else 0
 
 
 if __name__ == "__main__":

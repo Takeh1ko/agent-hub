@@ -66,6 +66,23 @@ def test_new_errors_one_line(env, capsys):
     assert rc == 2 and err.startswith("ошибка: задача не создана:") and "«bot/**» вне" in err and "приёмка" in err
 
 
+def test_review_task_panel_by_flag(env, capsys):
+    """`--review` of a review kind is its panel; `--model` is one reviewer, --rounds does not apply."""
+    store, _ = env
+    install_fake(store, [])
+    rc, out, err = ahub(capsys, "task", "new", "--kind", "review", "--title", "посмотри ветку",
+                        "--review", "fake", "--input", "main..ahub/T1")
+    assert rc == 0 and "ревью fake×1" in out, err
+    assert store.get_task(1).review == {"models": ["fake"], "rounds": 1}
+    rc, _, err = ahub(capsys, "task", "new", "--kind", "review", "--title", "x", "--review", "fake",
+                      "--model", "fake", "--input", "main")
+    assert rc == 2 and "--review и --model вместе нельзя" in err
+    rc, _, err = ahub(capsys, "task", "new", "--kind", "review", "--title", "y", "--review", "fake",
+                      "--rounds", "2", "--input", "main")
+    assert rc == 2 and "--rounds неприменим к задаче «ревью»" in err
+    assert store.get_task(2) is None
+
+
 def test_key_idempotent(env, capsys):
     store, _ = env
     install_fake(store, [])
@@ -86,6 +103,15 @@ def test_stop_continue_reject(env, capsys):
     assert rc == 2 and "продолжить можно" in err
     rc, _, err = ahub(capsys, "status", "T99")
     assert rc == 2 and "нет задачи" in err
+
+
+def test_budget_lowers_the_real_money_budget(env, capsys):
+    store, _ = env
+    install_fake(store, [])
+    ahub(capsys, "task", "new", "--kind", "scout", "--title", "x", "--model", "fake", "--budget-usd", "0.5")
+    rc, out, err = ahub(capsys, "budget", "T1", "--set-usd", "0.02")
+    assert rc == 0 and "реальные $0.5 → $0.02" in out, err
+    assert store.get_task(1).budget_usd == 0.02
 
 
 def test_nudge_refused_without_a_running_worker(env, capsys):
