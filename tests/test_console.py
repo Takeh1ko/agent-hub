@@ -146,6 +146,35 @@ async def test_tab_and_esc_move_focus(store: Store):
         assert app.focus_mode == "input"
 
 
+async def test_typing_after_a_click_into_the_input_never_acts_on_the_selected_task(store: Store):
+    """Tab selects a task; a click back into the input (no Esc) — typed text and Enter go to the input."""
+    from textual.widgets import Input
+
+    from ahub import transitions
+
+    tid = _task(store, "P", "selected")
+    transitions.move(store, tid, State.PREPARING)
+    app = ConsoleApp(store=store, all_projects=True)
+    acted: list[str] = []
+    for name in ("cmd_follow", "cmd_accept", "cmd_reject", "cmd_rework", "cmd_nudge"):
+        setattr(app, name, lambda args, _n=name: acted.append(_n))
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        await pilot.press("tab")
+        await pilot.pause(0.2)
+        assert app.focus_mode == "tasks"
+        await pilot.click("#input")  # the mouse, not Esc: the flag must follow the real focus
+        await pilot.pause(0.2)
+        assert app.focus_mode == "input"
+        await pilot.press(*"marx")
+        await pilot.pause(0.1)
+        assert acted == []
+        assert app.query_one("#input", Input).value == "marx"
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        assert acted == []  # Enter submitted the text, it did not follow the selected task
+
+
 async def test_follow_opens_and_esc_returns(tmp_path: Path, store: Store):
     import json as _json
 
