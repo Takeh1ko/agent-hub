@@ -18,7 +18,7 @@ from ahub.time import now_ms
 from ahub.tui import data
 from ahub.tui.app import TopApp
 from ahub.tui.live import LiveView
-from tests.conftest import rows_ready, write
+from tests.conftest import rows_ready, wait_for, write
 
 
 @pytest.fixture
@@ -133,11 +133,11 @@ async def test_app_transcript_screen_uses_the_width_of_its_pane(tmp_path, store)
     store.update_session(row, status="running", ended_at=None)
     app = TopApp(store=store, projects=[])
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Transcript"
+                       and bool(app.screen.query("#live-log")))
         screen = app.screen
         width = screen.query_one("#live-log", Static).size.width
         assert screen.view.width == width and width < 120
@@ -149,7 +149,6 @@ async def test_app_view_mode_blocks_actions(store):
     a, b = fill(store)
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         assert "ПРОСМОТР" in str(app.query_one("#mode").render())
         await rows_ready(app, pilot, want=2)  # the first refresh runs in a thread — a pause is not a wait
         assert len(app._ids) == 2
@@ -157,6 +156,7 @@ async def test_app_view_mode_blocks_actions(store):
         await pilot.pause(0.2)
         assert store.get_task(app.selected()).state in (State.QUEUED, State.DONE)
         await pilot.press("c")
+        await wait_for(pilot, lambda: "УПРАВЛЕНИЕ" in str(app.query_one("#mode").render()))
         assert "УПРАВЛЕНИЕ" in str(app.query_one("#mode").render())
 
 
@@ -164,13 +164,13 @@ async def test_app_stop_with_confirm(store):
     a, b = fill(store)
     app = TopApp(store=store, projects=[], control=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(a))
         await pilot.press("s")
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Confirm"
+                       and bool(app.screen.query("#dialog")))
         await pilot.press("y")
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: store.get_task(a).state is State.STOPPED)
         assert store.get_task(a).state is State.STOPPED
 
 
@@ -183,18 +183,19 @@ async def test_app_nudge_message(store):
     store.add_session(task_id=a, provider="fake", role="executor", model="fake", external_id="ses_x")
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(a))
         await pilot.press("m")  # view mode: nothing happens
         await pilot.pause(0.2)
         assert app.screen.__class__.__name__ != "Ask" and store.get_task(a).request == ""
         await pilot.press("c")  # control mode on
+        await wait_for(pilot, lambda: "УПРАВЛЕНИЕ" in str(app.query_one("#mode").render()))
         await pilot.press("m")
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Ask"
+                       and bool(app.screen.query("#dialog")))
         await pilot.press(*"продолжай, почини")
         await pilot.press("enter")
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: store.get_task(a).request_text == "продолжай, почини")
     t = store.get_task(a)
     assert t.request == "nudge" and t.request_text == "продолжай, почини"
     assert [e.payload["by"] for e in store.events(task_id=a) if e.kind == "nudge"] == ["human"]
@@ -204,7 +205,8 @@ async def test_app_help(store):
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
         await pilot.press("question_mark")
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Help"
+                       and bool(app.screen.query("#dialog")))
         assert app.screen.__class__.__name__ == "Help"
         await pilot.press("escape")
 
@@ -227,23 +229,15 @@ async def test_app_history_toggle(store):
     a, b = fill(store)
     c = accepted(store)
     app = TopApp(store=store, projects=[])
-
-    async def until(cond, timeout: float = 15.0) -> None:
-        # the refresh runs in a worker thread: wait for the state, not a fixed pause (slow under parallel suites)
-        for _ in range(int(timeout / 0.05)):
-            if cond():
-                return
-            await pilot.pause(0.05)
-
     async with app.run_test() as pilot:
-        await until(lambda: set(app._ids) == {a, b})
+        await wait_for(pilot, lambda: set(app._ids) == {a, b})
         assert set(app._ids) == {a, b}
         await pilot.press("h")
-        await until(lambda: set(app._ids) == {a, b, c})
+        await wait_for(pilot, lambda: set(app._ids) == {a, b, c})
         assert set(app._ids) == {a, b, c}
         assert "история" in str(app.query_one("#header").render())
         await pilot.press("h")
-        await until(lambda: set(app._ids) == {a, b})
+        await wait_for(pilot, lambda: set(app._ids) == {a, b})
         assert set(app._ids) == {a, b} and "текущие" in str(app.query_one("#header").render())
 
 
@@ -317,32 +311,35 @@ async def test_app_transcript_screen(tmp_path, store):
     _session(store, tid, _fake_log(tmp_path / "executor.log", ["Смотрю код."]), status="running")
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Transcript"
+                       and bool(app.screen.query("#live-log")))
         screen = app.screen
         assert screen.__class__.__name__ == "Transcript"
         assert "Смотрю код." in str(screen.query_one("#live-log").render())
         assert "эфир" in str(screen.query_one("#live-head").render())
         await pilot.press("p")  # the full prompt of the screen, not the pause of the table
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Prompt"
+                       and bool(app.screen.query("#prompt-text")))
         assert app.screen.__class__.__name__ == "Prompt"
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Transcript"
+                       and bool(app.screen.query("#live-log")))
         await pilot.press("a")  # the screen only reads: no accept dialog behind it
         await pilot.pause(0.2)
         assert app.screen.__class__.__name__ == "Transcript"
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: bool(app.screen.query("#tasks")))
         app.screen.query_one("#tasks")  # back at the table
         assert store.meta_get(PAUSE_KEY) is None
         await pilot.press("enter")  # enter on a row opens the transcript too
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Transcript"
+                       and bool(app.screen.query("#live-log")))
         assert app.screen.__class__.__name__ == "Transcript"
         await pilot.press("q")
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: bool(app.screen.query("#tasks")))
         app.screen.query_one("#tasks")
         assert app.is_running  # q on the transcript screen is "back", not "quit"
 
@@ -357,18 +354,19 @@ async def test_transcript_screen_nudges_the_worker(tmp_path, store):
     _session(store, tid, _fake_log(tmp_path / "executor.log", ["Смотрю код."]), status="running")
     app = TopApp(store=store, projects=[], control=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=app._ids.index(tid))
         await pilot.press("t")
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Transcript"
+                       and bool(app.screen.query("#live-log")))
         assert app.check_action("nudge", ()) is False  # the table key is not offered behind the screen
         assert await app.run_action("app.nudge") is False and store.get_task(tid).request == ""
         await pilot.press("m")  # the screen's own m
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Ask"
+                       and bool(app.screen.query("#dialog")))
         assert app.screen.__class__.__name__ == "Ask"
         await pilot.press(*"хватит, почини", "enter")
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: store.get_task(tid).request_text == "хватит, почини")
         assert app.screen.__class__.__name__ == "Transcript"  # the screen is still under the dialog
     assert store.get_task(tid).request_text == "хватит, почини"
 
@@ -382,25 +380,25 @@ async def test_transcript_tail_holds_when_scrolled_up(tmp_path, store):
     _session(store, tid, log, status="running")
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot)
         app.query_one("#tasks").move_cursor(row=0)
         await pilot.press("t")
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Transcript"
+                       and bool(app.screen.query("#live-log")))
         screen = app.screen
         box = screen.query_one("#live-box", VerticalScroll)
         assert box.is_vertical_scroll_end and screen.view.following
         box.scroll_home(animate=False)
         screen.refresh_live()
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: not screen.view.following)
         assert not screen.view.following
         assert "на паузе" in str(screen.query_one("#live-head").render())
         _say(log, ["ещё строчка"])  # a new line does not drag the reader down
         screen.refresh_live()
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: "ещё строчка" in str(screen.query_one("#live-log").render()))
         assert "ещё строчка" in str(screen.query_one("#live-log").render())
         await pilot.press("f")
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: screen.view.following)
         assert screen.view.following and "эфир" in str(screen.query_one("#live-head").render())
 
 
@@ -434,9 +432,9 @@ async def test_app_detail_shows_brackets_and_colours_as_text(store, monkeypatch)
         transitions.move(store, tid, st, reason="отчёт [x] готов")
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
+        await rows_ready(app, pilot)
         app._show_detail()
-        await pilot.pause(0.1)
+        await wait_for(pilot, lambda: "[--all? (оставить)]" in str(app.query_one("#detail").render()))
         text = str(app.query_one("#detail").render())
         assert "[--all? (оставить)]" in text
         assert "\x1b[" not in text
@@ -465,20 +463,19 @@ async def test_offer_decides_by_the_status_code_not_by_the_preview_text(tmp_path
     assert ": failed" in preview  # the words of the spec, not a status
     app = TopApp(store=store, projects=[project])
     async with app.run_test() as pilot:
-        await pilot.pause(0.3)
         app._offer(project, did, preview, drafts.status(store, did))
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "Confirm"
+                       and bool(app.screen.query("#dialog")))
         assert app.screen.__class__.__name__ == "Confirm"  # offered, not refused as an error
         await pilot.press("n")
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: drafts.status(store, did) == "cancelled")
         assert drafts.status(store, did) == "cancelled"  # declined — the draft is not started
 
     bad = _draft(store, "P", "failed")
     app = TopApp(store=store, projects=[project])
     async with app.run_test() as pilot:
-        await pilot.pause(0.3)
         app._offer(project, bad, drafts.preview(store, bad), drafts.status(store, bad))
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: len(app._notifications) == 1)
         assert app.screen.__class__.__name__ != "Confirm"  # not offered — the error goes to the notifications
         said = [n.message for n in app._notifications]
         assert len(said) == 1 and "failed" in said[0]
@@ -491,11 +488,10 @@ async def test_a_group_header_row_shows_the_group_in_the_detail(tmp_path, store)
     app = TopApp(store=store, projects=[_project_config(tmp_path / "A", "A"),
                                         _project_config(tmp_path / "B", "B")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot)
         assert app._ids[0] == 0  # the first row opens the group of project A
         app.query_one("#tasks").move_cursor(row=0)
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: "A" in str(app.query_one("#detail").render()))
         text = str(app.query_one("#detail").render())
         assert "нет задач" not in text and "A" in text and str(t("tui.group_tasks", n=1)) in text
         assert app.selected() is None  # a group row has no task to act on
@@ -514,7 +510,6 @@ async def test_the_o_key_narrows_the_table_and_the_feed(tmp_path, store):
     app = TopApp(store=store, projects=[_project_config(tmp_path / "A", "A"),
                                         _project_config(tmp_path / "B", "B")])
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot, want=whole)
         assert "сообщение B" in str(app.query_one("#feed").render())  # the whole feed at first
         await pilot.press("o")
