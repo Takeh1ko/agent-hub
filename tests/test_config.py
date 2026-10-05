@@ -63,6 +63,20 @@ def test_parse_v2_full(tmp_path):
     assert cfg.timeouts.retry_max == 10  # the cap
 
 
+def test_tests_args_default_empty_and_parsed(tmp_path):
+    cfg = config.parse_project({"schema_version": 2, "name": "P"}, tmp_path)
+    assert cfg.tests_args == ()
+    cfg = config.parse_project({"schema_version": 2, "name": "P",
+                                "tests": {"args": ["-n", "6", "--dist", "loadgroup"]}}, tmp_path)
+    assert cfg.tests_args == ("-n", "6", "--dist", "loadgroup")
+
+
+def test_tests_args_bad_type(tmp_path):
+    write(tmp_path / ".hub.toml", 'schema_version = 2\nname = "P"\n[tests]\nargs = ["-n", 6]\n')
+    with pytest.raises(config.ConfigError, match=r"tests\.args"):
+        config.load_project(tmp_path)
+
+
 def test_find_upward(tmp_path):
     write(tmp_path / "p" / ".hub.toml", 'schema_version = 2\nname = "P"\n')
     deep = tmp_path / "p" / "a" / "b"

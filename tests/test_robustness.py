@@ -162,7 +162,7 @@ def test_engine_lock_stopped_is_stopped(store: Store, tmp_path, monkeypatch):
 
 
 def test_accept_lock_busy_is_one_line_refusal(store: Store, tmp_path, monkeypatch):
-    """Accept on a busy test lock refuses without rolling the merge back."""
+    """Accept on a busy test lock refuses without ever merging (verify-before-move)."""
     from tests.test_accept import done_code, git_out
 
     project = make_project(tmp_path)
@@ -178,9 +178,9 @@ def test_accept_lock_busy_is_one_line_refusal(store: Store, tmp_path, monkeypatc
     monkeypatch.setattr(g, "run_acceptance", _busy)
     with pytest.raises(accept.DecisionError) as exc:
         accept.accept(store, project, t.id)
-    assert "\n" not in str(exc.value)  # one line, not a red-tests rollback with a tail
+    assert "\n" not in str(exc.value)  # one line, not a red-tests report with a tail
     after = git_out(project.root, "rev-parse", "HEAD").strip()
-    assert after != before  # the merge is still in place; a rollback would restore `before`
+    assert after == before  # nothing was merged; retry the accept
     cur = store.get_task(t.id)
     assert cur.state is State.NEEDS_DECISION
     assert "wait_test_lock" in cur.state_reason

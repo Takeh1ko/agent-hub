@@ -122,6 +122,84 @@ def test_tx_rolls_back(store):
     assert store.list_tasks() == []
 
 
+def test_tx_retries_locked_until_released(store, monkeypatch):
+    """A held write lock → BEGIN retries with back-off and succeeds once released."""
+    import threading
+    import time
+
+    import ahub.store as store_mod
+
+    monkeypatch.setattr(store_mod, "LOCK_RETRY_BUDGET_S", 5.0)
+    monkeypatch.setattr(store_mod, "LOCK_RETRY_BASE_S", 0.01)
+    monkeypatch.setattr(store_mod, "LOCK_RETRY_CAP_S", 0.05)
+    monkeypatch.setattr(store_mod, "BUSY_TIMEOUT_MS", 50)
+    holder = sqlite3.connect(str(store.path), timeout=5, isolation_level=None,
+                             check_same_thread=False)
+    holder.execute("PRAGMA busy_timeout=50")
+    try:
+        holder.execute("BEGIN IMMEDIATE")
+
+        def _release():
+            time.sleep(0.3)
+            try:
+                holder.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            finally:
+                try:
+                    holder.close()
+                except sqlite3.Error:
+                    pass
+
+        th = threading.Thread(target=_release)
+        th.start()
+        store.meta_set("k", "v")  # first BEGIN times out, retry wins after release
+        th.join(10)
+        assert store.meta_get("k") == "v"
+    finally:
+        try:
+            holder.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        try:
+            holder.close()
+        except sqlite3.Error:
+            pass
+
+
+def test_tx_does_not_retry_other_errors(store, monkeypatch):
+    """A non-lock OperationalError raises at once — it is never retried."""
+
+    calls: list[str] = []
+
+    class _FakeCon:
+        def execute(self, sql, *args, **kw):
+            if isinstance(sql, str) and "BEGIN" in sql:
+                calls.append(sql)
+                raise sqlite3.OperationalError("no such table: foo")
+            raise AssertionError(f"unexpected {sql!r}")
+
+        def close(self) -> None:
+            pass
+
+    fake = _FakeCon()
+    monkeypatch.setattr(store, "_open", lambda: fake)
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        with store.tx():
+            pass
+    assert len(calls) == 1
+
+
+def test_is_lock_error_only_for_lock():
+    from ahub.store import is_lock_error
+
+    assert is_lock_error(sqlite3.OperationalError("database is locked"))
+    assert is_lock_error(sqlite3.OperationalError("database is busy"))
+    assert not is_lock_error(sqlite3.OperationalError("no such table: foo"))
+    assert not is_lock_error(sqlite3.IntegrityError("UNIQUE failed"))
+    assert not is_lock_error(ValueError("database is locked"))
+
+
 def test_rows_tolerate_columns_of_a_newer_schema(store):
     """A migration adds a column under a live process — the old code still reads every row type."""
     tid = store.create_task(project="P", kind=Kind.CODE, title="x", now=1000)
