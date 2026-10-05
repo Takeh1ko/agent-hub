@@ -498,7 +498,9 @@ def test_edit_creates_template(tmp_path, monkeypatch, capsys):
     assert not local_path.exists()
     assert cli.main(["prompts", "edit", "review", "--local"]) == 0
     assert local_path.is_file()
-    assert "<!-- Guidance for review (local) -->" in local_path.read_text(encoding="utf-8")
+    rev_content = local_path.read_text(encoding="utf-8")
+    assert "<!-- Guidance for review (local) -->" in rev_content
+    assert "blocker: any SQL" in rev_content
 
     # Test with EDITOR set
     monkeypatch.setenv("EDITOR", "true")
@@ -555,6 +557,10 @@ def test_ahub_home_isolation(tmp_path, monkeypatch):
 
 def test_cli_prompts_and_show(tmp_path, monkeypatch, capsys):
     """ahub prompts and ahub prompts show CLI subcommands."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
     import json
     from pathlib import Path
 
@@ -570,6 +576,17 @@ def test_cli_prompts_and_show(tmp_path, monkeypatch, capsys):
     assert cli.main(["prompts"]) == 0
     out = capsys.readouterr().out
     assert "all" in out and "code" in out and "review" in out
+
+    # ahub prompts show all with no guidance prints hint
+    assert cli.main(["prompts", "show", "all"]) == 0
+    out_empty_all = capsys.readouterr().out
+    assert "no guidance for all" in out_empty_all
+
+    # ahub prompts show scout/code/routine/review all succeed and contain submit section
+    for r in ("scout", "code", "routine", "review"):
+        assert cli.main(["prompts", "show", r]) == 0
+        r_out = capsys.readouterr().out
+        assert "## How to submit" in r_out
 
     # Add a project prompt
     write(paths.project_prompts_dir(project.root) / "code.md", "CUSTOM_CODE_GUIDANCE")
@@ -758,8 +775,12 @@ def test_end_to_end_review_task_records_prompts(tmp_path, monkeypatch):
     assert "prompts: built-in + project(review)" in card
 
 
-def test_end_to_end_rework_fresh_task_keeps_no_rework_notes(tmp_path):
+def test_end_to_end_rework_fresh_task_keeps_no_rework_notes(tmp_path, monkeypatch):
     """An end-to-end rework with fresh_session pops rework_notes and does not restore it."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
     from ahub import tasks
     from ahub.engine import Engine
     from ahub.model import Kind
@@ -832,10 +853,10 @@ def test_non_utf8_guidance_handled(tmp_path, monkeypatch, capsys):
     bad_file.parent.mkdir(parents=True, exist_ok=True)
     bad_file.write_bytes(b"\xcf\xf0\xe8\xe2\xe5\xf2")  # cp1251 "Привет", invalid UTF-8
 
-    # 1. code_prompt does not crash; file is ignored
+    # 1. code_prompt does not crash; file is ignored and recorded as skipped
     prompt, summary, _ = prompts.code_prompt(project, task)
     assert "## Project guidance" not in prompt
-    assert summary == "built-in"
+    assert summary == "built-in + project(code: skipped, non-UTF-8)"
 
     # 2. rules_text does not crash
     assert prompts.rules_text(project) == prompts.DEFAULT_RULES
@@ -989,8 +1010,12 @@ def test_check_prompts_reports_unreadable_file(tmp_path, monkeypatch):
         assert "check file permissions" in errs[0].fix
 
 
-def test_refuse_bytes_assemble_guidance(tmp_path):
+def test_refuse_bytes_assemble_guidance(tmp_path, monkeypatch):
     """Guidance files > 16 KB are refused and treated as missing in assemble_guidance."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
     from ahub import paths, prompts
     from ahub.store import Store
     from tests.conftest import write
@@ -1006,6 +1031,95 @@ def test_refuse_bytes_assemble_guidance(tmp_path):
 
     prompt, summary, _ = prompts.code_prompt(project, task)
     assert "## Project guidance" not in prompt
-    assert summary == "built-in"
+    assert summary == "built-in + project(code: skipped, too big)"
+
+
+def test_skipped_unreadable_file_leaves_note_in_summary_and_log(tmp_path, monkeypatch, caplog):
+    """An unreadable guidance file is skipped and leaves a note in log and card summary."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
+    import logging
+    from pathlib import Path
+
+    from ahub import paths, prompts, views
+    from ahub.store import Store
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    store = Store()
+    tid = store.create_task(project="P", kind="code", title="task")
+    store.update_task(tid, limits={"paths": ["core/**"], "accept": []})
+    task = store.get_task(tid)
+
+    code_path = paths.global_prompts_dir() / "code.md"
+    code_path.parent.mkdir(parents=True, exist_ok=True)
+    code_path.write_text("SOME_CODE_RULE", encoding="utf-8")
+
+    # Simulate unreadable file by monkeypatching read_text on Path
+    orig_read_text = Path.read_text
+
+    def mock_read_text(self, *args, **kwargs):
+        if self == code_path:
+            raise OSError("Permission denied")
+        return orig_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", mock_read_text)
+
+    with caplog.at_level(logging.WARNING):
+        prompt, summary, layers = prompts.code_prompt(project, task)
+
+    # 1. Guidance not included
+    assert "SOME_CODE_RULE" not in prompt
+    # 2. Log contains warning
+    assert any("skipped" in r.message and "unreadable" in r.message for r in caplog.records)
+    # 3. Card summary records skipped note
+    assert summary == "built-in + global(code: skipped, unreadable)"
+
+    # 4. Russian card displays translated words
+    store.update_task(tid, limits={"prompts": summary})
+    task = store.get_task(tid)
+    monkeypatch.setenv("AHUB_LANG", "ru")
+    _reset()
+
+    card_ru = views.task_text(store, task)
+    assert "промпты: встроенный + глобальный(code: пропущен, не удаётся прочитать)" in card_ru
+
+
+def test_code_task_reviewer_summary_recorded(tmp_path, monkeypatch):
+    """When a code task runs a review round, the reviewer prompt summary is recorded on the task."""
+    monkeypatch.setenv("AHUB_LANG", "en")
+    from ahub.i18n import _reset
+    _reset()
+
+    from ahub import engine, gates, paths
+    from ahub.providers.base import Outcome, RunResult
+    from ahub.store import Store
+    from tests.conftest import write
+    from tests.enginekit import make_project
+
+    project = make_project(tmp_path)
+    write(paths.project_prompts_dir(project.root) / "review.md", "REVIEW_RULE")
+
+    store = Store()
+    tid = store.create_task(project="P", kind="code", title="feature")
+    store.update_task(tid, limits={"paths": ["src/**"], "accept": []})
+    task = store.get_task(tid)
+
+    eng = engine.Engine(store, project, tid)
+    g = gates.GateResult(base="base", head="head", diffstat="1 file")
+
+    # Mock session to return empty run result without spawning real process
+    def mock_session(role, model, prompt, **kwargs):
+        return RunResult(outcome=Outcome.OK, session_id="s1")
+
+    monkeypatch.setattr(eng, "session", mock_session)
+    monkeypatch.setattr(eng, "_revert_reviewer", lambda t: None)
+    eng._review_round(task, g, ["mock_model"], 1, 1, material="diff")
+
+    updated = store.get_task(tid)
+    assert "prompts" in updated.limits
+    assert updated.limits["prompts"] == "built-in + project(review)"
 
 

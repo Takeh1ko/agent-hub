@@ -36,6 +36,15 @@ def _format_size(size: int) -> str:
     return f"{size} B"
 
 
+def _format_cell(path: Path, size: int, project_root: Path | None = None, cap: int = 22) -> str:
+    sz = f"({_format_size(size)})"
+    p = _short_path(path, project_root)
+    budget = cap - len(sz) - 1
+    if len(p) > budget and budget > 3:
+        p = "…" + p[-(budget - 1):]
+    return f"{p} {sz}"
+
+
 def _dummy_task(project_name: str, role: str) -> Task:
     kind = {
         "scout": Kind.SCOUT,
@@ -92,15 +101,15 @@ def cmd_prompts(args) -> int:
             "local": {"path": str(l_path), "size": l_size, "exists": l_exists},
         }
 
-        g_cell = f"{_short_path(g_path)} ({_format_size(g_size)})" if g_exists else "—"
-        p_cell = f"{_short_path(p_target, project.root)} ({_format_size(p_size)})" if p_exists else "—"
-        l_cell = f"{_short_path(l_path)} ({_format_size(l_size)})" if l_exists else "—"
+        g_cell = _format_cell(g_path, g_size, None, 22) if g_exists else "—"
+        p_cell = _format_cell(p_target, p_size, project.root, 21) if p_exists else "—"
+        l_cell = _format_cell(l_path, l_size, None, 22) if l_exists else "—"
 
         is_empty = not (g_exists or p_exists or l_exists)
         rows.append((r, [r, g_cell, p_cell, l_cell], is_empty))
 
     head = [t("prompts.col_role"), t("prompts.col_global"), t("prompts.col_project"), t("prompts.col_local")]
-    table_lines = ui.table(head, [cells for _, cells, _ in rows], indent=2).splitlines()
+    table_lines = ui.table(head, [cells for _, cells, _ in rows], max_width=[7, 22, 21, 22], indent=2).splitlines()
     out = [table_lines[0]]  # header
     for i, (r, _, is_empty) in enumerate(rows, start=1):
         out.append(table_lines[i])
@@ -141,7 +150,9 @@ def cmd_show(args) -> int:
         ],
         "prompt": prompt_text,
     }
-    emit(args, data, prompt_text)
+    hint_str = t("prompts.hint_empty", role=role)
+    human_text = prompt_text if prompt_text.strip() else (ui.hint(hint_str) if ui.colour_on() else f"→ {hint_str}")
+    emit(args, data, human_text)
     return 0
 
 
@@ -229,7 +240,7 @@ def cmd_check(args) -> int:
 
     data = {
         "ok": not has_errors,
-        "issues": [{"path": str(i.path) if i.path else None, "severity": i.severity, "message": i.message, "fix": i.fix}
+        "issues": [{"path": str(i.path), "severity": i.severity, "message": i.message, "fix": i.fix}
                    for i in issues],
     }
     emit(args, data, "\n".join(out))

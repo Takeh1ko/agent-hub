@@ -135,7 +135,7 @@ Every worker or reviewer session receives guidance assembled in layers, followed
    - **Local** — `~/.config/ahub/projects/<project-name>/prompts/<role>.md` — personal overrides, not in git.
 
    Roles: `all` (prepended to every session), `code`, `routine`, `scout`, `review` (for reviewer panel sessions and `review` kind tasks).
-   Assembly order: `all.md` of global, project, local, then `<role>.md` of global, project, local — later layers refine earlier ones. Each non-empty layer appears under its heading (`## Global guidance`, `## Project guidance`, `## Local guidance`).
+   Assembly order: scope-major — global (`all.md`, then `<role>.md`), then project (`all.md`, then `<role>.md`), then local (`all.md`, then `<role>.md`). Within each scope `all.md` precedes `<role>.md`, and later scopes refine earlier ones. Each non-empty scope appears under its heading (`## Global guidance`, `## Project guidance`, `## Local guidance`).
 2. **The task specification** — title, description, files to read first, and expected results.
 3. **Built-in hub layer LAST** — worktree boundary isolation, secrets protection, submission contract (`.ahub/result.json`, report format, commit rules), and reply language. User guidance cannot override these constraints.
 

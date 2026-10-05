@@ -17,7 +17,7 @@ from ahub import reasons, workspace
 from ahub.config import ProjectConfig
 from ahub.gates import GateResult
 from ahub.model import Kind
-from ahub.prompts import PromptLayer, assemble_guidance, orchestrator_heading, reply_language_line
+from ahub.prompts import BOUNDARY, PromptLayer, assemble_guidance, orchestrator_heading, reply_language_line
 from ahub.store import Task
 
 VERDICTS = ("approve", "changes", "dispute")
@@ -92,8 +92,7 @@ def review_prompt(project: ProjectConfig, task: Task, diff: str, gate: GateResul
     guidance_sections, summary, layers = assemble_guidance(project, "review")
     sections = [*guidance_sections,
                 f"# Review of {task.label}: {task.title}\nYou are a reviewer in a fresh session; you have not seen "
-                "the worker's work. Stay in the copy (git worktree); never touch real data, other databases, "
-                "secrets (.env, keys, /etc); network only if the task explicitly requires it. "
+                f"the worker's work. {BOUNDARY} "
                 "Do not change or commit project files.",
                 "## Task\n" + strip_arbiter(task.spec.strip() or "(empty description)")]
     if task.kind is Kind.REVIEW:

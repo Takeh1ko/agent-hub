@@ -104,6 +104,7 @@ def captured() -> Iterator[list[str]]:
 
 
 def add_project_arg(parser, default: Any = None) -> None:
+    # default=argparse.SUPPRESS preserves a parent parser's --project value in subparsers
     from ahub.i18n import t
 
     parser.add_argument("--project", "-P", default=default, help=t("cli.help_project"))

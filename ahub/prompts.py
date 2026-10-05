@@ -1,10 +1,14 @@
-"""Worker prompts: global/project/local guidance per role on top of a lean built-in layer."""
+"""Worker prompts: global/project/local guidance per role on top of a lean built-in layer.
+
+Scope-major order: global (all, role) -> project (all, role) -> local (all, role).
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
+from ahub import log as hublog
 from ahub import paths
 from ahub.config import PROJECT_FILE, ProjectConfig
 from ahub.i18n import lang
@@ -12,16 +16,22 @@ from ahub.i18n import t as _t
 from ahub.model import Kind
 from ahub.store import Task
 
+_log = hublog.get("prompts")
+
 ROLES = ("all", "code", "routine", "scout", "review")
 WARN_BYTES = 4 * 1024
 REFUSE_BYTES = 16 * 1024
 REPORT_LIMIT_KB = 12
 
-DEFAULT_RULES = """# agent-hub worker rules
-- You are in a separate repo copy (git worktree). Never go outside it.
-- Do not touch real data, other databases, secrets (.env, keys, /etc); network only if the task explicitly requires it.
+BOUNDARY = (
+    "Stay in the copy (git worktree); never touch real data, other databases, secrets (.env, keys, /etc); "
+    "network only if the task explicitly requires it. Interfaces and names from the task are a contract: "
+    "do not rename them."
+)
+
+DEFAULT_RULES = f"""# agent-hub worker rules
+- {BOUNDARY}
 - The hub service directory is `.ahub/` (not in git): write your result and report there.
-- Interfaces and names from the task are a contract: do not rename them.
 """
 
 
@@ -48,7 +58,7 @@ def resolve_project_all_file(project: ProjectConfig) -> tuple[Path | None, bool]
 
 def assemble_guidance(project: ProjectConfig, role: str) -> tuple[list[str], str, list[PromptLayer]]:
     """Assemble user guidance for a session role:
-    Order:
+    Order (scope-major):
       1. global all.md, then global <role>.md
       2. project all.md (or legacy rules), then project <role>.md
       3. local all.md, then local <role>.md
@@ -85,12 +95,22 @@ def assemble_guidance(project: ProjectConfig, role: str) -> tuple[list[str], str
             content = ""
             exists = False
             if path.is_file():
+                skip_reason: str | None = None
                 try:
-                    if path.stat().st_size <= REFUSE_BYTES:
+                    if path.stat().st_size > REFUSE_BYTES:
+                        skip_reason = "size"
+                    else:
                         content = path.read_text(encoding="utf-8")
                         exists = True
-                except (OSError, UnicodeDecodeError):
-                    pass
+                except UnicodeDecodeError:
+                    skip_reason = "decode"
+                except OSError:
+                    skip_reason = "unreadable"
+
+                if skip_reason is not None:
+                    _log.warning("prompt guidance %s: skipped, %s", path, skip_reason)
+                    skip_note = f"{r}: {_t('prompts.skipped')}, {_t(f'prompts.skipped_{skip_reason}')}"
+                    used_by_scope[scope].append(skip_note)
             layer = PromptLayer(scope=scope, role=r, path=path, content=content, exists=exists, heading=heading)
             layers.append(layer)
             if content.strip():
@@ -101,14 +121,36 @@ def assemble_guidance(project: ProjectConfig, role: str) -> tuple[list[str], str
             sections.append(f"{heading}\n" + "\n\n".join(scope_texts))
 
     # Form summary: e.g. "built-in + global(code) + project(all, code)"
-    parts = ["built-in"]
+    parts = [_t("prompts.scope_builtin")]
     for sc in ("global", "project", "local"):
         roles_in_sc = used_by_scope[sc]
         if roles_in_sc:
-            parts.append(f"{sc}({', '.join(roles_in_sc)})")
+            parts.append(f"{_t(f'prompts.scope_{sc}')}({', '.join(roles_in_sc)})")
     summary = " + ".join(parts)
 
     return sections, summary, layers
+
+
+def format_summary(summary: str) -> str:
+    """Format prompt summary for display on the card in the current language."""
+    res = summary
+    res = res.replace("built-in", _t("prompts.scope_builtin"))
+    res = res.replace("встроенный", _t("prompts.scope_builtin"))
+    for sc in ("global", "project", "local"):
+        res = res.replace(f"{sc}(", f"{_t(f'prompts.scope_{sc}')}(")
+    for sc_ru, sc_en in [("глобальный", "global"), ("проектный", "project"), ("локальный", "local")]:
+        res = res.replace(f"{sc_ru}(", f"{_t(f'prompts.scope_{sc_en}')}(")
+    for prefix in ("skipped", "пропущен"):
+        for reason, key in [
+            ("unreadable", "skipped_unreadable"),
+            ("не удаётся прочитать", "skipped_unreadable"),
+            ("non-UTF-8", "skipped_decode"),
+            ("не-UTF-8", "skipped_decode"),
+            ("too big", "skipped_size"),
+            ("слишком большой", "skipped_size"),
+        ]:
+            res = res.replace(f"{prefix}, {reason}", f"{_t('prompts.skipped')}, {_t(f'prompts.{key}')}")
+    return res
 
 
 def rules_text(project: ProjectConfig) -> str:
@@ -168,7 +210,7 @@ def _header(task: Task) -> str:
 def scout_delivery() -> str:
     head = report_heading()
     return f"""## How to submit (required; overrides project rules about commits and reports)
-1. Stay in the copy (git worktree); never touch real data, other databases, secrets (.env, keys, /etc); network only if the task explicitly requires it. Interfaces and names from the task are a contract: do not rename them. Change and commit nothing in the project — this is reconnaissance. Create files only in `.ahub/` (the hub service directory, not in git).
+1. {BOUNDARY} Change and commit nothing in the project — this is reconnaissance. Create files only in `.ahub/` (the hub service directory, not in git).
 2. Report — `.ahub/report.md` (<= {REPORT_LIMIT_KB} KB). First section — `{head}`: at most 10 lines, the key
    points needed for a decision. Cite `file:line` for every claim; say what you did not check.
 3. Result — `.ahub/result.json`:
@@ -225,7 +267,7 @@ Need more — do not change, write it in the result notes.
 {tests}
 
 ## How to submit (required)
-1. Stay in the copy (git worktree); never touch real data, other databases, secrets (.env, keys, /etc); network only if the task explicitly requires it. Interfaces and names from the task are a contract: do not rename them. Commit as you go: `git add <paths>` by name (never `-A`/`.`), commit message in {commit_lang}. No uncommitted changes at the end.
+1. {BOUNDARY} Commit as you go: `git add <paths>` by name (never `-A`/`.`), commit message in {commit_lang}. No uncommitted changes at the end.
 2. Result — `.ahub/result.json` (the hub service directory is `.ahub/`, not in git):
    {{"summary": "1-3 sentences", "status": "done", "commit": "<HEAD sha>", "files": ["changed files"],
     "tests": {{"cmd": "...", "ok": true, "tail": "last output lines"}}, "notes": "what is not done / open questions"}}

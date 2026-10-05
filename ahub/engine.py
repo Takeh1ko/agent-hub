@@ -951,8 +951,17 @@ class Engine:
         for m in models:
             review.review_path(t.worktree, round_no, m).unlink(missing_ok=True)
 
+        prompts_by_model: dict[str, str] = {}
+        rev_summary = None
+        for m in models:
+            p, s, _ = review.review_prompt(self.project, t, diff, g, round_no, m, notes=notes)
+            prompts_by_model[m] = p
+            rev_summary = s
+        if rev_summary is not None:
+            self._record_prompts(t, rev_summary)
+
         def one(m: str):
-            prompt, _, _ = review.review_prompt(self.project, t, diff, g, round_no, m, notes=notes)
+            prompt = prompts_by_model[m]
             # a reviewer is not interrupted by a nudge: the message waits for the executor's next turn
             return self.session(Role.REVIEWER, m, prompt, keep_session_on_retry=False,
                                 log_name=f"reviewer_r{round_no}_{m}", prompt_kind="review",
@@ -960,9 +969,6 @@ class Engine:
 
         with ThreadPoolExecutor(max_workers=len(models)) as ex:
             results = list(ex.map(one, models))
-        if t.kind is Kind.REVIEW:
-            _, summary, _ = prompts.assemble_guidance(self.project, "review")
-            self._record_prompts(t, summary)
         if (stop := self._review_interrupted(results)) is not None:
             return stop
         self._revert_reviewer(t)
