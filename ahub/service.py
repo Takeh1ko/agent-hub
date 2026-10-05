@@ -193,6 +193,53 @@ class Service:
         if t.state_reason != reason:
             self.store.update_task(t.id, state_reason=reason, phase="waiting" if reason else "")
 
+    def _held_review(self, t: Task, hold: dict, quota_cfg, group_counts: dict[str, int]) -> str:
+        """A review-held code/routine task before its backoff is over: swap, recover or defer.
+
+        Returns the wait reason ("" — spawn now). The held stage's own quota decides, not the
+        executor's: a healthy executor must not re-pick the task every tick while the reviewer
+        is held. A newly configured fallback (or a recovered quota) wakes the task early.
+        """
+        from ahub.model import Role as _Role
+
+        role, models = quota.held_models(self.store, t, hold.get("stage", ""))
+        if role is not _Role.REVIEWER or not models:
+            return hold.get("reason") or ""
+        qres = quota.check_quota_for_models(self.store, models, quota_cfg, group_counts,
+                                            role=role, label=t.label)
+        if qres.fallback_model:
+            quota.swap_panel_ref(self.store, t, qres.breached_model, qres.fallback_model)
+            quota.expire_hold(self.store, t)  # wake at once; the resume info stays
+            self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                 payload={"from": qres.breached_model, "to": qres.fallback_model,
+                                          "text": qres.event_text})
+            return ""
+        if qres.ok:
+            return ""  # the reviewer recovered early — spawn, the engine resumes at review
+        if qres.cap:
+            return qres.wait_reason  # concurrency cap is transient: plain wait, no backoff
+        self._notify_hold(t, hold)
+        return hold.get("reason") or qres.wait_reason
+
+    def _notify_hold(self, t: Task, hold: dict) -> None:
+        """One DECISION event for a hold past HOLD_NOTIFY_MS (per hold episode)."""
+        if hold.get("notified") or not hold.get("notice"):
+            return
+        now = now_ms()
+        if now - int(hold.get("since") or now) < quota.HOLD_NOTIFY_MS:
+            return
+        fresh = self.store.get_task(t.id)
+        if fresh is None or fresh.state is not State.QUEUED:
+            return
+        hold = quota.active_hold(fresh, now)
+        if not hold or hold.get("notified"):
+            return
+        self.store.add_event(Ev.NEEDS_DECISION, task_id=t.id, project=t.project,
+                             payload={"reason": hold["notice"]})
+        lim = dict(fresh.limits)
+        lim["quota_hold"] = {**hold, "notified": True}
+        self.store.update_task(t.id, limits=lim)
+
     def tick(self) -> TickReport:
         live = live_workers(self.proc_root)
         now = time.monotonic()
@@ -249,38 +296,47 @@ class Service:
                             reason = reasons.dump("wait_resource_busy", name=r)
                             break
                 if not reason:
-                    qres = quota.check_quota_for_task(self.store, t, hub_cfg.quota, group_counts)
-                    if not qres.ok:
-                        if qres.fallback_model:
-                            from ahub import registry as _registry
-                            from ahub import tasks as _tasks
+                    hold = quota.active_hold(t, now_ms())
+                    if hold and t.kind in (Kind.CODE, Kind.ROUTINE) \
+                            and hold.get("stage") == quota.HOLD_STAGE_REVIEW:
+                        reason = self._held_review(t, hold, hub_cfg.quota, group_counts)
+                    else:
+                        qres = quota.check_quota_for_task(self.store, t, hub_cfg.quota, group_counts)
+                        if not qres.ok:
+                            if qres.fallback_model:
+                                from ahub import registry as _registry
+                                from ahub import tasks as _tasks
 
-                            old_model = _tasks.executor_ref(t)
-                            fb_base = _registry.base_alias(qres.fallback_model)
-                            fb_stored = _registry.stored_effort(qres.fallback_model)
-                            if t.kind is Kind.REVIEW:
-                                rev = dict(t.review)
-                                models = _tasks.review_refs(t) or ([old_model] if t.executor else [])
-                                old_model = models[0] if models else old_model
-                                rev["models"] = [fb_base]
-                                if fb_stored:
-                                    rev["efforts"] = [fb_stored]
-                                elif "efforts" in rev:
-                                    rev.pop("efforts", None)
-                                self.store.update_task(t.id, review=rev)
+                                old_model = _tasks.executor_ref(t)
+                                fb_base = _registry.base_alias(qres.fallback_model)
+                                fb_stored = _registry.stored_effort(qres.fallback_model)
+                                if t.kind is Kind.REVIEW:
+                                    rev = dict(t.review)
+                                    models = _tasks.review_refs(t) or ([old_model] if t.executor else [])
+                                    old_model = models[0] if models else old_model
+                                    rev["models"] = [fb_base]
+                                    if fb_stored:
+                                        rev["efforts"] = [fb_stored]
+                                    elif "efforts" in rev:
+                                        rev.pop("efforts", None)
+                                    self.store.update_task(t.id, review=rev)
+                                else:
+                                    self.store.update_task(t.id, executor=fb_base, effort=fb_stored,
+                                                           limits={**t.limits, "fresh_session": True})
+                                    t.executor = fb_base
+                                    try:
+                                        t.effort = fb_stored
+                                    except (AttributeError, TypeError):
+                                        pass
+                                quota.clear_hold(self.store, t)  # a fresh model does the work from scratch
+                                self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                                     payload={"from": old_model, "to": qres.fallback_model,
+                                                              "text": qres.event_text})
+                            elif hold and qres.breached_bucket is not None:
+                                reason = hold.get("reason") or qres.wait_reason
+                                self._notify_hold(t, hold)
                             else:
-                                self.store.update_task(t.id, executor=fb_base, effort=fb_stored,
-                                                       limits={**t.limits, "fresh_session": True})
-                                t.executor = fb_base
-                                try:
-                                    t.effort = fb_stored
-                                except (AttributeError, TypeError):
-                                    pass
-                            self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
-                                                 payload={"from": old_model, "to": qres.fallback_model,
-                                                          "text": qres.event_text})
-                        else:
-                            reason = qres.wait_reason
+                                reason = qres.wait_reason
                 if reason:
                     pl.waiting[t.id] = reasons.text(reason)
                     self._set_wait(t, reason)

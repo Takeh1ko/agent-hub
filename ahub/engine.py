@@ -54,7 +54,7 @@ from ahub.providers.base import Act, Activity, Outcome, RunResult, RunSpec
 from ahub.providers.runner import PollFailed
 from ahub.providers.runner import run as run_session
 from ahub.store import Store, Task, is_lock_error
-from ahub.time import now_ms
+from ahub.time import fmt_local, now_ms
 
 LEASE_MS = 90_000
 STOP_POLL_S = 3.0
@@ -594,6 +594,7 @@ class Engine:
         cwd = cwd or t.worktree
         tmo = self.project.timeouts
         self._check_lease()
+        self._quota_clear()  # provider work starts: a quota-hold episode is over
         should_stop = stop_predicate or self.interrupt_requested
         log_path = str(Path(cwd) / workspace.AHUB_DIR / "logs" / f"{log_name or role.value}.log")
         self._note_prompt(log_path, prompt_kind, prompt)
@@ -740,46 +741,23 @@ class Engine:
         t = self.task()
         reason, event_text = quota.describe_error(t.label, buckets, r.error, fallback)
         if fallback:
-            fb_base = registry.base_alias(fallback)
-            fb_stored = registry.stored_effort(fallback)
             if role is Role.REVIEWER:
                 # a reviewer never takes the executor's seat: only its panel entry moves
                 old_model = alias
-                rev = dict(t.review)
-                models = list(rev.get("models") or [])
-                efforts = list(rev.get("efforts") or [])
-                new_models, new_efforts = [], []
-                for i, x in enumerate(models):
-                    x_base = registry.base_alias(str(x))
-                    x_stored = str(efforts[i]) if i < len(efforts) else registry.stored_effort(str(x))
-                    x_ref = registry.model_ref(x_base, x_stored)
-                    if x_ref == alias:  # only the exact failing panel ref moves, not its siblings
-                        new_models.append(fb_base)
-                        new_efforts.append(fb_stored)
-                    else:
-                        new_models.append(x_base)
-                        new_efforts.append(x_stored)
-                rev["models"] = new_models
-                if any(new_efforts):
-                    rev["efforts"] = new_efforts
-                elif "efforts" in rev:
-                    rev.pop("efforts", None)
-                self.store.update_task(t.id, review=rev)
+                quota.swap_panel_ref(self.store, t, alias, fallback)
+                quota.expire_hold(self.store, t)  # wake at once; the resume info stays
             else:
-                old_model = self._exec_ref(t)
-                self.store.update_task(t.id, executor=fb_base, effort=fb_stored,
-                                       limits={**t.limits, "fresh_session": True})
-                t.executor = fb_base
-                try:
-                    t.effort = fb_stored
-                except (AttributeError, TypeError):
-                    pass
+                old_model = quota.swap_executor(self.store, t, fallback)
+                self._quota_clear()  # a fresh model does the work from scratch
             self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
                                  payload={"from": old_model, "to": fallback, "text": event_text})
         elif role is not Role.REVIEWER:
             # the session that hit the quota error is poisoned (agy answers a resume with the old
             # error again) — abandon it; the work is on the branch, the new session starts fresh
             self.store.update_task(t.id, limits={**t.limits, "fresh_session": True})
+            self._quota_hold(quota.HOLD_STAGE_EXECUTOR, reason, quota.pick_window(buckets), err=r.error)
+        else:
+            self._quota_hold(quota.HOLD_STAGE_REVIEW, reason, quota.pick_window(buckets), err=r.error)
         return State.QUEUED, reason
 
     def _step_with_continue(self, role: Role, alias: str, prompt: str, *, session_id: str | None,
@@ -826,6 +804,11 @@ class Engine:
 
     def _scout(self, t: Task) -> Settled:
         t = self._prepare(t)
+        held, swapped = self._quota_gate_executor(t)
+        if held is not None:
+            return held
+        if swapped:
+            t = self.task()
         self.set_phase(Phase.STUDYING)
         prev = [s for s in self.store.list_sessions(t.id) if s.role == Role.SCOUT.value and s.external_id]
         resume_sid = prev[-1].external_id if prev and not t.limits.get("fresh_session") else None  # resume
@@ -1014,6 +997,34 @@ class Engine:
             t = self.move(to, reasons.dump("worker_started"), fields=fields)
         return t
 
+    def _after_gates(self, t: Task, g: gates.GateResult, models: list[str], round_no: int,
+                     max_rounds: int, role: Role, sid: str | None):
+        """Review stage after green gates (or a quota-hold resume): settle, or fix-continuation.
+
+        Returns Settled, or (task, prompt, kind, round_no, sid) for the next worker turn.
+        """
+        summary = self._result(t).get("summary", "")
+        payload = {"summary": str(summary)[:500], "diffstat": g.diffstat,
+                   "tests": "green" if g.tests_ok else ("none" if g.tests_ok is None else "red")}
+        if not models:
+            code = "gates_passed" if t.kind is Kind.ROUTINE else "gates_passed_tests"
+            return self._settle(State.DONE, reasons.dump(code), payload=payload)
+        if self.over_budget():
+            return self._budget_stop(role, self._exec_ref(), sid)
+        t = self.move(State.REVIEWING, reasons.dump("review_round", round=round_no))
+        decision, reason, findings = self._review_round(t, g, models, round_no, max_rounds)
+        if decision == "queued":
+            return self._settle(State.QUEUED, reason)
+        if decision == "done":
+            return self._settle(State.DONE, reason, payload=payload)
+        if decision == "decision":
+            return self._settle(State.NEEDS_DECISION, reason,
+                                payload={**payload, "findings": len(findings)})
+        round_no += 1
+        t = self.move(State.FIXING, reason, fields={"round": round_no})
+        prompt, kind = review.fix_prompt(findings), "rework"
+        return t, prompt, kind, round_no, sid
+
     def _code(self, t: Task) -> Settled:
         try:
             t = self._prepare_code(t)
@@ -1031,18 +1042,6 @@ class Engine:
             lim = dict(self.task().limits)
             lim.pop("rework_notes", None)
             self.store.update_task(t.id, limits=lim)
-        if fresh:  # new session (different model/brief, or no session before): full brief + instructions
-            prompt, summary, _ = prompts.code_prompt(self.project, t)
-            self._record_prompts(t, summary)
-            kind = "start"
-            if notes:
-                prompt += f"\n\n{prompts.orchestrator_heading(rework=True)}\n" + notes
-                kind = "rework"
-            sid = None
-        elif notes:
-            prompt, kind = review.fix_prompt([], notes=notes), "rework"
-        else:
-            prompt, kind = prompts.CONTINUE_PROMPT, "continue"
         self._clear_fresh(t)
         # a lock-wait requeue resumes straight at the gates — the worker turn already happened.
         # A fresh session or pending rework notes still need a real turn, so they overrule the skip.
@@ -1055,6 +1054,39 @@ class Engine:
             self.store.update_task(t.id, limits=lim)
         round_no = t.round
         skip_turn = lock_resume
+        # a quota hold about the review resumes straight at the review panel — the worker turn
+        # and the gates already happened. A fresh session, pending rework notes or a lock-wait
+        # resume still goes through the normal flow (each stage's quota gates its own work).
+        resume = self._quota_resume(t) if not (fresh or notes or lock_resume) else None
+        if resume is not None:
+            g0, models, round_no, max_rounds = resume
+            if self.over_budget():
+                return self._budget_stop(role, self._exec_ref(), sid)
+            t = self.move(State.REVIEWING, reasons.dump("review_round", round=round_no))
+            out = self._after_gates(t, g0, models, round_no, max_rounds, role, sid)
+            if isinstance(out, Settled):
+                return out
+            t, prompt, kind, round_no, sid = out
+        else:
+            if not lock_resume:
+                held, swapped = self._quota_gate_executor(t)
+                if held is not None:
+                    return held
+                if swapped:  # a fallback model starts from scratch: full brief, no resume
+                    t = self.task()
+                    sid, fresh = None, True
+            if fresh:  # new session (different model/brief, or no session before): full brief + instructions
+                prompt, summary, _ = prompts.code_prompt(self.project, t)
+                self._record_prompts(t, summary)
+                kind = "start"
+                if notes:
+                    prompt += f"\n\n{prompts.orchestrator_heading(rework=True)}\n" + notes
+                    kind = "rework"
+                sid = None
+            elif notes:
+                prompt, kind = review.fix_prompt([], notes=notes), "rework"
+            else:
+                prompt, kind = prompts.CONTINUE_PROMPT, "continue"
         while True:
             if skip_turn:
                 skip_turn = False
@@ -1112,26 +1144,10 @@ class Engine:
                     g = self._gate(self.task())
                 except gates.LockTimeout as e:
                     return self._lock_wait(e)
-            summary = self._result(t).get("summary", "")
-            payload = {"summary": str(summary)[:500], "diffstat": g.diffstat,
-                       "tests": "green" if g.tests_ok else ("none" if g.tests_ok is None else "red")}
-            if not models:
-                code = "gates_passed" if t.kind is Kind.ROUTINE else "gates_passed_tests"
-                return self._settle(State.DONE, reasons.dump(code), payload=payload)
-            if self.over_budget():
-                return self._budget_stop(role, self._exec_ref(), sid)
-            t = self.move(State.REVIEWING, reasons.dump("review_round", round=round_no))
-            decision, reason, findings = self._review_round(t, g, models, round_no, max_rounds)
-            if decision == "queued":
-                return self._settle(State.QUEUED, reason)
-            if decision == "done":
-                return self._settle(State.DONE, reason, payload=payload)
-            if decision == "decision":
-                return self._settle(State.NEEDS_DECISION, reason,
-                                    payload={**payload, "findings": len(findings)})
-            round_no += 1
-            t = self.move(State.FIXING, reason, fields={"round": round_no})
-            prompt, kind = review.fix_prompt(findings), "rework"
+            out = self._after_gates(t, g, models, round_no, max_rounds, role, sid)
+            if isinstance(out, Settled):
+                return out
+            t, prompt, kind, round_no, sid = out
 
     def _record_prompts(self, t: Task, summary: str) -> None:
         lim = dict(self.task().limits)
@@ -1145,6 +1161,125 @@ class Engine:
             lim = dict(self.task().limits)
             lim.pop("fresh_session", None)
             self.store.update_task(t.id, limits=lim)
+
+    def _quota_clear(self) -> None:
+        """Drop the quota-hold marker: provider work is starting, the hold episode is over."""
+        lim = self.task().limits
+        if "quota_hold" in lim:
+            lim = dict(lim)
+            lim.pop("quota_hold", None)
+            self.store.update_task(self.task_id, limits=lim)
+
+    def _review_hold_git(self, t: Task, g: gates.GateResult, material: str | None) -> dict | None:
+        """What a review hold stores so the resume skips the gates: the HEAD they passed on."""
+        if material is not None or t.kind not in (Kind.CODE, Kind.ROUTINE):
+            return None
+        commit = str(self._result(t).get("commit", "") or "")
+        if not commit:
+            return None
+        return {"head": g.head, "commit": commit, "base": g.base, "tests_ok": g.tests_ok,
+                "tests_tail": g.tests_tail[:4000], "diffstat": g.diffstat}
+
+    def _quota_hold(self, stage: str, reason: str, bucket, *, git: dict | None = None,
+                   err: str = "") -> None:
+        """Record a quota hold: resume info, the backoff wake time, and the one owner notice.
+
+        `git` (review holds of code/routine tasks) carries what the skipped gates saw, so the
+        resume can check result.json commit == HEAD instead of re-running them. Refreshing a hold
+        keeps `since`/`notified`: one hold episode tells the owner once.
+        """
+        from ahub import quota as _quota
+
+        now = now_ms()
+        prev = self.task().limits.get("quota_hold") or {}
+        prev = prev if isinstance(prev, dict) else {}
+        n = int(prev.get("n") or 0) + 1
+        reset = int(bucket.reset_at) if bucket is not None and getattr(bucket, "reset_at", 0) else 0
+        marker: dict = {"stage": stage, "reason": reason, "since": int(prev.get("since") or now),
+                        "not_before": _quota.hold_wake_ms(now, reset, n), "n": n,
+                        "notified": bool(prev.get("notified"))}
+        if git:
+            marker.update(git)
+        marker["notice"] = self._hold_notice(stage, bucket, err)
+        lim = dict(self.task().limits)
+        lim["quota_hold"] = marker
+        self.store.update_task(self.task_id, limits=lim)
+
+    def _hold_notice(self, stage: str, bucket, err: str) -> str:
+        """The one DECISION text for a long hold (language-neutral params only)."""
+        t = self.task()
+        if stage == "review":
+            setting, cmd = "fallback_reviewer", f"ahub task edit {t.label} --review <alias>"
+        else:
+            setting, cmd = "fallback_executor", f"ahub model {t.label} <alias>"
+        if bucket is not None:
+            pct = int(round(bucket.remaining * 100))
+            return reasons.dump("quota_hold", group=bucket.group, window=bucket.window, pct=pct,
+                                reset=fmt_local(bucket.reset_at), setting=setting, cmd=cmd)
+        return reasons.dump("quota_hold_err", err=(err or "")[:120], setting=setting, cmd=cmd)
+
+    def _quota_gate_executor(self, t: Task) -> tuple[Settled | None, bool]:
+        """Executor quota before any executor turn: (hold to settle, fallback swapped).
+
+        A hold settles the task with no turn spent; a swap continues on the fallback model.
+        """
+        from ahub import config as _config
+        from ahub import quota as _quota
+
+        hub_cfg = _config.load_hub()
+        qres = _quota.check_quota_for_models(self.store, [self._exec_ref(t)], hub_cfg.quota, {},
+                                             role=Role.EXECUTOR, label=t.label)
+        if qres.ok:
+            return None, False
+        if qres.fallback_model:
+            old = _quota.swap_executor(self.store, t, qres.fallback_model)
+            self._quota_clear()  # a fresh model does the work from scratch
+            self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                 payload={"from": old, "to": qres.fallback_model, "text": qres.event_text})
+            return None, True
+        self._quota_hold(_quota.HOLD_STAGE_EXECUTOR, qres.wait_reason, qres.breached_bucket)
+        return self._settle(State.QUEUED, qres.wait_reason), False
+
+    def _quota_resume(self, t: Task) -> tuple[gates.GateResult, list[str], int, int] | None:
+        """A review-stage hold with the work still delivered: resume straight at the review panel.
+
+        The gate result is rebuilt from what the hold stored (base, tests) — the worker turn and
+        the gates do not re-run. None — run normally (stale head, pending worker input, no panel).
+        """
+        hold = self.task().limits.get("quota_hold") or {}
+        if not isinstance(hold, dict) or hold.get("stage") != "review":
+            return None
+        if t.kind not in (Kind.CODE, Kind.ROUTINE):
+            return None
+        if self.task().limits.get("fresh_session") or self.task().limits.get("rework_notes"):
+            return None
+        models = self._panel_refs(t)
+        if not models:
+            return None
+        wt = t.worktree
+        if not wt or not Path(wt).is_dir():
+            return None
+        try:
+            head = workspace.head(wt)
+        except workspace.WorkspaceError:
+            return None
+        if not head or head != hold.get("head"):
+            return None
+        commit = str(self._result(t).get("commit", "") or "")
+        if not commit or commit[:7] != head[:7] or commit[:7] != str(hold.get("commit", ""))[:7]:
+            return None
+        if workspace.changed_files(wt):
+            return None
+        work = workspace.git(self.project.root, "rev-parse", "--verify", self.project.work_branch,
+                             check=False)
+        ref = work.stdout.strip()
+        if not ref or workspace.git(wt, "merge-base", "--is-ancestor", ref, "HEAD",
+                                    check=False).returncode != 0:
+            return None  # the work branch moved: the normal run syncs and re-runs the gates
+        g = gates.GateResult(base=str(hold.get("base") or t.base_sha or ""), head=head,
+                             diffstat=str(hold.get("diffstat") or ""), tests_ok=hold.get("tests_ok"),
+                             tests_tail=str(hold.get("tests_tail") or ""))
+        return g, models, t.round, max(1, int(t.review.get("rounds") or 1))
 
     def _blocked(self, t: Task) -> str:
         res = self._result(t)
@@ -1226,6 +1361,7 @@ class Engine:
         if getattr(e, "stopped", False) or self.stop_requested():
             return self._settle(State.STOPPED, reasons.dump("stopped"))
         self.set_phase(Phase.WAITING)
+        self._quota_clear()  # the lock resume owns the re-pick, not the quota backoff
         lim = dict(self.task().limits)
         lim["lock_wait"] = True  # the resume skips the worker turn and goes straight to the gates
         self.store.update_task(self.task_id, limits=lim)
@@ -1248,17 +1384,14 @@ class Engine:
         hub_cfg = config.load_hub()
         quota_cfg = hub_cfg.quota
         fallback_rev = quota_cfg.fallback_reviewer or quota_cfg.fallback
+        if not fallback_rev:  # no configured fallback: the next reviewer-menu entry above
+            # threshold takes the turn instead of waiting (quotas are cached, no probe here)
+            fallback_rev = quota.menu_reviewer_fallback(self.store, self.project, quota_cfg,
+                                                        exclude=models, hub=hub_cfg)
         new_models = []
         for m in models:
             _prov, buckets = quota.get_model_buckets(self.store, m)
-            b_5h = next((b for b in buckets if b.window == "5h"), None)
-            b_week = next((b for b in buckets if b.window in ("weekly", "week")), None)
-            now = now_ms()
-            breached = None
-            if b_5h and b_5h.remaining < quota_cfg.min_5h and now < b_5h.reset_at:
-                breached = b_5h
-            elif b_week and b_week.remaining < quota_cfg.min_weekly and now < b_week.reset_at:
-                breached = b_week
+            breached = quota.breached(buckets, quota_cfg, now_ms())
 
             if breached:
                 pct = int(round(breached.remaining * 100))
@@ -1272,6 +1405,8 @@ class Engine:
                     reset_str = fmt_local(breached.reset_at)
                     reason = reasons.dump("wait_quota", group=breached.group, window=breached.window,
                                           pct=pct, reset=reset_str)
+                    self._quota_hold(quota.HOLD_STAGE_REVIEW, reason, breached,
+                                     git=self._review_hold_git(t, g, material))
                     return "queued", reason, []
             else:
                 new_models.append(m)
@@ -1308,6 +1443,10 @@ class Engine:
                     rev = dict(t.review)
                     rev["models"] = [fallback_rev if x == m else x for x in models]
                     self.store.update_task(t.id, review=rev)
+                    quota.expire_hold(self.store, t)
+                else:
+                    self._quota_hold(quota.HOLD_STAGE_REVIEW, reason, quota.pick_window(buckets),
+                                     git=self._review_hold_git(t, g, material), err=r.error)
                 return "queued", reason, []
         self._revert_reviewer(t)
         by_model = dict(zip(models, results, strict=True))
@@ -1338,6 +1477,10 @@ class Engine:
                         rev = dict(t.review)
                         rev["models"] = [fallback_rev if x == m else x for x in models]
                         self.store.update_task(t.id, review=rev)
+                        quota.expire_hold(self.store, t)
+                    else:
+                        self._quota_hold(quota.HOLD_STAGE_REVIEW, reason, quota.pick_window(buckets),
+                                         git=self._review_hold_git(t, g, material), err=r.error)
                     return "queued", reason, []
             self._revert_reviewer(t)
             for m in missing:

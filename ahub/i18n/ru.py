@@ -514,6 +514,8 @@ MESSAGES: dict[str, str] = {
     "reason.wait_quota": "ждёт квоты {group}: {window} {pct}%, сброс {reset}",
     "reason.wait_quota_concurrency": "ждёт очереди квоты {group} ({running}/{max})",
     "reason.quota_fallback": "порог квоты → запуск на {model}",
+    "reason.quota_hold": "ждёт квоты {group} ({window} {pct}%, сброс {reset}) — задайте [quota] {setting} или `{cmd}`",
+    "reason.quota_hold_err": "квота поставщика ({err}) — задайте [quota] {setting} или `{cmd}`",
     "reason.red_rolled_back": "после слияния приёмка красная — слияние откачено ({cmd})",
     "reason.accept_red": "приёмка красная — ничего не слито ({cmd})",
     "reason.work_moved": "рабочая ветка уехала во время приёмки ({now} ≠ {base}) — повторите accept",

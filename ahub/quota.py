@@ -10,12 +10,17 @@ import math
 from dataclasses import dataclass
 
 from ahub import providers, reasons, registry
-from ahub.config import QuotaConfig
+from ahub.config import HubConfig, ProjectConfig, QuotaConfig
 from ahub.i18n import t as _t
 from ahub.model import ROLE_FOR_KIND, Kind, Role
 from ahub.providers.base import QuotaBucket
 from ahub.store import Store, Task
 from ahub.time import fmt_local, now_ms
+
+HOLD_STAGE_REVIEW = "review"  # the hold is about the review: the resume skips the worker turn and the gates
+HOLD_STAGE_EXECUTOR = "executor"
+HOLD_BACKOFF_MS = (15 * 60_000, 30 * 60_000, 60 * 60_000)  # re-pick in 15 min → 30 min → 1 h
+HOLD_NOTIFY_MS = 30 * 60_000  # a hold this long with no fallback tells the owner once
 
 
 @dataclass
@@ -26,6 +31,7 @@ class QuotaCheckResult:
     event_text: str = ""
     breached_group: str = ""
     breached_bucket: QuotaBucket | None = None
+    breached_model: str = ""
     cap: int = 0
 
 
@@ -141,36 +147,45 @@ def check_quota_for_task(store: Store, task: Task, quota_cfg: QuotaConfig,
                          group_counts: dict[str, int]) -> QuotaCheckResult:
     """Check quota thresholds and concurrency cap for a task before launch."""
     role, models = task_models(task)
+    return check_quota_for_models(store, models, quota_cfg, group_counts, role=role, label=task.label)
+
+
+def breached(buckets: list[QuotaBucket], quota_cfg: QuotaConfig, now: int) -> QuotaBucket | None:
+    """First breached window (5h before weekly); None — above the thresholds or past the reset."""
+    b_5h = next((b for b in buckets if b.window == "5h"), None)
+    b_week = next((b for b in buckets if b.window in ("weekly", "week")), None)
+    if b_5h is not None and b_5h.remaining < quota_cfg.min_5h and now < b_5h.reset_at:
+        return b_5h
+    if b_week is not None and b_week.remaining < quota_cfg.min_weekly and now < b_week.reset_at:
+        return b_week
+    return None
+
+
+def check_quota_for_models(store: Store, models: list[str], quota_cfg: QuotaConfig,
+                           group_counts: dict[str, int], *, role: Role, label: str) -> QuotaCheckResult:
+    """Quota thresholds (with fallback) and concurrency cap for explicit model refs."""
     fb_role = quota_cfg.fallback_reviewer if role is Role.REVIEWER else quota_cfg.fallback_executor
     fallback = fb_role or quota_cfg.fallback
     now = now_ms()
 
     for m in models:
         _prov_name, buckets = get_model_buckets(store, m)
-        if not buckets:
-            continue
-        b_5h = next((b for b in buckets if b.window == "5h"), None)
-        b_week = next((b for b in buckets if b.window in ("weekly", "week")), None)
-
-        breached: QuotaBucket | None = None
-        if b_5h and b_5h.remaining < quota_cfg.min_5h and now < b_5h.reset_at:
-            breached = b_5h
-        elif b_week and b_week.remaining < quota_cfg.min_weekly and now < b_week.reset_at:
-            breached = b_week
-
-        if breached is not None:
-            pct = int(round(breached.remaining * 100))
+        hit = breached(buckets, quota_cfg, now)
+        if hit is not None:
+            pct = int(round(hit.remaining * 100))
             if fallback:
-                event_text = _t("engine.quota_fallback", label=task.label, group=breached.group,
-                                window=breached.window, pct=pct, fallback=fallback)
+                event_text = _t("engine.quota_fallback", label=label, group=hit.group,
+                                window=hit.window, pct=pct, fallback=fallback)
                 return QuotaCheckResult(ok=False, fallback_model=fallback, event_text=event_text,
-                                        breached_group=breached.group, breached_bucket=breached)
-            reset_str = fmt_local(breached.reset_at)
-            reason = reasons.dump("wait_quota", group=breached.group, window=breached.window,
+                                        breached_group=hit.group, breached_bucket=hit,
+                                        breached_model=m)
+            reset_str = fmt_local(hit.reset_at)
+            reason = reasons.dump("wait_quota", group=hit.group, window=hit.window,
                                   pct=pct, reset=reset_str)
-            return QuotaCheckResult(ok=False, wait_reason=reason, breached_group=breached.group,
-                                    breached_bucket=breached)
+            return QuotaCheckResult(ok=False, wait_reason=reason, breached_group=hit.group,
+                                    breached_bucket=hit, breached_model=m)
 
+        b_5h = next((b for b in buckets if b.window == "5h"), None)
         if b_5h:
             cap = max(1, math.ceil(b_5h.remaining * 6))
             running = group_counts.get(b_5h.group, 0)
@@ -179,3 +194,123 @@ def check_quota_for_task(store: Store, task: Task, quota_cfg: QuotaConfig,
                 return QuotaCheckResult(ok=False, wait_reason=reason, breached_group=b_5h.group, cap=cap)
 
     return QuotaCheckResult(ok=True)
+
+
+def hold_wake_ms(now: int, reset_ms: int, n: int) -> int:
+    """When a held task is re-picked: at the bucket reset, or with back-off when the reset is far."""
+    backoff = HOLD_BACKOFF_MS[min(max(n, 1) - 1, len(HOLD_BACKOFF_MS) - 1)]
+    if reset_ms and reset_ms > now:
+        return min(reset_ms, now + backoff)
+    return now + backoff
+
+
+def active_hold(task: Task, now: int | None = None) -> dict:
+    """Quota-hold marker still deferring the task ({} — none or expired)."""
+    hold = task.limits.get("quota_hold") or {}
+    if not isinstance(hold, dict):
+        return {}
+    if int(hold.get("not_before") or 0) <= (now if now is not None else now_ms()):
+        return {}
+    return hold
+
+
+def expire_hold(store: Store, task: Task) -> None:
+    """An explicit model change beats the backoff: wake at the next tick, resume info stays."""
+    hold = task.limits.get("quota_hold")
+    if isinstance(hold, dict) and hold.get("not_before"):
+        lim = dict(task.limits)
+        lim["quota_hold"] = {**hold, "not_before": 0}
+        store.update_task(task.id, limits=lim)
+
+
+def clear_hold(store: Store, task: Task) -> None:
+    """Drop the quota-hold marker: fresh work ahead, nothing to resume."""
+    if isinstance(task.limits.get("quota_hold"), dict):
+        lim = dict(task.limits)
+        lim.pop("quota_hold", None)
+        store.update_task(task.id, limits=lim)
+
+
+def held_models(store: Store, task: Task, stage: str) -> tuple[Role, list[str]]:
+    """Models + role the held stage waits on: the review panel for a review hold of a
+    code/routine task, otherwise the task's own models (the executor or a review panel)."""
+    from ahub import tasks as _tasks
+
+    if stage == HOLD_STAGE_REVIEW and task.kind in (Kind.CODE, Kind.ROUTINE):
+        panel = _tasks.review_refs(task)
+        if panel:
+            return Role.REVIEWER, panel
+    return task_models(task)
+
+
+def menu_reviewer_fallback(store: Store, project: ProjectConfig | None, quota_cfg: QuotaConfig,
+                           exclude: list[str] | tuple[str, ...] = (),
+                           hub: HubConfig | None = None) -> str:
+    """Next reviewer-menu ref above the thresholds ("" — none qualifies).
+
+    Rule: the role menu holds the models picked for review; when the panel reviewer is quota-held
+    with no configured fallback, the first menu entry in menu order that is enabled, whose provider
+    is on, that the project does not deny and that is above the quota thresholds takes the turn
+    instead of waiting. The panel models themselves are never candidates.
+    """
+    skip = {registry.base_alias(str(e)) for e in exclude}
+    now = now_ms()
+    for alias, effort, _default in registry.menu_efforts(store, Role.REVIEWER):
+        if registry.base_alias(alias) in skip:
+            continue
+        try:
+            entry = registry.get(store, alias)
+        except registry.RegistryError:
+            continue
+        if not entry.enabled or not registry.provider_enabled(entry.provider, hub):
+            continue
+        if registry.denied_by(entry, project) is not None:
+            continue
+        _prov, buckets = get_model_buckets(store, registry.model_ref(alias, effort))
+        if breached(buckets, quota_cfg, now) is not None:
+            continue
+        return registry.model_ref(alias, effort)
+    return ""
+
+
+def swap_executor(store: Store, task: Task, fallback: str) -> str:
+    """Point the executor at the fallback (base alias + effort); the next turn starts fresh."""
+    from ahub import tasks as _tasks
+
+    old = _tasks.executor_ref(task)
+    fb_base = registry.base_alias(fallback)
+    fb_stored = registry.stored_effort(fallback)
+    store.update_task(task.id, executor=fb_base, effort=fb_stored,
+                      limits={**task.limits, "fresh_session": True})
+    task.executor = fb_base
+    try:
+        task.effort = fb_stored
+    except (AttributeError, TypeError):
+        pass
+    return old
+
+
+def swap_panel_ref(store: Store, task: Task, old_ref: str, fallback: str) -> str:
+    """Move the exact failing panel entry to the fallback (its siblings stay)."""
+    fb_base = registry.base_alias(fallback)
+    fb_stored = registry.stored_effort(fallback)
+    rev = dict(task.review)
+    models = list(rev.get("models") or [])
+    efforts = list(rev.get("efforts") or [])
+    new_models, new_efforts = [], []
+    for i, x in enumerate(models):
+        x_base = registry.base_alias(str(x))
+        x_stored = str(efforts[i]) if i < len(efforts) else registry.stored_effort(str(x))
+        if registry.model_ref(x_base, x_stored) == old_ref:  # only the failing entry moves
+            new_models.append(fb_base)
+            new_efforts.append(fb_stored)
+        else:
+            new_models.append(x_base)
+            new_efforts.append(x_stored)
+    rev["models"] = new_models
+    if any(new_efforts):
+        rev["efforts"] = new_efforts
+    elif "efforts" in rev:
+        rev.pop("efforts", None)
+    store.update_task(task.id, review=rev)
+    return old_ref
