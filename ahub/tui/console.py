@@ -326,7 +326,12 @@ def live_text(store: Store, sc: scope.Scope | None, now: int,
 
 
 def footer_text(store: Store, sc: scope.Scope, width: int) -> str:
-    """Dim footer: left help, right working count + month money (Go and USD never summed)."""
+    """Dim footer: left help, right working count + month money (Go and USD never summed).
+
+    The count and the money are the payload: when the line does not fit, the scope
+    segment goes first (the welcome box already names it), then the help — never
+    the count or the money.
+    """
     try:
         active = store.list_tasks(states=ACTIVE, projects=(None if sc.all else sc.projects or None))
         n = len(active)
@@ -339,12 +344,20 @@ def footer_text(store: Store, sc: scope.Scope, width: int) -> str:
         go, usd = 0.0, 0.0
     scope_name = _t("console.footer_scope_all") if sc.all else (sc.name or "—")
     right = _t("console.footer_status", n=n, scope=scope_name, go=f"{go:.2f}", usd=f"{usd:.2f}")
+    plain = _t("console.footer_status_noscope", n=n, go=f"{go:.2f}", usd=f"{usd:.2f}")
     left = _t("console.footer_help")
     avail = max(20, width - 2)  # #footer has margin 0 1, no border
     if ui.plain_len(left) + 2 + ui.plain_len(right) <= avail:
         gap = avail - ui.plain_len(left) - ui.plain_len(right)
         return ui.styled(left + " " * gap + right, "dim")
-    return ui.styled(ui.clip_width(left + " · " + right, avail), "dim")
+    if ui.plain_len(left) + 2 + ui.plain_len(plain) <= avail:
+        gap = avail - ui.plain_len(left) - ui.plain_len(plain)
+        return ui.styled(left + " " * gap + plain, "dim")
+    if ui.plain_len(right) <= avail:
+        return ui.styled(right, "dim")
+    if ui.plain_len(plain) <= avail:
+        return ui.styled(plain, "dim")
+    return ui.styled(ui.clip_width(plain, avail), "dim")
 
 
 def event_lines(ev, task: Task | None, width: int) -> list[str]:
@@ -588,7 +601,8 @@ class ConsoleApp(App):
     #transcript-inner { background: ansi_default; }
     #live { height: 1; margin: 0 1; background: ansi_default; }
     #input { margin: 0 1; border: round #ff8700; background: ansi_default; }
-    #input:focus { border: round #ff8700; background: ansi_default; }
+    #input:focus { border: round #ff8700; background: ansi_default; background-tint: 0%; }
+    #input > .input--placeholder, #input > .input--suggestion { background: ansi_default; }
     #footer { height: 1; margin: 0 1; background: ansi_default; }
     #shortcuts { height: auto; margin: 0 1; background: ansi_default; }
     #dialog { width: 80; height: auto; border: thick #ff8700; background: ansi_default; padding: 1 2; }
@@ -609,7 +623,8 @@ class ConsoleApp(App):
     # through — Screen and every widget are ansi_default, borders keep the accent (#ff8700 =
     # ui 38;5;208). Scrollbars are dim track (transparent) + accent thumb, never textual blue.
     # The welcome box draws its own rounded accent border in text (ui.box): no CSS border,
-    # no focus/scroll indicator, no blue left edge.
+    # no focus/scroll indicator, no blue left edge. The input keeps no focus tint and its
+    # placeholder/suggestion stay dim text on ansi_default (the one-cell cursor keeps its reverse).
 
     def __init__(self, store: Store | None = None, all_projects: bool = False,
                  project: str | None = None, control: bool = False) -> None:

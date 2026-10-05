@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from ahub import scope, ui
@@ -363,3 +365,71 @@ def test_liveview_lines_capped(store: Store, tmp_path):
     view = LiveView(store, tid)
     view.feed = feed
     assert len(view.lines) <= MAX_LINES
+
+
+def _bg_sgr_params(sgr_text: str) -> list[str]:
+    """Background params of every SGR sequence: 40-47, 100-107, 48;5;n, 48;2;r;g;b."""
+    found: list[str] = []
+    for m in re.finditer(r"\x1b\[([0-9;]*)m", sgr_text):
+        params = m.group(1).split(";")
+        i = 0
+        while i < len(params):
+            p = params[i]
+            if p.isdigit() and (40 <= int(p) <= 47 or 100 <= int(p) <= 107):
+                found.append(p)
+            elif p == "48" and i + 1 < len(params) and params[i + 1] in ("5", "2"):
+                found.append("48;" + params[i + 1])
+                i += 1
+            i += 1
+    return found
+
+
+async def test_input_placeholder_has_no_background(store: Store):
+    """Placeholder: dim text on ansi_default; only the one-cell cursor may reverse."""
+    from textual.widgets import Input
+
+    app = ConsoleApp(store=store, all_projects=True)
+    async with app.run_test(size=(120, 35)) as pilot:
+        await pilot.pause(0.3)
+        assert app.native_ansi_color  # rendered under ansi_color
+        inp = app.query_one("#input", Input)
+        inp.focus()
+        await pilot.pause(0.1)
+        assert app.focused is inp
+        assert inp.styles.background_tint.a == 0  # no focus tint to blend into a bar
+        for comp in ("input--placeholder", "input--suggestion"):
+            bg = inp.get_component_rich_style(comp).bgcolor
+            assert bg is None or "default" in str(bg)
+        assert ".input--placeholder" in ConsoleApp.CSS  # the rule pins it, not just the default
+        from io import StringIO
+
+        from rich.console import Console as RichConsole
+
+        from ahub.i18n import t
+
+        buf = StringIO()
+        rc = RichConsole(file=buf, force_terminal=True, color_system="truecolor", width=120)
+        rc.print(t("console.input_placeholder"),
+                 style=inp.get_component_rich_style("input--placeholder"), end="")
+        assert _bg_sgr_params(buf.getvalue()) == []
+
+
+def test_footer_names_hub_sessions_with_separator(store: Store):
+    from ahub import transitions
+
+    tid = _task(store, "P", "footer task")
+    transitions.move(store, tid, State.PREPARING)
+    transitions.move(store, tid, State.WORKING)
+    wide = con.footer_text(store, scope.Scope(("P",)), 120)
+    assert "1 working · P · hub sessions this month: Go $" in wide
+    assert "USD $" in wide
+    # at 80 cols with a long scope the scope segment goes first — count and money stay
+    narrow = con.footer_text(store, scope.Scope(), 80)
+    assert "1 working · hub sessions this month: Go $" in narrow
+    assert "USD $" in narrow
+    assert ui.plain_len(narrow) <= 78
+
+
+def test_welcome_names_go_plan_machine(store: Store):
+    box = con.welcome_box(store, scope.Scope(("P",)), now_ms(), 80)
+    assert "Go plan (this machine): today $" in box
