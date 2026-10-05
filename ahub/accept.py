@@ -253,7 +253,12 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *
         _log.info("T%d is already merged into %s (%s) — acceptance on HEAD", t.id, project.work_branch, merged[:10])
     nodes = list(t.limits.get("accept") or [])
     if t.kind is Kind.CODE and nodes:
-        ok, tail, cmd = gates.run_acceptance(project, project.root, nodes, task_label=t.label)
+        try:
+            ok, tail, cmd = gates.run_acceptance(project, project.root, nodes, task_label=t.label)
+        except gates.LockTimeout:
+            # a busy test lock is a wait, not a red acceptance: no rollback, retry the accept
+            raise DecisionError(_t("accept.test_lock_busy"),
+                                reasons.dump("wait_test_lock")) from None
         if not ok:
             head_now = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
             if head_now != merged:  # someone committed into the work branch meanwhile — leave foreign commits alone
