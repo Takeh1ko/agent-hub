@@ -14,9 +14,9 @@ from ahub import paths, quota, reasons, registry, service, tasks, transitions
 from ahub.doctor import Check
 from ahub.home import data as home_data
 from ahub.home import text as home_text
-from ahub.model import Ev, Kind, State
+from ahub.model import Ev, Kind, Role, State
 from ahub.providers.agy import AgyProvider, parse_reset_time, parse_usage_json
-from ahub.providers.base import QuotaBucket
+from ahub.providers.base import Outcome, QuotaBucket, RunResult
 from ahub.store import Store
 from tests.enginekit import install_fake, make_project
 
@@ -187,6 +187,7 @@ def test_scheduling_below_threshold_with_fallback(store, tmp_path, monkeypatch):
     assert rec.spawned == [t.id]
     task_after = store.get_task(t.id)
     assert task_after.executor == "bunny"
+    assert task_after.limits.get("fresh_session") is True  # never resume another model's session
 
     # Event recorded: "T1: Gemini 5h quota 12% → running on bunny"
     events = store.events(task_id=t.id)
@@ -256,8 +257,8 @@ def test_concurrency_cap_per_quota_group(store, tmp_path):
     assert "waiting for Gemini quota concurrency (2/2)" in reasons.text(t3_row.state_reason)
 
 
-def test_turn_quota_error_requeue_and_resume_after_reset(store, tmp_path):
-    """Turn failing with quota error requeues to State.QUEUED and resumes after reset."""
+def test_turn_quota_error_requeue_and_fresh_start_after_reset(store, tmp_path):
+    """Turn failing with quota error requeues to State.QUEUED and restarts fresh after reset."""
     from ahub import engine
 
     project = make_project(tmp_path, max_parallel=2)
@@ -266,9 +267,9 @@ def test_turn_quota_error_requeue_and_resume_after_reset(store, tmp_path):
         {"session": "ses_q", "steps": [
             {"event": {"type": "error", "message": "quota limit reached: 429 RESOURCE_EXHAUSTED"}}],
          "exit": 1},
-        {"session": "ses_q", "steps": [{"write": {"path": ".ahub/report.md", "text": "## Суть\nok\n"}},
-                                        {"write": {"path": ".ahub/result.json", "text": res_json}},
-                                        {"event": {"type": "text", "text": "ok"}}]}
+        {"session": "ses_new", "steps": [{"write": {"path": ".ahub/report.md", "text": "## Суть\nok\n"}},
+                                         {"write": {"path": ".ahub/result.json", "text": res_json}},
+                                         {"event": {"type": "text", "text": "ok"}}]}
     ])
     ensure_model(store, "gemini-flash", "fake", "gemini-flash")
 
@@ -285,11 +286,12 @@ def test_turn_quota_error_requeue_and_resume_after_reset(store, tmp_path):
     eng = engine.Engine(store, project, t.id, sleep=lambda s: None)
     settled = eng.run()
 
-    # Requeued to QUEUED, not NEEDS_DECISION
+    # Requeued to QUEUED, not NEEDS_DECISION; the poisoned session is abandoned (fresh next time)
     assert settled.state is State.QUEUED
     assert "waiting for Gemini quota" in settled.reason
     task_after = store.get_task(t.id)
     assert task_after.state is State.QUEUED
+    assert task_after.limits.get("fresh_session") is True
 
     # 2. While quota is below threshold and before reset, service does not start it
     s, rec = svc(store, project, tmp_path)
@@ -306,12 +308,51 @@ def test_turn_quota_error_requeue_and_resume_after_reset(store, tmp_path):
         s.tick()
         assert rec.spawned == [t.id]
 
-    # 4. Engine runs again: resumes same session
+    # 4. Engine runs again: a new session (the old one would repeat the quota error), same task done
     eng2 = engine.Engine(store, project, t.id, sleep=lambda s: None)
     settled2 = eng2.run()
     assert settled2.state is State.DONE
-    # Check session was resumed (same session id 'ses_q')
-    assert fake.calls[-1]["session_id"] == "ses_q"
+    assert fake.calls[-1]["session_id"] is None
+
+
+def test_reviewer_quota_error_on_code_task_swaps_panel_not_executor(store, tmp_path):
+    """A reviewer quota error on a code task moves only the panel entry to the fallback."""
+    from ahub import engine
+
+    project = make_project(tmp_path, max_parallel=2)
+    fake = install_fake(store, [])
+    ensure_model(store, "gemini-exec", "fake", "gemini-exec")
+    ensure_model(store, "gemini-rev", "fake", "gemini-rev")
+    ensure_model(store, "bunny", "fake", "bunny")
+
+    set_hub_quota('[quota]\nfallback_reviewer = "bunny"\n')
+
+    now = int(time.time() * 1000)
+    fake.set_quota([
+        QuotaBucket("Gemini", "5h", 0.12, now + 3600_000, lambda m: "gemini" in m.lower()),
+        QuotaBucket("Gemini", "weekly", 0.60, now + 86400_000, lambda m: "gemini" in m.lower()),
+    ])
+
+    t = tasks.create(store, tasks.TaskSpec(project="P", kind=Kind.CODE, title="code task",
+                                           model="gemini-exec", review_models=["gemini-rev"],
+                                           review_rounds=1, paths=["core/**"],
+                                           accept=["tests/test_a.py"]),
+                     project, collect=False)
+
+    eng = engine.Engine(store, project, t.id, sleep=lambda s: None)
+    state, _reason = eng._outcome_to_state(
+        RunResult(Outcome.QUOTA, None, error="quota limit reached: 429 RESOURCE_EXHAUSTED"),
+        role=Role.REVIEWER, model_alias="gemini-rev")
+
+    assert state is State.QUEUED
+    after = store.get_task(t.id)
+    assert after.executor == "gemini-exec"
+    assert after.review.get("models") == ["bunny"]
+    events = store.events(task_id=t.id)
+    model_ev = next((e for e in events if e.kind == Ev.MODEL_CHANGED.value), None)
+    assert model_ev is not None
+    assert model_ev.payload.get("from") == "gemini-rev"
+    assert "Gemini 5h quota 12% → running on bunny" in model_ev.payload.get("text", "")
 
 
 def test_turn_quota_error_moves_to_fallback(store, tmp_path, monkeypatch):

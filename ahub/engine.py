@@ -638,10 +638,11 @@ class Engine:
         t = self.task()
         reason, event_text = quota.describe_error(t.label, buckets, r.error, fallback)
         if fallback:
-            old_model = alias
-            if role is Role.REVIEWER and t.kind is Kind.REVIEW:
+            if role is Role.REVIEWER:
+                # a reviewer never takes the executor's seat: only its panel entry moves
+                old_model = alias
                 rev = dict(t.review)
-                rev["models"] = [fallback]
+                rev["models"] = [fallback if x == alias else x for x in list(rev.get("models") or [])]
                 self.store.update_task(t.id, review=rev)
             else:
                 old_model = t.executor
@@ -649,6 +650,10 @@ class Engine:
                 t.executor = fallback
             self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
                                  payload={"from": old_model, "to": fallback, "text": event_text})
+        elif role is not Role.REVIEWER:
+            # the session that hit the quota error is poisoned (agy answers a resume with the old
+            # error again) — abandon it; the work is on the branch, the new session starts fresh
+            self.store.update_task(t.id, limits={**t.limits, "fresh_session": True})
         return State.QUEUED, reason
 
     def _step_with_continue(self, role: Role, alias: str, prompt: str, *, session_id: str | None,
