@@ -36,8 +36,10 @@ def cmd_providers(args) -> int:
         model_rows = []
     by_alias = {r.entry.alias: r for r in model_rows}
     rows = []
+    shown = {e.alias for e in _catalog.visible_entries(registry.models(store))}  # legacy names stay in the DB
     for state in doctor.provider_states():
-        aliases = [e.alias for e in registry.models(store) if e.provider == state.name]
+        aliases = [e.alias for e in registry.models(store)
+                   if e.provider == state.name and e.alias in shown]
         buckets = []
         try:
             prov = provider_mod.get(state.name)

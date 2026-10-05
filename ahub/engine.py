@@ -753,7 +753,7 @@ class Engine:
                     x_base = registry.base_alias(str(x))
                     x_stored = str(efforts[i]) if i < len(efforts) else registry.stored_effort(str(x))
                     x_ref = registry.model_ref(x_base, x_stored)
-                    if x_ref == alias or x_base == registry.base_alias(alias):
+                    if x_ref == alias:  # only the exact failing panel ref moves, not its siblings
                         new_models.append(fb_base)
                         new_efforts.append(fb_stored)
                     else:

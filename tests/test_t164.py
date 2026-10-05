@@ -303,6 +303,59 @@ def test_catalogs_cached_across_reads(monkeypatch):
     assert _counts() == [3, 3, 3]
 
 
+def test_providers_hides_legacy_but_keeps_rows(monkeypatch, capsys):
+    """Legacy model rows stay in the DB (old tasks reference them) but never reach `ahub providers`."""
+    from ahub import doctor
+
+    _en(monkeypatch)
+    store = Store()
+    with store.tx() as c:
+        c.execute("INSERT INTO model(alias, provider, model_id, variant, note) VALUES"
+                  "('spark-high','opencode','opencode-go/muse-spark-1.3-contributor','high',''),"
+                  "('spark-medium','opencode','opencode-go/muse-spark-1.3-contributor','medium',''),"
+                  "('gemini-low','agy','gemini-3.8-flash-low','','')")
+    monkeypatch.setattr(doctor, "provider_states", lambda *a, **k: [
+        doctor.ProviderState("opencode", True, True, detail="d", note="n", hint=""),
+        doctor.ProviderState("agy", True, True, detail="d", note="n", hint=""),
+    ])
+    monkeypatch.setattr("ahub.providers.agy.AgyProvider.quota", lambda self, force=False: [])
+    monkeypatch.setattr(_catalog, "get_catalogs", lambda refresh=False: {})
+    monkeypatch.setattr(_catalog, "_quota_pct_for", lambda entry, store=None: None)
+    monkeypatch.setattr(_catalog, "_go_numbers", lambda: (None, None))
+    monkeypatch.setattr("ahub.ui.width", lambda explicit=None: 200)
+    assert cli.main(["providers"]) == 0
+    out = capsys.readouterr().out
+    assert "spark-high" not in out and "spark-medium" not in out and "gemini-low" not in out
+    assert "spark " in out and "gemini " in out
+    with store.read() as c:
+        kept = {r[0] for r in c.execute("SELECT alias FROM model")}
+    assert {"spark-high", "spark-medium", "gemini-low"} <= kept
+
+
+def test_reviewer_fallback_replaces_only_failing_ref(monkeypatch, tmp_path):
+    """A quota failure on spark:high moves only that panel entry to the fallback, not spark:medium."""
+    from ahub import engine, paths
+    from ahub.model import State
+    from ahub.providers.base import Outcome, RunResult
+    from tests.enginekit import make_project
+
+    _en(monkeypatch)
+    monkeypatch.setattr(_catalog, "get_catalogs", lambda refresh=False: _spark_catalog())
+    project = make_project(tmp_path)
+    store = Store()
+    t = tasks.create(store, tasks.TaskSpec(project=project.name, kind=Kind.REVIEW, title="look",
+                                           review_models=["spark:high", "spark:medium"],
+                                           review_input="core/a.py"),
+                     project, collect=False)
+    write(paths.global_config_path(), '[quota]\nfallback_reviewer = "bunny"\n')
+    eng = engine.Engine(store, project, t.id, sleep=lambda s: None)
+    state, _reason = eng._handle_quota_outcome(RunResult(Outcome.QUOTA, None, error="quota exhausted"),
+                                               role=Role.REVIEWER, model_alias="spark:high")
+    assert state is State.QUEUED
+    rev = store.get_task(t.id).review
+    assert rev["models"] == ["bunny", "spark"] and rev["efforts"] == ["", "medium"]
+
+
 def test_console_model_usage_mentions_effort(monkeypatch):
     from ahub.i18n import t
 
