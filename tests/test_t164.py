@@ -212,16 +212,60 @@ def test_status_shows_level(monkeypatch, tmp_path, capsys):
     assert "spark:high" in out
 
 
-def test_migration_maps_legacy_menus(tmp_path, monkeypatch):
+def test_pick_effort_falls_back_past_denied_default(store, monkeypatch):
+    """pick(role, effort) without an explicit alias skips a denied default like a plain pick does."""
+    from ahub import config
+
     _en(monkeypatch)
-    db = tmp_path / "m.db"
+    monkeypatch.setattr(_catalog, "get_catalogs", lambda refresh=False: _spark_catalog())
+    denied = config.parse_project(
+        {"schema_version": 2, "name": "P", "models": {"deny": ["muse-spark-1.3-contributor"]}}, "/tmp")
+    picked = registry.pick(store, Role.SCOUT, denied, effort="high")
+    assert (picked.alias, picked.variant) == ("deepseek-flash", "high")
+
+
+def test_migration_maps_legacy_menus(tmp_path, monkeypatch):
+    """Migration 008 on real v7 legacy data: menus, task executors and sessions map to base + effort."""
+    import sqlite3
+
+    from ahub.store import MIGRATIONS_DIR, _split_sql
+
+    _en(monkeypatch)
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    for num in range(1, 8):
+        f = next(p for p in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql")) if int(p.name[:3]) == num)
+        for stmt in _split_sql(f.read_text(encoding="utf-8")):
+            con.execute(stmt)
+    con.execute("PRAGMA user_version=7")
+    con.execute("INSERT INTO model(alias, provider, model_id, variant, note) VALUES"
+                "('spark','opencode','opencode-go/muse-spark-1.3-contributor','xhigh',''),"
+                "('spark-high','opencode','opencode-go/muse-spark-1.3-contributor','high',''),"
+                "('spark-medium','opencode','opencode-go/muse-spark-1.3-contributor','medium',''),"
+                "('gemini','agy','gemini-3.8-flash-high','',''),"
+                "('gemini-low','agy','gemini-3.8-flash-low','','')")
+    con.execute("INSERT INTO role_model(role, alias, position, is_default) VALUES"
+                "('observer','spark-high',0,1),"
+                "('observer','spark-medium',1,0),"
+                "('scout','gemini-low',0,1)")
+    con.execute("INSERT INTO task(project, kind, title, executor, created_at, updated_at) VALUES"
+                "('P','scout','old','spark-high',0,0)")
+    con.execute("INSERT INTO session(task_id, provider, external_id, role, round, model, started_at,"
+                " log_path) VALUES(1,'agy','','scout',0,'gemini-low',0,'')")
+    con.commit()
+    con.close()
+
     store = Store(path=db)
-    with store.tx() as c:
-        c.execute("UPDATE role_model SET alias='spark-high', effort='' WHERE role='observer' AND is_default=1")
-    store2 = Store(path=db)
-    refs = registry.menu_efforts(store2, Role.OBSERVER)
+    assert store.schema_version() == 8
+    refs = registry.menu_efforts(store, Role.OBSERVER)
     assert ("spark", "high", True) in refs
+    assert ("spark", "medium", False) in refs
+    assert registry.menu_efforts(store, Role.SCOUT) == [("gemini", "low", True)]
     assert all(a not in registry.HIDDEN_ALIASES for a, _e, _d in refs)
+    t = store.get_task(1)
+    assert (t.executor, t.effort) == ("spark", "high")
+    s = store.list_sessions(1)[0]
+    assert (s.model, s.effort) == ("gemini", "low")
 
 
 def test_console_model_usage_mentions_effort(monkeypatch):

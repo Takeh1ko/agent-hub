@@ -540,7 +540,9 @@ def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit
     """Model for a role: explicit (checked) or default; if the default is denied — first allowed menu entry.
 
     explicit is ALIAS[:EFFORT] (legacy mapped); effort overrides it when given (a mismatch is refused
-    by the caller — here an explicit :effort and effort="" simply combine).
+    by the caller — here an explicit :effort and effort="" simply combine). With effort and no
+    explicit alias the override applies to every menu candidate in order: a denied default falls
+    back to the next allowed entry, exactly like a pick without an effort.
     """
     if explicit:
         alias_part, effort_part = split_ref(explicit)
@@ -548,17 +550,11 @@ def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit
         want = (effort or "").strip().lower() or stored
         ref = f"{base}:{want}" if want else base
         return check(store, ref, project, hub, info, index)
-    if effort:
-        # no explicit alias: the role default alias with this effort override (validated on use)
-        try:
-            default = role_default(store, role)
-        except (OSError, ValueError, RuntimeError):
-            default = None
-        if default is not None:
-            return check(store, f"{default.alias}:{effort}", project, hub, info, index)
+    want_override = (effort or "").strip().lower()
     if selectable_from_env():
         try:
-            return check(store, "fake", project, hub)
+            return check(store, f"fake:{want_override}" if want_override else "fake",
+                         project, hub, info, index)
         except RegistryError:
             pass
     off = disabled_providers(hub)
@@ -576,9 +572,9 @@ def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit
         if rule is not None:
             reasons.append(_t("registry.reason_denied", alias=e.alias))
             continue
-        if effort:
+        if want_override:
             try:
-                return check(store, f"{e.alias}:{effort}", project, hub, info, index)
+                return check(store, f"{e.alias}:{want_override}", project, hub, info, index)
             except RegistryError as err:
                 reasons.append(str(err))
                 continue
