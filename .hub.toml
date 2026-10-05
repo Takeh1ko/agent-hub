@@ -9,7 +9,7 @@ max_parallel = 6
 test_resource = "selftest"
 
 [resources]
-selftest = { lock = "/tmp/hub-selftest.lock", capacity = 2 }  # two tasks at once; acceptance itself still runs one at a time under the lock
+selftest = { lock = "/tmp/hub-selftest.lock", capacity = 3 }  # two tasks at once; acceptance itself still runs one at a time under the lock
 
 [budget]
 go = 1.5
