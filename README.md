@@ -17,6 +17,15 @@ The short version of everything below is in the [user guide](docs/guide.md).
 
 ## How it works
 
+<p align="center"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/assets/flow-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/assets/flow-light.svg">
+  <img src="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/assets/flow-dark.svg" alt="agent-hub: Claude files a task, the hub runs a worker, the gates and a review panel, then wakes Claude with one line to accept" width="100%">
+</picture></p>
+
+<details>
+<summary>The same flow as a diagram</summary>
+
 ```mermaid
 flowchart TD
   C["Claude Code"] -->|"ahub task new"| S["ahub service: queue, budgets, events"]
@@ -29,6 +38,7 @@ flowchart TD
   E -->|"ahub watch wakes Claude"| C
   C -->|"ahub accept / rework / reject"| S
 ```
+</details>
 
 The hub never merges on its own: the decision after `done` belongs to the orchestrator or to you. A network error is
 retried, silence gets one continuation, a quota limit waits for its window (or the fallback model), a timeout /

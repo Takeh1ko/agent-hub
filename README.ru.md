@@ -17,6 +17,15 @@ agent-hub — локальный сервис между оркестратор�
 
 ## Как это работает
 
+<p align="center"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/assets/flow-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/assets/flow-light.svg">
+  <img src="https://raw.githubusercontent.com/Takeh1ko/agent-hub/main/docs/assets/flow-dark.svg" alt="agent-hub: Claude ставит задачу, хаб запускает работника, ворота и панель ревью, затем будит Claude одной строкой, чтобы принять результат" width="100%">
+</picture></p>
+
+<details>
+<summary>Тот же путь схемой</summary>
+
 ```mermaid
 flowchart TD
   C["Claude Code"] -->|"ahub task new"| S["хаб: очередь, бюджеты, события"]
@@ -29,6 +38,7 @@ flowchart TD
   E -->|"ahub watch будит Claude"| C
   C -->|"ahub accept / rework / reject"| S
 ```
+</details>
 
 Хаб никогда не сливает изменения сам: решение после `done` принадлежит оркестратору или вам. Обрыв сети —
 повтор, тишина — одно продолжение, квота — ожидание своего окна (или запасная модель), таймаут или бюджет —
