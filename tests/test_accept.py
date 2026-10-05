@@ -558,7 +558,6 @@ def test_second_accept_waits_and_names_the_holder_on_a_tty(store, project, monke
     import io
     import sys
     import threading
-    import time
 
     from ahub import gates as g
     from ahub.i18n import _reset
@@ -569,18 +568,24 @@ def test_second_accept_waits_and_names_the_holder_on_a_tty(store, project, monke
     t1, t2 = two_done_tasks(store, project, b_text="B = 2\n", c_text="C = 2\n")
     first_in = threading.Event()
     heads = []
+    line = f"waiting for the accept of T{t1.id}…\n"
+    out = io.StringIO()
+    out.isatty = lambda: tty  # type: ignore[assignment]
 
     def slow_acceptance(project_, cwd, nodes, **kw):
         if kw.get("task_label") == f"T{t1.id}":
             head = git_out(cwd, "rev-parse", "HEAD").strip()
             first_in.set()
-            time.sleep(0.5)
+            # Hold the lock until the second accept is seen waiting: under load it may take
+            # a while to reach the lock, and a fixed sleep would release too early.
+            if tty:
+                wait_until(lambda: line in out.getvalue())
+            else:
+                wait_until(lambda: store.get_task(t2.id).state is State.ACCEPTING)
             heads.append((head, git_out(cwd, "rev-parse", "HEAD").strip()))
         return True, "", "pytest"
 
     monkeypatch.setattr(g, "run_acceptance", slow_acceptance)
-    out = io.StringIO()
-    out.isatty = lambda: tty  # type: ignore[assignment]
     monkeypatch.setattr(sys, "stdout", out)
 
     threads = [threading.Thread(target=accept.accept, args=(store, project, tid)) for tid in (t1.id, t2.id)]
@@ -592,7 +597,6 @@ def test_second_accept_waits_and_names_the_holder_on_a_tty(store, project, monke
 
     assert [store.get_task(t.id).state for t in (t1, t2)] == [State.ACCEPTED, State.ACCEPTED]
     assert heads and heads[0][0] == heads[0][1]  # nothing merged into the root while the tests ran
-    line = f"waiting for the accept of T{t1.id}…\n"
     if tty:
         assert out.getvalue().count(line) == 1  # one line, naming the holder, printed once
     else:

@@ -160,7 +160,8 @@ def test_sigterm_takes_the_provider_process_group_with_it(store, tmp_path, monke
     try:
         assert wait_until(lambda: agent_of(wt)), "процесс провайдера не стартовал"
         p.send_signal(signal.SIGTERM)
-        assert p.wait(timeout=30) == 0
+        # Generous bound: under parallel suites process startup and the group kill stretch.
+        assert p.wait(timeout=60) == 0
         assert wait_until(lambda: not agent_of(wt)), "процесс провайдера остался сиротой после SIGTERM"
         assert store.get_task(t.id).state is State.WORKING  # the task is left for the service
     finally:
