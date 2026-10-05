@@ -31,7 +31,8 @@ flowchart TD
 ```
 
 The hub never merges on its own: the decision after `done` belongs to the orchestrator or to you. A network error is
-retried, silence gets one continuation, a quota / timeout / budget limit turns into `needs_decision` — a task never
+retried, silence gets one continuation, a quota limit waits for its window (or the fallback model), a timeout /
+budget limit turns into `needs_decision` — a task never
 hangs silently. Events are stored until they are acknowledged, so a restarted session or a closed terminal does not
 drop a "done".
 
@@ -50,7 +51,7 @@ drop a "done".
 | Gates | commit present, diff ⊆ allowed paths, structured result, acceptance tests under a shared lock |
 | Review | panel of reviewer models in new sessions; disputes count only with file, line and reason; N rounds |
 | Merge | `ahub accept` merges `--no-ff`, re-runs acceptance, rolls back if red |
-| Failures | network error → retry; silence → one continuation; quota/timeout/budget → `needs_decision`; never a silent hang |
+| Failures | network error → retry; silence → one continuation; quota → waits for the window (or the fallback model); timeout/budget → `needs_decision`; never a silent hang |
 | Budgets | per task (including review); at 100 % the worker is asked to save and stop, extension is one command |
 | Providers | opencode, Google Antigravity (`agy`), OpenAI Codex CLI (`codex`); `ahub providers` shows what is found, logged in and enabled, `ahub providers enable\|disable <name>` switches one |
 | Watching | `ahub status` — one line per task; `ahub status T12` — the task in detail; `ahub top` — current tasks, pulse, money and events in a terminal UI |

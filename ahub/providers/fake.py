@@ -18,7 +18,18 @@ import os
 import sys
 from pathlib import Path
 
-from ahub.providers.base import Act, Activity, Cap, Health, ModelInfo, Provider, RunSpec, SessionState, Usage
+from ahub.providers.base import (
+    Act,
+    Activity,
+    Cap,
+    Health,
+    ModelInfo,
+    Provider,
+    QuotaBucket,
+    RunSpec,
+    SessionState,
+    Usage,
+)
 
 TRANSIENT_MARKERS = ("unexpected server error", "cannot connect", "econnrefused", "etimedout", "status 5", "429")
 
@@ -39,8 +50,15 @@ class FakeProvider(Provider):
     capabilities = frozenset({Cap.RESUME, Cap.STREAM, Cap.STRUCTURED, Cap.TOKENS, Cap.COST_MONEY,
                               Cap.EXPORT, Cap.CATALOG, Cap.HEALTH, Cap.FIND_SESSION})
 
-    def __init__(self, healthy: bool = True) -> None:
+    def __init__(self, healthy: bool = True, quota: list[QuotaBucket] | None = None) -> None:
         self.healthy = healthy
+        self._quota = quota
+
+    def set_quota(self, buckets: list[QuotaBucket]) -> None:
+        self._quota = buckets
+
+    def quota(self, force: bool = False) -> list[QuotaBucket]:
+        return list(self._quota) if self._quota is not None else []
 
     def build_command(self, spec: RunSpec) -> list[str]:
         src = spec.prompt.strip()

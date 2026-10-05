@@ -27,11 +27,14 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 
 from ahub import log as hublog
+from ahub import paths
 from ahub.i18n import t as _t
-from ahub.providers.base import Act, Activity, Cap, Health, ModelInfo, Outcome, Provider, RunSpec, Usage
+from ahub.providers.base import Act, Activity, Cap, Health, ModelInfo, Outcome, Provider, QuotaBucket, RunSpec, Usage
 from ahub.providers.opencode import extract_json, prompt_arg  # shared bits: prompt → argument, JSON out of text
 
 _log = hublog.get("agy")
@@ -136,12 +139,92 @@ def parse_models(out: str) -> list[ModelInfo]:
     return models
 
 
+def clean_group_name(name: str) -> str:
+    s = name.strip()
+    for suffix in (" Models", " models", " model", " Model"):
+        if s.endswith(suffix):
+            return s[:-len(suffix)].strip()
+    return s
+
+
+def parse_reset_time(val: str | int | float) -> int:
+    if isinstance(val, (int, float)):
+        return int(val)
+    s = str(val).strip()
+    if not s:
+        return 0
+    if s.isdigit():
+        return int(s)
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except (ValueError, TypeError):
+        return 0
+
+
+def parse_usage_json(data: dict | str) -> list[QuotaBucket]:
+    """Parse agy /usage JSON into QuotaBucket instances."""
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(data, dict):
+        return []
+    cmd_data = data.get("command", {}).get("data", {}) if isinstance(data.get("command"), dict) else {}
+    groups = cmd_data.get("groups") if isinstance(cmd_data, dict) and "groups" in cmd_data else data.get("groups")
+    if not isinstance(groups, list):
+        return []
+    out: list[QuotaBucket] = []
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        raw_name = str(g.get("name") or "")
+        group_name = clean_group_name(raw_name)
+        low_name = raw_name.lower()
+        gn_low = group_name.lower()
+        if "gemini" in low_name:
+            def pred(m: str) -> bool:
+                return m.lower().startswith("gemini")
+        elif "claude" in low_name or "gpt" in low_name:
+            def pred(m: str) -> bool:
+                return m.lower().startswith(("claude", "gpt"))
+        else:
+            def pred(m: str, target: str = gn_low) -> bool:
+                return target in m.lower()
+
+        buckets = g.get("buckets", [])
+        if isinstance(buckets, list):
+            for b in buckets:
+                if not isinstance(b, dict):
+                    continue
+                window = str(b.get("window") or "")
+                try:
+                    rem = min(1.0, max(0.0, float(b.get("remaining_fraction", 0.0))))
+                except (TypeError, ValueError):
+                    continue
+                reset_time = str(b.get("reset_time") or "")
+                reset_at = parse_reset_time(reset_time)
+                out.append(QuotaBucket(
+                    group=group_name,
+                    window=window,
+                    remaining=rem,
+                    reset_at=reset_at,
+                    models=pred,
+                ))
+    return out
+
+
 def _outcome_of(flags: dict) -> Outcome:
     for key, outcome in (("no_access", Outcome.NO_ACCESS), ("quota", Outcome.QUOTA),
                          ("transient", Outcome.TRANSIENT)):
         if flags.get(key):
             return outcome
     return Outcome.MODEL_ERROR
+
+
+def agy_quota_cache_file() -> Path:
+    return paths.state_dir() / "quota_agy.json"
 
 
 class AgyProvider(Provider):
@@ -341,3 +424,47 @@ class AgyProvider(Provider):
         if not models:
             problems.append(_t("agy.no_models"))
         return Health(not problems, tuple(problems), details)
+
+    def quota(self, force: bool = False) -> list[QuotaBucket]:
+        cache_path = agy_quota_cache_file()
+        now = time.time()
+        if not force and cache_path.is_file():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                ts = float(cached.get("ts", 0))
+                if 0 <= now - ts < 60:
+                    return parse_usage_json(cached.get("data", {}))
+            except (OSError, json.JSONDecodeError, ValueError):
+                pass
+        try:
+            rc, out, _err = run_capture([self._bin(), "-p", "/usage", "--output-format", "json"],
+                                        timeout=30, env=self.extra_env)
+        except (OSError, subprocess.SubprocessError) as e:
+            _log.warning("usage: %s", e)
+            return self._stale_quota(cache_path)
+        if rc != 0:
+            _log.warning("usage: code %s", rc)
+            return self._stale_quota(cache_path)
+        try:
+            raw_data = json.loads(out)
+        except json.JSONDecodeError:
+            return self._stale_quota(cache_path)
+        buckets = parse_usage_json(raw_data)
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cache_path.with_suffix(f".tmp.{os.getpid()}")
+            tmp.write_text(json.dumps({"ts": now, "data": raw_data}, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(cache_path)
+        except OSError as e:
+            _log.warning("quota cache write: %s", e)
+        return buckets
+
+    def _stale_quota(self, cache_path: Path) -> list[QuotaBucket]:
+        if cache_path.is_file():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                return parse_usage_json(cached.get("data", {}))
+            except (OSError, ValueError):
+                pass
+        return []
+

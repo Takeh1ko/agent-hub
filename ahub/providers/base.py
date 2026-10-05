@@ -18,6 +18,7 @@ reports "no data" instead of failing.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -241,8 +242,28 @@ class Provider(ABC):
     def catalog(self) -> list[ModelInfo]:
         return []
 
+    def quota(self, force: bool = False) -> list[QuotaBucket]:
+        return []
+
     def health(self) -> Health:
         return Health(ok=True, problems=(_t("provider.no_health"),))
+
+
+@dataclass
+class QuotaBucket:
+    group: str
+    window: str
+    remaining: float  # 0..1
+    reset_at: int  # ms UTC
+    models: Callable[[str], bool] = field(default=lambda _m: True)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group": self.group,
+            "window": self.window,
+            "remaining": self.remaining,
+            "reset_at": self.reset_at,
+        }
 
 
 def clip(text: Any, limit: int = 2000) -> str:

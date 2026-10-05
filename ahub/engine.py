@@ -37,7 +37,7 @@ from ahub import log as hublog
 from ahub.config import ProjectConfig
 from ahub.i18n import plural
 from ahub.i18n import t as _t
-from ahub.model import ACTIVE, Kind, Phase, Role, State
+from ahub.model import ACTIVE, Ev, Kind, Phase, Role, State
 from ahub.providers.base import Act, Activity, Outcome, RunResult, RunSpec
 from ahub.providers.runner import PollFailed
 from ahub.providers.runner import run as run_session
@@ -583,7 +583,8 @@ class Engine:
             t = self.move(State.WORKING, reasons.dump("worker_started"), fields={**fields, "round": max(1, t.round)})
         return t
 
-    def _outcome_to_state(self, r: RunResult) -> tuple[State, str] | None:
+    def _outcome_to_state(self, r: RunResult, *, role: Role = Role.EXECUTOR,
+                          model_alias: str = "") -> tuple[State, str] | None:
         """Step result after which there is nothing to continue. None — step ok or handled separately."""
         if r.outcome is Outcome.KILLED:
             if self.lost.is_set():
@@ -594,12 +595,45 @@ class Engine:
         if r.outcome is Outcome.TIMEOUT:
             return State.NEEDS_DECISION, reasons.dump("time_limit", err=r.error)
         if r.outcome is Outcome.QUOTA:
-            return State.NEEDS_DECISION, reasons.dump("quota", err=r.error[:300])
+            return self._handle_quota_outcome(r, role=role, model_alias=model_alias)
         if r.outcome is Outcome.TRANSIENT:
             return State.NEEDS_DECISION, reasons.dump("transient_out", err=r.error[:300])
         if r.outcome in (Outcome.NO_ACCESS, Outcome.MODEL_ERROR, Outcome.CRASH, Outcome.NOT_STARTED):
             return State.ERROR, reasons.dump("step_failed", outcome=r.outcome.value, err=r.error[:400])
         return None
+
+    def _handle_quota_outcome(self, r: RunResult, *, role: Role = Role.EXECUTOR,
+                              model_alias: str = "") -> tuple[State, str]:
+        from ahub import config, quota
+
+        alias = model_alias or self.task().executor
+        _prov, buckets = quota.get_model_buckets(self.store, alias, force=True)
+
+        hub_cfg = config.load_hub()
+        quota_cfg = hub_cfg.quota
+        fb_role = quota_cfg.fallback_reviewer if role is Role.REVIEWER else quota_cfg.fallback_executor
+        fallback = fb_role or quota_cfg.fallback
+
+        t = self.task()
+        reason, event_text = quota.describe_error(t.label, buckets, r.error, fallback)
+        if fallback:
+            if role is Role.REVIEWER:
+                # a reviewer never takes the executor's seat: only its panel entry moves
+                old_model = alias
+                rev = dict(t.review)
+                rev["models"] = [fallback if x == alias else x for x in list(rev.get("models") or [])]
+                self.store.update_task(t.id, review=rev)
+            else:
+                old_model = t.executor
+                self.store.update_task(t.id, executor=fallback, limits={**t.limits, "fresh_session": True})
+                t.executor = fallback
+            self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                 payload={"from": old_model, "to": fallback, "text": event_text})
+        elif role is not Role.REVIEWER:
+            # the session that hit the quota error is poisoned (agy answers a resume with the old
+            # error again) — abandon it; the work is on the branch, the new session starts fresh
+            self.store.update_task(t.id, limits={**t.limits, "fresh_session": True})
+        return State.QUEUED, reason
 
     def _step_with_continue(self, role: Role, alias: str, prompt: str, *, session_id: str | None,
                             log_name: str, prompt_kind: str = "start") -> tuple[RunResult, tuple[State, str] | None]:
@@ -615,7 +649,7 @@ class Engine:
             r = self._take_nudge(role, alias, r, session_id, log_name)
             if r.outcome is Outcome.SILENCE:
                 return r, (State.NEEDS_DECISION, reasons.dump("silence_twice", secs=r.silence_s))
-        return r, self._outcome_to_state(r)
+        return r, self._outcome_to_state(r, role=role, model_alias=alias)
 
     def _take_nudge(self, role: Role, alias: str, r: RunResult, session_id: str | None,
                     log_name: str) -> RunResult:
@@ -751,6 +785,8 @@ class Engine:
         decision, reason, findings = self._review_round(t, gates.GateResult(base="", head=""), models, round_no,
                                                         max(1, int(t.review.get("rounds") or 1)),
                                                         material=material, rework=False, notes=rework_notes)
+        if decision == "queued":
+            return self._settle(State.QUEUED, reason)
         if decision == "decision":  # a reviewer without a verdict, a stop, the budget
             return self._settle(State.NEEDS_DECISION, reason, payload={"findings": len(findings)})
         summary = _findings_summary(findings)
@@ -889,6 +925,8 @@ class Engine:
                 return self._budget_stop(role, t.executor, sid)
             t = self.move(State.REVIEWING, reasons.dump("review_round", round=round_no))
             decision, reason, findings = self._review_round(t, g, models, round_no, max_rounds)
+            if decision == "queued":
+                return self._settle(State.QUEUED, reason)
             if decision == "done":
                 return self._settle(State.DONE, reason, payload=payload)
             if decision == "decision":
@@ -928,6 +966,41 @@ class Engine:
         from concurrent.futures import ThreadPoolExecutor
 
         diff = gates.diff_text(t.worktree, g.base) if material is None else material
+        from ahub import config, quota
+        from ahub.time import fmt_local
+
+        hub_cfg = config.load_hub()
+        quota_cfg = hub_cfg.quota
+        fallback_rev = quota_cfg.fallback_reviewer or quota_cfg.fallback
+        new_models = []
+        for m in models:
+            _prov, buckets = quota.get_model_buckets(self.store, m)
+            b_5h = next((b for b in buckets if b.window == "5h"), None)
+            b_week = next((b for b in buckets if b.window in ("weekly", "week")), None)
+            now = now_ms()
+            breached = None
+            if b_5h and b_5h.remaining < quota_cfg.min_5h and now < b_5h.reset_at:
+                breached = b_5h
+            elif b_week and b_week.remaining < quota_cfg.min_weekly and now < b_week.reset_at:
+                breached = b_week
+
+            if breached:
+                pct = int(round(breached.remaining * 100))
+                if fallback_rev:
+                    event_text = _t("engine.quota_fallback", label=t.label, group=breached.group,
+                                    window=breached.window, pct=pct, fallback=fallback_rev)
+                    self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                         payload={"from": m, "to": fallback_rev, "text": event_text})
+                    new_models.append(fallback_rev)
+                else:
+                    reset_str = fmt_local(breached.reset_at)
+                    reason = reasons.dump("wait_quota", group=breached.group, window=breached.window,
+                                          pct=pct, reset=reset_str)
+                    return "queued", reason, []
+            else:
+                new_models.append(m)
+        models = new_models
+
         for m in models:
             review.review_path(t.worktree, round_no, m).unlink(missing_ok=True)
 
@@ -942,6 +1015,17 @@ class Engine:
             results = list(ex.map(one, models))
         if (stop := self._review_interrupted(results)) is not None:
             return stop
+        for m, r in zip(models, results, strict=True):
+            if r.outcome is Outcome.QUOTA:
+                _prov, buckets = quota.get_model_buckets(self.store, m, force=True)
+                reason, event_text = quota.describe_error(t.label, buckets, r.error, fallback_rev)
+                if fallback_rev:
+                    self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                         payload={"from": m, "to": fallback_rev, "text": event_text})
+                    rev = dict(t.review)
+                    rev["models"] = [fallback_rev if x == m else x for x in models]
+                    self.store.update_task(t.id, review=rev)
+                return "queued", reason, []
         self._revert_reviewer(t)
         by_model = dict(zip(models, results, strict=True))
         found: dict[str, review.Review] = {}
@@ -961,6 +1045,17 @@ class Engine:
                 retries = list(ex.map(retry_one, missing))
             if (stop := self._review_interrupted(retries)) is not None:
                 return stop
+            for m, r in zip(missing, retries, strict=True):
+                if r.outcome is Outcome.QUOTA:
+                    _prov, buckets = quota.get_model_buckets(self.store, m, force=True)
+                    reason, event_text = quota.describe_error(t.label, buckets, r.error, fallback_rev)
+                    if fallback_rev:
+                        self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
+                                             payload={"from": m, "to": fallback_rev, "text": event_text})
+                        rev = dict(t.review)
+                        rev["models"] = [fallback_rev if x == m else x for x in models]
+                        self.store.update_task(t.id, review=rev)
+                    return "queued", reason, []
             self._revert_reviewer(t)
             for m in missing:
                 rv = review.parse(review.review_path(t.worktree, round_no, m), m)
