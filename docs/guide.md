@@ -79,6 +79,11 @@ How money works per provider: opencode free models need no login and cost nothin
 ChatGPT plan. The last two report token counts and no price, so a task on them shows `$0.000 Go` and its tokens
 appear in `ahub follow`.
 
+`agy` reads its quota windows from `/usage` (the Gemini 5h and weekly buckets) and the hub schedules around them:
+below `[quota] min_5h` / `min_weekly` a task waits for the reset or starts on the fallback model (`fallback`,
+`fallback_executor`, `fallback_reviewer`). `ahub providers` and `ahub doctor` show every bucket; a quota error
+mid-task returns it to the queue with the wait reason instead of `needs_decision`.
+
 ## Running tasks
 
 ```
@@ -206,6 +211,10 @@ the tokens per step in `ahub follow` — what they cost is the quota of the acco
 * `ahub budget T12 --add 1` raises the budget and the task resumes on its own.
 * `ahub cost` shows the money of the hub's own sessions per project and per model (`--all`, `--since YYYY-MM-DD`).
   `ahub top` shows the same numbers in its header, per project group.
+
+Quota windows are not money: a Gemini task waits (`waiting for Gemini quota: 5h 12%, resets 17:16`) or moves to the
+fallback model, and one quota group is shared by at most `ceil(remaining_5h * 6)` tasks at once. A quota error
+mid-turn requeues the task in the same session — it resumes by itself after the reset.
 
 The README has real numbers from this repository's own tasks, with the tariffs that paid for them.
 
