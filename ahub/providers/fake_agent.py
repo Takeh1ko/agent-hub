@@ -10,7 +10,6 @@ Steps:
   {"bg": 30, "detach": false}        — drop a background process and exit (detach — also leave the group via setsid)
   {"write": {"path": "a.txt", "text": "..."}}  — write a file into cwd
   {"git_commit": "message"}          — git add -A && git commit in cwd
-  {"merge": "main"}                  — git merge --no-edit <ref> in cwd (conflict stays for the next write)
   {"result": {...}}                  — .ahub/result.json with commit = current HEAD
   {"stderr": "text"}                 — a line to stderr
   {"crash": true}                    — exit at once with no result (code 137)
@@ -55,10 +54,6 @@ def main(argv: list[str]) -> int:
         elif "git_commit" in step:
             subprocess.run(["git", "add", "-A"], check=True, capture_output=True)
             subprocess.run(["git", "commit", "-q", "-m", step["git_commit"]], check=True, capture_output=True)
-        elif "merge" in step:
-            # A worker resolving a moved main: merge stays in progress on conflict, so the next
-            # write can resolve it and git_commit finishes the merge commit.
-            subprocess.run(["git", "merge", "--no-edit", str(step["merge"])], capture_output=True)
         elif "result" in step:
             # Worker result with the real HEAD (as a worker would): commit fills itself in.
             res = dict(step["result"])
