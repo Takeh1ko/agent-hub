@@ -504,13 +504,14 @@ async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
         real_apply = app._apply
 
         def _counting(screen, live, pulses) -> None:
+            real_apply(screen, live, pulses)
             applied.append(1)
-            return real_apply(screen, live, pulses)
 
         app._apply = _counting  # type: ignore[method-assign]
         before = len(applied)
         app.refresh_data()
         await wait_for(pilot, lambda n=before: len(applied) > n)  # the refresh applied, not just the rows
+        assert len(applied) > before
         assert app.query_one("#tasks").cursor_row == 3
 
 
