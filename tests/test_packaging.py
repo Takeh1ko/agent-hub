@@ -1,10 +1,12 @@
-"""Packaging of 3.0.0: Telegram as an extra, refusal on Windows, only the ahub script."""
+"""Packaging: Telegram as an extra, refusal on Windows, only the ahub script."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
 from pathlib import Path
+
+from ahub import __version__
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -47,11 +49,11 @@ def test_tg_core_launcher_import_without_aiogram():
 
 
 def test_pyproject_layout():
-    """ahub package 3.0.0: only the ahub script, aiogram only in an extra."""
+    """ahub package: only the ahub script, aiogram only in an extra, version matches the code."""
     import tomllib
 
     proj = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    assert proj["name"] == "ahub" and proj["version"] == "3.0.0"
+    assert proj["name"] == "ahub" and proj["version"] == __version__
     assert proj["requires-python"] == ">=3.11"
     assert list(proj["scripts"]) == ["ahub"]
     assert "aiogram" not in " ".join(proj["dependencies"])

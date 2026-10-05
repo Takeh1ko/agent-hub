@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from ahub import cli, doctor, paths
+from ahub import __version__, cli, doctor, paths
 from ahub.store import Store
 from tests.conftest import write
 from tests.enginekit import make_repo
@@ -75,7 +75,7 @@ def test_home_screen_without_a_hub(capsys, monkeypatch, tmp_path):
     rc, out = run(capsys)  # not argparse usage: a screen, and exit 0
     assert rc == 0
     assert snap(out, tmp_path) == (
-        "ahub 3.0.0 · no project in this directory · service not running\n"
+        f"ahub {__version__} · no project in this directory · service not running\n"
         "  the hub is not configured yet — run `ahub setup` to get started\n"
         "  • ahub setup\n"
         "  • ahub doctor\n"
@@ -138,7 +138,7 @@ def test_home_screen_with_work_and_a_decision(capsys, monkeypatch, tmp_path):
     transitions.move(store, waiting, State.DONE, reason=reasons.dump("review_exhausted", n=2, highs=1), now=now)
     store.meta_set(HEARTBEAT_KEY, str(NOW + 30_000))
     lines = run(capsys)[1].splitlines()
-    assert lines[0] == "ahub 3.0.0 · shop · service alive"
+    assert lines[0] == f"ahub {__version__} · shop · service alive"
     assert lines[1] == "Active"
     assert lines[2].split() == ["task", "kind", "title", "state", "model", "idle"]  # the table head
     row = lines[3].split()
