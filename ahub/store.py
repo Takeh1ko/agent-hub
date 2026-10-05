@@ -91,6 +91,7 @@ class Task:
     spec_hash: str = ""
     result_format: str = ""
     executor: str = ""
+    effort: str = ""  # reasoning level for the executor ("" — the alias default)
     review: dict = field(default_factory=dict)
     limits: dict = field(default_factory=dict)
     budget_go: float = 0.0
@@ -130,7 +131,7 @@ class Task:
 
 # Task fields allowed in a plain update (not state, not ownership).
 _TASK_PLAIN_FIELDS = frozenset({
-    "title", "spec", "spec_hash", "result_format", "executor", "budget_go", "budget_usd", "phase",
+    "title", "spec", "spec_hash", "result_format", "executor", "effort", "budget_go", "budget_usd", "phase",
     "round", "branch", "worktree", "base_sha", "accepted_sha", "state_reason",
 })
 _TASK_JSON_FIELDS = {"review": "review_json", "limits": "limits_json"}
@@ -179,6 +180,7 @@ class Session:
     tokens: dict
     log_path: str
     prompts: str = ""  # canonical prompt-layers summary of the session's own prompt (T133)
+    effort: str = ""  # reasoning level used for this session ("" — the alias default)
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Session":
@@ -323,7 +325,7 @@ class Store:
 
     def create_task(self, *, project: str, kind: Kind | str, title: str, spec: str = "",
                     spec_hash: str = "", result_format: str = "", executor: str = "",
-                    review: dict | None = None, limits: dict | None = None,
+                    effort: str = "", review: dict | None = None, limits: dict | None = None,
                     budget_go: float = 0.0, budget_usd: float = 0.0,
                     state: State | str = State.QUEUED, created_by: str = "",
                     after: list[int] | None = None, now: int | None = None,
@@ -336,13 +338,24 @@ class Store:
             raise ValueError(f"new task must be queued or draft, not {state}")
 
         def _do(c: sqlite3.Connection) -> int:
-            cur = c.execute(
-                "INSERT INTO task(project, kind, title, spec, spec_hash, result_format, executor,"
-                " review_json, limits_json, budget_go, budget_usd, state, created_by, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (project, kind.value, title, spec, spec_hash, result_format, executor,
-                 _dumps(review or {}), _dumps(limits or {}), float(budget_go), float(budget_usd),
-                 state.value, created_by, ts, ts))
+            try:
+                cur = c.execute(
+                    "INSERT INTO task(project, kind, title, spec, spec_hash, result_format, executor, effort,"
+                    " review_json, limits_json, budget_go, budget_usd, state, created_by, created_at, updated_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (project, kind.value, title, spec, spec_hash, result_format, executor, effort,
+                     _dumps(review or {}), _dumps(limits or {}), float(budget_go), float(budget_usd),
+                     state.value, created_by, ts, ts))
+            except sqlite3.OperationalError as e:
+                if "effort" not in str(e).lower():
+                    raise
+                cur = c.execute(
+                    "INSERT INTO task(project, kind, title, spec, spec_hash, result_format, executor,"
+                    " review_json, limits_json, budget_go, budget_usd, state, created_by, created_at, updated_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (project, kind.value, title, spec, spec_hash, result_format, executor,
+                     _dumps(review or {}), _dumps(limits or {}), float(budget_go), float(budget_usd),
+                     state.value, created_by, ts, ts))
             tid = int(cur.lastrowid)
             for a in after or []:
                 c.execute("INSERT OR IGNORE INTO task_dep(task_id, after_id) VALUES(?, ?)", (tid, int(a)))
@@ -431,11 +444,17 @@ class Store:
         args.append(now if now is not None else now_ms())
         args.append(int(task_id))
         sql = f"UPDATE task SET {', '.join(sets)} WHERE id=?"
-        if con is not None:
-            con.execute(sql, args)
-            return
-        with self.tx() as c:
-            c.execute(sql, args)
+        try:
+            if con is not None:
+                con.execute(sql, args)
+                return
+            with self.tx() as c:
+                c.execute(sql, args)
+        except sqlite3.OperationalError as e:
+            if "effort" not in str(e).lower() or "effort" not in fields:
+                raise
+            fields = {k: v for k, v in fields.items() if k != "effort"}
+            self.update_task(task_id, now=now, con=con, **fields)
 
     def dependents_of(self, task_id: int) -> list[int]:
         with self.read() as c:
@@ -487,18 +506,28 @@ class Store:
 
     def add_session(self, *, task_id: int | None, provider: str, role: str, model: str = "",
                     round: int = 0, pid: int | None = None, external_id: str = "",
-                    log_path: str = "", prompts: str = "", now: int | None = None) -> int:
+                    log_path: str = "", prompts: str = "", effort: str = "",
+                    now: int | None = None) -> int:
         with self.tx() as c:
-            cur = c.execute(
-                "INSERT INTO session(task_id, provider, external_id, role, round, model, pid, started_at,"
-                " log_path, prompts) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (task_id, provider, external_id, role, int(round), model, pid,
-                 now if now is not None else now_ms(), log_path, prompts))
+            try:
+                cur = c.execute(
+                    "INSERT INTO session(task_id, provider, external_id, role, round, model, pid, started_at,"
+                    " log_path, prompts, effort) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (task_id, provider, external_id, role, int(round), model, pid,
+                     now if now is not None else now_ms(), log_path, prompts, effort))
+            except sqlite3.OperationalError as e:
+                if "effort" not in str(e).lower():
+                    raise
+                cur = c.execute(
+                    "INSERT INTO session(task_id, provider, external_id, role, round, model, pid, started_at,"
+                    " log_path, prompts) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (task_id, provider, external_id, role, int(round), model, pid,
+                     now if now is not None else now_ms(), log_path, prompts))
             return int(cur.lastrowid)
 
     def update_session(self, session_id: int, **fields: Any) -> None:
         allowed = {"external_id", "pid", "status", "outcome", "ended_at", "cost_go", "cost_usd", "quota",
-                   "tokens", "log_path"}
+                   "tokens", "log_path", "effort"}
         bad = set(fields) - allowed
         if bad:
             raise ValueError(f"session fields: {sorted(bad)}")
@@ -513,8 +542,16 @@ class Store:
                 sets.append(f"{k}=?")
                 args.append(v)
         args.append(int(session_id))
-        with self.tx() as c:
-            c.execute(f"UPDATE session SET {', '.join(sets)} WHERE id=?", args)
+        try:
+            with self.tx() as c:
+                c.execute(f"UPDATE session SET {', '.join(sets)} WHERE id=?", args)
+        except sqlite3.OperationalError as e:
+            if "effort" not in str(e).lower() or "effort" not in fields:
+                raise
+            fields = {k: v for k, v in fields.items() if k != "effort"}
+            if not fields:
+                return
+            self.update_session(session_id, **fields)
 
     def get_session(self, session_id: int) -> Session | None:
         with self.read() as c:

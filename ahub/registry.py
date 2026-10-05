@@ -24,31 +24,44 @@ from ahub.store import Store
 
 SPARK = "opencode-go/muse-spark-1.3-contributor"
 
-# alias → (provider, model_id, variant, note)
+# alias → (provider, model_id, variant, note). One alias per model+plan: <model> for the paid
+# default route, <model>-<plan> otherwise. spark-high/spark-medium/gemini-low are legacy names
+# (LEGACY_ALIASES): still accepted, mapped to base + effort, hidden from menus.
 DEFAULT_MODELS: dict[str, tuple[str, str, str, str]] = {
     "spark": ("opencode", SPARK, "xhigh", "Muse Spark 1.3, main"),
-    "spark-high": ("opencode", SPARK, "high", "Spark 1.3, high reasoning"),
-    "spark-medium": ("opencode", SPARK, "medium", "Spark 1.3, medium reasoning"),
     "mimo-flash": ("opencode", "opencode-go/mimo-v2.6-flash", "", "MiMo 2.6 Flash"),
     "deepseek-flash": ("opencode", "opencode-go/deepseek-v4.1-flash", "high", "DeepSeek v4.1 Flash (pricier)"),
     "spark-free": ("opencode", "opencode/muse-spark-1.3-contributor-free", "xhigh", "free Spark (slower)"),
     "bunny": ("opencode", "opencode/space-bunny-free", "", "Space Bunny free (opencode)"),
     "gemini": ("agy", "gemini-3.8-flash-high", "", "Gemini via agy (window quota)"),
-    "gemini-low": ("agy", "gemini-3.8-flash-low", "", "Gemini via agy, fast (window quota)"),
     # Codex CLI: a ChatGPT subscription, no prices; the sandbox limits writes to the copy.
     # The ids come from the login catalog (`codex debug models`, `ahub models --all`).
     "codex": ("codex", "gpt-5.6-terra", "", "Codex via codex CLI (subscription, OS sandbox)"),
     "codex-fast": ("codex", "gpt-5.6-luna", "", "Codex via codex CLI, cheaper/faster (subscription)"),
 }
 
-# role → [(alias, is_default)] in display order
+# Legacy names: alias → (base alias, implied effort). Accepted everywhere, mapped to base + effort
+# with one line "<legacy> is <base>:<effort>" on use, hidden from menus and tables.
+LEGACY_ALIASES: dict[str, tuple[str, str]] = {
+    "spark-high": ("spark", "high"),
+    "spark-medium": ("spark", "medium"),
+    "gemini-low": ("gemini", "low"),
+}
+HIDDEN_ALIASES: frozenset[str] = frozenset(LEGACY_ALIASES)
+
+# Reasoning levels for the --effort flag and ALIAS[:EFFORT] refs (validated per model against the catalog).
+EFFORT_CHOICES: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+_AGY_FALLBACK_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max", "ultra")
+_CODEX_FALLBACK_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max", "ultra")
+
+# role → [(ref, is_default)] in display order; ref is ALIAS[:EFFORT] ("" effort — the alias default).
 DEFAULT_MENUS: dict[Role, list[tuple[str, bool]]] = {
     Role.EXECUTOR: [("spark", True), ("mimo-flash", False), ("deepseek-flash", False)],
     Role.REVIEWER: [("spark", True), ("mimo-flash", False), ("deepseek-flash", False)],
     Role.SCOUT: [("spark", True), ("deepseek-flash", False)],
     Role.ROUTINE: [("spark", True), ("mimo-flash", False)],
-    Role.OBSERVER: [("spark-high", True), ("spark-medium", False)],
-    Role.DRAFTER: [("spark-high", True), ("spark", False)],
+    Role.OBSERVER: [("spark:high", True), ("spark:medium", False)],
+    Role.DRAFTER: [("spark:high", True), ("spark", False)],
 }
 
 
@@ -72,6 +85,164 @@ class ModelEntry:
     variant: str = ""
     enabled: bool = True
     note: str = ""
+
+
+def split_ref(ref: str) -> tuple[str, str]:
+    """ALIAS[:EFFORT] → (alias, effort); effort lowercased, "" when absent."""
+    s = (ref or "").strip()
+    if ":" in s:
+        alias, _, effort = s.rpartition(":")
+        return alias.strip(), effort.strip().lower()
+    return s.strip(), ""
+
+
+def map_legacy(alias: str, effort: str) -> tuple[str, str, str]:
+    """Legacy alias → (base alias, stored effort, notice). Notice "" when not legacy."""
+    if alias in LEGACY_ALIASES:
+        base, implied = LEGACY_ALIASES[alias]
+        eff = effort or implied
+        if effort:
+            notice = _t("registry.legacy_mapped_full", ref=f"{alias}:{effort}", base=base, effort=eff)
+        else:
+            notice = _t("registry.legacy_mapped", alias=alias, base=base, effort=eff)
+        return base, eff, notice
+    return alias, effort, ""
+
+
+def legacy_notice(ref: str) -> str:
+    """One line "<legacy> is <base>:<effort>" when the ref uses a legacy name, else ""."""
+    alias, effort = split_ref(ref)
+    _base, _eff, notice = map_legacy(alias, effort)
+    return notice
+
+
+def base_alias(ref: str) -> str:
+    """Base alias of a ref: legacy mapped, :effort stripped."""
+    alias, effort = split_ref(ref)
+    base, _eff, _notice = map_legacy(alias, effort)
+    return base
+
+
+def stored_effort(ref: str) -> str:
+    """Stored effort of a ref: explicit or legacy-implied, "" when the alias default applies."""
+    alias, effort = split_ref(ref)
+    _base, eff, _notice = map_legacy(alias, effort)
+    return eff
+
+
+def default_effort(entry: ModelEntry) -> str:
+    """Alias default reasoning level (the variant; agy encodes it in the model id)."""
+    if entry.variant:
+        return entry.variant
+    if entry.provider == "agy":
+        tail = (entry.model_id or "").lower().rsplit("-", 1)[-1]
+        if tail in _AGY_FALLBACK_LEVELS:
+            return tail
+    return ""
+
+
+def effective_effort(entry: ModelEntry, stored: str) -> str:
+    """Effort to run/display: stored override or the alias default."""
+    return stored or default_effort(entry)
+
+
+def model_ref(alias: str, stored: str) -> str:
+    """Canonical ref for storage/display: alias or alias:effort."""
+    return f"{alias}:{stored}" if stored else alias
+
+
+def valid_levels(entry: ModelEntry, info=None, index=None) -> list[str]:
+    """Reasoning levels the alias accepts, weakest first (catalog when known, else a fallback)."""
+    from ahub.catalog import LEVEL_ORDER as _order
+
+    rank = {lvl: i for i, lvl in enumerate(_order)}
+    # catalog first (strict when the provider knows the model)
+    avail: list[str] = []
+    try:
+        if info is None and index is None:
+            from ahub import catalog as _catalog
+
+            try:
+                catalogs = _catalog.get_catalogs()
+            except (OSError, ValueError, RuntimeError, AttributeError):
+                catalogs = {}
+            try:
+                index = _catalog.index_by_id(catalogs)
+            except (OSError, ValueError, RuntimeError, AttributeError):
+                index = {}
+            info = _catalog.match_entry(entry, index) if index else None
+        if info is not None or index is not None:
+            from ahub import catalog as _catalog
+
+            try:
+                avail = _catalog.available_levels(entry, info, index)
+            except (OSError, ValueError, RuntimeError, AttributeError):
+                avail = []
+    except (ImportError, AttributeError):
+        avail = []
+    if avail:
+        seen: list[str] = []
+        for lvl in avail:
+            low = (lvl or "").lower()
+            if low and low not in seen:
+                seen.append(low)
+        return sorted(seen, key=lambda lv: (rank.get(lv, len(rank)), lv))
+    # fallback when the catalog is silent: agy/codex levels are known, otherwise the CLI choices
+    # for a model with a default level, nothing for one without reasoning
+    if entry.provider == "agy":
+        return list(_AGY_FALLBACK_LEVELS)
+    if entry.provider == "codex":
+        return list(_CODEX_FALLBACK_LEVELS)
+    if entry.provider == "fake":
+        return ["low", "high"]
+    if entry.variant:
+        return list(EFFORT_CHOICES)
+    return []
+
+
+def check_effort(entry: ModelEntry, effort: str, info=None, index=None) -> None:
+    """Refuse an unknown reasoning level, listing the valid ones."""
+    eff = (effort or "").strip().lower()
+    if not eff:
+        return
+    valid = valid_levels(entry, info, index)
+    if not valid:
+        raise RegistryError(_t("registry.no_effort", alias=entry.alias))
+    if eff not in valid:
+        raise RegistryError(_t("registry.bad_effort", effort=effort, alias=entry.alias,
+                               valid=", ".join(valid)))
+
+
+def _agy_sibling_id(model_id: str, effort: str) -> str:
+    """agy model id for the effort: base without the level suffix + the new suffix."""
+    base = (model_id or "")
+    low = base.lower()
+    for lvl in _AGY_FALLBACK_LEVELS:
+        suffix = f"-{lvl}"
+        if low.endswith(suffix):
+            return base[: -len(suffix)] + f"-{effort}" if effort else base
+    return f"{base}-{effort}" if effort and not base.lower().endswith(f"-{effort}") else base
+
+
+def effective_entry(entry: ModelEntry, stored: str, index=None) -> ModelEntry:
+    """Entry to run/display: stored effort applied (agy — the sibling model id)."""
+    eff = (stored or "").strip().lower()
+    if not eff:
+        return entry
+    if entry.provider == "agy":
+        return ModelEntry(entry.alias, entry.provider, _agy_sibling_id(entry.model_id, eff),
+                          "", entry.enabled, entry.note)
+    return ModelEntry(entry.alias, entry.provider, entry.model_id, eff, entry.enabled, entry.note)
+
+
+def resolve_ref(store: Store, ref: str, info=None, index=None) -> tuple[ModelEntry, str, str]:
+    """Ref → (base entry, stored effort, legacy notice). Validates an explicit effort."""
+    alias, effort = split_ref(ref)
+    base, stored, notice = map_legacy(alias, effort)
+    entry = get(store, base)
+    if stored:
+        check_effort(entry, stored, info, index)
+    return entry, stored, notice
 
 
 def seed(store: Store) -> bool:
@@ -106,9 +277,11 @@ def seed(store: Store) -> bool:
         if not seeded:
             return False
         for role, items in DEFAULT_MENUS.items():
-            for pos, (alias, is_def) in enumerate(items):
-                c.execute("INSERT INTO role_model(role, alias, position, is_default) VALUES(?,?,?,?)",
-                          (role.value, alias, pos, 1 if is_def else 0))
+            for pos, (ref, is_def) in enumerate(items):
+                alias, effort = split_ref(ref)
+                _base, stored, _notice = map_legacy(alias, effort)
+                c.execute("INSERT INTO role_model(role, alias, position, is_default, effort) VALUES(?,?,?,?,?)",
+                          (role.value, _base, pos, 1 if is_def else 0, stored))
         return True
 
 
@@ -121,8 +294,12 @@ def _seed_fake(c) -> None:
     c.execute("INSERT INTO model(alias, provider, model_id, variant, note) VALUES(?,?,?,?,?)",
               (ALIAS, ALIAS, MODEL_ID, "", "fake provider (AHUB_FAKE_PROVIDER)"))
     for role in Role:
-        c.execute("INSERT OR IGNORE INTO role_model(role, alias, position, is_default) VALUES(?,?,999,0)",
-                  (role.value, ALIAS))
+        try:
+            c.execute("INSERT OR IGNORE INTO role_model(role, alias, position, is_default, effort)"
+                      " VALUES(?,?,999,0,'')", (role.value, ALIAS))
+        except Exception:
+            c.execute("INSERT OR IGNORE INTO role_model(role, alias, position, is_default) VALUES(?,?,999,0)",
+                      (role.value, ALIAS))
 
 
 def _entry(row) -> ModelEntry:
@@ -136,13 +313,23 @@ def models(store: Store) -> list[ModelEntry]:
         return [_entry(r) for r in c.execute("SELECT * FROM model ORDER BY alias")]
 
 
-def get(store: Store, alias: str) -> ModelEntry:
+def get(store: Store, alias: str, info=None, index=None) -> ModelEntry:
+    """Base entry by alias; accepts ALIAS[:EFFORT] and legacy names (mapped, validated).
+
+    Returns the effective entry (stored effort applied) so runners get the right variant/model id.
+    """
+    alias_part, effort_part = split_ref(alias)
+    base, stored, _notice = map_legacy(alias_part, effort_part)
     seed(store)
     with store.read() as c:
-        row = c.execute("SELECT * FROM model WHERE alias=?", (alias,)).fetchone()
+        row = c.execute("SELECT * FROM model WHERE alias=?", (base,)).fetchone()
     if row is None:
         raise RegistryError(_t("registry.no_model", alias=alias))
-    return _entry(row)
+    entry = _entry(row)
+    if stored:
+        check_effort(entry, stored, info, index)
+        return effective_entry(entry, stored, index)
+    return entry
 
 
 _cached_disabled: tuple[int, frozenset[str]] | None = None
@@ -193,12 +380,32 @@ def set_provider_enabled(name: str, enabled: bool) -> Path:
 
 
 def _raw_menu(store: Store, role: Role | str) -> list[tuple[ModelEntry, bool]]:
-    """Role menu rows as stored, a switched-off provider included (for the reasons in a refusal)."""
+    """Role menu rows as stored, a switched-off provider included (for the reasons in a refusal).
+
+    The entry carries the stored effort (role effort or the alias default): legacy names never appear
+    here (the migration maps them), hidden ones are filtered by the caller.
+    """
     seed(store)
     with store.read() as c:
-        rows = c.execute("SELECT m.*, rm.is_default FROM role_model rm JOIN model m ON m.alias=rm.alias"
-                         " WHERE rm.role=? ORDER BY rm.position, m.alias", (Role(role).value,)).fetchall()
-    return [(_entry(r), bool(r["is_default"])) for r in rows]
+        try:
+            rows = c.execute("SELECT m.*, rm.is_default, rm.effort AS rm_effort FROM role_model rm"
+                             " JOIN model m ON m.alias=rm.alias"
+                             " WHERE rm.role=? ORDER BY rm.position, m.alias",
+                             (Role(role).value,)).fetchall()
+        except Exception:
+            rows = c.execute("SELECT m.*, rm.is_default FROM role_model rm JOIN model m ON m.alias=rm.alias"
+                             " WHERE rm.role=? ORDER BY rm.position, m.alias", (Role(role).value,)).fetchall()
+    out: list[tuple[ModelEntry, bool]] = []
+    for r in rows:
+        try:
+            stored = str(r["rm_effort"] or "")
+        except (KeyError, IndexError, TypeError):
+            stored = ""
+        base = _entry(r)
+        if base.alias in HIDDEN_ALIASES:
+            continue
+        out.append((effective_entry(base, stored), bool(r["is_default"])))
+    return out
 
 
 def menu(store: Store, role: Role | str, hub: HubConfig | None = None) -> list[tuple[ModelEntry, bool]]:
@@ -211,6 +418,30 @@ def role_default(store: Store, role: Role | str) -> ModelEntry | None:
     """The default model of a role menu as stored, None — no default (a switched-off provider included)."""
     items = _raw_menu(store, role)
     return next((e for e, d in items if d), None)
+
+
+def menu_efforts(store: Store, role: Role | str) -> list[tuple[str, str, bool]]:
+    """Menu refs as stored: [(alias, stored effort, default)] in display order (legacy never appears)."""
+    seed(store)
+    with store.read() as c:
+        try:
+            rows = c.execute("SELECT alias, effort, is_default FROM role_model WHERE role=? ORDER BY position",
+                             (Role(role).value,)).fetchall()
+            return [(str(r["alias"]), str(r["effort"] or ""), bool(r["is_default"])) for r in rows
+                    if str(r["alias"]) not in HIDDEN_ALIASES]
+        except Exception:
+            rows = c.execute("SELECT alias, is_default FROM role_model WHERE role=? ORDER BY position",
+                             (Role(role).value,)).fetchall()
+            return [(str(r["alias"]), "", bool(r["is_default"])) for r in rows
+                    if str(r["alias"]) not in HIDDEN_ALIASES]
+
+
+def role_default_ref(store: Store, role: Role | str) -> tuple[str, str] | None:
+    """(alias, stored effort) of the role default, None — no default."""
+    for alias, effort, is_def in menu_efforts(store, role):
+        if is_def:
+            return alias, effort
+    return None
 
 
 def is_free(entry) -> bool:
@@ -281,24 +512,50 @@ def denied_by(entry: ModelEntry, project: ProjectConfig | None) -> str | None:
     return None
 
 
-def check(store: Store, alias: str, project: ProjectConfig | None, hub: HubConfig | None = None) -> ModelEntry:
-    """Model fit for a project task: exists, enabled, provider on, not denied by the project."""
-    entry = get(store, alias)
-    if not entry.enabled:
-        raise RegistryError(_t("registry.disabled", alias=alias))
-    if not provider_enabled(entry.provider, hub):
-        raise RegistryError(_t("registry.provider_off", alias=alias, provider=entry.provider))
-    rule = denied_by(entry, project)
+def check(store: Store, alias: str, project: ProjectConfig | None, hub: HubConfig | None = None,
+          info=None, index=None) -> ModelEntry:
+    """Model fit for a project task: exists, enabled, provider on, not denied by the project.
+
+    Accepts ALIAS[:EFFORT] and legacy names (mapped to base + effort, validated against the catalog).
+    Returns the effective entry (stored effort applied).
+    """
+    base, stored, _notice = map_legacy(*split_ref(alias))
+    entry = get(store, base)
+    if stored:
+        check_effort(entry, stored, info, index)
+    eff = effective_entry(entry, stored, index)
+    if not eff.enabled:
+        raise RegistryError(_t("registry.disabled", alias=base))
+    if not provider_enabled(eff.provider, hub):
+        raise RegistryError(_t("registry.provider_off", alias=base, provider=eff.provider))
+    rule = denied_by(eff, project)
     if rule is not None:
-        raise RegistryError(_t("registry.denied", alias=alias, project=project.name, rule=rule))
-    return entry
+        raise RegistryError(_t("registry.denied", alias=base, project=project.name, rule=rule))
+    return eff
 
 
 def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit: str | None = None,
-         hub: HubConfig | None = None) -> ModelEntry:
-    """Model for a role: explicit (checked) or default; if the default is denied — first allowed menu entry."""
+         hub: HubConfig | None = None, effort: str | None = None,
+         info=None, index=None) -> ModelEntry:
+    """Model for a role: explicit (checked) or default; if the default is denied — first allowed menu entry.
+
+    explicit is ALIAS[:EFFORT] (legacy mapped); effort overrides it when given (a mismatch is refused
+    by the caller — here an explicit :effort and effort="" simply combine).
+    """
     if explicit:
-        return check(store, explicit, project, hub)
+        alias_part, effort_part = split_ref(explicit)
+        base, stored, _notice = map_legacy(alias_part, effort_part)
+        want = (effort or "").strip().lower() or stored
+        ref = f"{base}:{want}" if want else base
+        return check(store, ref, project, hub, info, index)
+    if effort:
+        # no explicit alias: the role default alias with this effort override (validated on use)
+        try:
+            default = role_default(store, role)
+        except (OSError, ValueError, RuntimeError):
+            default = None
+        if default is not None:
+            return check(store, f"{default.alias}:{effort}", project, hub, info, index)
     if selectable_from_env():
         try:
             return check(store, "fake", project, hub)
@@ -319,6 +576,12 @@ def pick(store: Store, role: Role | str, project: ProjectConfig | None, explicit
         if rule is not None:
             reasons.append(_t("registry.reason_denied", alias=e.alias))
             continue
+        if effort:
+            try:
+                return check(store, f"{e.alias}:{effort}", project, hub, info, index)
+            except RegistryError as err:
+                reasons.append(str(err))
+                continue
         return e
     suffix = f" ({'; '.join(reasons)})" if reasons else ""
     raise RegistryError(_t("registry.no_role", role=Role(role).value, reasons=suffix))
@@ -343,34 +606,81 @@ def set_enabled(store: Store, alias: str, enabled: bool) -> None:
         c.execute("UPDATE model SET enabled=? WHERE alias=?", (1 if enabled else 0, alias))
 
 
-def add_to_role(store: Store, role: Role | str, alias: str, default: bool = False) -> None:
-    get(store, alias)
+def add_to_role(store: Store, role: Role | str, alias: str, default: bool = False,
+                effort: str = "") -> None:
+    alias_part, effort_part = split_ref(alias)
+    base, stored, _notice = map_legacy(alias_part, effort_part or effort)
+    get(store, base)
+    if stored:
+        check_effort(get(store, base), stored)
     r = Role(role).value
     with store.tx() as c:
         pos = c.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM role_model WHERE role=?", (r,)).fetchone()[0]
-        c.execute("INSERT OR IGNORE INTO role_model(role, alias, position) VALUES(?,?,?)", (r, alias, pos))
+        try:
+            c.execute("INSERT OR IGNORE INTO role_model(role, alias, position, effort) VALUES(?,?,?,?)",
+                      (r, base, pos, stored))
+        except Exception:
+            c.execute("INSERT OR IGNORE INTO role_model(role, alias, position) VALUES(?,?,?)", (r, base, pos))
         if default:
-            c.execute("UPDATE role_model SET is_default=(alias=?) WHERE role=?", (alias, r))
+            try:
+                c.execute("UPDATE role_model SET is_default=((alias=? AND effort=?)) WHERE role=?",
+                          (base, stored, r))
+            except Exception:
+                c.execute("UPDATE role_model SET is_default=(alias=?) WHERE role=?", (base, r))
 
 
-def remove_from_role(store: Store, role: Role | str, alias: str) -> None:
+def remove_from_role(store: Store, role: Role | str, alias: str, effort: str | None = None) -> None:
+    alias_part, effort_part = split_ref(alias)
+    base, stored, _notice = map_legacy(alias_part, effort_part if effort is None else effort)
     r = Role(role).value
     with store.tx() as c:
-        row = c.execute("SELECT is_default FROM role_model WHERE role=? AND alias=?", (r, alias)).fetchone()
+        try:
+            if effort is None and not effort_part:
+                row = c.execute("SELECT is_default FROM role_model WHERE role=? AND alias=?",
+                                (r, base)).fetchone()
+            else:
+                row = c.execute("SELECT is_default FROM role_model WHERE role=? AND alias=? AND effort=?",
+                                (r, base, stored)).fetchone()
+        except Exception:
+            row = c.execute("SELECT is_default FROM role_model WHERE role=? AND alias=?", (r, base)).fetchone()
         if row is None:
-            raise RegistryError(_t("registry.no_menu", alias=alias, role=r))
+            raise RegistryError(_t("registry.no_menu", alias=base, role=r))
         left = c.execute("SELECT COUNT(*) FROM role_model WHERE role=?", (r,)).fetchone()[0]
         if left <= 1:
             raise RegistryError(_t("registry.menu_last", role=r))
-        c.execute("DELETE FROM role_model WHERE role=? AND alias=?", (r, alias))
+        try:
+            if effort is None and not effort_part:
+                c.execute("DELETE FROM role_model WHERE role=? AND alias=?", (r, base))
+            else:
+                c.execute("DELETE FROM role_model WHERE role=? AND alias=? AND effort=?", (r, base, stored))
+        except Exception:
+            c.execute("DELETE FROM role_model WHERE role=? AND alias=?", (r, base))
         if row["is_default"]:
-            c.execute("UPDATE role_model SET is_default=1 WHERE role=? AND alias="
-                      "(SELECT alias FROM role_model WHERE role=? ORDER BY position LIMIT 1)", (r, r))
+            try:
+                c.execute("UPDATE role_model SET is_default=1 WHERE role=? AND (alias, effort)=("
+                          "SELECT alias, effort FROM role_model WHERE role=? ORDER BY position LIMIT 1)",
+                          (r, r))
+            except Exception:
+                c.execute("UPDATE role_model SET is_default=1 WHERE role=? AND alias="
+                          "(SELECT alias FROM role_model WHERE role=? ORDER BY position LIMIT 1)", (r, r))
 
 
-def set_default(store: Store, role: Role | str, alias: str) -> None:
+def set_default(store: Store, role: Role | str, alias: str, effort: str = "") -> None:
+    alias_part, effort_part = split_ref(alias)
+    base, stored, _notice = map_legacy(alias_part, effort_part or effort)
+    if stored:
+        check_effort(get(store, base), stored)
     r = Role(role).value
     with store.tx() as c:
-        if not c.execute("SELECT 1 FROM role_model WHERE role=? AND alias=?", (r, alias)).fetchone():
-            raise RegistryError(_t("registry.menu_add_first", alias=alias, role=r))
-        c.execute("UPDATE role_model SET is_default=(alias=?) WHERE role=?", (alias, r))
+        try:
+            if not c.execute("SELECT 1 FROM role_model WHERE role=? AND alias=? AND effort=?",
+                             (r, base, stored)).fetchone():
+                raise RegistryError(_t("registry.menu_add_first", alias=model_ref(base, stored), role=r))
+            c.execute("UPDATE role_model SET is_default=((alias=? AND effort=?)) WHERE role=?",
+                      (base, stored, r))
+        except RegistryError:
+            raise
+        except Exception:
+            if not c.execute("SELECT 1 FROM role_model WHERE role=? AND alias=?", (r, base)).fetchone():
+                raise RegistryError(_t("registry.menu_add_first", alias=base, role=r)) from None
+            c.execute("UPDATE role_model SET is_default=(alias=?) WHERE role=?", (base, r))

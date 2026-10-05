@@ -175,8 +175,8 @@ def _fmt_price(v: float | None) -> str:
     if v is None:
         return "—"
     if v == 0:
-        return "0"
-    return f"${v:g}"
+        return "$0.00"
+    return f"${float(v):.2f}"
 
 
 def context_text(info: CatalogEntry | None) -> str:
@@ -206,7 +206,7 @@ def model_text(info: CatalogEntry | None, *, with_vendor: bool = True, fallback:
 
 
 def roles_where_default(store: Store, alias: str) -> list[str]:
-    """Roles where the alias is the default, in role order."""
+    """Roles where the alias is the default, in role order, effort next to each ("executor:xhigh")."""
     out: list[str] = []
     for role in Role:
         try:
@@ -214,8 +214,35 @@ def roles_where_default(store: Store, alias: str) -> list[str]:
         except (OSError, ValueError, RuntimeError):
             continue
         if default is not None and default.alias == alias:
-            out.append(role.value)
+            try:
+                level = alias_level(default)
+            except (OSError, ValueError, RuntimeError, AttributeError):
+                level = ""
+            out.append(f"{role.value}:{level}" if level else role.value)
     return out
+
+
+def identity_text(entry: registry.ModelEntry, info: CatalogEntry | None = None,
+                  plan: PlanKind | None = None) -> str:
+    """Canonical dim identity: "<display> · <plan> · <level>" (no level part when there is none)."""
+    if info is not None and info.display_name:
+        display = info.display_name
+    else:
+        display = (entry.model_id or entry.alias).split("/", 1)[-1] or entry.alias
+    try:
+        kind = plan if plan is not None else registry.plan_kind(entry, info)
+    except (OSError, ValueError, RuntimeError, AttributeError):
+        from ahub.providers.base import PlanKind as _Plan
+
+        kind = _Plan.PAYG
+    plan_s = plan_label(kind)
+    try:
+        level = alias_level(entry)
+    except (OSError, ValueError, RuntimeError, AttributeError):
+        level = ""
+    if level:
+        return f"{display} · {plan_s} · {level}"
+    return f"{display} · {plan_s}"
 
 
 @dataclass
@@ -332,26 +359,36 @@ def provider_order(names: list[str]) -> list[str]:
 
 
 def visible_entries(entries: list[registry.ModelEntry]) -> list[registry.ModelEntry]:
-    """Entries shown in the tables: the fake provider only with AHUB_FAKE_PROVIDER=1."""
+    """Entries shown in the tables: legacy names hidden, fake only with AHUB_FAKE_PROVIDER=1."""
     from ahub.providers.fake import selectable_from_env
 
+    hidden = set(getattr(registry, "HIDDEN_ALIASES", frozenset()))
     if selectable_from_env():
-        return list(entries)
-    return [e for e in entries if e.provider != "fake"]
+        return [e for e in entries if e.alias not in hidden]
+    return [e for e in entries if e.provider != "fake" and e.alias not in hidden]
+
+
+def _plan_width() -> int:
+    """Plan column cap: the longest plan label, so "pay-as-you-go" is never clipped."""
+    try:
+        return max(len(plan_label(p)) for p in PlanKind)
+    except (OSError, ValueError, RuntimeError, AttributeError):
+        return len("pay-as-you-go")
 
 
 def table_columns(w: int) -> tuple[bool, bool, list[int | None]]:
     """Column toggles and caps for the models table at width w.
 
     At 140+ nothing is clipped; below that context goes first, then the vendor inside
-    the model cell; alias and plan stay whatever the width.
+    the model cell; alias and plan stay whatever the width (plan sized to its longest label).
     """
     with_vendor = w >= 100
     with_context = w >= 120
+    plan_w = _plan_width()
     if w >= 140:
-        maxw: list[int | None] = [34, None, 24, 12, 16]
+        maxw: list[int | None] = [34, None, 24, plan_w, 18]
     else:
-        maxw = [32, 28, 16, 12, 14]
+        maxw = [32, 28, 16, plan_w, 16]
     if with_context:
         maxw.append(8)
     maxw.append(None)
