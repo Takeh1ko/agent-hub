@@ -170,6 +170,21 @@ def wait_until(cond: Callable[[], _T], timeout: float = WAIT_S, step: float = 0.
         time.sleep(step)
 
 
+async def wait_for(pilot, cond: Callable[[], bool], timeout: float = 15.0) -> None:
+    """Wait for `cond()` in the pilot loop — a worker thread lands when it lands.
+
+    A fixed pause is not a wait under load: poll the state the test is about to assert.
+    On timeout just return and let the caller's assert say so (assertions stay as strict).
+    """
+    end = time.monotonic() + timeout
+    while True:
+        if cond():
+            return
+        if time.monotonic() >= end:
+            return
+        await pilot.pause(0.05)
+
+
 def write(path, text: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")

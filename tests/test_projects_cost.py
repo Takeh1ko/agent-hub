@@ -19,7 +19,7 @@ from ahub.scope import OWNER, Scope
 from ahub.store import Store
 from ahub.time import fmt_local, now_ms
 from ahub.tui import data
-from tests.conftest import rows_ready, write
+from tests.conftest import rows_ready, wait_for, write
 
 
 @pytest.fixture
@@ -424,7 +424,6 @@ async def test_top_key_narrows_the_table_to_one_project(hub, store):
     whole = [0, tids["a_working"], tids["a_done"], 0, tids["b_working"], tids["b_queued"]]
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot, want=whole)  # the refresh of the `o` key lands in its own time
         assert app._ids[0] == 0  # the header row of A
         await pilot.press("o")
@@ -446,17 +445,16 @@ async def test_top_header_row_opens_nothing(hub, store):
     filled(store)
     app = TopApp(store=store, projects=[], control=True)
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot, want=6)
         assert app.query_one("#tasks").cursor_row == 0
         await pilot.press("enter")  # the transcript of... no task
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: bool(app.screen.query("#tasks")))
         app.screen.query_one("#tasks")  # the table is still on top — no transcript of nothing
         await pilot.press("s")  # stop — nothing to stop
         await pilot.pause(0.3)
         assert store.get_task(1).state is State.WORKING
         await pilot.press("m")  # a message to the worker of... no task
-        await pilot.pause(0.3)
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ != "Ask")
         assert app.screen.__class__.__name__ != "Ask"
         assert not any("T0" in n.message for n in app._notifications._notifications)
 
@@ -477,16 +475,15 @@ async def test_top_project_filter_waits_for_the_refresh_in_flight(hub, store, mo
     monkeypatch.setattr(TopApp, "set_interval", lambda self, *a, **kw: None)  # no periodic rescue
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot, want=6)
         gate, real = threading.Event(), tdata.snapshot
         monkeypatch.setattr(tdata, "snapshot",
                             lambda *a, **kw: (gate.wait(10), real(*a, **kw))[1])
         app.refresh_data()  # the refresh that is in flight
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: app._busy)
         assert app._busy
         await pilot.press("o")  # the request arrives while it runs
-        await pilot.pause(0.2)
+        await wait_for(pilot, lambda: app.project == "A" and app._pending is True)
         assert app.project == "A" and app._pending is True and len(app._ids) == 6
         monkeypatch.setattr(tdata, "snapshot", real)  # the kept request must not wait at the gate
         gate.set()  # the refresh in flight ends...
@@ -501,10 +498,20 @@ async def test_top_keeps_the_cursor_on_the_group_it_was_on(hub, store):
     filled(store)
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot, want=6)
         app.query_one("#tasks").move_cursor(row=3)  # the header row of B
-        await pilot.pause(2.5)  # a refresh of the screen
+        applied: list[int] = []
+        real_apply = app._apply
+
+        def _counting(screen, live, pulses) -> None:
+            real_apply(screen, live, pulses)
+            applied.append(1)
+
+        app._apply = _counting  # type: ignore[method-assign]
+        before = len(applied)
+        app.refresh_data()
+        await wait_for(pilot, lambda n=before: len(applied) > n)  # the refresh applied, not just the rows
+        assert len(applied) > before
         assert app.query_one("#tasks").cursor_row == 3
 
 
@@ -515,7 +522,6 @@ async def test_top_cursor_survives_a_refresh_that_empties_the_table(hub, store):
     tids = filled(store)
     app = TopApp(store=store, projects=[])
     async with app.run_test() as pilot:
-        await pilot.pause(0.5)
         await rows_ready(app, pilot, want=6)
         app.query_one("#tasks").move_cursor(row=3)  # the header row of B
         ahead = {State.QUEUED: (State.PREPARING, State.WORKING, State.DONE, State.ACCEPTED),
