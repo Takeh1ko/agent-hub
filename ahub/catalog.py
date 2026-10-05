@@ -8,6 +8,7 @@ console's /models all read through here, so the numbers match everywhere.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from ahub import registry
@@ -15,6 +16,15 @@ from ahub.i18n import t as _t
 from ahub.model import Role
 from ahub.providers.base import CatalogEntry, PlanKind
 from ahub.store import Store
+
+CATALOG_TTL_S = 60.0  # in-memory cache: provider catalogs shell out (seconds per call),
+# and hot paths (`ahub status T12`, task views) read them on every render
+_cache: dict[str, tuple[float, dict[str, list[CatalogEntry]]]] = {}
+
+
+def reset_cache() -> None:
+    """Drop the cached provider catalogs (tests isolate here; `--refresh` bypasses anyway)."""
+    _cache.clear()
 
 _AGY_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
 
@@ -40,7 +50,15 @@ def plan_label(plan: PlanKind) -> str:
 
 
 def get_catalogs(refresh: bool = False) -> dict[str, list[CatalogEntry]]:
-    """Catalog per hub provider; a provider without it gives [] (never raises)."""
+    """Catalog per hub provider; a provider without it gives [] (never raises).
+
+    Cached in memory for CATALOG_TTL_S (a fetch shells out to every provider); refresh=True
+    always re-fetches and refreshes the cache.
+    """
+    if not refresh:
+        hit = _cache.get("catalogs")
+        if hit is not None and time.monotonic() - hit[0] < CATALOG_TTL_S:
+            return hit[1]
     from ahub import providers as _providers
 
     out: dict[str, list[CatalogEntry]] = {}
@@ -65,6 +83,7 @@ def get_catalogs(refresh: bool = False) -> dict[str, list[CatalogEntry]]:
                     out[name] = list(prov.catalog(refresh))
         except (OSError, ValueError, RuntimeError, AttributeError):
             out[name] = []
+    _cache["catalogs"] = (time.monotonic(), out)
     return out
 
 

@@ -268,6 +268,35 @@ def test_migration_maps_legacy_menus(tmp_path, monkeypatch):
     assert (s.model, s.effort) == ("gemini", "low")
 
 
+def test_catalogs_cached_across_reads(monkeypatch):
+    """get_catalogs shells out to every provider — repeated reads (status views) hit the cache."""
+    from ahub.providers import agy as _agy
+    from ahub.providers import codex as _codex
+    from ahub.providers import opencode as _op
+
+    calls: list[str] = []
+    for cls, label in ((_op.OpencodeProvider, "opencode"), (_agy.AgyProvider, "agy"),
+                       (_codex.CodexProvider, "codex")):
+        def _wrap(self, refresh=False, _label=label):
+            calls.append(_label)
+            return []
+        monkeypatch.setattr(cls, "catalog", _wrap)
+
+    def _counts() -> list[int]:
+        return sorted(calls.count(name) for name in ("agy", "codex", "opencode"))
+
+    _catalog.reset_cache()
+    _catalog.get_catalogs()
+    assert _counts() == [1, 1, 1]
+    _catalog.get_catalogs()
+    assert _counts() == [1, 1, 1]  # cache hit: no new provider shells
+    _catalog.get_catalogs(refresh=True)
+    assert _counts() == [2, 2, 2]  # refresh re-fetches
+    _catalog.reset_cache()
+    _catalog.get_catalogs()
+    assert _counts() == [3, 3, 3]
+
+
 def test_console_model_usage_mentions_effort(monkeypatch):
     from ahub.i18n import t
 
