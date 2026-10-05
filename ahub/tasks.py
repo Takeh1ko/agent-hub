@@ -58,8 +58,9 @@ class TaskSpec:
     spec: str = ""
     result_format: str = ""
     model: str | None = None
+    effort: str | None = None  # reasoning level override for the executor (validated per model)
     review_level: int | None = None  # 0 — no review; 1–4 — levels
-    review_models: list[str] | None = None  # explicit roster (overrides level)
+    review_models: list[str] | None = None  # explicit roster (overrides level), ALIAS[:EFFORT] each
     review_rounds: int | None = None
     paths: list[str] = field(default_factory=list)  # allowed files (glob)
     accept: list[str] = field(default_factory=list)  # acceptance pytest nodes
@@ -78,6 +79,7 @@ class Resolved:
     """Task after defaults and validation — ready to store."""
 
     executor: str
+    effort: str
     review: dict
     limits: dict
     budget_go: float
@@ -146,11 +148,26 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
     if len(spec.spec.encode("utf-8")) > MAX_SPEC_BYTES:
         errors.append(_t("tasks.spec_big", kb=MAX_SPEC_BYTES // 1000))
 
-    # Models
+    # Models (alias + effort; legacy names map to base + effort)
     role = ROLE_FOR_KIND[kind]
     executor = ""
+    effort = ""
+    model_ref = (spec.model or "").strip()
+    want_effort = (spec.effort or "").strip().lower()
+    if model_ref and want_effort:
+        _malias, meffort = registry.split_ref(model_ref)
+        _mbase, mstored, _mnotice = registry.map_legacy(_malias, meffort)
+        if mstored and mstored != want_effort:
+            errors.append(_t("tasks.effort_mismatch", model=model_ref, effort=spec.effort))
     try:
-        executor = registry.pick(store, role, project, spec.model).alias
+        picked = registry.pick(store, role, project, model_ref or None, effort=want_effort or None)
+        executor = picked.alias
+        if want_effort:
+            effort = want_effort
+        elif model_ref:
+            effort = registry.stored_effort(model_ref)
+        else:
+            effort = ""
     except registry.RegistryError as e:
         errors.append(str(e))
     # The review kind is not reviewed itself: --review names its panel, --model one reviewer — not both,
@@ -178,11 +195,17 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
         rounds = 1  # the panel of a review task reviews once — the rounds of a level belong to a reworked task
     if rmodels and not 1 <= rounds <= MAX_ROUNDS:
         errors.append(_t("tasks.bad_rounds", rounds=rounds, max=MAX_ROUNDS))
+    rmodels_base: list[str] = []
+    refforts: list[str] = []
     for m in rmodels:
         try:
-            registry.check(store, m, project)
+            checked = registry.check(store, m, project)
+            rmodels_base.append(checked.alias)
+            refforts.append(registry.stored_effort(m))
         except registry.RegistryError as e:
             errors.append(_t("tasks.review_prefix", err=e))
+            rmodels_base.append(registry.base_alias(m))
+            refforts.append("")
 
     # Files and acceptance
     paths = [_norm(p) for p in spec.paths if p.strip()]
@@ -246,8 +269,13 @@ def resolve(store: Store, spec: TaskSpec, project: ProjectConfig, *, collect: bo
               "time_limit_min": tlim}
     if spec.review_input.strip():
         limits["input"] = spec.review_input.strip()
-    review = {"models": rmodels, "rounds": rounds} if rmodels else {}
-    return Resolved(executor, review, limits, float(budget_go), float(budget_usd), spec_hash(spec))
+    if rmodels:
+        review = {"models": rmodels_base, "rounds": rounds}
+        if any(refforts):
+            review["efforts"] = refforts
+    else:
+        review = {}
+    return Resolved(executor, effort, review, limits, float(budget_go), float(budget_usd), spec_hash(spec))
 
 
 def create(store: Store, spec: TaskSpec, project: ProjectConfig, *, key: str | None = None,
@@ -260,7 +288,7 @@ def create(store: Store, spec: TaskSpec, project: ProjectConfig, *, key: str | N
     def _do(con) -> dict:
         tid = store.create_task(project=project.name, kind=spec.kind, title=spec.title.strip(), spec=spec.spec,
                                 spec_hash=res.spec_hash, result_format=spec.result_format, executor=res.executor,
-                                review=res.review, limits=res.limits, budget_go=res.budget_go,
+                                effort=res.effort, review=res.review, limits=res.limits, budget_go=res.budget_go,
                                 budget_usd=res.budget_usd, state=State.DRAFT if draft else State.QUEUED,
                                 created_by=spec.created_by, after=spec.after, con=con)
         return {"id": tid}
@@ -277,3 +305,41 @@ def create(store: Store, spec: TaskSpec, project: ProjectConfig, *, key: str | N
 
 def role_of(task: Task) -> Role:
     return ROLE_FOR_KIND[task.kind]
+
+
+def executor_ref(task: Task) -> str:
+    """Executor as ALIAS[:EFFORT] (legacy executors map to base + effort)."""
+    base = registry.base_alias(task.executor or "")
+    stored = getattr(task, "effort", "") or ""
+    if not stored and base != (task.executor or "").strip():
+        stored = registry.stored_effort(task.executor or "")
+    return registry.model_ref(base, stored)
+
+
+def executor_effort(task: Task) -> str:
+    """Stored effort of the executor ("" — the alias default)."""
+    stored = getattr(task, "effort", "") or ""
+    if stored:
+        return stored
+    return registry.stored_effort(task.executor or "")
+
+
+def review_refs(task: Task) -> list[str]:
+    """Review panel as [ALIAS[:EFFORT]] (efforts parallel to models when stored)."""
+    models = list(task.review.get("models") or [])
+    efforts = list(task.review.get("efforts") or [])
+    out: list[str] = []
+    for i, m in enumerate(models):
+        base = registry.base_alias(str(m))
+        stored = str(efforts[i]) if i < len(efforts) else registry.stored_effort(str(m))
+        out.append(registry.model_ref(base, stored))
+    return out
+
+
+def review_effort(task: Task, model: str) -> str:
+    """Stored effort for one panel model ("" — default)."""
+    for ref in review_refs(task):
+        alias, effort = registry.split_ref(ref)
+        if alias == registry.base_alias(model):
+            return effort
+    return ""

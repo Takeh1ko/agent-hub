@@ -460,29 +460,42 @@ def edit(store: Store, project: ProjectConfig, task_id: int, *, spec: str | None
         if not 1 <= count <= tasks.MAX_ROUNDS:
             raise DecisionError(_t("accept.edit_rounds_bad", rounds=count, max=tasks.MAX_ROUNDS),
                                 hint=_t("hint.models"))
+        bases: list[str] = []
+        befforts: list[str] = []
         for alias in models:
             try:
-                registry.check(store, alias, project)
+                checked = registry.check(store, alias, project)
+                bases.append(checked.alias)
+                befforts.append(registry.stored_effort(alias))
             except registry.RegistryError as e:
                 raise DecisionError(str(e), hint=_t("hint.models")) from e
         if t.kind is Kind.REVIEW:
             count = 1  # the same one round tasks.resolve gives a review task
-        fields["review"] = {"models": models, "rounds": count}
-        changes.append(_t("accept.review_msg", models="+".join(models), rounds=count))
+        fields["review"] = {"models": bases, "rounds": count}
+        if any(befforts):
+            fields["review"]["efforts"] = befforts
+        refs = [registry.model_ref(b, e) for b, e in zip(bases, befforts, strict=True)]
+        changes.append(_t("accept.review_msg", models="+".join(refs), rounds=count))
     if model:
         try:
-            registry.check(store, model, project)
+            checked = registry.check(store, model, project)
         except registry.RegistryError as e:
             raise DecisionError(str(e), hint=_t("hint.models")) from e
+        ref = registry.model_ref(checked.alias, registry.stored_effort(model))
+        cur_ref = registry.model_ref(registry.base_alias(t.executor or ""),
+                                     getattr(t, "effort", "") or registry.stored_effort(t.executor or ""))
         if panel:
             # a review task with a panel runs that panel — a model here names the one reviewer of it
             _panel_locked(store, t, "--model")
             count = int(t.review.get("rounds") or 1)
-            fields["review"] = {"models": [model], "rounds": count}
-            changes.append(_t("accept.review_msg", models=model, rounds=count))
-        elif model != t.executor:
-            changes.append(_t("accept.model_edit", old=t.executor or "—", new=model))
-            fields["executor"] = model
+            fields["review"] = {"models": [checked.alias], "rounds": count}
+            if registry.stored_effort(model):
+                fields["review"]["efforts"] = [registry.stored_effort(model)]
+            changes.append(_t("accept.review_msg", models=ref, rounds=count))
+        elif ref != cur_ref:
+            changes.append(_t("accept.model_edit", old=cur_ref or "—", new=ref))
+            fields["executor"] = checked.alias
+            fields["effort"] = registry.stored_effort(model)
             limits["fresh_session"] = True  # never resume another model's session
     cur_input = input.strip() if input is not None else str(t.limits.get("input") or "")
     if input is not None:
@@ -574,21 +587,27 @@ def change_model(store: Store, project: ProjectConfig, task_id: int, alias: str,
     if t.state in transitions.ACTIVE:
         raise DecisionError(_t("accept.model_active", label=t.label))
     try:
-        registry.check(store, alias, project)
+        checked = registry.check(store, alias, project)
     except registry.RegistryError as e:
         raise DecisionError(str(e), hint=_t("hint.models")) from e
+    ref = registry.model_ref(checked.alias, registry.stored_effort(alias))
+    cur_ref = registry.model_ref(registry.base_alias(t.executor or ""),
+                                 getattr(t, "effort", "") or registry.stored_effort(t.executor or ""))
     panel = list(t.review.get("models") or []) if t.kind is Kind.REVIEW else []
     if panel:
         # what reviews is the panel (engine._review) — the executor is only the fallback reviewer
         _panel_locked(store, t, "ahub model")
         rounds = int(t.review.get("rounds") or 1)
-        store.update_task(t.id, review={"models": [alias], "rounds": rounds})
+        new_review: dict = {"models": [checked.alias], "rounds": rounds}
+        if registry.stored_effort(alias):
+            new_review["efforts"] = [registry.stored_effort(alias)]
+        store.update_task(t.id, review=new_review)
         store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
-                        payload={"from": ", ".join(panel), "to": alias, "by": by})
-        return _t("accept.model_panel", label=t.label, old=", ".join(panel), new=alias)
+                        payload={"from": ", ".join(panel), "to": ref, "by": by})
+        return _t("accept.model_panel", label=t.label, old=", ".join(panel), new=ref)
     lim = dict(t.limits)
     lim["fresh_session"] = True  # never resume another model's session
-    store.update_task(t.id, executor=alias, limits=lim)
+    store.update_task(t.id, executor=checked.alias, effort=registry.stored_effort(alias), limits=lim)
     store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
-                    payload={"from": t.executor, "to": alias, "by": by})
-    return _t("accept.model_msg", label=t.label, old=t.executor, new=alias)
+                    payload={"from": cur_ref, "to": ref, "by": by})
+    return _t("accept.model_msg", label=t.label, old=cur_ref or "—", new=ref)

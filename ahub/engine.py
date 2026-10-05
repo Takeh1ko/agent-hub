@@ -533,7 +533,7 @@ class Engine:
         return max(1, int((self._deadline_ms - now_ms()) / 1000))
 
     def _session_row(self, provider: str, role: Role, alias: str, round_no: int, session_id: str | None,
-                     log_path: str, prompts_summary: str = "") -> int:
+                     log_path: str, prompts_summary: str = "", effort: str = "") -> int:
         """Session row: resume — same row (provider id is unique), new — new row."""
         if session_id:
             for s in self.store.list_sessions(self.task_id):
@@ -542,7 +542,7 @@ class Engine:
                     return s.id
         return self.store.add_session(task_id=self.task_id, provider=provider, role=role.value, model=alias,
                                        round=round_no, external_id=session_id or "", log_path=log_path,
-                                       prompts=prompts_summary)
+                                       prompts=prompts_summary, effort=effort)
 
     def _close_session(self, row: int) -> None:
         """The provider group is gone and the turn is lost — the row must not stay 'running'."""
@@ -583,7 +583,11 @@ class Engine:
 
         `stop_predicate` — what interrupts this turn. By default a nudge does (a worker turn carries the
         message); a reviewer or a save-and-stop turn passes `self.stop_requested` and waits for its turn.
+
+        alias may be ALIAS[:EFFORT] (legacy mapped); the session row keeps the base alias + stored effort.
         """
+        base = registry.base_alias(alias)
+        stored = registry.stored_effort(alias)
         entry = registry.get(self.store, alias)
         prov = providers.get(entry.provider)
         t = self.task()
@@ -596,7 +600,8 @@ class Engine:
         attempt = 0
         while True:
             self._check_lease()
-            row = self._session_row(prov.name, role, alias, t.round, session_id, log_path, prompts_summary)
+            row = self._session_row(prov.name, role, base, t.round, session_id, log_path, prompts_summary,
+                                    stored)
 
             def on_session(sid: str, _row=row) -> None:
                 try:
@@ -701,11 +706,30 @@ class Engine:
             return State.ERROR, reasons.dump("step_failed", outcome=r.outcome.value, err=r.error[:400])
         return None
 
+    def _exec_ref(self, t=None) -> str:
+        """Executor ref ALIAS[:EFFORT] for a run (legacy executors map to base + effort)."""
+        task = t if t is not None else self.task()
+        base = registry.base_alias(task.executor or "")
+        stored = getattr(task, "effort", "") or registry.stored_effort(task.executor or "")
+        return registry.model_ref(base, stored)
+
+    def _panel_refs(self, t=None) -> list[str]:
+        """Review panel refs ALIAS[:EFFORT] (parallel efforts when stored)."""
+        task = t if t is not None else self.task()
+        models = list(task.review.get("models") or [])
+        efforts = list(task.review.get("efforts") or [])
+        out: list[str] = []
+        for i, m in enumerate(models):
+            base = registry.base_alias(str(m))
+            stored = str(efforts[i]) if i < len(efforts) else registry.stored_effort(str(m))
+            out.append(registry.model_ref(base, stored))
+        return out
+
     def _handle_quota_outcome(self, r: RunResult, *, role: Role = Role.EXECUTOR,
                               model_alias: str = "") -> tuple[State, str]:
         from ahub import config, quota
 
-        alias = model_alias or self.task().executor
+        alias = model_alias or self._exec_ref()
         _prov, buckets = quota.get_model_buckets(self.store, alias, force=True)
 
         hub_cfg = config.load_hub()
@@ -716,16 +740,40 @@ class Engine:
         t = self.task()
         reason, event_text = quota.describe_error(t.label, buckets, r.error, fallback)
         if fallback:
+            fb_base = registry.base_alias(fallback)
+            fb_stored = registry.stored_effort(fallback)
             if role is Role.REVIEWER:
                 # a reviewer never takes the executor's seat: only its panel entry moves
                 old_model = alias
                 rev = dict(t.review)
-                rev["models"] = [fallback if x == alias else x for x in list(rev.get("models") or [])]
+                models = list(rev.get("models") or [])
+                efforts = list(rev.get("efforts") or [])
+                new_models, new_efforts = [], []
+                for i, x in enumerate(models):
+                    x_base = registry.base_alias(str(x))
+                    x_stored = str(efforts[i]) if i < len(efforts) else registry.stored_effort(str(x))
+                    x_ref = registry.model_ref(x_base, x_stored)
+                    if x_ref == alias or x_base == registry.base_alias(alias):
+                        new_models.append(fb_base)
+                        new_efforts.append(fb_stored)
+                    else:
+                        new_models.append(x_base)
+                        new_efforts.append(x_stored)
+                rev["models"] = new_models
+                if any(new_efforts):
+                    rev["efforts"] = new_efforts
+                elif "efforts" in rev:
+                    rev.pop("efforts", None)
                 self.store.update_task(t.id, review=rev)
             else:
-                old_model = t.executor
-                self.store.update_task(t.id, executor=fallback, limits={**t.limits, "fresh_session": True})
-                t.executor = fallback
+                old_model = self._exec_ref(t)
+                self.store.update_task(t.id, executor=fb_base, effort=fb_stored,
+                                       limits={**t.limits, "fresh_session": True})
+                t.executor = fb_base
+                try:
+                    t.effort = fb_stored
+                except (AttributeError, TypeError):
+                    pass
             self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
                                  payload={"from": old_model, "to": fallback, "text": event_text})
         elif role is not Role.REVIEWER:
@@ -787,14 +835,14 @@ class Engine:
         else:
             prompt, summary, _ = prompts.scout_prompt(self.project, t)
             self._record_prompts(t, summary)
-        r, final = self._step_with_continue(Role.SCOUT, t.executor, prompt, session_id=resume_sid,
+        r, final = self._step_with_continue(Role.SCOUT, self._exec_ref(t), prompt, session_id=resume_sid,
                                             log_name="scout",
                                             prompt_kind="continue" if resume_sid else "start")
         if final is not None:
             return self._settle(*final)
         problems = self._check_scout(t)
         if problems and not any(p.code in UNFIXABLE_SCOUT for p in problems):
-            r, final = self._step_with_continue(Role.SCOUT, t.executor,
+            r, final = self._step_with_continue(Role.SCOUT, self._exec_ref(t),
                                                 prompts.repair_prompt("; ".join(problems)),
                                                 session_id=r.session_id, log_name="scout", prompt_kind="repair")
             if final is not None:
@@ -888,7 +936,7 @@ class Engine:
                                     reasons.dump("review_input", err=_t("engine.review_empty", input=inp)))
         except ReviewInputError as e:
             return self._settle(State.NEEDS_DECISION, reasons.dump("review_input", err=e))
-        models = list(t.review.get("models") or []) or [t.executor]
+        models = self._panel_refs(t) or [self._exec_ref(t)]
         round_no = max(1, t.round)
         rework_notes = str(t.limits.get("rework_notes") or "")
         if rework_notes:
@@ -972,7 +1020,7 @@ class Engine:
         except _Settle as s:
             return self._settle(s.state, s.reason)
         role = Role.EXECUTOR if t.kind is Kind.CODE else Role.ROUTINE
-        models = list(t.review.get("models") or [])
+        models = self._panel_refs(t)
         max_rounds = max(1, int(t.review.get("rounds") or 1))
         prev = [s for s in self.store.list_sessions(t.id) if s.role == role.value and s.external_id]
         sid = prev[-1].external_id if prev else None
@@ -1013,21 +1061,21 @@ class Engine:
                 t = self.move(State.CHECKING, reasons.dump("gates"))
             else:
                 self.set_phase(Phase.WRITING)
-                r, final = self._step_with_continue(role, t.executor, prompt, session_id=sid, log_name=role.value,
-                                                    prompt_kind=kind)
+                r, final = self._step_with_continue(role, self._exec_ref(t), prompt, session_id=sid,
+                                                    log_name=role.value, prompt_kind=kind)
                 sid = r.session_id or sid
                 if final is not None:
                     if self.budget_hit:
-                        return self._budget_stop(role, t.executor, sid)
+                        return self._budget_stop(role, self._exec_ref(), sid)
                     return self._settle(*final)
                 blocked = self._blocked(t)
                 if blocked:
                     return self._settle(State.NEEDS_DECISION, reasons.dump("blocked", summary=blocked[:400]))
                 t = self.move(State.CHECKING, reasons.dump("gates"))
-            sid, sync_final = self._sync_before_gates(t, role, t.executor, sid)
+            sid, sync_final = self._sync_before_gates(t, role, self._exec_ref(t), sid)
             if sync_final is not None:
                 if self.budget_hit:
-                    return self._budget_stop(role, t.executor, sid)
+                    return self._budget_stop(role, self._exec_ref(), sid)
                 return self._settle(*sync_final)
             t = self.task()
             try:
@@ -1052,12 +1100,13 @@ class Engine:
                 fixed_once = True
                 red_tests = g.tests_ok is False and not g.repairable
                 fix = (review.fix_prompt([], gate=g) if red_tests else prompts.repair_prompt(problem))
-                r, final = self._step_with_continue(role, t.executor, fix, session_id=sid, log_name=role.value,
+                r, final = self._step_with_continue(role, self._exec_ref(), fix, session_id=sid,
+                                                    log_name=role.value,
                                                     prompt_kind="rework" if red_tests else "repair")
                 sid = r.session_id or sid
                 if final is not None:
                     if self.budget_hit:
-                        return self._budget_stop(role, t.executor, sid)
+                        return self._budget_stop(role, self._exec_ref(), sid)
                     return self._settle(*final)
                 try:
                     g = self._gate(self.task())
@@ -1070,7 +1119,7 @@ class Engine:
                 code = "gates_passed" if t.kind is Kind.ROUTINE else "gates_passed_tests"
                 return self._settle(State.DONE, reasons.dump(code), payload=payload)
             if self.over_budget():
-                return self._budget_stop(role, t.executor, sid)
+                return self._budget_stop(role, self._exec_ref(), sid)
             t = self.move(State.REVIEWING, reasons.dump("review_round", round=round_no))
             decision, reason, findings = self._review_round(t, g, models, round_no, max_rounds)
             if decision == "queued":

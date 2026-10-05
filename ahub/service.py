@@ -252,17 +252,30 @@ class Service:
                     qres = quota.check_quota_for_task(self.store, t, hub_cfg.quota, group_counts)
                     if not qres.ok:
                         if qres.fallback_model:
-                            old_model = t.executor
+                            from ahub import registry as _registry
+                            from ahub import tasks as _tasks
+
+                            old_model = _tasks.executor_ref(t)
+                            fb_base = _registry.base_alias(qres.fallback_model)
+                            fb_stored = _registry.stored_effort(qres.fallback_model)
                             if t.kind is Kind.REVIEW:
                                 rev = dict(t.review)
-                                models = list(rev.get("models") or [t.executor])
-                                old_model = models[0] if models else t.executor
-                                rev["models"] = [qres.fallback_model]
+                                models = _tasks.review_refs(t) or ([old_model] if t.executor else [])
+                                old_model = models[0] if models else old_model
+                                rev["models"] = [fb_base]
+                                if fb_stored:
+                                    rev["efforts"] = [fb_stored]
+                                elif "efforts" in rev:
+                                    rev.pop("efforts", None)
                                 self.store.update_task(t.id, review=rev)
                             else:
-                                self.store.update_task(t.id, executor=qres.fallback_model,
+                                self.store.update_task(t.id, executor=fb_base, effort=fb_stored,
                                                        limits={**t.limits, "fresh_session": True})
-                                t.executor = qres.fallback_model
+                                t.executor = fb_base
+                                try:
+                                    t.effort = fb_stored
+                                except (AttributeError, TypeError):
+                                    pass
                             self.store.add_event(Ev.MODEL_CHANGED, task_id=t.id, project=t.project,
                                                  payload={"from": old_model, "to": qres.fallback_model,
                                                           "text": qres.event_text})
