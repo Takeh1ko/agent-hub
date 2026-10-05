@@ -79,6 +79,41 @@ class ReviewInputError(RuntimeError):
     """The --input of a review task names nothing that exists — the task needs a decision, not a worker."""
 
 
+def _tb_has_hub(e: BaseException) -> bool:
+    """The traceback goes through hub code (ahub.*) — not a provider subprocess output."""
+    tb = e.__traceback__
+    while tb is not None:
+        fn = (tb.tb_frame.f_code.co_filename or "").replace("\\", "/")
+        if "/ahub/" in fn or fn.endswith("/ahub.py"):
+            return True
+        mod = tb.tb_frame.f_globals.get("__name__", "")
+        if isinstance(mod, str) and (mod == "ahub" or mod.startswith("ahub.")):
+            return True
+        tb = tb.tb_next
+    return False
+
+
+def _stale_code_error(e: BaseException) -> bool:
+    """Old worker on new code: a hub import broke or a hub attribute vanished.
+
+    Only hub code counts — an ImportError in a provider subprocess output never raises here,
+    it arrives as Outcome text, not as an exception.
+    """
+    if isinstance(e, ImportError):
+        name = getattr(e, "name", "") or ""
+        if isinstance(name, str) and name.startswith("ahub"):
+            return True
+        if "ahub" in str(e):
+            return True
+        return _tb_has_hub(e)
+    if isinstance(e, AttributeError):
+        # a hub module lost an attribute under a live update: the message names it
+        if "ahub" in str(e):
+            return True
+        return False
+    return False
+
+
 UNFIXABLE_SCOUT = ("scout_files", "scout_commits")  # a scout that touched files — a repair prompt cannot fix it
 
 _SHA = re.compile(r"[0-9a-fA-F]{7,40}")
@@ -257,6 +292,18 @@ class Engine:
             self.log.error("worktree: %s", e)
             return self._settle(State.ERROR, reasons.dump("prepare_failed", err=e))
         except Exception as e:
+            if _stale_code_error(e):
+                # old code on a live update: like the poll failure path — one log line, the
+                # provider group is stopped, the worker exits 4 and the service re-picks the task
+                self.log.error("stale hub code (%s: %s) — the task is left to the service",
+                               type(e).__name__, str(e)[:200])
+                try:
+                    from ahub.providers import runner as _runner
+
+                    _runner.request_stop()
+                except Exception:
+                    self.log.exception("stopping the provider failed")
+                raise PollFailed(f"stale code: {type(e).__name__}: {e}") from e
             self.log.exception("engine crashed")
             try:
                 # an exception message is technical detail — stored as text, not as a reason code
@@ -525,6 +572,13 @@ class Engine:
             except PollFailed:  # the runner killed the provider group — the row must not stay running
                 self._close_session(row)
                 raise
+            except (ImportError, AttributeError) as e:
+                if not _stale_code_error(e):
+                    raise
+                self._close_session(row)
+                self.log.error("stale hub code (%s: %s) — the task is left to the service",
+                               type(e).__name__, str(e)[:200])
+                raise PollFailed(f"stale code: {type(e).__name__}: {e}") from e
             u = r.usage
             fields: dict = {"status": "ok" if r.ok else ("killed" if r.outcome is Outcome.KILLED else "failed"),
                             "outcome": r.outcome.value, "ended_at": r.ended_ms}
@@ -744,14 +798,27 @@ class Engine:
             problems.append(gates.problem("no_result"))
             res = {}
         else:
-            res = self._result(t)
-            if not res:
+            try:
+                raw = res_path.read_text(encoding="utf-8")
+            except OSError:
                 problems.append(gates.problem("result_not_json"))
+                res = {}
             else:
-                if not str(res.get("summary", "")).strip():
-                    problems.append(gates.problem("empty_summary"))
-                if res.get("status") not in ("done", "blocked"):
-                    problems.append(gates.problem("bad_status"))
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as e:
+                    problems.append(gates.problem("result_json", err=str(e)[:200]))
+                    res = {}
+                else:
+                    if not isinstance(data, dict) or not data:
+                        problems.append(gates.problem("result_not_json"))
+                        res = {}
+                    else:
+                        res = data
+                        if not str(res.get("summary", "")).strip():
+                            problems.append(gates.problem("empty_summary"))
+                        if res.get("status") not in ("done", "blocked"):
+                            problems.append(gates.problem("bad_status"))
         report = base / "report.md"
         try:
             report_ok = report.is_file() and bool(report.read_text(encoding="utf-8", errors="replace").strip())
@@ -901,7 +968,10 @@ class Engine:
             if blocked:
                 return self._settle(State.NEEDS_DECISION, reasons.dump("blocked", summary=blocked[:400]))
             t = self.move(State.CHECKING, reasons.dump("gates"))
-            g = self._gate(t)
+            try:
+                g = self._gate(t)
+            except gates.LockTimeout as e:
+                return self._lock_wait(e)
             fixed_once = False
             while True:
                 if g.fatal:
@@ -927,7 +997,10 @@ class Engine:
                     if self.budget_hit:
                         return self._budget_stop(role, t.executor, sid)
                     return self._settle(*final)
-                g = self._gate(self.task())
+                try:
+                    g = self._gate(self.task())
+                except gates.LockTimeout as e:
+                    return self._lock_wait(e)
             summary = self._result(t).get("summary", "")
             payload = {"summary": str(summary)[:500], "diffstat": g.diffstat,
                        "tests": "green" if g.tests_ok else ("none" if g.tests_ok is None else "red")}
@@ -974,6 +1047,13 @@ class Engine:
 
         orch = bool(t.limits.get("orch_edit"))
         return gates.check(self.project, t, orch_edit=orch, on_wait=on_wait, should_stop=self.stop_requested)
+
+    def _lock_wait(self, e: gates.LockTimeout) -> Settled:
+        """A busy test lock is a wait, not a red acceptance: back to the queue, gates re-run."""
+        if getattr(e, "stopped", False) or self.stop_requested():
+            return self._settle(State.STOPPED, reasons.dump("stopped"))
+        self.set_phase(Phase.WAITING)
+        return self._settle(State.QUEUED, reasons.dump("wait_test_lock"))
 
     def _review_round(self, t: Task, g: gates.GateResult, models: list[str], round_no: int,
                       max_rounds: int, *, material: str | None = None,
