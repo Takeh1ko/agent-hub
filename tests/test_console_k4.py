@@ -384,33 +384,34 @@ def _bg_sgr_params(sgr_text: str) -> list[str]:
     return found
 
 
-async def test_input_placeholder_has_no_background(store: Store):
-    """Placeholder: dim text on ansi_default; only the one-cell cursor may reverse."""
+async def test_input_emits_no_background_sgr(store: Store):
+    """The input line paints no background: placeholder dim on default, cursor underlined, no tint.
+
+    Mirrors the real-terminal gate (pty_bg_check.py): no 40-47/100-107/48;5/48;2 SGR
+    anywhere in the rows the Input emits under ansi_color.
+    """
+    from io import StringIO
+
+    from rich.console import Console as RichConsole
     from textual.widgets import Input
 
     app = ConsoleApp(store=store, all_projects=True)
     async with app.run_test(size=(120, 35)) as pilot:
         await pilot.pause(0.3)
-        assert app.native_ansi_color  # rendered under ansi_color
+        assert app.native_ansi_color
         inp = app.query_one("#input", Input)
         inp.focus()
         await pilot.pause(0.1)
         assert app.focused is inp
-        assert inp.styles.background_tint.a == 0  # no focus tint to blend into a bar
-        for comp in ("input--placeholder", "input--suggestion"):
+        assert inp.styles.background_tint.a == 0
+        for comp in ("input--placeholder", "input--suggestion", "input--cursor"):
             bg = inp.get_component_rich_style(comp).bgcolor
-            assert bg is None or "default" in str(bg)
-        assert ".input--placeholder" in ConsoleApp.CSS  # the rule pins it, not just the default
-        from io import StringIO
-
-        from rich.console import Console as RichConsole
-
-        from ahub.i18n import t
-
+            assert bg is None or "default" in str(bg), comp
         buf = StringIO()
         rc = RichConsole(file=buf, force_terminal=True, color_system="truecolor", width=120)
-        rc.print(t("console.input_placeholder"),
-                 style=inp.get_component_rich_style("input--placeholder"), end="")
+        for y in range(inp.size.height):
+            for seg in inp.render_line(y):
+                rc.print(seg, end="")
         assert _bg_sgr_params(buf.getvalue()) == []
 
 

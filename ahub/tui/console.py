@@ -603,6 +603,7 @@ class ConsoleApp(App):
     #input { margin: 0 1; border: round #ff8700; background: ansi_default; }
     #input:focus { border: round #ff8700; background: ansi_default; background-tint: 0%; }
     #input > .input--placeholder, #input > .input--suggestion { background: ansi_default; }
+    #input > .input--cursor { background: ansi_default; color: ansi_default; text-style: underline; }
     #footer { height: 1; margin: 0 1; background: ansi_default; }
     #shortcuts { height: auto; margin: 0 1; background: ansi_default; }
     #dialog { width: 80; height: auto; border: thick #ff8700; background: ansi_default; padding: 1 2; }
@@ -623,8 +624,9 @@ class ConsoleApp(App):
     # through — Screen and every widget are ansi_default, borders keep the accent (#ff8700 =
     # ui 38;5;208). Scrollbars are dim track (transparent) + accent thumb, never textual blue.
     # The welcome box draws its own rounded accent border in text (ui.box): no CSS border,
-    # no focus/scroll indicator, no blue left edge. The input keeps no focus tint and its
-    # placeholder/suggestion stay dim text on ansi_default (the one-cell cursor keeps its reverse).
+    # no focus/scroll indicator, no blue left edge. The input keeps no focus tint, its
+    # placeholder/suggestion stay dim text on ansi_default, and the cursor is an
+    # underline with no background (never a reverse block that paints a bar).
 
     def __init__(self, store: Store | None = None, all_projects: bool = False,
                  project: str | None = None, control: bool = False) -> None:
