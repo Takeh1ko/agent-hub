@@ -228,7 +228,9 @@ def test_scout_invalid_result_json_has_parser_error(store: Store, tmp_path):
 
 
 def test_stale_import_is_poll_failed(store: Store, tmp_path, monkeypatch):
-    """An ImportError from hub code exits 4 like the poll failure path, not ERROR."""
+    """Changed hub code under the worker exits 4 like the poll failure path, not ERROR."""
+    from ahub import selfupdate
+
     project = make_project(tmp_path)
     install_fake(store, [{"session": "ses_x", "steps": [{"sleep": 60}]}])
     t = tasks.create(
@@ -238,6 +240,9 @@ def test_stale_import_is_poll_failed(store: Store, tmp_path, monkeypatch):
     assert _stale_code_error(AttributeError("module 'ahub.providers.base' has no attribute 'QuotaBucket'"))
     assert not _stale_code_error(ImportError("cannot import name 'foo' from 'bar'"))
     assert not _stale_code_error(AttributeError("'NoneType' object has no attribute 'foo'"))
+
+    prints = iter(["v1", "v1", "v2"])
+    monkeypatch.setattr(selfupdate, "code_fingerprint", lambda: next(prints, "v2"))
 
     real_prepare = Engine._prepare
 
@@ -257,6 +262,34 @@ def test_stale_import_is_poll_failed(store: Store, tmp_path, monkeypatch):
 
     # provider subprocess output mentioning ImportError stays a normal step failure, not exit 4
     assert not _stale_code_error(ValueError("ImportError: bad import in model output"))
+
+
+def test_stale_import_same_code_goes_to_error(store: Store, tmp_path, monkeypatch):
+    """Unchanged hub code is a genuine bug: no exit 4, the task goes to error as before."""
+    from ahub import selfupdate
+
+    project = make_project(tmp_path)
+    install_fake(store, [{"session": "ses_x", "steps": [{"sleep": 60}]}])
+    t = tasks.create(
+        store, tasks.TaskSpec(project="P", kind=Kind.SCOUT, title="x", model="fake"), project, collect=False
+    )
+    monkeypatch.setattr(selfupdate, "code_fingerprint", lambda: "v1")
+
+    real_prepare = Engine._prepare
+
+    def _boom(self, t):
+        raise ImportError("cannot import name 'QuotaBucket' from 'ahub.providers.base'")
+
+    monkeypatch.setattr(Engine, "_prepare", _boom)
+    from ahub import worker
+
+    monkeypatch.setattr(worker, "find_project", lambda name: project)
+    try:
+        assert worker.main([f"T{t.id}"]) != 4
+    finally:
+        monkeypatch.setattr(Engine, "_prepare", real_prepare)
+    left = store.get_task(t.id)
+    assert left.state is State.ERROR
 
 
 def test_provider_output_importerror_is_not_stale():

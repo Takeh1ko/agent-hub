@@ -32,7 +32,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ahub import gates, prepare, prompts, providers, reasons, registry, review, transcript, transitions, workspace
+from ahub import (
+    gates,
+    prepare,
+    prompts,
+    providers,
+    reasons,
+    registry,
+    review,
+    selfupdate,
+    transcript,
+    transitions,
+    workspace,
+)
 from ahub import log as hublog
 from ahub.config import ProjectConfig
 from ahub.i18n import plural
@@ -112,6 +124,26 @@ def _stale_code_error(e: BaseException) -> bool:
             return True
         return False
     return False
+
+
+def _code_fingerprint() -> str:
+    """Best-effort fingerprint of the hub code ('' when unknown)."""
+    try:
+        return selfupdate.code_fingerprint()
+    except Exception:
+        return ""
+
+
+def _code_changed_since(fp: str) -> bool:
+    """Hub code changed since fp was taken; False when either fingerprint is unknown.
+
+    Unknown never counts as changed: a genuine bug must go to error, not loop re-picks on the
+    same code.
+    """
+    if not fp:
+        return False
+    now = _code_fingerprint()
+    return bool(now) and now != fp
 
 
 UNFIXABLE_SCOUT = ("scout_files", "scout_commits")  # a scout that touched files — a repair prompt cannot fix it
@@ -272,6 +304,7 @@ class Engine:
         self._budget_at = 0.0
         self._soft_sent = False
         self._nudge_turns = 0
+        self._code0 = _code_fingerprint()  # hub code as this worker started; stale imports compare against it
         self.log = hublog.get("engine", task=self.task_id, project=project.name)
 
     def run(self) -> Settled:
@@ -292,9 +325,10 @@ class Engine:
             self.log.error("worktree: %s", e)
             return self._settle(State.ERROR, reasons.dump("prepare_failed", err=e))
         except Exception as e:
-            if _stale_code_error(e):
-                # old code on a live update: like the poll failure path — one log line, the
-                # provider group is stopped, the worker exits 4 and the service re-picks the task
+            if _stale_code_error(e) and _code_changed_since(self._code0):
+                # the hub code changed under this worker: like the poll failure path — one log line,
+                # the provider group is stopped, the worker exits 4 and the service re-picks the task.
+                # Unchanged code is a genuine bug and settles error as before (no re-pick loop).
                 self.log.error("stale hub code (%s: %s) — the task is left to the service",
                                type(e).__name__, str(e)[:200])
                 try:
@@ -573,7 +607,7 @@ class Engine:
                 self._close_session(row)
                 raise
             except (ImportError, AttributeError) as e:
-                if not _stale_code_error(e):
+                if not _stale_code_error(e) or not _code_changed_since(self._code0):
                     raise
                 self._close_session(row)
                 self.log.error("stale hub code (%s: %s) — the task is left to the service",
