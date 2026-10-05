@@ -25,7 +25,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ahub import reasons, workspace
+from ahub import procs, reasons, workspace
 from ahub.config import ProjectConfig
 from ahub.i18n import t as _t
 from ahub.i18n import template
@@ -141,9 +141,60 @@ class LockTimeout(RuntimeError):
         self.stopped = stopped
 
 
+def accept_waiting_path(lock: str) -> Path:
+    """Marker next to the test lock: an accept waits for it (its pid inside)."""
+    return Path(f"{lock}.accept-waiting")
+
+
+def _waiting_pid(lock: str) -> int | None:
+    try:
+        raw = accept_waiting_path(lock).read_text(encoding="utf-8").strip().splitlines()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        return int(raw[0].strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def accept_waiting(lock: str) -> bool:
+    """True while a live accept waits for the test lock (stale markers — dead pid — ignored)."""
+    if not lock:
+        return False
+    pid = _waiting_pid(lock)
+    if pid is None:
+        return False
+    return procs.alive(pid)
+
+
+def _mark_accept_waiting(lock: str) -> None:
+    try:
+        accept_waiting_path(lock).write_text(f"{os.getpid()}\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_accept_waiting(lock: str) -> None:
+    try:
+        if _waiting_pid(lock) == os.getpid():
+            accept_waiting_path(lock).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def with_lock(path: str, fn: Callable[[], object], *, wait_s: float = LOCK_WAIT_S,
-              on_wait: Callable[[], None] | None = None, should_stop: Callable[[], bool] | None = None):
-    """Run fn under an external flock (shared project test lock). Empty — no lock."""
+              on_wait: Callable[[], None] | None = None, should_stop: Callable[[], bool] | None = None,
+              is_accept: bool = False):
+    """Run fn under an external flock (shared project test lock). Empty — no lock.
+
+    An accept waits ahead of task gates: while it waits it leaves a marker next to the lock
+    (accept_waiting_path, its pid inside); gates see a live marker and keep waiting without
+    trying the flock, so the accept goes next once the current run ends. A stale marker
+    (dead pid) is ignored. Waiting — for gates and for the accept — is still bounded by
+    `wait_s` (LockTimeout) and `should_stop`, never a red acceptance.
+    """
     if not path:
         return fn()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -151,19 +202,37 @@ def with_lock(path: str, fn: Callable[[], object], *, wait_s: float = LOCK_WAIT_
     try:
         deadline = time.monotonic() + wait_s
         waited = False
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if not waited and on_wait is not None:
-                    on_wait()
-                waited = True
-                if time.monotonic() >= deadline:
-                    raise LockTimeout(_t("gates.lock_busy", path=path, secs=int(wait_s))) from None
-                if should_stop is not None and should_stop():
-                    raise LockTimeout(_t("gates.lock_stopped"), stopped=True) from None
-                time.sleep(1.0)
+        marked = False
+        try:
+            while True:
+                if not is_accept and accept_waiting(path):
+                    if not waited and on_wait is not None:
+                        on_wait()
+                    waited = True
+                    if time.monotonic() >= deadline:
+                        raise LockTimeout(_t("gates.lock_busy", path=path, secs=int(wait_s))) from None
+                    if should_stop is not None and should_stop():
+                        raise LockTimeout(_t("gates.lock_stopped"), stopped=True) from None
+                    time.sleep(1.0)
+                    continue
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if is_accept and not marked:
+                        _mark_accept_waiting(path)
+                        marked = True
+                    if not waited and on_wait is not None:
+                        on_wait()
+                    waited = True
+                    if time.monotonic() >= deadline:
+                        raise LockTimeout(_t("gates.lock_busy", path=path, secs=int(wait_s))) from None
+                    if should_stop is not None and should_stop():
+                        raise LockTimeout(_t("gates.lock_stopped"), stopped=True) from None
+                    time.sleep(1.0)
+        finally:
+            if marked:
+                _clear_accept_waiting(path)
         try:
             return fn()
         finally:
@@ -174,7 +243,8 @@ def with_lock(path: str, fn: Callable[[], object], *, wait_s: float = LOCK_WAIT_
 
 def run_acceptance(project: ProjectConfig, cwd: str, nodes: list[str], *, task_label: str = "",
                    on_wait: Callable[[], None] | None = None,
-                   should_stop: Callable[[], bool] | None = None) -> tuple[bool, str, str]:
+                   should_stop: Callable[[], bool] | None = None,
+                   is_accept: bool = False) -> tuple[bool, str, str]:
     """(green?, output tail, command). Under the project test resource.
 
     A busy test lock is a wait, not a red acceptance: LockTimeout propagates and the caller
@@ -199,7 +269,7 @@ def run_acceptance(project: ProjectConfig, cwd: str, nodes: list[str], *, task_l
         tail = "\n".join((r.stdout + "\n" + r.stderr).strip().splitlines()[-TAIL_LINES:])
         return r.returncode == 0, tail
 
-    ok, tail = with_lock(lock, _run, on_wait=on_wait, should_stop=should_stop)
+    ok, tail = with_lock(lock, _run, on_wait=on_wait, should_stop=should_stop, is_accept=is_accept)
     return ok, tail, " ".join(cmd[2:])
 
 

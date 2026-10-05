@@ -3,15 +3,19 @@ path extension, budget top-up, model change, resume with a new brief.
 
 Merge: task → "accepting" (lease held by whoever accepts; a second "accept" is refused) → a per-project flock
 (the whole sequence below is one at a time per project, a second accept waits) → gates at the copy's
-current HEAD (orchestrator edit — if HEAD ≠ worker result commit: legitimate, with an event) → in the project root
-`git merge --no-ff` into the work branch → acceptance under the test resource → red — roll the merge back →
-push per config → "accepted", task_cleanup hook, copy and branch removed, archived.
+current HEAD (orchestrator edit — if HEAD ≠ worker result commit: legitimate, with an event) → merge
+`git merge --no-ff` into a temporary worktree/branch from the work-branch tip → acceptance there under
+the test resource (the accept waits for the test lock ahead of task gates) → green — fast-forward the
+work branch to the verified merge (the branch moved meanwhile — refuse); red — nothing ever merged →
+push per config → "accepted", task_cleanup hook, copy and branch removed, archived. The temp worktree
+is removed in every outcome.
 
-Resumable: if accept's own merge commit (`merge T<n>: …`, second parent = the task branch tip) is the tip of the work
-branch (the accept was interrupted after the merge — the gates on the copy see nothing but the merge commit), the gates
-and the merge are skipped: acceptance runs on HEAD (red — roll the merge back, as usual), then the same tail. A foreign
-merge is never taken for that state: a hand-merge, or an extra commit on top of it, is refused for the orchestrator to
-finish by hand.
+Resumable: an interrupted accept leaves only the temp worktree to clean (it is removed at the next
+start and at the end); if accept's own merge commit (`merge T<n>: …`, second parent = the task branch
+tip) is already the tip of the work branch (the accept was interrupted after the fast-forward), the gates
+and the merge are skipped: acceptance runs on HEAD (red — roll the merge back, as usual), then the same
+tail. A foreign merge is never taken for that state: a hand-merge, or an extra commit on top of it, is
+refused for the orchestrator to finish by hand (`already_merged`).
 
 The lease is taken with this process's pid and renewed in the background while the acceptance runs: a long
 acceptance is not an orphan, and `service` leaves an "accepting" task with a live owner process alone.
@@ -21,6 +25,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import shutil
 import sys
 import time
 from collections.abc import Iterator
@@ -104,6 +109,28 @@ def _root_ready(project: ProjectConfig) -> None:
         raise DecisionError(_t("accept.root_dirty", files=", ".join(x[3:] for x in dirty[:5])))
 
 
+def _verify_branch(project: ProjectConfig, t: Task) -> str:
+    """Temp branch for the verified merge (one per task; the per-project accept lock makes it unique)."""
+    return f"{project.branch_prefix}accept-{t.label}"
+
+
+def _verify_path(project: ProjectConfig, t: Task) -> Path:
+    """Temp worktree for the verified merge, next to the task copies."""
+    base = Path(project.worktrees) if project.worktrees else Path(project.root).parent / f"{Path(project.root).name}-wt"
+    return base / f"accept-{t.label}"
+
+
+def _clean_verify(project: ProjectConfig, t: Task) -> None:
+    """Remove the temp worktree/branch (an interrupted accept leaves only this)."""
+    path = _verify_path(project, t)
+    if path.exists():
+        workspace.git(project.root, "worktree", "remove", "--force", str(path), check=False)
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+    workspace.git(project.root, "worktree", "prune", check=False)
+    workspace.git(project.root, "branch", "-D", _verify_branch(project, t), check=False)
+
+
 def _is_tty() -> bool:
     try:
         return sys.stdout.isatty()
@@ -130,12 +157,13 @@ def _holder_label(fd: int, tries: int = 1) -> str:
 
 @contextmanager
 def _project_lock(project: ProjectConfig, t: Task) -> Iterator[None]:
-    """One accept at a time per project: the whole merge -> acceptance -> rollback-or-push under an flock.
+    """One accept at a time per project: the whole verify -> fast-forward-or-push under an flock.
 
     Two accepts of one project interleaved once: the second merge moved the root under a running acceptance, the red
     one could no longer roll its merge back ("acceptance is red after the merge, but the root moved"), and both
-    merges went to the branch. The lock file is in the hub data dir, keyed by the project name; the holder writes
-    its label in, so a waiter can name it. A dead holder releases the flock with its fd — nobody waits forever.
+    merges went to the branch — hence the verify-before-move below. The lock file is in the hub data dir, keyed
+    by the project name; the holder writes its label in, so a waiter can name it. A dead holder releases the flock
+    with its fd — nobody waits forever.
     """
     lock_file = paths.accept_lock_path(project.name)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
@@ -219,8 +247,64 @@ def _back(store: Store, task_id: int, owner: str, reason: str) -> None:
         events.ack_task(store, task_id)  # the orchestrator saw the refusal in the command output
 
 
+def _verify_merge(project: ProjectConfig, t: Task, title: str) -> str:
+    """Merge into a temp worktree, run acceptance there, fast-forward the work branch. Returns its tip.
+
+    Main never shows an unverified merge: the merge commit (`merge T<n>: …`) is built on a temp branch
+    from the work-branch tip and tested there; only green moves the work branch (fast-forward). Red —
+    nothing on the work branch ever changed. The temp worktree is removed in every outcome.
+    """
+    base_tip = workspace.git(project.root, "rev-parse", project.work_branch).stdout.strip()
+    tmp_path = _verify_path(project, t)
+    tmp_branch = _verify_branch(project, t)
+    _clean_verify(project, t)
+    try:
+        workspace.git(project.root, "worktree", "add", "-b", tmp_branch, str(tmp_path), base_tip)
+        r = workspace.git(str(tmp_path), "merge", "--no-ff", "-m", f"merge {t.label}: {title}", t.branch,
+                          check=False)
+        if r.returncode != 0:
+            diff_u = workspace.git(str(tmp_path), "diff", "--name-only", "--diff-filter=U",
+                                   check=False).stdout.split()
+            workspace.git(str(tmp_path), "merge", "--abort", check=False)
+            conflicts = ", ".join(diff_u[:10]) or (r.stderr or r.stdout)[-300:]
+            raise DecisionError(_t("accept.conflict", info=conflicts), reasons.dump("merge_conflict", files=conflicts))
+        verified = workspace.git(str(tmp_path), "rev-parse", "HEAD").stdout.strip()
+        if verified == base_tip:
+            raise DecisionError(_t("accept.already_merged", branch=project.work_branch, label=t.label),
+                                reasons.dump("already_merged", branch=project.work_branch, label=t.label))
+        nodes = list(t.limits.get("accept") or [])
+        if t.kind is Kind.CODE and nodes:
+            try:
+                ok, tail, cmd = gates.run_acceptance(project, str(tmp_path), nodes, task_label=t.label,
+                                                     is_accept=True)
+            except gates.LockTimeout:
+                # a busy test lock is a wait, not a red acceptance: nothing merged, retry the accept
+                raise DecisionError(_t("accept.test_lock_busy"),
+                                    reasons.dump("wait_test_lock")) from None
+            if not ok:
+                raise DecisionError(_t("accept.red", cmd=cmd, tail=tail[-600:]),
+                                    reasons.dump("accept_red", cmd=cmd))
+        head_now = workspace.git(project.root, "rev-parse", project.work_branch, check=False).stdout.strip()
+        if head_now != base_tip:  # the work branch moved under the running acceptance — leave it alone
+            raise DecisionError(_t("accept.work_moved", now=head_now[:10], base=base_tip[:10]),
+                                reasons.dump("work_moved", now=head_now[:10], base=base_tip[:10]))
+        _root_ready(project)  # the root may have got dirty while the acceptance ran
+        fr = workspace.git(project.root, "merge", "--ff-only", verified, check=False)
+        if fr.returncode != 0:
+            head_now2 = workspace.git(project.root, "rev-parse", project.work_branch, check=False).stdout.strip()
+            if head_now2 != base_tip:
+                raise DecisionError(_t("accept.work_moved", now=head_now2[:10], base=base_tip[:10]),
+                                    reasons.dump("work_moved", now=head_now2[:10], base=base_tip[:10]))
+            err = (fr.stderr or fr.stdout).strip()[-300:] or "fast-forward failed"
+            raise DecisionError(_t("accept.fail", err=err), reasons.dump("accept_failed", err=err))
+        return verified
+    finally:
+        _clean_verify(project, t)
+
+
 def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *, merged: str = "") -> str:
-    if not merged:  # an empty merged — the branch is not in the work branch yet: gates on the copy, then merge
+    fresh = not merged
+    if not merged:  # an empty merged — the branch is not in the work branch yet: gates on the copy, then verify
         res = archive.read_json(Path(t.worktree) / workspace.AHUB_DIR / "result.json")
         head = workspace.head(t.worktree)
         orch_edit = not res.get("commit") or not head.startswith(str(res.get("commit"))[:7])
@@ -237,24 +321,15 @@ def _merge(store: Store, project: ProjectConfig, t: Task, owner: str, by: str, *
             raise DecisionError(_t("accept.gates_head", problems="; ".join(problems)),
                                 reasons.dump("accept_gates", problems=gates.codes(problems)))
         title = t.title.replace('"', "'")[:100]
-        head_before = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
-        r = workspace.git(project.root, "merge", "--no-ff", "-m", f"merge {t.label}: {title}", t.branch, check=False)
-        if r.returncode != 0:
-            diff_u = workspace.git(project.root, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
-            workspace.git(project.root, "merge", "--abort", check=False)
-            conflicts = ", ".join(diff_u[:10]) or (r.stderr or r.stdout)[-300:]
-            raise DecisionError(_t("accept.conflict", info=conflicts), reasons.dump("merge_conflict", files=conflicts))
-        head_after = workspace.git(project.root, "rev-parse", "HEAD").stdout.strip()
-        if head_after == head_before:
-            raise DecisionError(_t("accept.already_merged", branch=project.work_branch, label=t.label),
-                                reasons.dump("already_merged", branch=project.work_branch, label=t.label))
-        merged = head_after
+        merged = _verify_merge(project, t, title)
     else:
+        _clean_verify(project, t)  # a leftover temp worktree from the interrupted run
         _log.info("T%d is already merged into %s (%s) — acceptance on HEAD", t.id, project.work_branch, merged[:10])
     nodes = list(t.limits.get("accept") or [])
-    if t.kind is Kind.CODE and nodes:
+    if not fresh and t.kind is Kind.CODE and nodes:
+        # an interrupted accept whose merge is already the tip: acceptance on HEAD (rollback if red)
         try:
-            ok, tail, cmd = gates.run_acceptance(project, project.root, nodes, task_label=t.label)
+            ok, tail, cmd = gates.run_acceptance(project, project.root, nodes, task_label=t.label, is_accept=True)
         except gates.LockTimeout:
             # a busy test lock is a wait, not a red acceptance: no rollback, retry the accept
             raise DecisionError(_t("accept.test_lock_busy"),
