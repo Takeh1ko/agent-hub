@@ -1,5 +1,30 @@
 # Changelog
 
+## 3.2.0 — 2026-10-06
+
+### Added
+
+- Model catalog: `ahub models` shows every model with its provider, real name and vendor, reasoning levels, plan
+  (free / Go plan / pay-as-you-go / subscription), price per 1M tokens, context and the roles it serves; the
+  provider headers show the Go plan's month spend and the Gemini quota. The same data in `setup`, `providers` and
+  the console's `/models`.
+- Reasoning effort as its own choice: `ahub task new --effort`, `ALIAS:EFFORT` in role defaults and model switches
+  (`/model T12 spark:high`), validated against the model's levels. Legacy aliases (`spark-high`, `spark-medium`,
+  `gemini-low`) keep working and are hidden from menus.
+- Busy-loop guard: a task that settles for the same reason three times without progress, or a worker that gets
+  three empty continues in a row, stops and asks instead of spinning; status shows holds as holds; the observer
+  alarms on frequent re-picks.
+
+### Fixed
+
+- Quota holds no longer spin: a task waiting for a reviewer's quota resumes straight at the review (no worker turn,
+  no gates re-run), is re-checked at the quota reset or with a back-off, tells the owner once, and falls back to the
+  next reviewer in the menu that has quota.
+- Console: typed text after a click into the input no longer acts on the selected task (Enter followed it,
+  a/x/r/m accepted/rejected/reworked/nudged it).
+- Tests no longer start real providers or wait on fixed pauses: console tests wait for state, the quota tests used a
+  real `opencode` turn over the network, and a test that launches a real provider binary now fails at once.
+
 ## 3.1.0 — 2026-10-05
 
 ### Added
