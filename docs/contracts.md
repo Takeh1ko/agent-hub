@@ -289,3 +289,23 @@ With no fallback, the review first tries the next reviewer-menu entry that is en
 project and above the thresholds (the panel models themselves are never candidates). A hold longer
 than 30 min raises one `DECISION` event per task (`reason.quota_hold[...]`, naming the fallback setting
 and the command that sets it); the task itself stays queued.
+
+## 11. Busy-loop guard
+
+No task may spin in place silently, whatever the cause. `[limits]` in the hub config
+(`loop_settles` = 3, `stuck_continues` = 3, `picks_per_hour` = 6):
+
+- The engine counts QUEUED settles with the same reason code (`limits["loop"]`: code,
+  count, first time, HEAD, verdicts, round). Progress is a new commit on the task branch,
+  a new review verdict, or a forward round. Without progress the count grows; at
+  `loop_settles` the task goes to "Needs decision" with the reason code `loop` and the
+  evidence (`queued 3× for wait_quota in 15 min, no progress`) — one `DECISION` event —
+  and stays there until the owner acts (`continue` / `rework` / `task edit`, which clear
+  the streak).
+- A worker session that gets `stuck_continues` `continue` turns in a row with no new
+  commit and no tool activity (`limits["stuck"]`) goes to "Needs decision" with the reason
+  code `stuck_session` and the last outcome, not another continue.
+- Every engine run counts a re-pick (`limits["picks"]`, `limits["pick_ts"]`). A held task
+  reads as what it is — `queued · waiting for Gemini quota (3×, next check 02:10)` — not
+  the phase of its last attempt; `ahub status T12` shows the picks. The observer raises a
+  code-only `ALARM` when a task is re-picked more than `picks_per_hour` times per hour.

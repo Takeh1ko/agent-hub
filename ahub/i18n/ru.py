@@ -1208,4 +1208,10 @@ MESSAGES: dict[str, str] = {
     "console.stage_error": "ошибка",
     "console.stage_stopped": "остановлена",
     "console.stage_dead": "процесс мёртв",
+    "reason.loop": "зацикливание: {n}× в очереди за {what} за {mins} мин, без продвижения",
+    "reason.stuck_session": "зависшая сессия: {n} продолжений без коммита и работы инструментов ({outcome})",
+    "loops.next_check": "след. проверка {when}",
+    "observer.loop_picks": "{label} перевзят {n} раз за час — возможный глухой цикл",
+    "views.lbl_picks": "Перевзятий",
+    "views.picks": "перевзятий {n}",
 }

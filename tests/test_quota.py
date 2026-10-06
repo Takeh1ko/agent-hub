@@ -42,14 +42,16 @@ def store() -> Store:
 
 
 def ensure_model(store: Store, alias: str, provider: str = "fake", model_id: str = "") -> None:
-    try:
-        registry.add_model(store, alias, provider, model_id or alias)
-    except registry.RegistryError:
-        # A seeded alias (e.g. bunny → opencode) stays on its provider after a failed add:
-        # point it at the fake one, or the test runs a real session (slow, flaky, network).
-        with store.tx() as c:
-            c.execute("UPDATE model SET provider=?, model_id=? WHERE alias=?",
-                      (provider, model_id or alias, alias))
+    from tests.enginekit import ensure_fake_model
+
+    if provider != "fake":
+        try:
+            registry.add_model(store, alias, provider, model_id or alias)
+        except registry.RegistryError as e:
+            raise AssertionError(
+                f"alias '{alias}' already exists for another provider: {e} — re-point explicitly") from e
+        return
+    ensure_fake_model(store, alias, model_id or alias)
 
 
 def set_hub_quota(cfg_text: str) -> None:
@@ -551,8 +553,12 @@ def test_reviewer_quota_below_threshold_with_fallback(store, tmp_path, monkeypat
     assert "Gemini 5h quota 10% → running on bunny" in model_ev.payload.get("text", "")
 
 
-def test_visibility_providers_doctor_home(store, tmp_path):
+def test_visibility_providers_doctor_home(store, tmp_path, monkeypatch):
     """Visibility in ahub providers, ahub doctor, and ahub home."""
+    # home_data() probes every provider's quota: stub the real ones, never the network.
+    monkeypatch.setattr("ahub.providers.agy.AgyProvider.quota", lambda self, force=False: [])
+    monkeypatch.setattr("ahub.providers.opencode.OpencodeProvider.quota", lambda self, force=False: [])
+    monkeypatch.setattr("ahub.providers.codex.CodexProvider.quota", lambda self, force=False: [])
     today = datetime.now(timezone.utc).date()  # reset today: the header shows bare "17:16"
     reset_ms = int(datetime(today.year, today.month, today.day, 17, 16, tzinfo=timezone.utc).timestamp() * 1000)
     b_5h = QuotaBucket("Gemini", "5h", 0.29, reset_ms, lambda m: True)

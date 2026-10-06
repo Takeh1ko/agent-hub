@@ -332,8 +332,12 @@ def test_engine_retry_does_not_add_a_turn(tmp_path):
 
 def test_engine_prompt_kinds_of_a_code_task(tmp_path):
     """One sidecar per session log, one line per turn: start, rework on the findings, review."""
+    import dataclasses
+
     store = Store()
     project = make_project(tmp_path)
+    # Load-safe: slow fake startup under parallel suites is not silence.
+    project = dataclasses.replace(project, timeouts=dataclasses.replace(project.timeouts, idle_s=120))
     high = [{"severity": "high", "file": "core/b.py", "line": 1, "issue": "Y должен быть 3",
              "fix": "поставить 3"}]
 

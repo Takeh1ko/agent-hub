@@ -218,6 +218,116 @@ def _no_runner_stop():
     runner.reset_stop()
 
 
+_REAL_PROVIDERS = frozenset({"opencode", "agy", "codex"})
+_REAL_BINARIES = frozenset({"opencode", "agy", "codex"})
+
+
+def _real_binary_provider(cmd) -> str:
+    """Provider of a real worker-session command ('' — not a worker run).
+
+    Only worker turns are refused here (opencode run, agy stream-json, codex exec);
+    catalog/health/quota probes (models, --version, /usage) stay allowed so the
+    existing visibility tests keep working without the network. A fake stub under
+    /tmp (the provider contract tests) is not a real binary either.
+    """
+    try:
+        parts = list(cmd) if cmd else []
+    except TypeError:
+        return ""
+    if not parts:
+        return ""
+    import os as _os
+    import tempfile as _tf
+
+    first = str(parts[0])
+    base = _os.path.basename(first)
+    if base not in _REAL_BINARIES:
+        return ""
+    if first.startswith(_tf.gettempdir() + "/") or "/pytest-" in first:
+        return ""
+    text = " ".join(str(p) for p in parts)
+    if base == "opencode" and "run" in parts:
+        return base
+    if base == "agy" and "-p" in parts and "stream-json" in text:
+        return base
+    if base == "codex" and "exec" in parts:
+        return base
+    return ""
+
+
+@pytest.fixture(autouse=True)
+def _no_real_provider_binaries(monkeypatch):
+    """Tests never run a real provider: launching opencode/agy/codex fails at once.
+
+    While AHUB_UNDER_TEST=1 and not AHUB_LIVE=1, a run through the runner or a
+    direct subprocess launch of a real provider binary raises with the alias and
+    the provider named, instead of spending ~25 s on the network and flaking.
+    """
+    from ahub.providers import runner as _runner
+
+    _real_run = _runner.run
+
+    def _guarded_run(provider, spec, **kw):
+        import os as _os
+        import tempfile as _tf
+
+        pname = getattr(provider, "name", "") or ""
+        if _os.environ.get("AHUB_UNDER_TEST") == "1" and _os.environ.get("AHUB_LIVE") != "1":
+            if pname in _REAL_PROVIDERS:
+                binary = ""
+                try:
+                    if hasattr(provider, "_bin"):
+                        binary = str(provider._bin())
+                    else:
+                        binary = str(getattr(provider, "binary", "") or "")
+                except Exception:
+                    binary = ""
+                tmp = _tf.gettempdir()
+                # contract tests run the real provider class on a fake stub under /tmp —
+                # that is not the network, only a system binary (or the default) is refused
+                is_fake_stub = bool(binary) and (binary.startswith(tmp + "/") or "/pytest-" in binary
+                                                 or binary in ("/bin/echo", "/bin/true"))
+                if not is_fake_stub:
+                    raise AssertionError(
+                        f"refusing real provider '{pname}' (alias model '{spec.model_id}') in tests: "
+                        f"point the alias at the fake provider (tests/enginekit.ensure_fake_model) "
+                        f"or set AHUB_LIVE=1")
+        return _real_run(provider, spec, **kw)
+
+    monkeypatch.setattr(_runner, "run", _guarded_run)
+
+    import subprocess as _sp
+
+    _real_popen = _sp.Popen
+    _real_run_sub = _sp.run
+
+    def _guarded_popen(cmd, *a, **kw):
+        import os as _os
+
+        if _os.environ.get("AHUB_UNDER_TEST") == "1" and _os.environ.get("AHUB_LIVE") != "1":
+            prov = _real_binary_provider(cmd) if isinstance(cmd, (list, tuple)) else ""
+            if prov:
+                raise AssertionError(
+                    f"refusing real provider binary '{cmd[0]}' (provider '{prov}') in tests: "
+                    f"use the fake provider or set AHUB_LIVE=1")
+        return _real_popen(cmd, *a, **kw)
+
+    def _guarded_sub_run(cmd, *a, **kw):
+        import os as _os
+
+        if _os.environ.get("AHUB_UNDER_TEST") == "1" and _os.environ.get("AHUB_LIVE") != "1":
+            prov = _real_binary_provider(cmd) if isinstance(cmd, (list, tuple)) else ""
+            if prov:
+                raise AssertionError(
+                    f"refusing real provider binary '{cmd[0]}' (provider '{prov}') in tests: "
+                    f"use the fake provider or set AHUB_LIVE=1")
+        return _real_run_sub(cmd, *a, **kw)
+
+    monkeypatch.setattr(_sp, "Popen", _guarded_popen)
+    monkeypatch.setattr(_sp, "run", _guarded_sub_run)
+    yield
+
+
 @pytest.fixture
 def own_signals():
     """Signal handlers of the test process: a test that installs the worker's handlers puts them back."""
