@@ -382,8 +382,12 @@ class CodexProvider(Provider):
         """`codex debug models` — the catalog of this login (it refreshes the local cache, so the
         timeout is short: health() runs it in the observer's loop)."""
         del refresh  # no hub cache here: the command refreshes its own cache
+        binary = self._bin()
+        if not os.access(binary, os.X_OK):  # not installed — no warning, the observer reads those
+            _log.debug("models: no binary %s", binary)
+            return []
         try:
-            rc, out, _err = run_capture([self._bin(), "debug", "models"], timeout=_CATALOG_TIMEOUT_S,
+            rc, out, _err = run_capture([binary, "debug", "models"], timeout=_CATALOG_TIMEOUT_S,
                                         env=self.extra_env)
         except (OSError, subprocess.SubprocessError) as e:
             _log.warning("models: %s", e)
@@ -395,8 +399,12 @@ class CodexProvider(Provider):
 
     def login(self) -> tuple[bool, str]:
         """`codex login status` → (logged in, what it said): "Logged in using ChatGPT", rc 0."""
+        binary = self._bin()
+        if not os.access(binary, os.X_OK):  # not installed — no warning, the observer reads those
+            _log.debug("login status: no binary %s", binary)
+            return False, _t("codex.no_binary", binary=binary)
         try:
-            rc, out, err = run_capture([self._bin(), "login", "status"], timeout=30, env=self.extra_env)
+            rc, out, err = run_capture([binary, "login", "status"], timeout=30, env=self.extra_env)
         except (OSError, subprocess.SubprocessError) as e:
             _log.warning("login status: %s", e)
             return False, str(e)

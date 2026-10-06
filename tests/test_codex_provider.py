@@ -4,6 +4,7 @@ health, contract on a fake executable. Live runs are marked live."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -352,6 +353,28 @@ def test_long_prompt_goes_to_file(tmp_path):
     assert len(arg) < 1000 and "in file" in arg
     files = list((tmp_path / ".ahub").glob("prompt_*.md"))
     assert len(files) == 1 and files[0].read_text() == long
+
+
+def test_missing_binary_is_quiet(tmp_path, caplog):
+    """No binary — catalog/login stay quiet (no WARNING for the observer to alarm on)."""
+    missing = str(tmp_path / "no-such" / "codex")
+    prov = CodexProvider(binary=missing)
+    with caplog.at_level(logging.DEBUG, logger="ahub.codex"):
+        assert prov.catalog() == []
+        ok, said = prov.login()
+    assert ok is False and missing in said
+    assert [r for r in caplog.records
+            if r.name == "ahub.codex" and r.levelno >= logging.WARNING] == []
+
+
+def test_failing_binary_still_warns(tmp_path, caplog):
+    """An installed but broken binary keeps its WARNING — real failures are not lost."""
+    stub = tmp_path / "codex-fail"
+    stub.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+    stub.chmod(0o755)
+    with caplog.at_level(logging.WARNING, logger="ahub.codex"):
+        assert CodexProvider(binary=str(stub)).catalog() == []
+    assert any(r.name == "ahub.codex" and r.levelno >= logging.WARNING for r in caplog.records)
 
 
 def _real_home() -> dict[str, str]:

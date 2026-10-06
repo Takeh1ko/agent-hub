@@ -4,6 +4,7 @@ contract on a fake executable. Live runs are marked live."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -232,6 +233,16 @@ def test_health_reports_login_and_models(tmp_path):
     h = prov.health()  # neither login nor state file — both problems visible
     assert not h.ok and len(h.problems) == 1 and "о входе" in h.problems[0]
     assert h.details["models"] == 14 and h.details["version"] == "1.2.15-fake"
+
+
+def test_missing_binary_is_quiet(tmp_path, caplog):
+    """No binary — catalog/quota stay quiet (no WARNING for the observer to alarm on)."""
+    prov = AgyProvider(binary=str(tmp_path / "no-such" / "agy"))
+    with caplog.at_level(logging.DEBUG, logger="ahub.agy"):
+        assert prov.catalog() == []
+        assert prov.quota(force=True) == []
+    assert [r for r in caplog.records
+            if r.name == "ahub.agy" and r.levelno >= logging.WARNING] == []
 
 
 @pytest.mark.live

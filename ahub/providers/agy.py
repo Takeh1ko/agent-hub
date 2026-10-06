@@ -435,8 +435,12 @@ class AgyProvider(Provider):
 
     def catalog(self, refresh: bool = False) -> list[CatalogEntry]:
         del refresh  # no cache here: `agy models` is fast, quota has its own 60 s cache
+        binary = self._bin()
+        if not os.access(binary, os.X_OK):  # not installed — no warning, the observer reads those
+            _log.debug("models: no binary %s", binary)
+            return []
         try:
-            rc, out, _err = run_capture([self._bin(), "models"], env=self.extra_env)
+            rc, out, _err = run_capture([binary, "models"], env=self.extra_env)
         except (OSError, subprocess.SubprocessError) as e:
             _log.warning("models: %s", e)
             return []
@@ -477,8 +481,12 @@ class AgyProvider(Provider):
                     return parse_usage_json(cached.get("data", {}))
             except (OSError, json.JSONDecodeError, ValueError):
                 pass
+        binary = self._bin()
+        if not os.access(binary, os.X_OK):  # not installed — no warning, the observer reads those
+            _log.debug("usage: no binary %s", binary)
+            return self._stale_quota(cache_path)
         try:
-            rc, out, _err = run_capture([self._bin(), "-p", "/usage", "--output-format", "json"],
+            rc, out, _err = run_capture([binary, "-p", "/usage", "--output-format", "json"],
                                         timeout=30, env=self.extra_env)
         except (OSError, subprocess.SubprocessError) as e:
             _log.warning("usage: %s", e)
