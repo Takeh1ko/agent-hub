@@ -28,10 +28,10 @@ SPARK = "opencode-go/muse-spark-1.3-contributor"
 # default route, <model>-<plan> otherwise. spark-high/spark-medium/gemini-low are legacy names
 # (LEGACY_ALIASES): still accepted, mapped to base + effort, hidden from menus.
 DEFAULT_MODELS: dict[str, tuple[str, str, str, str]] = {
-    "spark": ("opencode", SPARK, "xhigh", "Muse Spark 1.3, main"),
+    "spark": ("opencode", SPARK, "max", "Muse Spark 1.3, main"),
     "mimo-flash": ("opencode", "opencode-go/mimo-v2.6-flash", "", "MiMo 2.6 Flash"),
     "deepseek-flash": ("opencode", "opencode-go/deepseek-v4.1-flash", "high", "DeepSeek v4.1 Flash (pricier)"),
-    "spark-free": ("opencode", "opencode/muse-spark-1.3-contributor-free", "xhigh", "free Spark (slower)"),
+    "spark-free": ("opencode", "opencode/muse-spark-1.3-contributor-free", "max", "free Spark (slower)"),
     "bunny": ("opencode", "opencode/space-bunny-free", "", "Space Bunny free (opencode)"),
     "gemini": ("agy", "gemini-3.8-flash-high", "", "Gemini via agy (window quota)"),
     # Codex CLI: a ChatGPT subscription, no prices; the sandbox limits writes to the copy.
@@ -60,8 +60,8 @@ DEFAULT_MENUS: dict[Role, list[tuple[str, bool]]] = {
     Role.REVIEWER: [("spark", True), ("mimo-flash", False), ("deepseek-flash", False)],
     Role.SCOUT: [("spark", True), ("deepseek-flash", False)],
     Role.ROUTINE: [("spark", True), ("mimo-flash", False)],
-    Role.OBSERVER: [("spark:high", True), ("spark:medium", False)],
-    Role.DRAFTER: [("spark:high", True), ("spark", False)],
+    Role.OBSERVER: [("spark:max", True), ("spark:medium", False)],
+    Role.DRAFTER: [("spark:max", True), ("spark:high", False)],
 }
 
 
