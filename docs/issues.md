@@ -3,6 +3,21 @@
 Что хаб по умолчанию делает плохо или не делает — записывает оркестратор (Claude) по ходу работы, исправляет
 владелец. Новое — сверху. Формат: дата · что видно · почему плохо · как исправить (предложение) · статус.
 
+## 2026-10-28 · PlayerUP · agy не запускается с 14.10, а хаб показывает его рабочим
+`/root/.local/lib/agy/agy` (обновился 14.10 03:24) падает сразу: «This binary was compiled with pclmul enabled, but
+this feature is not available on this processor». Процессор VPS — `QEMU Virtual CPU version 2.5+` без `pclmulqdq`.
+`ahub providers` при этом: agy found ✓ · enabled on, квота «5h 100% (resets 14.10 03:35)» — данные двухнедельной
+давности, падение бинаря не видно; задачу на `gemini` можно поставить, и она упадёт уже в работе.
+Предложение: `providers`/`doctor` запускают `agy --version` и показывают его ошибку; квоту с меткой старше суток
+помечать как устаревшую; провайдер, который не запускается, не предлагать в `task new`. Статус: открыто.
+
+## 2026-10-28 · PlayerUP · Задача на `spark` (Go) падает «нужна подписка Go», а `providers` пишет «paid Spark available»
+T141 (`--model spark --effort xhigh`) сразу ушла в error: «An active OpenCode Go subscription is required to use Go
+models». В `ahub providers` в это же время: «opencode-go: paid Spark available». Следом `spark-free` (T142/T143) больше
+часа получал «UnknownError | Unexpected server error» и дважды исчерпал повторы.
+Предложение: проверять активность Go до постановки (отказ одной строкой при `task new`); при серии одинаковых
+серверных ошибок провайдера сразу давать событие оркестратору, не тратя все повторы. Статус: открыто.
+
 ## 2026-10-17 · PlayerUP · Проверка слияния падает на задачах сайта: нет node_modules (T137)
 `ahub accept T137` (фронтенд, узлы `tests/web/test_web.py::test_typecheck|lint|unit|build`) — «acceptance is red»
 за 0.47 с, хотя в копии задачи все 4 узла зелёные. Проверка слияния идёт во временной копии
