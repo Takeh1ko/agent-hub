@@ -48,7 +48,7 @@ def _isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("AHUB_PROBE", "0")  # no live model probes in tests (they would hit the network)
     monkeypatch.setenv("AHUB_UNDER_TEST", "1")  # children (worker, gates, service) refuse the live hub DB too
     for var in ("XDG_DATA_HOME", "XDG_STATE_HOME", "AHUB_FAKE_QUEUE", "AHUB_FAKE_PROVIDER", "LANG", "LC_ALL",
-                "LC_MESSAGES"):
+                "LC_MESSAGES", "NO_COLOR"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr("sqlite3.connect", _refusing_connect)
     from ahub import log
@@ -58,7 +58,14 @@ def _isolated_env(tmp_path, monkeypatch):
     for name in PROVIDER_KEYS:  # a developer shell exports its provider keys; the doctor check must not read them
         monkeypatch.delenv(name, raising=False)
     _reset()  # language is picked lazily — reset it between tests
-    from ahub import catalog, registry
+    from ahub import catalog, providers, registry
+    from ahub.providers.omp import OmpProvider
+
+    # Registered doubles (and their quota state) belong to one test only.
+    monkeypatch.setattr(providers, "_cache", {})
+    # Catalog enumeration visits every registered provider. Keep omp helpers local too;
+    # contract tests replace this instance with their own executable and live fixtures.
+    monkeypatch.setitem(providers._cache, "omp", OmpProvider(binary=str(tmp_path / "missing" / "omp")))
 
     registry._cached_disabled = None  # the provider switch is cached by mtime — one test per file state
     catalog.reset_cache()  # provider catalogs are cached in memory — one test per fetch
@@ -218,8 +225,8 @@ def _no_runner_stop():
     runner.reset_stop()
 
 
-_REAL_PROVIDERS = frozenset({"opencode", "agy", "codex"})
-_REAL_BINARIES = frozenset({"opencode", "agy", "codex"})
+_REAL_PROVIDERS = frozenset({"opencode", "agy", "codex", "omp"})
+_REAL_BINARIES = frozenset({"opencode", "agy", "codex", "omp"})
 
 
 def _real_binary_provider(cmd) -> str:
@@ -249,6 +256,8 @@ def _real_binary_provider(cmd) -> str:
     if base == "opencode" and "run" in parts:
         return base
     if base == "agy" and "-p" in parts and "stream-json" in text:
+        return base
+    if base == "omp" and "-p" in parts:
         return base
     if base == "codex" and "exec" in parts:
         return base

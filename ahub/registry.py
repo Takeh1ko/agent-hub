@@ -70,7 +70,7 @@ DEFAULT_MENUS: dict[Role, list[tuple[str, bool]]] = {
 FREE_ALIASES: tuple[str, ...] = ("spark-free", "bunny")
 
 # Providers that are paid for by a subscription or a window quota, not per token — the note in the wizard.
-PLAN_PROVIDERS: tuple[str, ...] = ("agy", "codex")
+PLAN_PROVIDERS: tuple[str, ...] = ("agy", "codex", "omp")
 
 
 class RegistryError(ValueError):
@@ -193,6 +193,10 @@ def valid_levels(entry: ModelEntry, info=None, index=None) -> list[str]:
         return list(_AGY_FALLBACK_LEVELS)
     if entry.provider == "codex":
         return list(_CODEX_FALLBACK_LEVELS)
+    if entry.provider == "omp":
+        from ahub.providers.omp import THINKING_LEVELS
+
+        return list(THINKING_LEVELS)
     if entry.provider == "fake":
         return ["low", "high"]
     if entry.variant:
@@ -466,6 +470,8 @@ def plan_kind(entry, info=None) -> PlanKind:
 
     if is_free(entry):
         return _Plan.FREE
+    if getattr(entry, "provider", "") == "omp" and getattr(entry, "model_id", "").startswith("opencode-go/"):
+        return _Plan.SUBSCRIPTION  # omp has no Go list prices or machine-wide monthly spend
     if info is not None:
         pin = info.price_in if isinstance(getattr(info, "price_in", None), (int, float)) else None
         pout = info.price_out if isinstance(getattr(info, "price_out", None), (int, float)) else None

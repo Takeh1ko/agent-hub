@@ -618,7 +618,7 @@ def test_provider_states_from_the_checks(monkeypatch, tmp_path):
                         lambda name: {"opencode": str(opencode), "codex": str(codex_fake)}.get(name))
 
     states = {s.name: s for s in doctor.provider_states()}
-    assert list(states) == ["opencode", "agy", "codex"]  # every provider ahub knows
+    assert list(states) == ["opencode", "agy", "codex", "omp"]  # every provider ahub knows
     assert states["opencode"].found and states["opencode"].logged_in
     assert "opencode-go" in states["opencode"].note  # the paid Spark is available
     assert states["opencode"].hint == ""  # nothing to fix
@@ -697,7 +697,7 @@ def test_one_broken_provider_does_not_take_the_list_down(monkeypatch):
 
     monkeypatch.setattr(doctor, "provider_state", _state)
     states = {s.name: s for s in doctor.provider_states(["opencode-go"])}
-    assert list(states) == ["opencode", "agy", "codex"]
+    assert list(states) == ["opencode", "agy", "codex", "omp"]
     assert states["opencode"].found and states["codex"].found
     assert "RuntimeError" in states["agy"].detail and states["agy"].found is False
 
@@ -945,11 +945,11 @@ def test_the_live_line_moves_only_on_the_slow_checks(monkeypatch):
     for name in ("python", "git", "config", "service", "opencode", "network", "claude", "claude_skill",
                  "claude_rule", "telegram"):
         monkeypatch.setattr(doctor, f"check_{name}", _fast(name))
-    for name in ("opencode_health", "agy", "codex", "models", "provider_keys"):
+    for name in ("opencode_health", "agy", "codex", "omp", "models", "provider_keys"):
         monkeypatch.setattr(doctor, f"check_{name}", _slow(name))
     steps: list[str] = []
     doctor.run_all(step=lambda: steps.append(ran[-1]))
-    assert steps == ["opencode_health", "provider_keys", "agy", "codex", "models"]
+    assert steps == ["opencode_health", "provider_keys", "agy", "codex", "omp", "models"]
     # the role menus and the service unit env move the live line, the proxy does not
 
 
@@ -959,7 +959,7 @@ def test_cli_codes_and_json(capsys, monkeypatch):
     assert cli.main(["--json", "doctor"]) in (0, 1)
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert isinstance(data["checks"], list) and len(data["checks"]) == 17
+    assert isinstance(data["checks"], list) and len(data["checks"]) == 18
     assert secret not in out
     for c in data["checks"]:
         assert set(c) == {"name", "ok", "detail", "fix", "buckets"}

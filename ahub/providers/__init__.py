@@ -10,6 +10,7 @@ _REGISTRY: dict[str, str] = {
     "opencode": "ahub.providers.opencode:OpencodeProvider",
     "agy": "ahub.providers.agy:AgyProvider",
     "codex": "ahub.providers.codex:CodexProvider",
+    "omp": "ahub.providers.omp:OmpProvider",
     "fake": "ahub.providers.fake:FakeProvider",
 }
 _cache: dict[str, Provider] = {}

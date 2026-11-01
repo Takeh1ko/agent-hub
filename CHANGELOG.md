@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `omp` provider (oh-my-pi): resumable JSON sessions, tool transcripts, usage, Go quota holds,
+  Go/willow catalog and doctor checks; `[providers.omp]` supports `enabled`, `binary`, and `api_key_file`.
+
 ## 3.2.0 — 2026-10-06
 
 ### Added

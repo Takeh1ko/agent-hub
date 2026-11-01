@@ -29,7 +29,7 @@ def reset_cache() -> None:
 _AGY_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
 
 # Reasoning strength, weakest first: the table shows the available range in this order.
-LEVEL_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+LEVEL_ORDER = ("off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 _LEVEL_RANK = {lvl: i for i, lvl in enumerate(LEVEL_ORDER)}
 
 
@@ -88,16 +88,25 @@ def get_catalogs(refresh: bool = False) -> dict[str, list[CatalogEntry]]:
 
 
 def index_by_id(catalogs: dict[str, list[CatalogEntry]]) -> dict[str, CatalogEntry]:
-    """Full model id → catalog entry (first wins)."""
+    """Provider-qualified IDs plus legacy full IDs (first wins).
+
+    omp can expose the same Go IDs as opencode with different prices and thinking levels;
+    its metadata must stay with its own aliases.
+    """
     index: dict[str, CatalogEntry] = {}
-    for entries in catalogs.values():
+    for provider, entries in catalogs.items():
         for e in entries:
-            index.setdefault(e.model_id, e)
+            if provider == "omp":
+                index[f"omp:{e.model_id}"] = e
+            else:
+                index.setdefault(e.model_id, e)
     return index
 
 
 def match_entry(entry: registry.ModelEntry, index: dict[str, CatalogEntry]) -> CatalogEntry | None:
     """Catalog entry for the alias, by full model id."""
+    if entry.provider == "omp":
+        return index.get(f"omp:{entry.model_id}")
     return index.get(entry.model_id)
 
 

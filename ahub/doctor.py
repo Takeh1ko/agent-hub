@@ -367,6 +367,22 @@ def check_provider_keys() -> Check:
                  f"{fix}; {_t(reload_key, unit=UNIT_SERVICE, label=LABELS[UNIT_SERVICE])}")
 
 
+def check_omp() -> Check:
+    """omp CLI and the configured Go key; never expose credentials in diagnostics."""
+    from ahub import providers
+
+    h = providers.get("omp").health()
+    if not h.details.get("binary"):
+        return Check("omp", None, "; ".join(h.problems), _t("doctor.prov_hint_omp"))
+    detail = _t("doctor.omp_found", binary=h.details["binary"])
+    version = h.details.get("version")
+    if version:
+        detail += _t("doctor.health_version", version=version)
+    if h.ok:
+        return Check("omp", True, detail + "; " + _t("doctor.omp_key_ok") + provider_proxy_detail("omp"), "")
+    return Check("omp", False, detail + "; " + "; ".join(h.problems), _t("doctor.omp_fix"))
+
+
 def check_agy() -> Check:
     """agy (Gemini): found — ok True/False by the provider's health(); not found — not installed (None)."""
     from ahub import providers
@@ -468,9 +484,11 @@ _PROV_HINTS: dict[str, str] = {
     "opencode": "doctor.prov_hint_opencode",
     "agy": "doctor.prov_hint_agy",
     "codex": "doctor.prov_hint_codex",
+    "omp": "doctor.prov_hint_omp",
 }
 
-_PROV_NOTES: dict[str, str] = {"agy": "doctor.prov_note_agy", "codex": "doctor.prov_note_codex"}
+_PROV_NOTES: dict[str, str] = {"agy": "doctor.prov_note_agy", "codex": "doctor.prov_note_codex",
+                            "omp": "doctor.prov_note_omp"}
 
 
 def install_hint(name: str) -> str:
@@ -502,6 +520,11 @@ def provider_state(name: str, auth: list[str] | None = None) -> ProviderState:
         fix = "" if logged else check.fix
     elif name == "codex":
         check = check_codex()
+        found, logged = check.ok is not None, bool(check.ok)
+        detail = check.detail
+        fix = "" if logged else check.fix
+    elif name == "omp":
+        check = check_omp()
         found, logged = check.ok is not None, bool(check.ok)
         detail = check.detail
         fix = "" if logged else check.fix
@@ -699,7 +722,7 @@ def check_models(auth: list[str] | None = None) -> Check:
         default = next((e for e, d in menu if d), None)
         if default is None:
             continue
-        if default.model_id.startswith("opencode-go/") and not go:
+        if default.provider != "omp" and default.model_id.startswith("opencode-go/") and not go:
             bad.append(role.value)
     if menus and not any(menus.values()):
         # every provider switched off: no role has a model at all — a green doctor here would be a lie
@@ -864,7 +887,7 @@ def _safe(name: str, fn) -> Check:
 
 # the checks that call a binary or read a store (the slow ones): `ahub doctor` shows one live line while
 # they run; a fast check would only make it flicker
-_SLOW = frozenset({"opencode_health", "agy", "codex", "models", "provider_keys"})
+_SLOW = frozenset({"opencode_health", "agy", "codex", "omp", "models", "provider_keys"})
 
 
 def run_all(root: Path | None = None, step: Callable[[], None] | None = None) -> list[Check]:
@@ -887,6 +910,7 @@ def run_all(root: Path | None = None, step: Callable[[], None] | None = None) ->
         ("provider_keys", check_provider_keys),
         ("agy", check_agy),
         ("codex", check_codex),
+        ("omp", check_omp),
         ("models", lambda: check_models(providers)),
         ("network", check_network),
         ("claude", check_claude),
@@ -911,7 +935,7 @@ __all__ = ["Check", "ProviderState", "TIMEOUT_S", "PROBE_TIMEOUT_S", "PROBE_WIZA
            "provider_states", "provider_state", "provider_line", "install_hint",
            "check_python", "check_git", "check_config", "check_service", "check_opencode",
            "check_opencode_health", "check_opencode_auth", "check_provider_keys", "check_agy", "check_codex",
-           "check_models", "check_network", "check_claude", "check_claude_skill", "check_claude_rule",
+           "check_omp", "check_models", "check_network", "check_claude", "check_claude_skill", "check_claude_rule",
            "check_prompts", "check_telegram",
            "provider_proxy_detail",
            "skill_path", "settings_path", "bash_allowed", "apparmor_blocks_userns", "codex_sandbox_fix"]

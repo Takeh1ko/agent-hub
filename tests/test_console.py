@@ -817,7 +817,8 @@ async def test_status_lands_its_text_in_the_transcript(store: Store):
     tid = _task(store, "P", "status-visible-task")
     transitions.move(store, tid, State.PREPARING)
     app = ConsoleApp(store=store, all_projects=True)
-    async with app.run_test() as pilot:
+    # Keep the title visible: the default 80-column table correctly truncates it.
+    async with app.run_test(size=(120, 24)) as pilot:
         await wait_for(pilot, lambda: app._frame >= 1)
         app.run_command("/status")
         await wait_for(pilot, lambda: "status-visible-task" in "\n".join(app._transcript))
