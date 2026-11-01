@@ -533,8 +533,9 @@ def test_reviewer_quota_below_threshold_with_fallback(store, tmp_path, monkeypat
     set_hub_quota('[quota]\nfallback_reviewer = "bunny"\n')
 
     now = int(time.time() * 1000)
+    # Keep the quota exhausted throughout this test, including slow full-suite runs.
     fake.set_quota([
-        QuotaBucket("Gemini", "5h", 0.10, now + 10_000, lambda m: "gemini" in m.lower()),
+        QuotaBucket("Gemini", "5h", 0.10, now + 3_600_000, lambda m: "gemini" in m.lower()),
     ])
 
     # Review task specifying gemini-flash as model

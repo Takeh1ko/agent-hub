@@ -31,6 +31,11 @@ Example ~/.config/ahub/config.toml:
 
     # per proxy key: absent — inherited as is, "" — explicitly none, a value — set
 
+    [providers.omp]
+    enabled = true
+    binary = "~/.local/bin/omp"
+    api_key_file = "~/.config/opencode-go/api_key"
+
     [providers.codex]
     enabled = true
     sandbox = "workspace-write"         # codex OS sandbox: read-only | workspace-write | danger-full-access
@@ -184,6 +189,8 @@ class ProviderSettings:
     no_proxy: str | None = None
     sandbox: str = ""
     enabled: bool = True
+    binary: str = ""  # omp executable; absent — PATH, then ~/.local/bin/omp
+    api_key_file: str = ""  # omp OpenCode Go key; absent — ~/.config/opencode-go/api_key
 
 
 @dataclass(frozen=True)
@@ -347,9 +354,12 @@ def _provider_settings(r: _Reader, raw: dict) -> dict[str, ProviderSettings]:
             r.errors.append(_t("config.bad_sandbox", name=name, got=sandbox))
             sandbox = ""
         enabled = r.bool_(spec, "enabled", True, where)
+        binary = r.str_(spec, "binary", "", where).strip()
+        api_key_file = r.str_(spec, "api_key_file", "", where).strip()
         norm = name.strip().lower()
-        if proxy is not None or no_proxy is not None or sandbox or not enabled:
-            out[norm] = ProviderSettings(proxy=proxy, no_proxy=no_proxy, sandbox=sandbox, enabled=enabled)
+        if proxy is not None or no_proxy is not None or sandbox or not enabled or binary or api_key_file:
+            out[norm] = ProviderSettings(proxy=proxy, no_proxy=no_proxy, sandbox=sandbox, enabled=enabled,
+                                         binary=binary, api_key_file=api_key_file)
     return out
 
 
