@@ -161,6 +161,67 @@ def test_capabilities_and_missing_binary(oc):
     assert not h.ok and "нет исполняемого opencode" in h.problems[0]
 
 
+def test_route_from_runspec_never_mutates_singleton(tmp_path):
+    """Route comes from immutable RunSpec context; an explicit instance never mutates the cache."""
+    from ahub import providers as _providers
+
+    before = dict(os.environ)
+    a = OpencodeProvider(db_path=str(tmp_path / "a.db"))
+    b = OpencodeProvider(db_path=str(tmp_path / "b.db"))
+    assert a.db_path != b.db_path  # per-instance, not a mutated singleton
+    spec = RunSpec(prompt="x", cwd=str(tmp_path), model_id="m", session_id="ses_1")
+    frozen = (spec.prompt, spec.cwd, spec.model_id, spec.session_id)
+    a.build_command(spec)
+    a.env(spec)
+    assert (spec.prompt, spec.cwd, spec.model_id, spec.session_id) == frozen
+    assert dict(os.environ) == before
+    cached = _providers.get("opencode")
+    assert getattr(cached, "db_path", None) is None  # singleton stays default-routed
+
+
+def test_fresh_process_reads_same_legacy_session(tmp_path):
+    """A fresh provider/CLI process reads usage/state/find/export for the same legacy session."""
+    import sqlite3
+
+    from tests.test_opencode_db import NOW as _NOW
+    from tests.test_opencode_db import _mkdb, _ses
+
+    db = tmp_path / "opencode.db"
+    con = _mkdb(db)
+    _ses(con, "ses_fresh", directory=str(tmp_path), cost=0.1, tin=11, t_updated=_NOW)
+    con.commit()
+    con.close()
+    first = OpencodeProvider(db_path=str(db), binary="/nonexistent/opencode-fake")
+    assert first.usage("ses_fresh").tokens_in == 11
+    assert first.session_state("ses_fresh").usage.tokens_in == 11
+    assert first.find_session(str(tmp_path), _NOW - 60_000) == "ses_fresh"
+    fresh = OpencodeProvider(db_path=str(db), binary="/nonexistent/opencode-fake")
+    assert fresh.usage("ses_fresh").tokens_in == 11  # fresh process, same legacy DB
+    assert fresh.export("ses_fresh") is None  # bad binary: honest None, no fabricated export
+    assert sqlite3.connect(str(db)).execute("SELECT count(*) FROM session").fetchone()[0] == 1
+
+
+def test_explicit_db_precedence_over_default(tmp_path, monkeypatch):
+    """Explicit db_path beats OPENCODE_DB routing and the default DB (contract 3)."""
+    from ahub import paths as _paths
+    from tests.conftest import write as _write
+    from tests.test_opencode_db import NOW as _NOW
+    from tests.test_opencode_db import _mkdb, _ses
+
+    default_db = tmp_path / "default.db"
+    explicit_db = tmp_path / "explicit.db"
+    for db, sid in ((default_db, "s_def"), (explicit_db, "s_exp")):
+        con = _mkdb(db)
+        _ses(con, sid, directory="/wt/T", t_updated=_NOW)
+        con.commit()
+        con.close()
+    _write(_paths.global_config_path(), f'[paths]\nopencode_db = "{default_db}"\n')
+    monkeypatch.delenv("OPENCODE_DB", raising=False)
+    prov = OpencodeProvider(db_path=str(explicit_db))
+    assert prov.usage("s_exp") is not None and prov.usage("s_def") is None
+    assert prov.find_session("/wt/T", _NOW - 60_000) == "s_exp"
+
+
 @pytest.mark.live
 def test_live_contract(tmp_path):
     """Live Spark session (≈ $0.001): AHUB_LIVE=1 pytest -m live tests/test_opencode_provider.py"""

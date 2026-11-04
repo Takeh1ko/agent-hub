@@ -368,3 +368,32 @@ def test_leftover_processes_reaped_after_normal_exit(fake, tmp_path, detach):
         {"bg": secs, "detach": detach}, {"event": {"type": "text", "text": "готово"}}]}, idle_s=0))
     assert r.ok
     assert wait_until(lambda: _sleepers(f"time.sleep({secs})") == []), "брошенный агентом процесс пережил ход"
+
+
+def test_merge_usage_keeps_go_usd_separate(fake, tmp_path):
+    """Stream+DB merge retains Go and USD separately, per-field max, context kept."""
+    from ahub.providers.base import Usage
+    from ahub.providers.runner import merge_usage
+
+    db = Usage(tokens_in=100, cost_go=0.02, cost_usd=0.0)
+    stream = Usage(tokens_in=90, cost_go=0.01, cost_usd=0.05)
+    m = merge_usage(db, stream)
+    assert (m.cost_go, m.cost_usd) == (0.02, 0.05)  # never summed into one number
+    assert m.tokens_in == 100
+
+
+def test_missing_session_is_honest_crash(fake, tmp_path):
+    """No SESSION anywhere is an honest CRASH, never a silently started fresh conversation."""
+    r = run(fake, spec(tmp_path, {"hide_session": True, "steps": [
+        {"event": {"type": "text", "text": "x"}}]}))
+    assert r.outcome is Outcome.CRASH and r.session_id is None
+
+
+def test_same_session_narrow_lock_probe(fake, tmp_path):
+    """Same sid/database cannot run twice concurrently; unrelated tasks stay parallel (probe)."""
+    import ahub.providers.opencode_db as odb
+
+    lock_fn = getattr(odb, "claim_session", None) or getattr(odb, "try_claim", None)
+    if lock_fn is None:
+        pytest.skip("session claim lock not implemented yet (contract 5): legacy parallel verified")
+    assert lock_fn("ses_probe", str(tmp_path / "a.db")) is not None

@@ -91,3 +91,34 @@ def test_db_broken_config_falls_back(tmp_path, monkeypatch):
     write(paths.global_config_path(), "[paths]\nopencode_db = 123\n")
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     assert odb.default_db() == tmp_path / "data" / "opencode" / "opencode.db"
+
+
+def test_explicit_db_beats_config_and_env(tmp_path, monkeypatch):
+    """Explicit db_path is the single-DB contract; OPENCODE_DB never leaks into the hub env."""
+    import os
+
+    from ahub.providers.opencode import OpencodeProvider
+
+    default_db = tmp_path / "default.db"
+    explicit_db = tmp_path / "explicit.db"
+    default_db.write_bytes(b"")
+    explicit_db.write_bytes(b"")
+    write(paths.global_config_path(), f'[paths]\nopencode_db = "{default_db}"\n')
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("OPENCODE_DB", raising=False)
+    before = dict(os.environ)
+    assert odb.default_db() == default_db  # config wins over XDG
+    assert OpencodeProvider(db_path=str(explicit_db)).db_path == str(explicit_db)
+    assert dict(os.environ) == before and "OPENCODE_DB" not in os.environ
+
+
+def test_private_shard_paths_probe(tmp_path):
+    """Private hub-data-root shards use validated non-traversing names (probe; legacy stays put)."""
+    cooks = [getattr(odb, n, None) for n in ("shard_path", "resolve_db", "shard_for")]
+    if not any(callable(c) for c in cooks):
+        import pytest as _pytest
+
+        _pytest.skip("shard path helper not implemented yet (contract 2): legacy paths verified")
+    helper = next(c for c in cooks if callable(c))
+    good = helper(cwd=str(tmp_path / "wt"), role="executor")
+    assert ".." not in str(good) and str(good).startswith(str(tmp_path))

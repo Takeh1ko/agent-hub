@@ -310,3 +310,41 @@ def test_real_home_not_touched():
     # Tests only touch an explicit path; the default is the HOME from conftest.
     home = Path(os.environ["HOME"])
     assert odb.default_db().is_relative_to(home)
+
+
+def test_telemetry_never_creates_missing_db(tmp_path):
+    """Read-only telemetry on a missing shard reports unknown and creates no file."""
+    missing = tmp_path / "shard-missing.db"
+    assert odb.session_usage("s", missing) is None
+    assert odb.session_state("s", missing) is None
+    assert odb.find_session("/wt/T", 0, missing) is None
+    z = odb.totals(0, missing)
+    assert (z.tokens_in, z.cost_go, z.cost_usd) == (0, 0.0, 0.0)
+    assert not missing.exists()
+
+
+def test_find_session_exact_cwd_and_window(tmp_path):
+    """Legacy search keeps exact cwd, top-level parent filter, and the 5 s tolerance."""
+    db = tmp_path / "opencode.db"
+    con = _mkdb(db)
+    _ses(con, "exact", directory="/wt/T", t_created=NOW - 10_000, t_updated=NOW - 10_000)
+    _ses(con, "prefix", directory="/wt/T-sub", t_created=NOW - 5_000, t_updated=NOW - 5_000)
+    con.commit()
+    con.close()
+    assert odb.find_session("/wt/T", NOW - 60_000, db) == "exact"  # no prefix match
+    assert odb.find_session("/wt/T-sub", NOW - 60_000, db) == "prefix"
+    assert odb.find_session("/wt/T", NOW - 4_000, db) is None  # window is -5000
+
+
+def test_totals_keeps_go_usd_split_and_bounds(tmp_path):
+    """Stream+DB merge keeps Go and USD separately; totals keep [since, until) bounds."""
+    db = tmp_path / "opencode.db"
+    con = _mkdb(db)
+    _ses(con, "go", cost=0.4, tin=10, t_updated=NOW - 10_000)
+    _ses(con, "usd", provider="openrouter", cost=0.6, tin=20, t_updated=NOW - 10_000)
+    con.commit()
+    con.close()
+    got = odb.totals(NOW - 50_000, db, NOW)
+    assert (got.cost_go, got.cost_usd) == (0.4, 0.6)
+    assert got.tokens_in == 30
+    assert odb.totals(NOW, db, NOW + 1).tokens_in == 0  # boundary: nothing new in window

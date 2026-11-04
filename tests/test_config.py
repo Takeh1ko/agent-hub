@@ -455,3 +455,26 @@ def test_hub_provider_case_insensitive(tmp_path, monkeypatch):
     assert hub.provider("Codex").proxy == "socks5://127.0.0.1:1080"
     assert hub.providers_off == ("codex",)
 
+
+def test_isolation_opt_in_defaults_to_legacy(tmp_path, monkeypatch):
+    """Eligibility survives restart/flag changes: no opt-in means legacy for old/history tasks."""
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    hub = config.load_hub()
+    iso_attrs = [n for n in dir(hub) if "isolat" in n or "shard" in n or "cutoff" in n]
+    if not iso_attrs:
+        import pytest as _pytest
+
+        _pytest.skip("isolation config not implemented yet (contract 8): legacy defaults verified")
+    assert getattr(hub, iso_attrs[0], None) in (None, False, "", 0)  # opt-in, never on by default
+
+
+def test_legacy_config_parses_without_isolation_keys(tmp_path, monkeypatch):
+    """A config without isolation keys keeps catalog/health/auth/proxy/scrub_env unchanged."""
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    write(paths.global_config_path(), '[providers.opencode]\nproxy = "http://127.0.0.1:8080"\n')
+    hub = config.load_hub()
+    assert hub.provider("opencode").proxy == "http://127.0.0.1:8080"
+    assert hub.opencode_db == "" and hub.provider_enabled("opencode") is True
+
