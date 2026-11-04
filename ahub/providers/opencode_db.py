@@ -48,6 +48,18 @@ def default_db() -> Path:
     return Path.home() / ".local/share/opencode/opencode.db"
 
 
+def _configured_db() -> str:
+    try:
+        from ahub import config
+
+        override = config.load_hub().opencode_db
+        if override:
+            return str(Path(override))
+    except config.ConfigError:
+        pass
+    return ""
+
+
 @dataclass
 class SchemaStatus:
     ok: bool
@@ -55,7 +67,27 @@ class SchemaStatus:
 
 
 def _resolve(db_path: str | Path | None) -> str:
-    return str(default_db()) if db_path is None else str(db_path)
+    if db_path is not None:
+        return str(db_path)
+    override = os.environ.get("OPENCODE_DB", "").strip()
+    if override:
+        return override
+    configured = _configured_db()
+    return configured or str(default_db())
+
+
+def _candidate_paths(db_path: str | Path | None) -> list[str]:
+    """Explicit paths stay single-DB; default reads include registered shards."""
+    if db_path is not None or _configured_db() or os.environ.get("OPENCODE_DB", "").strip():
+        return [_resolve(db_path)]
+    paths = [str(default_db())]
+    try:
+        from ahub.providers import opencode_storage
+
+        paths.extend(str(r["db"]) for r in opencode_storage.routes())
+    except Exception:
+        pass
+    return list(dict.fromkeys(paths))
 
 
 def _warn(msg: str, *args: object) -> None:
@@ -213,6 +245,15 @@ def session_usage(session_id: str, db_path: str | Path | None = None) -> Usage |
     if not session_id:
         return None
     path = _resolve(db_path)
+    if db_path is None and not _configured_db() and not os.environ.get("OPENCODE_DB", "").strip():
+        try:
+            from ahub.providers import opencode_storage
+
+            mapped = opencode_storage.session_db(session_id)
+            if mapped is not None:
+                path = str(mapped)
+        except Exception:
+            pass
     con: sqlite3.Connection | None = None
     try:
         try:
@@ -304,6 +345,15 @@ def session_state(session_id: str, db_path: str | Path | None = None) -> Session
     if not session_id:
         return None
     path = _resolve(db_path)
+    if db_path is None and not _configured_db() and not os.environ.get("OPENCODE_DB", "").strip():
+        try:
+            from ahub.providers import opencode_storage
+
+            mapped = opencode_storage.session_db(session_id)
+            if mapped is not None:
+                path = str(mapped)
+        except Exception:
+            pass
     con: sqlite3.Connection | None = None
     try:
         try:
@@ -403,7 +453,15 @@ def find_session(
     directory: str, started_after_ms: int, db_path: str | Path | None = None,
 ) -> str | None:
     """Newest session without parent_id in the directory within the window (5 s tolerance)."""
-    path = _resolve(db_path)
+    candidate = _candidate_paths(db_path)
+    for path in candidate:
+        found = _find_session_one(directory, started_after_ms, path)
+        if found:
+            return found
+    return None
+
+
+def _find_session_one(directory: str, started_after_ms: int, path: str) -> str | None:
     con: sqlite3.Connection | None = None
     try:
         try:
@@ -438,7 +496,23 @@ def totals(
     """Totals over sessions with time_updated in [since, until): go/usd separately."""
     zeros = Usage(tokens_in=0, tokens_out=0, tokens_reasoning=0,
                   cache_read=0, cache_write=0, cost_go=0.0, cost_usd=0.0)
+    if db_path is None and not _configured_db() and not os.environ.get("OPENCODE_DB", "").strip():
+        paths = _candidate_paths(None)
+        by_sid: set[str] = set()
+        acc = zeros
+        for path in paths:
+            part = _totals_one(since_ms, path, until_ms, by_sid)
+            acc = acc.add(part)
+        acc.context = None
+        return acc
     path = _resolve(db_path)
+    return _totals_one(since_ms, path, until_ms)
+
+
+def _totals_one(since_ms: int, path: str, until_ms: int | None, seen: set[str] | None = None) -> Usage:
+    """Read one DB for totals; ``seen`` deduplicates overlapping registered sources."""
+    zeros = Usage(tokens_in=0, tokens_out=0, tokens_reasoning=0,
+                  cache_read=0, cache_write=0, cost_go=0.0, cost_usd=0.0)
     con: sqlite3.Connection | None = None
     try:
         try:
@@ -452,14 +526,14 @@ def totals(
                 return zeros
             if until_ms is None:
                 rows = con.execute(
-                    "SELECT cost, model, tokens_input, tokens_output,"
+                    "SELECT id, cost, model, tokens_input, tokens_output,"
                     " tokens_reasoning, tokens_cache_read, tokens_cache_write"
                     " FROM session WHERE time_updated>=?",
                     (since_ms,),
                 ).fetchall()
             else:
                 rows = con.execute(
-                    "SELECT cost, model, tokens_input, tokens_output,"
+                    "SELECT id, cost, model, tokens_input, tokens_output,"
                     " tokens_reasoning, tokens_cache_read, tokens_cache_write"
                     " FROM session WHERE time_updated>=? AND time_updated<?",
                     (since_ms, until_ms),
@@ -470,6 +544,11 @@ def totals(
         acc = zeros
         for r in rows:
             try:
+                sid = str(r["id"] or "")
+                if seen is not None and sid in seen:
+                    continue
+                if seen is not None and sid:
+                    seen.add(sid)
                 acc = acc.add(_usage_from_row(r, None))
             except (TypeError, ValueError, json.JSONDecodeError) as e:
                 _warn("opencode.db: totals row skipped: %s", e)

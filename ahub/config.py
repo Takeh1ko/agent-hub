@@ -191,6 +191,8 @@ class ProviderSettings:
     enabled: bool = True
     binary: str = ""  # omp executable; absent — PATH, then ~/.local/bin/omp
     api_key_file: str = ""  # omp OpenCode Go key; absent — ~/.config/opencode-go/api_key
+    isolate_sqlite: bool = False  # opencode only; OFF preserves the legacy shared database
+    isolate_new_tasks_after: int | None = None  # creation-time cutoff, milliseconds since epoch
 
 
 @dataclass(frozen=True)
@@ -356,10 +358,17 @@ def _provider_settings(r: _Reader, raw: dict) -> dict[str, ProviderSettings]:
         enabled = r.bool_(spec, "enabled", True, where)
         binary = r.str_(spec, "binary", "", where).strip()
         api_key_file = r.str_(spec, "api_key_file", "", where).strip()
+        isolate_sqlite = r.bool_(spec, "isolate_sqlite", False, where)
+        cutoff = spec.get("isolate_new_tasks_after")
+        if cutoff is not None and (isinstance(cutoff, bool) or not isinstance(cutoff, int) or cutoff < 0):
+            r.errors.append(_t("config.expect_int", where=where, field="isolate_new_tasks_after", got=cutoff))
+            cutoff = None
         norm = name.strip().lower()
-        if proxy is not None or no_proxy is not None or sandbox or not enabled or binary or api_key_file:
+        if (proxy is not None or no_proxy is not None or sandbox or not enabled or binary or api_key_file
+                or isolate_sqlite or cutoff is not None):
             out[norm] = ProviderSettings(proxy=proxy, no_proxy=no_proxy, sandbox=sandbox, enabled=enabled,
-                                         binary=binary, api_key_file=api_key_file)
+                                         binary=binary, api_key_file=api_key_file,
+                                         isolate_sqlite=isolate_sqlite, isolate_new_tasks_after=cutoff)
     return out
 
 

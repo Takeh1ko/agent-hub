@@ -22,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+from contextlib import nullcontext
 
 from ahub.i18n import t as _t
 
@@ -322,6 +323,17 @@ class Provider(ABC):
     def env(self, spec: RunSpec) -> dict[str, str]:
         """Extra process environment (isolation). By default — spec.env only."""
         return dict(spec.env)
+
+    def run_lock(self, spec: RunSpec):
+        """Optional narrow provider namespace lock; the default is inert."""
+        return nullcontext()
+
+    def bind_session(self, session_id: str, spec: RunSpec) -> None:
+        """Optional durable session binding hook; the default is inert."""
+        return None
+
+    def find_session_for_run(self, cwd: str, started_after_ms: int, spec: RunSpec) -> str | None:
+        return self.find_session(cwd, started_after_ms)
 
     @abstractmethod
     def parse_line(self, line: str, now: int) -> list[Activity]:

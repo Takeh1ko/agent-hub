@@ -187,12 +187,17 @@ def run(provider: Provider, spec: RunSpec, *,
     err_f = open(err_path, "ab")
     start_off = out_f.tell()
     err_off = err_f.tell()  # the stderr of earlier runs (another provider, an older turn) is not this run's
+    run_lock = provider.run_lock(spec)
+    run_lock.__enter__()
+    lock_held = True
     try:
         proc = subprocess.Popen(cmd, cwd=spec.cwd, stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL,
                                 env=env, start_new_session=True)
     except OSError as e:
         out_f.close()
         err_f.close()
+        run_lock.__exit__(None, None, None)
+        lock_held = False
         _log.error("failed to start: %s", e, extra=ctx)
         return RunResult(Outcome.NOT_STARTED, spec.session_id, error=clip(f"{cmd[0]}: {e}"),
                          started_ms=started, ended_ms=now_ms(), log_path=log_path)
@@ -217,6 +222,10 @@ def run(provider: Provider, spec: RunSpec, *,
         last_act_ms[0] = act.ts
         if act.kind is Act.SESSION and act.text and sid_box[0] is None:
             sid_box[0] = act.text
+            try:
+                provider.bind_session(act.text, spec)
+            except Exception:
+                _log.exception("bind_session failed", extra=ctx)
             if on_session is not None:
                 try:
                     on_session(act.text)
@@ -332,6 +341,8 @@ def run(provider: Provider, spec: RunSpec, *,
                 _log.warning("reaped stray agent processes: %s", left[:10], extra=ctx)
         except Exception:
             _log.exception("reaping agent leftovers failed", extra=ctx)
+        if lock_held:
+            run_lock.__exit__(None, None, None)
 
     ended = now_ms()
     with acts_lock:
@@ -339,7 +350,9 @@ def run(provider: Provider, spec: RunSpec, *,
     sid = sid_box[0]
     if sid is None and provider.has(Cap.FIND_SESSION):
         try:
-            sid = provider.find_session(spec.cwd, started)
+            sid = provider.find_session_for_run(spec.cwd, started, spec)
+            if sid:
+                provider.bind_session(sid, spec)
         except Exception:
             _log.exception("find_session failed", extra=ctx)
     if sid is None and spec.session_id:

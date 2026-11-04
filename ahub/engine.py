@@ -48,6 +48,7 @@ from ahub import (
 )
 from ahub import log as hublog
 from ahub.config import ProjectConfig
+from ahub import config as hub_config
 from ahub.i18n import plural
 from ahub.i18n import t as _t
 from ahub.model import ACTIVE, Ev, Kind, Phase, Role, State
@@ -691,9 +692,24 @@ class Engine:
                 except sqlite3.IntegrityError:
                     self.log.warning("session %s already linked to another row", sid)
 
+            run_env: dict[str, str] = {}
+            if entry.provider == "opencode":
+                try:
+                    op = hub_config.load_hub().provider("opencode")
+                except hub_config.ConfigError:
+                    op = None
+                route = f"task:{t.id}:role:{role.value}:log:{log_name or role.value}"
+                # The route identity is harmless metadata until an enrolled route exists.  Keeping it
+                # stable lets a task continue using its shard after the switch is turned off.
+                run_env["AHUB_OPENCODE_ROUTE"] = route
+                if (op is not None and op.isolate_sqlite and op.isolate_new_tasks_after is not None
+                        and t.created_at > op.isolate_new_tasks_after):
+                    # log_name identifies independent reviewers in one worktree; continuation keeps it stable.
+                    run_env.update(AHUB_OPENCODE_ISOLATE="1",
+                                   AHUB_OPENCODE_ROUTE=f"task:{t.id}:role:{role.value}:log:{log_name or role.value}")
             spec = RunSpec(prompt=prompt, cwd=cwd, model_id=entry.model_id, variant=entry.variant,
                            session_id=session_id, log_path=log_path, timeout_s=self._remaining_s(),
-                           idle_s=tmo.idle_s, schema=schema)
+                           idle_s=tmo.idle_s, schema=schema, env=run_env)
             try:
                 r = run_session(prov, spec, on_activity=self._on_activity, on_session=on_session,
                                 on_start=lambda pid, _row=row: self.store.update_session(_row, pid=pid),

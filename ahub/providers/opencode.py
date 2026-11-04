@@ -135,6 +135,15 @@ def _usage_of_part(part: dict) -> Usage | None:
                  context=(tok.get("input") or 0) + (cache.get("read") or 0) or None)
 
 
+def _configured_opencode_db() -> str:
+    try:
+        from ahub import config
+
+        return config.load_hub().opencode_db
+    except config.ConfigError:
+        return ""
+
+
 class OpencodeProvider(Provider):
     name = "opencode"
     stamped = True  # every event carries `timestamp`
@@ -167,7 +176,58 @@ class OpencodeProvider(Provider):
         home.mkdir(parents=True, exist_ok=True)
         env = {"AHUB_HOME": str(home), "AGENT_HUB_HOME": str(home / "v1")}
         env.update(spec.env)
+        if self.db_path is not None:
+            env["OPENCODE_DB"] = str(self.db_path)
+        elif "OPENCODE_DB" not in spec.env:
+            configured = _configured_opencode_db()
+            if configured:
+                env["OPENCODE_DB"] = configured
+            elif spec.env.get("AHUB_OPENCODE_ROUTE"):
+                from ahub.providers import opencode_storage
+
+                db = None
+                if spec.env.get("AHUB_OPENCODE_ISOLATE") == "1" or opencode_storage.has_route(
+                        spec.env.get("AHUB_OPENCODE_ROUTE", "")):
+                    db = opencode_storage.register(spec, int(time.time() * 1000))
+                if db is not None:
+                    env["OPENCODE_DB"] = str(db)
         return env
+
+    def _db_for(self, spec: RunSpec | None = None) -> str | None:
+        if self.db_path is not None:
+            return self.db_path
+        from ahub.providers import opencode_db, opencode_storage
+
+        configured = _configured_opencode_db()
+        if configured:
+            return configured
+        if spec is not None and spec.env.get("AHUB_OPENCODE_ISOLATE") == "1":
+            return str(opencode_storage.register(spec, int(time.time() * 1000)) or opencode_db.default_db())
+        if spec is not None:
+            routed = opencode_storage.db_for_spec(spec)
+            if routed is not None:
+                return str(routed)
+        mapped = opencode_storage.session_db(spec.session_id) if spec is not None and spec.session_id else None
+        return str(mapped) if mapped is not None else None
+
+    def run_lock(self, spec: RunSpec):
+        from ahub.providers import opencode_db, opencode_storage
+
+        if self.db_path is not None:
+            return (opencode_storage.db_lock(self.db_path, spec.session_id)
+                    if spec.session_id else opencode_storage.no_lock())
+        if opencode_storage.route_key(spec) is not None:
+            return opencode_storage.lock(spec)
+        if spec.session_id:
+            return opencode_storage.db_lock(self._db_for(spec) or opencode_db.default_db(), spec.session_id)
+        return opencode_storage.no_lock()
+
+    def bind_session(self, session_id: str, spec: RunSpec) -> None:
+        from ahub.providers import opencode_storage
+
+        db = self._db_for(spec)
+        if db:
+            opencode_storage.bind_session(session_id, db, spec)
 
     def parse_line(self, line: str, now: int) -> list[Activity]:
         s = line.strip()
@@ -231,9 +291,23 @@ class OpencodeProvider(Provider):
 
         return opencode_db.find_session(cwd, started_after_ms, self.db_path)
 
+    def find_session_for_run(self, cwd: str, started_after_ms: int, spec: RunSpec) -> str | None:
+        from ahub.providers import opencode_db
+
+        return opencode_db.find_session(cwd, started_after_ms, self._db_for(spec))
+
     def export(self, session_id: str) -> dict | None:
+        export_env = dict(self.extra_env)
+        if self.db_path is None:
+            from ahub.providers import opencode_storage
+
+            db = opencode_storage.session_db(session_id)
+            if db is not None:
+                export_env["OPENCODE_DB"] = str(db)
+            elif _configured_opencode_db():
+                export_env["OPENCODE_DB"] = _configured_opencode_db()
         try:
-            rc, out, err = run_capture([self._bin(), "export", session_id], env=self.extra_env)
+            rc, out, err = run_capture([self._bin(), "export", session_id], env=export_env)
         except (OSError, subprocess.SubprocessError) as e:
             _log.warning("export %s: %s", session_id, e)
             return None
