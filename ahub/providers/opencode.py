@@ -10,6 +10,7 @@ Errors (ported v1 H13 rules + real forms): 5xx, isRetryable, "Unexpected server 
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -155,6 +156,11 @@ class OpencodeProvider(Provider):
         self.db_path = db_path  # None — opencode_db.default_db() on each call
         self.binary = binary
         self.extra_env = dict(env or {})  # helper-command environment (export/models/--version)
+        self._bound = False
+        self._run_deadline = None
+        self._run_should_stop = None
+        self._lock_database = False
+        self._inject_database = True
 
     def _bin(self) -> str:
         return self.binary or opencode_bin()
@@ -170,54 +176,80 @@ class OpencodeProvider(Provider):
         cmd.append(prompt_arg(spec.prompt, spec.cwd))
         return cmd
 
-    def env(self, spec: RunSpec) -> dict[str, str]:
-        """Isolation: the hub inside a worker session writes to its own dir, not the live storage."""
-        home = Path(spec.cwd) / ".ahub" / "home"
-        home.mkdir(parents=True, exist_ok=True)
-        env = {"AHUB_HOME": str(home), "AGENT_HUB_HOME": str(home / "v1")}
-        env.update(spec.env)
-        if self.db_path is not None:
-            env["OPENCODE_DB"] = str(self.db_path)
-        elif "OPENCODE_DB" not in spec.env:
-            configured = _configured_opencode_db()
-            if configured:
-                env["OPENCODE_DB"] = configured
-            elif spec.env.get("AHUB_OPENCODE_ROUTE"):
-                from ahub.providers import opencode_storage
-
-                db = None
-                if spec.env.get("AHUB_OPENCODE_ISOLATE") == "1" or opencode_storage.has_route(
-                        spec.env.get("AHUB_OPENCODE_ROUTE", "")):
-                    db = opencode_storage.register(spec, int(time.time() * 1000))
-                if db is not None:
-                    env["OPENCODE_DB"] = str(db)
-        return env
-
-    def _db_for(self, spec: RunSpec | None = None) -> str | None:
-        if self.db_path is not None:
-            return self.db_path
+    def for_run(self, spec: RunSpec, *, deadline=None, should_stop=None) -> Provider:
+        """Freeze one effective DB for child env, recovery, binding and accounting."""
         from ahub.providers import opencode_db, opencode_storage
 
+        db = self._db_for(spec, deadline=deadline, should_stop=should_stop)
+        bound = copy.copy(self)
+        bound.db_path = db or opencode_db._resolve(None)
+        bound._bound = True
+        bound._run_deadline = deadline
+        bound._run_should_stop = should_stop
+        managed = bool(db and opencode_storage._managed_db(Path(db).resolve()))
+        if managed and spec.session_id and opencode_db.session_usage(spec.session_id, db) is None:
+            raise ValueError("OpenCode resume session was not found in its database")
+        bound._lock_database = managed or bool(spec.session_id)
+        bound._inject_database = db is not None
+        return bound
+
+    def env(self, spec: RunSpec) -> dict[str, str]:
+        """Change SQLite only in this child; authentication/config homes remain shared."""
+        home = Path(spec.cwd) / ".ahub" / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        env = {"AHUB_HOME": str(home), "AGENT_HUB_HOME": str(home / "v1"), **spec.env}
+        db = self._db_for(spec)
+        if db is not None and (not self._bound or self._inject_database):
+            env["OPENCODE_DB"] = db
+        return env
+
+    def _db_for(self, spec: RunSpec | None = None, *, deadline=None, should_stop=None) -> str | None:
+        if self.db_path is not None:
+            return str(self.db_path)
+        from ahub.providers import opencode_storage
+
+        if spec is not None and spec.env.get("OPENCODE_DB", "").strip():
+            return spec.env["OPENCODE_DB"]
         configured = _configured_opencode_db()
         if configured:
             return configured
-        if spec is not None and spec.env.get("AHUB_OPENCODE_ISOLATE") == "1":
-            return str(opencode_storage.register(spec, int(time.time() * 1000)) or opencode_db.default_db())
+        inherited = os.environ.get("OPENCODE_DB", "").strip()
+        if inherited:
+            return inherited
         if spec is not None:
-            routed = opencode_storage.db_for_spec(spec)
-            if routed is not None:
-                return str(routed)
-        mapped = opencode_storage.session_db(spec.session_id) if spec is not None and spec.session_id else None
-        return str(mapped) if mapped is not None else None
+            # A known resume must keep its actual DB even if the current route is newly enrolled.
+            if spec.session_id:
+                mapped = opencode_storage.session_db(spec.session_id, strict=True)
+                if mapped is not None:
+                    return str(mapped)
+                # A historical legacy session must never move into a fresh empty shard.
+                from ahub.providers import opencode_db
+                if opencode_db.session_usage(spec.session_id, opencode_db.default_db()) is not None:
+                    return str(opencode_db.default_db())
+            if opencode_storage.route_key(spec) is not None:
+                db = opencode_storage.register(spec, int(time.time() * 1000),
+                    deadline=deadline, should_stop=should_stop)
+                if spec.session_id:
+                    from ahub.providers import opencode_db
+                    if opencode_db.session_usage(spec.session_id, db) is None:
+                        raise ValueError("OpenCode resume session was not found in its database")
+                return str(db)
+        return None
 
     def run_lock(self, spec: RunSpec):
         from ahub.providers import opencode_db, opencode_storage
 
+        if self._bound:
+            return (opencode_storage.db_lock(self.db_path, spec.session_id or "",
+                        deadline=self._run_deadline, should_stop=self._run_should_stop)
+                    if self._lock_database else opencode_storage.no_lock())
         if self.db_path is not None:
             return (opencode_storage.db_lock(self.db_path, spec.session_id)
                     if spec.session_id else opencode_storage.no_lock())
         if opencode_storage.route_key(spec) is not None:
-            return opencode_storage.lock(spec)
+            # Resolve through the same precedence as env, including explicit overrides.
+            db = self._db_for(spec)
+            return opencode_storage.db_lock(db, spec.session_id or "") if db else opencode_storage.no_lock()
         if spec.session_id:
             return opencode_storage.db_lock(self._db_for(spec) or opencode_db.default_db(), spec.session_id)
         return opencode_storage.no_lock()
@@ -294,18 +326,22 @@ class OpencodeProvider(Provider):
     def find_session_for_run(self, cwd: str, started_after_ms: int, spec: RunSpec) -> str | None:
         from ahub.providers import opencode_db
 
-        return opencode_db.find_session(cwd, started_after_ms, self._db_for(spec))
+        return opencode_db.find_session(cwd, started_after_ms, self._db_for(spec) or opencode_db._resolve(None))
 
     def export(self, session_id: str) -> dict | None:
         export_env = dict(self.extra_env)
-        if self.db_path is None:
-            from ahub.providers import opencode_storage
-
-            db = opencode_storage.session_db(session_id)
-            if db is not None:
-                export_env["OPENCODE_DB"] = str(db)
-            elif _configured_opencode_db():
-                export_env["OPENCODE_DB"] = _configured_opencode_db()
+        if self.db_path is not None:
+            export_env["OPENCODE_DB"] = str(self.db_path)
+        elif "OPENCODE_DB" not in export_env:
+            configured = _configured_opencode_db()
+            inherited = os.environ.get("OPENCODE_DB", "").strip()
+            if configured or inherited:
+                export_env["OPENCODE_DB"] = configured or inherited
+            else:
+                from ahub.providers import opencode_storage
+                db = opencode_storage.session_db(session_id, strict=True)
+                if db is not None:
+                    export_env["OPENCODE_DB"] = str(db)
         try:
             rc, out, err = run_capture([self._bin(), "export", session_id], env=export_env)
         except (OSError, subprocess.SubprocessError) as e:

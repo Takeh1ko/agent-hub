@@ -173,36 +173,54 @@ def run(provider: Provider, spec: RunSpec, *,
         should_stop: Callable[[], bool] | None = None) -> RunResult:
     started = now_ms()
     log_path = spec.log_path or str(Path(spec.cwd) / ".ahub" / f"{provider.name}_{started}.log")
-    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-    cmd = provider.build_command(spec)
-    from ahub.prepare import apply_proxy, scrub_env
-
-    # the worker gets no hub tokens/passwords (model keys stay) and the provider's own proxy
-    env = apply_proxy(scrub_env(dict(os.environ)), *hub_proxy(provider.name))
-    env.update(provider.env(spec))
+    deadline = time.monotonic() + max(1, int(spec.timeout_s))
     ctx = {"provider": provider.name, "model": spec.model_id, "cwd": spec.cwd}
+    run_lock = None
+    lock_held = False
+    out_f = err_f = None
 
-    err_path = log_path + ".stderr"
-    out_f = open(log_path, "ab")
-    err_f = open(err_path, "ab")
-    start_off = out_f.tell()
-    err_off = err_f.tell()  # the stderr of earlier runs (another provider, an older turn) is not this run's
-    run_lock = provider.run_lock(spec)
-    run_lock.__enter__()
-    lock_held = True
+    def lock_stop() -> bool:
+        return _stop.is_set() or (should_stop is not None and bool(should_stop()))
+
     try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        provider = provider.for_run(spec, deadline=deadline, should_stop=lock_stop)
+        cmd = provider.build_command(spec)
+        from ahub.prepare import apply_proxy, scrub_env
+
+        env = apply_proxy(scrub_env(dict(os.environ)), *hub_proxy(provider.name))
+        env.update(provider.env(spec))
+        out_f = open(log_path, "ab")
+        err_f = open(log_path + ".stderr", "ab")
+        start_off = out_f.tell()
+        err_off = err_f.tell()
+        run_lock = provider.run_lock(spec)
+        run_lock.__enter__()
+        lock_held = True
         proc = subprocess.Popen(cmd, cwd=spec.cwd, stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL,
                                 env=env, start_new_session=True)
-    except OSError as e:
-        out_f.close()
-        err_f.close()
-        run_lock.__exit__(None, None, None)
-        lock_held = False
-        _log.error("failed to start: %s", e, extra=ctx)
-        return RunResult(Outcome.NOT_STARTED, spec.session_id, error=clip(f"{cmd[0]}: {e}"),
+    except PollFailed:
+        if lock_held:
+            run_lock.__exit__(None, None, None)
+        raise
+    except Exception as exc:
+        if lock_held:
+            run_lock.__exit__(None, None, None)
+        if isinstance(exc, InterruptedError):
+            outcome, error = Outcome.KILLED, _t("runner.killed")
+        elif isinstance(exc, TimeoutError):
+            outcome, error = Outcome.TIMEOUT, _t("runner.timeout", secs=spec.timeout_s)
+        else:
+            outcome, error = Outcome.NOT_STARTED, clip(f"{provider.name}: {exc}")
+        _log.error("failed to start: %s", error, extra=ctx)
+        return RunResult(outcome, spec.session_id, error=error,
                          started_ms=started, ended_ms=now_ms(), log_path=log_path)
-    out_f.close()  # the process inherited the descriptors
-    err_f.close()
+    finally:
+        if out_f is not None:
+            out_f.close()
+        if err_f is not None:
+            err_f.close()
+    err_path = log_path + ".stderr"
     if on_start is not None:
         try:
             on_start(proc.pid)
@@ -282,7 +300,6 @@ def run(provider: Provider, spec: RunSpec, *,
 
     forced: Outcome | None = None
     silence_s = 0
-    deadline = time.monotonic() + max(1, int(spec.timeout_s))
     tracked: dict[int, int | None] = {}  # agent descendants (pid → start time) — reap after the turn
     last_track = 0.0
     with _live_lock:

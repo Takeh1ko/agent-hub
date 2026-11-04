@@ -249,11 +249,12 @@ def session_usage(session_id: str, db_path: str | Path | None = None) -> Usage |
         try:
             from ahub.providers import opencode_storage
 
-            mapped = opencode_storage.session_db(session_id)
+            mapped = opencode_storage.session_db(session_id, strict=True)
             if mapped is not None:
                 path = str(mapped)
-        except Exception:
-            pass
+        except ValueError as exc:
+            _warn("opencode.db: invalid session routing: %s", exc)
+            return None
     con: sqlite3.Connection | None = None
     try:
         try:
@@ -299,6 +300,21 @@ def sessions_usage(
     want = [str(x) for x in session_ids if str(x)]
     if not want:
         return {}
+    if db_path is None and not _configured_db() and not os.environ.get("OPENCODE_DB", "").strip():
+        from ahub.providers import opencode_storage
+
+        groups: dict[str, list[str]] = {}
+        try:
+            for sid in want:
+                mapped = opencode_storage.session_db(sid, strict=True)
+                groups.setdefault(str(mapped) if mapped is not None else _resolve(None), []).append(sid)
+        except ValueError as exc:
+            _warn("opencode.db: invalid session routing: %s", exc)
+            return {}
+        out: dict[str, Usage] = {}
+        for path, ids in groups.items():
+            out.update(sessions_usage(ids, path))
+        return out
     path = _resolve(db_path)
     con: sqlite3.Connection | None = None
     try:
@@ -349,11 +365,12 @@ def session_state(session_id: str, db_path: str | Path | None = None) -> Session
         try:
             from ahub.providers import opencode_storage
 
-            mapped = opencode_storage.session_db(session_id)
+            mapped = opencode_storage.session_db(session_id, strict=True)
             if mapped is not None:
                 path = str(mapped)
-        except Exception:
-            pass
+        except ValueError as exc:
+            _warn("opencode.db: invalid session routing: %s", exc)
+            return None
     con: sqlite3.Connection | None = None
     try:
         try:

@@ -19,10 +19,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
-from contextlib import nullcontext
 
 from ahub.i18n import t as _t
 
@@ -323,6 +323,10 @@ class Provider(ABC):
     def env(self, spec: RunSpec) -> dict[str, str]:
         """Extra process environment (isolation). By default — spec.env only."""
         return dict(spec.env)
+
+    def for_run(self, spec: RunSpec, *, deadline=None, should_stop=None) -> "Provider":
+        """Optional immutable per-run provider context; cached providers stay stateless."""
+        return self
 
     def run_lock(self, spec: RunSpec):
         """Optional narrow provider namespace lock; the default is inert."""
