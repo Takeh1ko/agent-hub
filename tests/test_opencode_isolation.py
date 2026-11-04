@@ -1,43 +1,31 @@
-"""Opt-in OpenCode DB isolation and recovery routing (contract /tmp/night-solw-provider-test-contract.txt).
+"""Opt-in OpenCode DB isolation and recovery routing against T826 storage APIs.
 
-Legacy behavior is asserted strictly. Future isolation symbols are probed with getattr and
-skipped when the source worker has not landed them yet, so this file stays green before
-and after T826. Fake HOME, no network/credentials.
+Strict hermetic regression tests for contract /tmp/night-solw-provider-test-contract.txt.
+Fake HOME, no credentials/network/live DB. Route identity comes from immutable RunSpec env.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
+import stat
 import threading
-
-import pytest
 
 from ahub import paths
 from ahub.providers import opencode as opmod
 from ahub.providers import opencode_db as odb
+from ahub.providers import opencode_storage as storage
 from ahub.providers.base import RunSpec
 from tests.conftest import write
 from tests.test_opencode_db import NOW, _assist, _mkdb, _msg, _ses
 
 
-def _isolation_api():
-    """Any future isolation entry point, or None when the source has not landed it."""
-    for mod in (odb, opmod):
-        for name in ("resolve_db", "shard_for", "route_for", "shard_db", "route_db", "isolation_enabled",
-                     "shard_path"):
-            fn = getattr(mod, name, None)
-            if callable(fn):
-                return fn
-    try:
-        from ahub import config as _cfg
-
-        for name in dir(_cfg.HubConfig):
-            if "isolat" in name or "shard" in name or "cutoff" in name:
-                return getattr(_cfg.HubConfig, name)
-    except Exception:  # config import shape changed — legacy probe stays honest
-        pass
-    return None
+def _spec(cwd: str, route: str, isolate: bool = True, **extra: str) -> RunSpec:
+    env = {"AHUB_OPENCODE_ROUTE": route, **extra}
+    if isolate:
+        env["AHUB_OPENCODE_ISOLATE"] = "1"
+    return RunSpec(prompt="x", cwd=cwd, model_id="m", env=env)
 
 
 def test_isolation_off_uses_legacy_db(tmp_path, monkeypatch):
@@ -73,42 +61,160 @@ def test_explicit_db_path_is_single_db(tmp_path):
     assert odb.sessions_usage(["sa", "sb"], db_a) == {"sa": odb.sessions_usage(["sa"], db_a)["sa"]}
 
 
-def test_shard_routing_opt_in_probe(tmp_path):
-    """Opt-in routing: distinct shards per cwd and per role, stable, validated, 0700/0600, no secrets."""
-    fn = _isolation_api()
-    if fn is None:
-        pytest.skip("isolation routing not implemented yet (contract 2-3): legacy single-DB verified above")
-    # Source landed: same-cwd roles and different cwds resolve to distinct validated shard DBs.
-    route_a = fn(task="T1", cwd=str(tmp_path / "a"), role="executor")
-    route_b = fn(task="T2", cwd=str(tmp_path / "b"), role="executor")
-    route_role = fn(task="T1", cwd=str(tmp_path / "a"), role="reviewer")
-    assert route_a != route_b and route_a != route_role
-    for route in (route_a, route_b, route_role):
-        assert ".." not in str(route) and "\x00" not in str(route)
+def test_route_key_enrollment(tmp_path):
+    """route_key is None until enrolled: isolate flag or existing metadata, never bare route."""
+    cwd = str(tmp_path / "wt")
+    assert storage.route_key(_spec(cwd, "")) is None  # no route at all
+    bare = RunSpec(prompt="x", cwd=cwd, model_id="m", env={"AHUB_OPENCODE_ROUTE": "task:1:role:e:log:x"})
+    assert storage.route_key(bare) is None  # bare route without isolate/metadata stays legacy
+    assert storage.route_key(_spec(cwd, "task:1:role:e:log:x")) == "task:1:role:e:log:x"
+    key = "task:9:role:executor:log:exec"
+    assert storage.register(_spec(cwd, key), NOW) is not None  # enrollment persists metadata
+    assert storage.has_route(key)
+    assert storage.route_key(bare.__class__(prompt="x", cwd=cwd, model_id="m",
+                                             env={"AHUB_OPENCODE_ROUTE": key})) == key
 
 
-def test_totals_dedup_across_shards_probe(tmp_path):
-    """totals(since, until) dedups by sid across legacy + shards, keeps bounds and Go/USD split."""
+def test_register_distinct_stable_atomic(tmp_path, monkeypatch):
+    """Different cwds and same-cwd roles get distinct shards; stable; 0700/0600; no secrets."""
+    monkeypatch.setenv("OPENCODE_API_KEY", "sk-secret-xyz")
+    a = storage.register(_spec(str(tmp_path / "a"), "task:1:role:executor:log:exec"), NOW)
+    b = storage.register(_spec(str(tmp_path / "b"), "task:2:role:executor:log:exec"), NOW)
+    role = storage.register(_spec(str(tmp_path / "a"), "task:1:role:reviewer:log:rev"), NOW)
+    assert a is not None and b is not None and role is not None
+    assert a != b and a != role  # two simultaneous runs + two roles sharing cwd resolve distinctly
+    again = storage.register(_spec(str(tmp_path / "a"), "task:1:role:executor:log:exec"), NOW + 60_000)
+    assert again == a  # stable after restart; earliest started_after_ms kept
+    meta = json.loads((_a_meta(a)).read_text(encoding="utf-8"))
+    assert meta["started_after_ms"] == NOW
+    root = paths.data_dir() / "opencode-shards"
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    for p in (root / f"{a.stem}.json", a):
+        assert stat.S_IMODE(p.stat().st_mode) == 0o600 if p.suffix != ".db" or p.exists() else True
+    assert a.name.endswith(".db") and len(a.stem) == 64 and all(c in "0123456789abcdef" for c in a.stem)
+    assert ".." not in str(a) and str(a).startswith(str(root))
+    assert "sk-secret-xyz" not in (root / f"{a.stem}.json").read_text(encoding="utf-8")  # no secrets
+    assert list(root.glob(".*.tmp.*")) == []  # atomic write leaves no tmp behind
+
+
+def _a_meta(db_path):
+    # Find the single metadata pointing at this db.
+    for p in (paths.data_dir() / "opencode-shards").glob("*.json"):
+        if json.loads(p.read_text(encoding="utf-8")).get("db") == str(db_path):
+            return p
+    raise AssertionError(f"no metadata for {db_path}")
+
+
+def test_register_survives_worktree_removal(tmp_path):
+    """Eligible route has no cwd in the key: removing the worktree keeps the same shard."""
+    import shutil
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    key = "task:7:role:executor:log:exec"
+    first = storage.register(_spec(str(wt), key), NOW)
+    shutil.rmtree(wt)
+    assert not wt.exists()
+    second = storage.register(_spec(str(wt), key), NOW + 1_000)
+    assert first == second and storage.db_for_spec(_spec(str(wt), key)) == first
+
+
+def test_session_db_mapping_and_ambiguous(tmp_path):
+    """session_db returns the single mapped shard, None when absent or ambiguous."""
+    a = storage.register(_spec(str(tmp_path / "a"), "task:1:role:e:log:x"), NOW)
+    b = storage.register(_spec(str(tmp_path / "b"), "task:2:role:e:log:y"), NOW)
+    assert storage.session_db("ses-absent") is None
+    storage.bind_session("ses_1", a)
+    assert storage.session_db("ses_1") == a
+    storage.bind_session("", a)  # empty sid is a no-op, never maps
+    assert storage.session_db("") is None
+    storage.bind_session("ses_1", b)  # same sid in two shards is ambiguous
+    assert storage.session_db("ses_1") is None  # honest unknown, never a wrong shard
+
+
+def test_totals_dedup_across_registered_shards(tmp_path):
+    """totals(since, until) includes legacy + each shard once, dedups sids, keeps bounds/split."""
     legacy = tmp_path / "legacy.db"
-    shard = tmp_path / "shard.db"
     con = _mkdb(legacy)
     _ses(con, "dup", provider="opencode-go", cost=0.5, tin=100, t_updated=NOW - 10_000)
     _ses(con, "only_leg", provider="openrouter", cost=0.25, tin=10, t_updated=NOW - 10_000)
+    _ses(con, "old", cost=9.0, tin=999, t_updated=NOW - 100_000)
     con.commit()
     con.close()
+    write(paths.global_config_path(), "")  # no configured db: default routing reads legacy + shards
+    monkeypatch_db = odb.default_db()
+    assert str(monkeypatch_db) != str(legacy)  # default points at faked HOME, not our fixture
+    # Point the default legacy DB at our fixture via XDG so _candidate_paths finds it first.
+    import shutil
+
+    monkeypatch_db.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(legacy, monkeypatch_db)
+    key = "task:3:role:executor:log:exec"
+    shard = storage.register(_spec(str(tmp_path / "wt"), key), NOW - 50_000)
+    c2 = _mkdb(shard)
+    _ses(c2, "dup", provider="opencode-go", cost=0.5, tin=100, t_updated=NOW - 10_000)
+    _ses(c2, "only_sh", provider="openrouter", cost=0.5, tin=20, t_updated=NOW - 10_000)
+    c2.commit()
+    c2.close()
+    # Explicit totals stay single-DB.
+    assert odb.totals(NOW - 50_000, legacy, NOW).tokens_in == 110
+    got = odb.totals(NOW - 50_000, None, NOW)
+    assert (got.cost_go, got.cost_usd) == (0.5, 0.75)  # dup counted once, provider split kept
+    assert got.tokens_in == 130
+    assert odb.totals(NOW, None, NOW + 1).tokens_in == 0  # upper bound holds
+
+
+def test_find_session_registered_shard_recovery(tmp_path):
+    """Crash before SESSION still recovers via the registered shard within tolerance."""
+    wt = str(tmp_path / "wt")
+    key = "task:5:role:executor:log:exec"
+    shard = storage.register(_spec(wt, key, started_ms=NOW - 60_000), NOW - 60_000)
     con = _mkdb(shard)
-    _ses(con, "dup", provider="opencode-go", cost=0.5, tin=100, t_updated=NOW - 10_000)
-    _ses(con, "only_sh", provider="openrouter", cost=0.5, tin=20, t_updated=NOW - 10_000)
+    _ses(con, "shard_ses", directory=wt, t_created=NOW - 10_000, t_updated=NOW - 10_000)
     con.commit()
     con.close()
-    # Legacy single-DB behavior stays exact.
-    leg = odb.totals(NOW - 50_000, legacy, NOW)
-    assert (leg.cost_go, leg.cost_usd) == (0.5, 0.25)
-    multi = getattr(odb, "totals_all", None) or getattr(odb, "hub_totals", None)
-    if multi is None:
-        pytest.skip("multi-DB totals not implemented yet (contract 7): single-DB bounds verified")
-    got = multi(NOW - 50_000, until_ms=NOW)
-    assert (got.cost_go, got.cost_usd) == (0.5, 0.75)  # dup counted once
+    prov = opmod.OpencodeProvider(binary="/nonexistent/opencode-fake")
+    spec = _spec(wt, key)
+    found = prov.find_session_for_run(wt, NOW - 60_000, spec)
+    assert found == "shard_ses"  # no unbounded scan: default candidates are legacy + registered shards
+    assert prov.find_session_for_run("/wt/нет", 0, spec) is None
+    # Legacy exact-cwd/parent filter/tolerance still hold through the same path.
+    assert odb.find_session("/wt/нет", 0, shard) is None
+
+
+def test_lock_narrow_same_vs_unrelated(tmp_path):
+    """Same shard serializes; unrelated shards stay parallel; lock file is 0600."""
+    import time
+
+    a1 = _spec(str(tmp_path / "a"), "task:1:role:e:log:x")
+    a2 = _spec(str(tmp_path / "a"), "task:1:role:e:log:x")
+    other = _spec(str(tmp_path / "b"), "task:2:role:e:log:y")
+    with storage.lock(a1):
+        db = storage.register(a1, int(time.time() * 1000))
+        lock_path = db.with_suffix(".lock")
+        assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+    order: list[str] = []
+    started = threading.Event()
+    done = threading.Event()
+
+    def _bg():
+        started.set()
+        with storage.lock(a2):
+            order.append("bg")
+        done.set()
+
+    with storage.lock(a1):
+        t = threading.Thread(target=_bg)
+        t.start()
+        assert started.wait(5)
+        time.sleep(0.3)
+        assert order == []  # same namespace blocks
+        with storage.lock(other):  # unrelated namespace never blocks
+            order.append("other")
+        assert order == ["other"]
+    assert done.wait(10)  # outer lock released, the waiter proceeds
+    t.join(timeout=10)
+    assert not t.is_alive() and order == ["other", "bg"]
 
 
 def test_concurrent_shard_writes_while_legacy_held(tmp_path):
@@ -117,7 +223,6 @@ def test_concurrent_shard_writes_while_legacy_held(tmp_path):
     con = _mkdb(legacy)
     _ses(con, "base", t_updated=NOW - 1_000)
     con.commit()
-    # Writer holds a RESERVED lock (uncommitted INSERT) while shards are written.
     holder = sqlite3.connect(str(legacy), timeout=30)
     holder.execute("BEGIN IMMEDIATE")
     holder.execute("INSERT INTO session (id, directory, cost, model, time_created, time_updated)"
@@ -151,7 +256,7 @@ def test_concurrent_shard_writes_while_legacy_held(tmp_path):
         assert got.context == 10
 
 
-def test_missing_session_recovery_honest(tmp_path, monkeypatch):
+def test_missing_session_recovery_honest(tmp_path):
     """Missing/ambiguous routes return unknown, never a fabricated fresh conversation."""
     db = tmp_path / "opencode.db"
     con = _mkdb(db)
@@ -161,28 +266,33 @@ def test_missing_session_recovery_honest(tmp_path, monkeypatch):
     assert odb.find_session("/wt/нет", 0, db) is None
     assert odb.session_usage("нет-такой", db) is None
     assert odb.session_state("нет-такой", db) is None
+    assert storage.session_db("нет-такой") is None
     prov = opmod.OpencodeProvider(db_path=str(db), binary="/nonexistent/opencode-fake")
     assert prov.usage("нет-такой") is None
     assert prov.find_session("/wt/нет", 0) is None
     assert prov.session_state("нет-такой") is None
     assert prov.export("ses_missing") is None  # bad binary: honest None, not a fake session
     before = dict(os.environ)
-    spec = RunSpec(prompt="x", cwd=str(tmp_path), model_id="m")
-    prov.env(spec)
+    prov.env(_spec(str(tmp_path), "task:1:role:e:log:x"))
     assert dict(os.environ) == before
 
 
-def test_provider_env_auth_isolation(tmp_path):
-    """OPENCODE_DB goes only to the child/export env; hub os.environ and other providers stay clean."""
-    import sys
-
-    from ahub.providers.fake import FakeProvider
-
-    spec = RunSpec(prompt="x", cwd=str(tmp_path), model_id="m", env={"OPENCODE_DB": "/tmp/shard.db"})
-    child = dict(FakeProvider().env(spec))
-    assert "OPENCODE_DB" not in os.environ  # base provider never leaks spec env globally
-    assert child.get("OPENCODE_DB") == "/tmp/shard.db" or "OPENCODE_DB" not in child
-    oc_env = opmod.OpencodeProvider().env(RunSpec(prompt="x", cwd=str(tmp_path), model_id="m"))
-    assert "OPENCODE_DB" not in oc_env  # legacy run injects no DB override
-    assert oc_env["AHUB_HOME"].startswith(str(tmp_path)) and os.path.isdir(oc_env["AHUB_HOME"])
-    assert sys.executable  # keep import anchored without network
+def test_provider_env_strict_routing(tmp_path, monkeypatch):
+    """OPENCODE_DB goes only to the child env; explicit/spec/config precedence is exact."""
+    monkeypatch.delenv("OPENCODE_DB", raising=False)
+    prov = opmod.OpencodeProvider()
+    legacy_spec = RunSpec(prompt="x", cwd=str(tmp_path), model_id="m")
+    assert "OPENCODE_DB" not in prov.env(legacy_spec)  # legacy run injects no override
+    routed = storage.register(_spec(str(tmp_path), "task:1:role:e:log:x"), NOW)
+    child = prov.env(_spec(str(tmp_path), "task:1:role:e:log:x"))
+    assert child["OPENCODE_DB"] == str(routed)  # routed child gets its shard
+    explicit = prov.env(RunSpec(prompt="x", cwd=str(tmp_path), model_id="m",
+                                env={"OPENCODE_DB": "/tmp/keep.db", "AHUB_OPENCODE_ROUTE": "task:1:role:e:log:x",
+                                     "AHUB_OPENCODE_ISOLATE": "1"}))
+    assert explicit["OPENCODE_DB"] == "/tmp/keep.db"  # spec OPENCODE_DB wins, no re-register
+    assert "OPENCODE_DB" not in os.environ  # hub environment never mutated
+    single = opmod.OpencodeProvider(db_path="/tmp/explicit.db").env(_spec(str(tmp_path), "task:1:role:e:log:x"))
+    assert single["OPENCODE_DB"] == "/tmp/explicit.db"  # explicit db_path beats routing
+    write(paths.global_config_path(), f'[paths]\nopencode_db = "{tmp_path / "cfg.db"}"\n')
+    cfg_env = prov.env(_spec(str(tmp_path), "task:9:role:e:log:z"))
+    assert cfg_env["OPENCODE_DB"] == str(tmp_path / "cfg.db")  # configured db wins, shard suppressed

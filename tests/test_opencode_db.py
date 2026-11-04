@@ -348,3 +348,48 @@ def test_totals_keeps_go_usd_split_and_bounds(tmp_path):
     assert (got.cost_go, got.cost_usd) == (0.4, 0.6)
     assert got.tokens_in == 30
     assert odb.totals(NOW, db, NOW + 1).tokens_in == 0  # boundary: nothing new in window
+
+
+def _routed(tmp_path, route: str, cwd: str = ""):
+    from ahub.providers.base import RunSpec as _Spec
+
+    return _Spec(prompt="x", cwd=cwd or str(tmp_path), model_id="m",
+                 env={"AHUB_OPENCODE_ROUTE": route, "AHUB_OPENCODE_ISOLATE": "1"})
+
+
+def test_session_first_recovery_via_storage_mapping(tmp_path):
+    """usage/state with db_path=None follow the bound shard; explicit stays single-DB."""
+    from ahub.providers import opencode_storage as _storage
+
+    db = tmp_path / "opencode.db"
+    con = _mkdb(db)
+    _ses(con, "real", directory="/wt/T", cost=0.1, tin=11, t_updated=NOW)
+    con.commit()
+    con.close()
+    route = "task:11:role:executor:log:exec"
+    shard = _storage.register(_routed(tmp_path, route), NOW - 60_000)
+    c2 = _mkdb(shard)
+    _ses(c2, "shard_only", directory=str(tmp_path), cost=0.2, tin=22, t_updated=NOW)
+    c2.commit()
+    c2.close()
+    _storage.bind_session("shard_only", shard)
+    assert odb.session_usage("shard_only", None).tokens_in == 22  # session-first, not legacy
+    assert odb.session_state("shard_only", None).usage.tokens_in == 22
+    assert odb.session_usage("shard_only", db) is None  # explicit path never follows mapping
+    assert odb.session_usage("нет-такой", None) is None
+
+
+def test_candidate_paths_single_vs_default_plus_shards(tmp_path):
+    """Explicit/config/OPENCODE_DB stay single-DB; default reads legacy + registered shards."""
+    from ahub import paths as _paths
+    from ahub.providers import opencode_storage as _storage
+    from tests.conftest import write as _write
+
+    route = "task:12:role:executor:log:exec"
+    shard = _storage.register(_routed(tmp_path, route), NOW)
+    assert odb._candidate_paths(str(tmp_path / "explicit.db")) == [str(tmp_path / "explicit.db")]
+    _write(_paths.global_config_path(), f'[paths]\nopencode_db = "{tmp_path / "cfg.db"}"\n')
+    assert odb._candidate_paths(None) == [str(tmp_path / "cfg.db")]
+    _write(_paths.global_config_path(), "")
+    cands = odb._candidate_paths(None)
+    assert str(shard) in cands and cands[0] == str(odb.default_db())

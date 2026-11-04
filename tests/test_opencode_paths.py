@@ -112,13 +112,25 @@ def test_explicit_db_beats_config_and_env(tmp_path, monkeypatch):
     assert dict(os.environ) == before and "OPENCODE_DB" not in os.environ
 
 
-def test_private_shard_paths_probe(tmp_path):
-    """Private hub-data-root shards use validated non-traversing names (probe; legacy stays put)."""
-    cooks = [getattr(odb, n, None) for n in ("shard_path", "resolve_db", "shard_for")]
-    if not any(callable(c) for c in cooks):
-        import pytest as _pytest
+def test_private_shard_root_validated_names_and_modes(tmp_path):
+    """Shard root is 0700 under hub data dir; metadata 0600; sha256 names; no traversal/secrets."""
+    import json
+    import stat as _stat
 
-        _pytest.skip("shard path helper not implemented yet (contract 2): legacy paths verified")
-    helper = next(c for c in cooks if callable(c))
-    good = helper(cwd=str(tmp_path / "wt"), role="executor")
-    assert ".." not in str(good) and str(good).startswith(str(tmp_path))
+    from ahub.providers import opencode_storage as _storage
+    from ahub.providers.base import RunSpec as _Spec
+
+    def _spec(cwd: str, route: str) -> _Spec:
+        return _Spec(prompt="x", cwd=cwd, model_id="m",
+                     env={"AHUB_OPENCODE_ROUTE": route, "AHUB_OPENCODE_ISOLATE": "1"})
+
+    db = _storage.register(_spec(str(tmp_path / "wt"), "task:1:role:executor:log:exec"), 1_700_000_000_000)
+    root = paths.data_dir() / "opencode-shards"
+    assert _stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert str(db).startswith(str(root)) and ".." not in str(db)
+    assert len(db.stem) == 64 and all(c in "0123456789abcdef" for c in db.stem)
+    meta = root / f"{db.stem}.json"
+    assert _stat.S_IMODE(meta.stat().st_mode) == 0o600
+    data = json.loads(meta.read_text(encoding="utf-8"))
+    assert set(data) >= {"version", "key", "cwd", "db", "sessions", "started_after_ms"}
+    assert "sk-" not in json.dumps(data)

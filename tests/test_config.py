@@ -457,16 +457,31 @@ def test_hub_provider_case_insensitive(tmp_path, monkeypatch):
 
 
 def test_isolation_opt_in_defaults_to_legacy(tmp_path, monkeypatch):
-    """Eligibility survives restart/flag changes: no opt-in means legacy for old/history tasks."""
+    """No opt-in means legacy: isolate flags default OFF and eligibility needs both keys."""
     monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
     monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
     hub = config.load_hub()
-    iso_attrs = [n for n in dir(hub) if "isolat" in n or "shard" in n or "cutoff" in n]
-    if not iso_attrs:
-        import pytest as _pytest
+    assert hub.provider("opencode").isolate_sqlite is False
+    assert hub.provider("opencode").isolate_new_tasks_after is None
 
-        _pytest.skip("isolation config not implemented yet (contract 8): legacy defaults verified")
-    assert getattr(hub, iso_attrs[0], None) in (None, False, "", 0)  # opt-in, never on by default
+
+def test_isolation_config_parsed_and_validated(tmp_path, monkeypatch):
+    """[providers.opencode] isolate_sqlite + isolate_new_tasks_after parse; bad values refuse."""
+    monkeypatch.delenv("AHUB_TG_TOKEN", raising=False)
+    monkeypatch.delenv("AHUB_TG_CHAT", raising=False)
+    write(paths.global_config_path(), "[providers.opencode]\nisolate_sqlite = true\n"
+                                      "isolate_new_tasks_after = 1700000000000\n")
+    hub = config.load_hub()
+    assert hub.provider("opencode").isolate_sqlite is True
+    assert hub.provider("opencode").isolate_new_tasks_after == 1700000000000
+    for bad in ('isolate_sqlite = "yes"\n', "isolate_new_tasks_after = true\n",
+                "isolate_new_tasks_after = -5\n", "isolate_new_tasks_after = 1.5\n"):
+        write(paths.global_config_path(), f"[providers.opencode]\n{bad}")
+        try:
+            config.load_hub()
+        except config.ConfigError:
+            continue
+        raise AssertionError(f"bad isolation value accepted: {bad!r}")
 
 
 def test_legacy_config_parses_without_isolation_keys(tmp_path, monkeypatch):

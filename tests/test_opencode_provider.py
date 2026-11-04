@@ -222,6 +222,103 @@ def test_explicit_db_precedence_over_default(tmp_path, monkeypatch):
     assert prov.find_session("/wt/T", _NOW - 60_000) == "s_exp"
 
 
+def _routed_spec(cwd: str, route: str) -> RunSpec:
+    return RunSpec(prompt="x", cwd=cwd, model_id="m",
+                   env={"AHUB_OPENCODE_ROUTE": route, "AHUB_OPENCODE_ISOLATE": "1"})
+
+
+def test_env_injects_routed_shard_strict(tmp_path, monkeypatch):
+    """Child env gets OPENCODE_DB for enrolled routes; explicit/config/spec win; hub env clean."""
+    from ahub import paths as _paths
+    from ahub.providers import opencode_storage as _storage
+    from tests.conftest import write as _write
+
+    monkeypatch.delenv("OPENCODE_DB", raising=False)
+    prov = OpencodeProvider()
+    assert "OPENCODE_DB" not in prov.env(RunSpec(prompt="x", cwd=str(tmp_path), model_id="m"))
+    route = "task:1:role:executor:log:exec"
+    shard = _storage.register(_routed_spec(str(tmp_path), route), 1_700_000_000_000)
+    assert prov.env(_routed_spec(str(tmp_path), route))["OPENCODE_DB"] == str(shard)
+    keep = RunSpec(prompt="x", cwd=str(tmp_path), model_id="m",
+                   env={"OPENCODE_DB": "/tmp/keep.db", "AHUB_OPENCODE_ROUTE": route,
+                        "AHUB_OPENCODE_ISOLATE": "1"})
+    assert prov.env(keep)["OPENCODE_DB"] == "/tmp/keep.db"
+    assert "OPENCODE_DB" not in os.environ
+    single = OpencodeProvider(db_path="/tmp/explicit.db").env(_routed_spec(str(tmp_path), route))
+    assert single["OPENCODE_DB"] == "/tmp/explicit.db"
+    _write(_paths.global_config_path(), f'[paths]\nopencode_db = "{tmp_path / "cfg.db"}"\n')
+    assert prov.env(_routed_spec(str(tmp_path), "task:9:role:e:log:z"))["OPENCODE_DB"] == str(tmp_path / "cfg.db")
+
+
+def test_db_for_session_first_recovery_strict(tmp_path):
+    """_db_for prefers explicit, then isolate registration, then session mapping, else None."""
+    from ahub.providers import opencode_storage as _storage
+
+    assert OpencodeProvider(db_path="/tmp/x.db")._db_for(_routed_spec(str(tmp_path), "task:1:role:e:log:x")) == \
+        "/tmp/x.db"
+    route = "task:2:role:executor:log:exec"
+    spec = _routed_spec(str(tmp_path), route)
+    shard = _storage.register(spec, 1_700_000_000_000)
+    assert OpencodeProvider()._db_for(spec) == str(shard)
+    _storage.bind_session("ses_mapped", shard)
+    resume = RunSpec(prompt="x", cwd=str(tmp_path), model_id="m", session_id="ses_mapped")
+    assert OpencodeProvider()._db_for(resume) == str(shard)
+    assert OpencodeProvider()._db_for(RunSpec(prompt="x", cwd=str(tmp_path), model_id="m")) is None
+
+
+def test_run_lock_narrow_and_explicit_bypass_strict(tmp_path):
+    """Default provider takes the shard namespace lock; explicit db_path stays lock-free."""
+    from contextlib import nullcontext
+
+    from ahub.providers import opencode_storage as _storage
+
+    assert isinstance(OpencodeProvider(db_path="/tmp/x.db").run_lock(
+        _routed_spec(str(tmp_path), "task:1:role:e:log:x")), type(nullcontext()))
+    lock = OpencodeProvider().run_lock(_routed_spec(str(tmp_path), "task:1:role:e:log:x"))
+    assert not isinstance(lock, type(nullcontext()))
+    with lock:
+        assert _storage.register(_routed_spec(str(tmp_path), "task:1:role:e:log:x"), 1) is not None
+
+
+def test_bind_and_find_session_for_run_strict(tmp_path):
+    """bind_session persists the mapping; find_session_for_run reads the routed shard."""
+    from ahub.providers import opencode_storage as _storage
+    from tests.test_opencode_db import NOW as _NOW
+    from tests.test_opencode_db import _mkdb, _ses
+
+    route = "task:4:role:executor:log:exec"
+    spec = _routed_spec(str(tmp_path / "wt"), route)
+    shard = _storage.register(spec, _NOW - 60_000)
+    con = _mkdb(shard)
+    _ses(con, "shard_ses", directory=str(tmp_path / "wt"), t_created=_NOW - 10_000, t_updated=_NOW - 10_000)
+    con.commit()
+    con.close()
+    prov = OpencodeProvider(binary="/nonexistent/opencode-fake")
+    prov.bind_session("shard_ses", spec)
+    assert _storage.session_db("shard_ses") == shard
+    assert prov.find_session_for_run(str(tmp_path / "wt"), _NOW - 60_000, spec) == "shard_ses"
+
+
+def test_export_injects_shard_db_strict(tmp_path, monkeypatch):
+    """export() passes OPENCODE_DB of the mapped shard; bad binary stays honest None."""
+    from ahub.providers import opencode_storage as _storage
+
+    route = "task:6:role:executor:log:exec"
+    spec = _routed_spec(str(tmp_path), route)
+    shard = _storage.register(spec, 1_700_000_000_000)
+    _storage.bind_session("ses_exp", shard)
+    seen: dict = {}
+    import ahub.providers.opencode as _opmod
+
+    def _fake(cmd, timeout=120, env=None):
+        seen.update(env or {})
+        return 1, "", "nope"
+
+    monkeypatch.setattr(_opmod, "run_capture", _fake)
+    assert OpencodeProvider(binary="/nonexistent/opencode-fake").export("ses_exp") is None
+    assert seen.get("OPENCODE_DB") == str(shard)
+
+
 @pytest.mark.live
 def test_live_contract(tmp_path):
     """Live Spark session (≈ $0.001): AHUB_LIVE=1 pytest -m live tests/test_opencode_provider.py"""

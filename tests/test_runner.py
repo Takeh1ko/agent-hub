@@ -389,11 +389,55 @@ def test_missing_session_is_honest_crash(fake, tmp_path):
     assert r.outcome is Outcome.CRASH and r.session_id is None
 
 
-def test_same_session_narrow_lock_probe(fake, tmp_path):
-    """Same sid/database cannot run twice concurrently; unrelated tasks stay parallel (probe)."""
-    import ahub.providers.opencode_db as odb
+def test_same_shard_serializes_unrelated_parallel(tmp_path):
+    """Provider run_lock is narrow per shard; explicit db_path bypasses it; lock file is 0600."""
+    import stat as _stat
+    import time
 
-    lock_fn = getattr(odb, "claim_session", None) or getattr(odb, "try_claim", None)
-    if lock_fn is None:
-        pytest.skip("session claim lock not implemented yet (contract 5): legacy parallel verified")
-    assert lock_fn("ses_probe", str(tmp_path / "a.db")) is not None
+    from ahub.providers import opencode_storage as _storage
+    from ahub.providers.base import RunSpec as _Spec
+    from ahub.providers.opencode import OpencodeProvider as _Op
+
+    def _spec(route: str) -> _Spec:
+        return _Spec(prompt="x", cwd=str(tmp_path), model_id="m",
+                     env={"AHUB_OPENCODE_ROUTE": route, "AHUB_OPENCODE_ISOLATE": "1"})
+
+    a = _spec("task:1:role:executor:log:exec")
+    b = _spec("task:2:role:executor:log:exec")
+    db_a = _storage.register(a, int(time.time() * 1000))
+    db_b = _storage.register(b, int(time.time() * 1000))
+    assert db_a.with_suffix(".lock") != db_b.with_suffix(".lock")  # unrelated namespaces differ
+    with _Op().run_lock(a):
+        assert _stat.S_IMODE(db_a.with_suffix(".lock").stat().st_mode) == 0o600
+    from contextlib import nullcontext as _null
+
+    assert isinstance(_Op(db_path="/tmp/x.db").run_lock(a), type(_null()))  # explicit stays lock-free
+
+
+def test_runner_binds_session_and_recovers_via_shard(tmp_path):
+    """Runner binds SESSION to the shard and recovers a crash-before-SESSION via find_session_for_run."""
+    import stat as _stat
+
+    from ahub.providers import opencode_storage as _storage
+    from ahub.providers.base import RunSpec as _Spec
+    from ahub.providers.opencode import OpencodeProvider as _Op
+
+    route = "task:8:role:executor:log:exec"
+    wt = str(tmp_path / "wt")
+    spec = _Spec(prompt="x", cwd=wt, model_id="m",
+                 env={"AHUB_OPENCODE_ROUTE": route, "AHUB_OPENCODE_ISOLATE": "1"},
+                 log_path=str(tmp_path / "run.log"))
+    shard = _storage.register(spec, 1_700_000_000_000)
+    assert _stat.S_IMODE((shard.parent / f"{shard.stem}.json").stat().st_mode) == 0o600
+    prov = _Op(binary="/nonexistent/opencode-fake")
+    prov.bind_session("ses_bind", spec)
+    assert _storage.session_db("ses_bind") == shard
+    from tests.test_opencode_db import NOW as _NOW
+    from tests.test_opencode_db import _mkdb as _mk
+    from tests.test_opencode_db import _ses as _s
+
+    con = _mk(shard)
+    _s(con, "shard_ses", directory=wt, t_created=_NOW - 10_000, t_updated=_NOW - 10_000)
+    con.commit()
+    con.close()
+    assert prov.find_session_for_run(wt, _NOW - 60_000, spec) == "shard_ses"
