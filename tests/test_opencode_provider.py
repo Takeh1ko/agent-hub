@@ -266,6 +266,45 @@ def test_db_for_session_first_recovery_strict(tmp_path):
     assert OpencodeProvider()._db_for(RunSpec(prompt="x", cwd=str(tmp_path), model_id="m")) is None
 
 
+def test_for_run_freezes_effective_db_and_keeps_singleton_immutable(tmp_path, monkeypatch):
+    """for_run clones per run: spec OPENCODE_DB/config win, legacy stays clean, caller never mutates."""
+    import pytest as _pytest
+
+    from ahub import paths as _paths
+    from ahub.providers import opencode_storage as _storage
+    from tests.conftest import write as _write
+
+    monkeypatch.delenv("OPENCODE_DB", raising=False)
+    prov = OpencodeProvider()
+    route = "task:21:role:executor:log:exec"
+    spec = _routed_spec(str(tmp_path), route)
+    frozen_env = dict(spec.env)
+    shard = _storage.register(spec, 1_700_000_000_000)
+    bound = prov.for_run(spec)
+    assert bound is not prov and prov.db_path is None  # cached provider stays default-routed
+    assert bound.db_path == str(shard) and dict(spec.env) == frozen_env  # spec never mutated
+    assert bound.env(spec)["OPENCODE_DB"] == str(shard)  # same DB across env hook
+    keep = RunSpec(prompt="x", cwd=str(tmp_path), model_id="m",
+                   env={"OPENCODE_DB": "/tmp/keep.db", "AHUB_OPENCODE_ROUTE": route,
+                        "AHUB_OPENCODE_ISOLATE": "1"})
+    keep_bound = prov.for_run(keep)
+    assert keep_bound.db_path == "/tmp/keep.db"  # spec OPENCODE_DB beats the shard
+    assert keep_bound.env(keep)["OPENCODE_DB"] == "/tmp/keep.db"
+    prov.bind_session("sid_keep", keep)  # explicit outside DB never gains shard mapping
+    assert _storage.session_db("sid_keep") is None
+    _write(_paths.global_config_path(), f'[paths]\nopencode_db = "{tmp_path / "cfg.db"}"\n')
+    cfg_bound = prov.for_run(_routed_spec(str(tmp_path), "task:22:role:e:log:z"))
+    assert cfg_bound.db_path == str(tmp_path / "cfg.db")  # configured DB wins, shard suppressed
+    _write(_paths.global_config_path(), "")
+    legacy = RunSpec(prompt="x", cwd=str(tmp_path), model_id="m")
+    legacy_bound = prov.for_run(legacy)
+    assert "OPENCODE_DB" not in legacy_bound.env(legacy)  # default legacy injects nothing
+    assert "OPENCODE_DB" not in os.environ
+    with _pytest.raises(ValueError):  # bound resume of a missing sid fails before any child
+        prov.for_run(RunSpec(prompt="x", cwd=str(tmp_path), model_id="m",
+                             session_id="ses_absent_xyz", env=dict(spec.env)))
+
+
 def test_run_lock_narrow_and_explicit_bypass_strict(tmp_path):
     """Default provider takes the shard namespace lock; explicit db_path stays lock-free."""
     from contextlib import nullcontext

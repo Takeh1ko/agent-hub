@@ -393,3 +393,31 @@ def test_candidate_paths_single_vs_default_plus_shards(tmp_path):
     _write(_paths.global_config_path(), "")
     cands = odb._candidate_paths(None)
     assert str(shard) in cands and cands[0] == str(odb.default_db())
+
+
+def test_sessions_usage_mapped_batch_and_single_db(tmp_path, monkeypatch):
+    """Default batches follow each sid's shard; explicit/config/env stay single-DB."""
+    from ahub import paths as _paths
+    from ahub.providers import opencode_storage as _storage
+    from tests.conftest import write as _write
+
+    monkeypatch.delenv("OPENCODE_DB", raising=False)
+    _write(_paths.global_config_path(), "")
+    shard_a = _storage.register(_routed(tmp_path, "task:31:role:e:log:a"), NOW)
+    shard_b = _storage.register(_routed(tmp_path, "task:32:role:e:log:b"), NOW)
+    for shard, sid, tin in ((shard_a, "batch_a", 11), (shard_b, "batch_b", 22)):
+        con = _mkdb(shard)
+        _ses(con, sid, tin=tin, t_updated=NOW)
+        con.commit()
+        con.close()
+        _storage.bind_session(sid, shard)
+    got = odb.sessions_usage(["batch_a", "batch_b", "нет-такой"], None)
+    assert (got["batch_a"].tokens_in, got["batch_b"].tokens_in) == (11, 22)  # mapped batch
+    assert "нет-такой" not in got and odb.sessions_usage([], None) == {}
+    assert odb.sessions_usage(["batch_a", "batch_b"], shard_a) == {
+        "batch_a": odb.sessions_usage(["batch_a"], shard_a)["batch_a"]}  # explicit single
+    _write(_paths.global_config_path(), f'[paths]\nopencode_db = "{tmp_path / "cfg.db"}"\n')
+    assert odb.sessions_usage(["batch_a", "batch_b"], None) == {}  # configured single
+    _write(_paths.global_config_path(), "")
+    monkeypatch.setenv("OPENCODE_DB", str(tmp_path / "env.db"))
+    assert odb.sessions_usage(["batch_a", "batch_b"], None) == {}  # env single

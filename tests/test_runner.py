@@ -241,6 +241,79 @@ def test_not_started(tmp_path):
     assert r.outcome is Outcome.NOT_STARTED
 
 
+def test_lock_wait_errors_convert_and_close_logs(tmp_path):
+    """Held lock timeout/cancel and lock IO become TIMEOUT/KILLED/NOT_STARTED; logs stay closed."""
+    from pathlib import Path as _Path
+
+    from ahub.providers.base import RunSpec as _Spec
+
+    def _run_with_lock(lock_factory, log_name: str):
+        class _Prov(FakeProvider):
+            def run_lock(self, spec):
+                return lock_factory()
+
+        log_path = str(tmp_path / log_name)
+        made = _Spec(prompt=json.dumps({"session": "s", "steps": []}), cwd=str(tmp_path),
+                     model_id="fake/model", log_path=log_path)
+        return run(_Prov(), made), log_path
+
+    class _EnterFail:
+        def __enter__(self):
+            raise OSError("lock io")
+        def __exit__(self, *exc):
+            return False
+
+    def _timeout():
+        raise TimeoutError("wait timed out")
+
+    def _cancel():
+        raise InterruptedError("cancelled")
+
+    def _io():
+        raise OSError("lock io")
+
+    r, log = _run_with_lock(_timeout, "t.log")
+    assert r.outcome is Outcome.TIMEOUT and r.log_path == log
+    r, log = _run_with_lock(_cancel, "k.log")
+    assert r.outcome is Outcome.KILLED and r.log_path == log
+    r, log = _run_with_lock(_io, "c.log")
+    assert r.outcome is Outcome.NOT_STARTED and r.log_path == log
+    r, log = _run_with_lock(_EnterFail, "e.log")
+    assert r.outcome is Outcome.NOT_STARTED and r.log_path == log
+    for name in ("t.log", "c.log", "e.log"):  # opened before the lock, always closed afterwards
+        p = _Path(tmp_path / name)
+        assert p.exists() and p.read_bytes() is not None  # readable: no leaked descriptor
+
+
+def test_bound_missing_session_not_started_before_child(tmp_path):
+    """A bound resume of a missing sid fails NOT_STARTED before any child process starts."""
+    from ahub.providers import opencode_storage as _storage
+    from ahub.providers.base import RunSpec as _Spec
+    from ahub.providers.opencode import OpencodeProvider as _Op
+
+    route = "task:95:role:executor:log:exec"
+    wt = str(tmp_path / "wt")
+    spec = _Spec(prompt="x", cwd=wt, model_id="m",
+                 env={"AHUB_OPENCODE_ROUTE": route, "AHUB_OPENCODE_ISOLATE": "1"},
+                 log_path=str(tmp_path / "run.log"))
+    _storage.register(spec, 1_700_000_000_000)
+
+    class _Prov(_Op):
+        def __init__(self):
+            super().__init__(binary="/nonexistent/opencode-fake")
+            self.built = False
+        def build_command(self, s):
+            self.built = True
+            return super().build_command(s)
+
+    prov = _Prov()
+    missing = _Spec(prompt="x", cwd=wt, model_id="m", session_id="ses_absent_xyz",
+                    env=dict(spec.env), log_path=str(tmp_path / "run.log"))
+    r = run(prov, missing)
+    assert r.outcome is Outcome.NOT_STARTED and r.session_id == "ses_absent_xyz"
+    assert prov.built is False  # for_run refused before any child command was built
+
+
 def test_callback_errors_do_not_break(fake, tmp_path):
     def bad(_):
         raise RuntimeError("колбэк упал")

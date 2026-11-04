@@ -296,3 +296,103 @@ def test_provider_env_strict_routing(tmp_path, monkeypatch):
     write(paths.global_config_path(), f'[paths]\nopencode_db = "{tmp_path / "cfg.db"}"\n')
     cfg_env = prov.env(_spec(str(tmp_path), "task:9:role:e:log:z"))
     assert cfg_env["OPENCODE_DB"] == str(tmp_path / "cfg.db")  # configured db wins, shard suppressed
+
+
+def test_corrupt_metadata_fail_closed_preserves_file(tmp_path):
+    """Invalid JSON/version/outside DB fails launch/resume explicitly and never rewrites the file."""
+    import pytest as _pytest
+
+    for i, bad in enumerate(["{not json",
+                             '{"version": 999, "key": "k"}',
+                             '{"version": 1, "key": "k", "cwd": "/wt", "db": "/tmp/outside.db",'
+                             ' "sessions": [], "started_after_ms": 1}']):
+        route = f"task:90:role:e:log:c{i}"
+        spec = _spec(str(tmp_path), route)
+        db = storage.register(spec, NOW)
+        meta = _a_meta(db)
+        before = meta.read_text(encoding="utf-8")
+        meta.write_text(bad, encoding="utf-8")
+        with _pytest.raises(ValueError):
+            storage.route_key(spec)
+        with _pytest.raises(ValueError):
+            storage.register(spec, NOW + 1_000)
+        assert meta.read_text(encoding="utf-8") == bad and before != bad  # preserved, not healed
+
+
+def test_concurrent_register_and_bind_preserves_sid_and_start(tmp_path):
+    """Register/bind race keeps the bound sid and the earliest started_after_ms."""
+    route = "task:91:role:executor:log:exec"
+    spec = _spec(str(tmp_path / "wt"), route)
+    storage.register(spec, NOW)
+    shard = storage.db_for_spec(spec)
+    assert shard is not None
+    errs: list[str] = []
+
+    def _reg():
+        try:
+            storage.register(spec, NOW + 5_000)
+        except ValueError as e:  # narrow: only invalid routing may fail here
+            errs.append(str(e))
+
+    def _bind():
+        try:
+            storage.bind_session("race_sid", shard)
+        except ValueError as e:
+            errs.append(str(e))
+
+    threads = [threading.Thread(target=_reg), threading.Thread(target=_bind)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads) and errs == []
+    data = json.loads(_a_meta(shard).read_text(encoding="utf-8"))
+    assert "race_sid" in data["sessions"] and data["started_after_ms"] == NOW
+
+
+def test_held_shard_lock_times_out_cancels_and_shares_identity(tmp_path):
+    """One shard/DB uses one lock: same DB blocks, unrelated stays parallel; wait is bounded."""
+    import time
+
+    import pytest as _pytest
+
+    a = _spec(str(tmp_path / "a"), "task:92:role:e:log:x")
+    other = _spec(str(tmp_path / "b"), "task:93:role:e:log:y")
+    db = storage.register(a, NOW)
+    assert db is not None
+    storage.register(other, NOW)
+    with storage.db_lock(db, "enrolled"):
+        with _pytest.raises(TimeoutError):  # same shard, other namespace: bounded wait, not 30 s
+            with storage.db_lock(db, "mapped", deadline=time.monotonic() + 0.4):
+                pass
+        with _pytest.raises(InterruptedError):  # cancellation is honest
+            with storage.db_lock(db, "mapped", should_stop=lambda: True):
+                pass
+        with storage.lock(other):  # unrelated route never blocks
+            pass
+
+
+def test_legacy_find_ignores_shard_same_cwd(tmp_path, monkeypatch):
+    """Unenrolled recovery searches only legacy; enrolled searches its shard."""
+    from tests.conftest import write as _write
+
+    monkeypatch.delenv("OPENCODE_DB", raising=False)
+    _write(paths.global_config_path(), "")
+    wt = str(tmp_path / "wt")
+    default = odb.default_db()
+    default.parent.mkdir(parents=True, exist_ok=True)
+    con = _mkdb(default)
+    _ses(con, "leg", directory=wt, t_created=NOW - 10_000, t_updated=NOW - 10_000)
+    con.commit()
+    con.close()
+    route = "task:94:role:executor:log:exec"
+    enrolled = _spec(wt, route)
+    shard = storage.register(enrolled, NOW - 60_000)
+    c2 = _mkdb(shard)
+    _ses(c2, "sh", directory=wt, t_created=NOW - 5_000, t_updated=NOW - 5_000)
+    c2.commit()
+    c2.close()
+    prov = opmod.OpencodeProvider(binary="/nonexistent/opencode-fake")
+    assert prov.find_session_for_run(wt, NOW - 60_000,
+                                     RunSpec(prompt="x", cwd=wt, model_id="m")) == "leg"
+    assert prov.find_session_for_run(wt, NOW - 60_000, enrolled) == "sh"
