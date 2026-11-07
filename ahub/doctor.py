@@ -368,7 +368,7 @@ def check_provider_keys() -> Check:
 
 
 def check_omp() -> Check:
-    """omp CLI and the configured Go key; never expose credentials in diagnostics."""
+    """omp CLI and its models (Go key or omp's own providers); never expose credentials in diagnostics."""
     from ahub import providers
 
     h = providers.get("omp").health()
@@ -379,7 +379,8 @@ def check_omp() -> Check:
     if version:
         detail += _t("doctor.health_version", version=version)
     if h.ok:
-        return Check("omp", True, detail + "; " + _t("doctor.omp_key_ok") + provider_proxy_detail("omp"), "")
+        access = _t("doctor.omp_key_ok" if h.details.get("key_present") else "doctor.omp_own_models")
+        return Check("omp", True, detail + "; " + access + provider_proxy_detail("omp"), "")
     return Check("omp", False, detail + "; " + "; ".join(h.problems), _t("doctor.omp_fix"))
 
 

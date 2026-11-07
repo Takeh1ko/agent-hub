@@ -12,8 +12,11 @@ Errors: assistant stopReason=error, errorStatus/errorMessage; exhausted retries 
 auto_retry_end{success:false,finalError}. Go 429 includes retry-after-ms: persist a zero
 quota bucket until that reset so workers and the scheduler share the hold. Recovered
 auto-retries do not fail a successful turn. Exit 0 means success, 1 means error.
-Go is a subscription; zero/absent costs mean unknown money, including willow's zero
-catalog prices. Export and session search are deliberately absent: no reliable API.
+Go and Mistral Vibe are subscriptions; zero/absent costs mean unknown money, including
+willow's zero catalog prices. omp keeps other providers' keys itself (~/.omp/agent/models.yml),
+so the Go key is required only when omp lists no models without it. A 429 outside Go has no
+shared bucket: it stays a plain QUOTA outcome with the core's hold backoff.
+Export and session search are deliberately absent: no reliable API.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ from ahub.providers.opencode import prompt_arg, run_capture
 from ahub.time import now_ms
 
 THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+SUBSCRIPTIONS = ("opencode-go", "mistral-vibe")  # omp providers paid by a plan, not per token
 _GO_MODELS = ("opencode-go/deepseek-v4.1-flash", "opencode-go/muse-spark-1.3-contributor")
 _RETRY_MS = re.compile(r"retry-after-ms[=: ]+(\d+)", re.IGNORECASE)
 _STATUS = re.compile(r"\b(?:status|http|error)\W{0,8}(\d{3})\b|^\s*(\d{3})\b", re.IGNORECASE)
@@ -76,7 +80,7 @@ def usage_of(raw) -> Usage | None:
 
 
 def parse_models(out: str) -> list[CatalogEntry]:
-    """`omp models --json`: use its Go/willow chat models; zero prices are not free."""
+    """`omp models --json`: chat models of every provider omp is set up for; zero prices are not free."""
     try:
         raw = json.loads(out)
     except (ValueError, TypeError):
@@ -86,18 +90,19 @@ def parse_models(out: str) -> list[CatalogEntry]:
         return []
     result = []
     for m in models:
-        if not isinstance(m, dict) or m.get("provider") not in ("opencode-go", "willow") or not m.get("id"):
+        if not isinstance(m, dict) or not m.get("provider") or not m.get("id") or m.get("kind", "chat") != "chat":
             continue
         mid = f"{m['provider']}/{m['id']}"
         cost = m.get("cost") if isinstance(m.get("cost"), dict) else {}
+        subscription = m["provider"] in SUBSCRIPTIONS
 
-        def price(key, cost=cost, provider=m["provider"]):
+        def price(key, cost=cost, subscription=subscription):
             v = cost.get(key)
-            return float(v) if isinstance(v, (int, float)) and v > 0 and provider != "opencode-go" else None
+            return float(v) if isinstance(v, (int, float)) and v > 0 and not subscription else None
 
         result.append(CatalogEntry(
             model_id=mid, display_name=str(m.get("name") or m["id"]), vendor=infer_vendor(model_id=mid),
-            plan=PlanKind.SUBSCRIPTION if m["provider"] == "opencode-go" else PlanKind.PAYG,
+            plan=PlanKind.SUBSCRIPTION if subscription else PlanKind.PAYG,
             price_in=price("input"), price_out=price("output"), price_cache=price("cacheRead"),
             context=m.get("contextWindow") if type(m.get("contextWindow")) is int else None,
             reasoning=THINKING_LEVELS if m.get("reasoning") else ("off",),
@@ -296,15 +301,18 @@ class OmpProvider(Provider):
             env["OPENCODE_API_KEY"] = key
         return env
 
-    def catalog(self, refresh: bool = False) -> list[CatalogEntry]:
-        del refresh  # `models refresh` can make network requests; the local CLI catalog suffices
-        models = []
+    def _listed(self) -> list[CatalogEntry]:
         try:
             rc, out, _err = run_capture([self._bin(), "models", "--json"], timeout=30, env=self._helper_env())
-            if rc == 0:
-                models = parse_models(out)
         except (OSError, subprocess.SubprocessError):
-            pass
+            return []
+        return parse_models(out) if rc == 0 else []
+
+    def catalog(self, refresh: bool = False) -> list[CatalogEntry]:
+        del refresh  # `models refresh` can make network requests; the local CLI catalog suffices
+        models = self._listed()
+        if models and not self._key():
+            return models  # omp runs on its own providers: Go models would fail without the key
         known = {m.model_id for m in models}
         return models + [CatalogEntry(mid, vendor=infer_vendor(model_id=mid), plan=PlanKind.SUBSCRIPTION,
                                       reasoning=THINKING_LEVELS) for mid in _GO_MODELS if mid not in known]
@@ -322,6 +330,6 @@ class OmpProvider(Provider):
                 problems.append(_t("omp.version_fail"))
         except (OSError, subprocess.SubprocessError):
             problems.append(_t("omp.version_fail"))
-        if not details["key_present"]:
+        if not details["key_present"] and not self._listed():
             problems.append(_t("omp.no_key"))
         return Health(not problems, tuple(problems), details)

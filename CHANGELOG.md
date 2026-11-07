@@ -5,7 +5,9 @@
 ### Added
 
 - `omp` provider (oh-my-pi): resumable JSON sessions, tool transcripts, usage, Go quota holds,
-  Go/willow catalog and doctor checks; `[providers.omp]` supports `enabled`, `binary`, and `api_key_file`.
+  catalog of every provider omp is set up for (Go and Mistral Vibe count as subscriptions) and doctor checks;
+  the Go key is needed only when omp has no models of its own; `[providers.omp]` supports `enabled`, `binary`,
+  and `api_key_file`.
 
 ## 3.2.0 — 2026-10-06
 

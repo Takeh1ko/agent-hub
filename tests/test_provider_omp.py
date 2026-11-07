@@ -210,7 +210,7 @@ def test_runner_start_resume_quota_and_transcript(fake_omp, tmp_path, monkeypatc
     assert third.outcome is Outcome.QUOTA and fake_omp.quota()
 
 
-def test_health_catalog_doctor_no_secrets(fake_omp, monkeypatch, capsys):
+def test_health_catalog_doctor_no_secrets(fake_omp, tmp_path, monkeypatch, capsys):
     monkeypatch.setitem(providers._cache, "omp", fake_omp)
     h = fake_omp.health()
     assert h.ok and h.details["version"] == "omp v18.14.0" and h.details["key_present"]
@@ -227,6 +227,10 @@ def test_health_catalog_doctor_no_secrets(fake_omp, monkeypatch, capsys):
     assert SECRET not in text([doctor.check_omp()])
     assert SECRET not in json.dumps(asdict(h)) + repr(models) + capsys.readouterr().out
     Path(fake_omp.api_key_file).unlink()
+    assert fake_omp.health().ok and not fake_omp.health().details["key_present"]  # omp lists its own models
+    assert "OpenCode Go" in doctor.check_omp().detail and doctor.check_omp().ok is True
+    empty = write(tmp_path / "no-models" / "models.json", '{"models":[]}').parent
+    fake_omp.extra_env["OMP_TEST_DATA"] = str(empty)
     assert not fake_omp.health().ok and doctor.check_omp().ok is False
     fake_omp.binary = "/missing/omp"
     assert doctor.check_omp().ok is None
@@ -258,6 +262,44 @@ def test_money_and_catalog_prices():
     models = parse_models(json.dumps({"models": [{"provider": "willow", "id": "gpt-test", "reasoning": True,
                                                "cost": {"input": 1.0, "output": 2.0}}]}))
     assert (models[0].price_in, models[0].price_out) == (1.0, 2.0)
+
+
+VIBE = "mistral-vibe/deepseek-v4-1-flash-1017"
+VIBE_MODELS = json.dumps({"models": [
+    {"provider": "mistral-vibe", "kind": "chat", "id": "deepseek-v4-1-flash-1017", "name": "DeepSeek V4.1 Flash 1017",
+     "contextWindow": 1048576, "reasoning": True, "cost": {"input": 0, "output": 0}, "pricingStatus": "unknown"},
+    {"provider": "mistral-vibe", "kind": "embedding", "id": "codestral-embed"},
+    {"provider": "someone", "kind": "chat", "id": "paid", "cost": {"input": 3.0, "output": 9.0}},
+]})
+
+
+def test_any_configured_provider_in_catalog_vibe_is_a_subscription():
+    vibe, other = parse_models(VIBE_MODELS)
+    assert (vibe.model_id, vibe.plan, vibe.price_in, vibe.context) == (VIBE, PlanKind.SUBSCRIPTION, None, 1048576)
+    assert vibe.variants == THINKING_LEVELS and vibe.counter == "quota"
+    assert (other.model_id, other.plan, other.price_in) == ("someone/paid", PlanKind.PAYG, 3.0)
+    entry = registry.ModelEntry("vibe", "omp", VIBE, "high")
+    assert registry.plan_kind(entry) is PlanKind.SUBSCRIPTION
+    assert registry.plan_kind(entry, vibe) is PlanKind.SUBSCRIPTION
+    assert registry.cost_kind(entry) == "plan"
+
+
+def test_no_go_key_no_go_fallback_when_omp_has_its_own_models(tmp_path, monkeypatch):
+    prov = OmpProvider(binary="/missing/omp", api_key_file=str(tmp_path / "absent"))
+    monkeypatch.setattr("ahub.providers.omp.run_capture", lambda *a, **kw: (0, VIBE_MODELS, ""))
+    ids = [m.model_id for m in prov.catalog()]
+    assert VIBE in ids and MODEL not in ids
+    prov.api_key_file = str(write(tmp_path / "key", SECRET))
+    assert MODEL in [m.model_id for m in prov.catalog()]  # with the key both work
+
+
+def test_vibe_429_is_quota_without_touching_the_go_bucket(omp):
+    line = json.dumps({"type": "message_end", "message": {
+        "role": "assistant", "stopReason": "error", "errorStatus": 429,
+        "errorMessage": "429 rate limit, retry-after-ms: 60000"}})
+    acts = omp.parse_line(line, 1000)
+    assert omp.classify(exit_code=1, activities=acts, session_id="s", stderr_tail="")[0] is Outcome.QUOTA
+    assert omp.quota() == []
 
 
 def test_catalog_does_not_borrow_opencode_prices_or_levels(omp):

@@ -470,8 +470,11 @@ def plan_kind(entry, info=None) -> PlanKind:
 
     if is_free(entry):
         return _Plan.FREE
-    if getattr(entry, "provider", "") == "omp" and getattr(entry, "model_id", "").startswith("opencode-go/"):
-        return _Plan.SUBSCRIPTION  # omp has no Go list prices or machine-wide monthly spend
+    if getattr(entry, "provider", "") == "omp":
+        from ahub.providers.omp import SUBSCRIPTIONS
+
+        if getattr(entry, "model_id", "").split("/")[0] in SUBSCRIPTIONS:
+            return _Plan.SUBSCRIPTION  # omp has no list prices or machine-wide monthly spend for these
     if info is not None:
         pin = info.price_in if isinstance(getattr(info, "price_in", None), (int, float)) else None
         pout = info.price_out if isinstance(getattr(info, "price_out", None), (int, float)) else None

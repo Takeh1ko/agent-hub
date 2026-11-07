@@ -72,7 +72,7 @@ drop a "done".
 |---|---|---|---|
 | [opencode](https://opencode.ai) | `opencode` | per token, or a plan (opencode Go); many models are free | the widest catalog; the hub takes the token counts and the cost from the session |
 | Google Antigravity | `agy` | the quota of your Google account — no per-token money | Gemini models; a window quota rather than a budget |
-| oh-my-pi | `omp` | OpenCode Go subscription or willow gateway | resumable sessions; `[providers.omp]` sets `binary` and `api_key_file` |
+| oh-my-pi | `omp` | OpenCode Go or Mistral Vibe subscription, willow gateway, any provider set up in omp | resumable sessions; `[providers.omp]` sets `binary` and `api_key_file` |
 | OpenAI Codex CLI | `@openai/codex` | your ChatGPT plan | the worker runs in the OS sandbox configured for codex |
 
 The hub is not tied to any model. Any model a provider exposes can be added with `ahub models add` and given to a
