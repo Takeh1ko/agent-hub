@@ -9,6 +9,12 @@
   the Go key is needed only when omp has no models of its own; `[providers.omp]` supports `enabled`, `binary`,
   and `api_key_file`.
 
+### Fixed
+
+- A provider switched off (`[providers.<name>] enabled = false`) is no longer probed: the catalog fetch and
+  the observer's health check skip it, and `ahub models` hides its models — a provider without a login no
+  longer floods the log with listing errors and raises observer alarms.
+
 ## 3.2.0 — 2026-10-06
 
 ### Added
