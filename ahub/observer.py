@@ -117,7 +117,10 @@ def quick_check(store: Store, *, projects: list[config.ProjectConfig] | None = N
         bad = proxy_problem()
         if bad:
             sus.append(Suspicion("proxy", bad, critical=True))
+        off = registry.disabled_providers()
         for name in providers.names():
+            if name in off:  # switched off in the hub config: not probed, not reported
+                continue
             try:
                 h = providers.get(name).health()
             except Exception as e:  # a provider module must not crash the observer

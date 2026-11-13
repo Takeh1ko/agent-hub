@@ -73,7 +73,8 @@ def cmd_list(args) -> int:
         entries = [e for e in registry.models(store) if e.alias in wanted]
     else:
         entries = registry.models(store)
-    entries = _catalog.visible_entries(entries)
+    off = registry.disabled_providers()
+    entries = [e for e in _catalog.visible_entries(entries) if e.provider not in off]
     rows, extra = _catalog.build_rows(store, entries, refresh=refresh)
     by_alias = {r.entry.alias: r for r in rows}
     # --json: every field raw (registry + catalog + derived); roles kept for old readers

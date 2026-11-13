@@ -91,6 +91,22 @@ def test_broken_provider_is_critical(store, monkeypatch):
     assert qc(store) == []  # the same check without the health part — clean
 
 
+def test_switched_off_provider_is_not_probed(store, monkeypatch):
+    """[providers.<name>] enabled = false: health() is never called, so no login → no alarms."""
+    from ahub import providers
+
+    class _Off:
+        name = "agy"
+
+        def health(self):
+            raise AssertionError("a switched-off provider must not be probed")
+
+    monkeypatch.setattr(providers, "names", lambda: ["opencode", "agy"])
+    monkeypatch.setitem(providers._cache, "agy", _Off())
+    monkeypatch.setattr(registry, "disabled_providers", lambda hub=None: frozenset({"agy"}))
+    assert observer.quick_check(store, projects=[], health=True, live={}) == []
+
+
 def test_queue_stuck_and_unacked(store):
     tid = store.create_task(project="P", kind="scout", title="x", now=now_ms() - 30 * 60_000)
     store.add_event("done", task_id=tid, now=now_ms() - 30 * 60_000)

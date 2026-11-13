@@ -62,7 +62,11 @@ def get_catalogs(refresh: bool = False) -> dict[str, list[CatalogEntry]]:
     from ahub import providers as _providers
 
     out: dict[str, list[CatalogEntry]] = {}
+    off = registry.disabled_providers()
     for name in _providers.names():
+        if name in off:  # a switched-off provider is not shelled out to (no login → endless errors)
+            out[name] = []
+            continue
         try:
             prov = _providers.get(name)
         except (KeyError, AttributeError):
